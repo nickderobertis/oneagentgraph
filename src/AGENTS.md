@@ -59,6 +59,14 @@ check a CI round-trip away. `just lint-windows` runs the same clippy against it
 here; it asks for a target and a cross compiler `just bootstrap` deliberately
 does not install, and says which when either is missing.
 
+**To prove a Windows journey red, compile the layer out rather than revert it.**
+Swapping `cfg(windows)` for `cfg(all(windows, not(windows)))` and widening the
+`cfg(not(any(unix, windows)))` module to `cfg(not(unix))` routes Windows through
+the degraded fallback — the behaviour before the layer existed — while leaving
+every test and caller compiling. Add `--no-fail-fast` to `test-quick` on that
+throwaway branch too: the four `scratch::tests` ownership proofs fail in
+milliseconds and otherwise cancel the e2e journeys that are the point.
+
 ## Two things that bite
 
 **A sentinel in a prompt matches prose.** The fake harness is steered by markers

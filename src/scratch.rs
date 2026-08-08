@@ -85,6 +85,18 @@ pub const SCRATCH_PREFIX: &str = "oneagentgraph-";
 ///
 /// Two processes that reuse one number never share a start token, so this
 /// answers "is that still the same process?" — the question a bare pid cannot.
+// llmlint: ignore-block[invalid_states_unrepresentable] both fields are
+// deliberately unvalidated, because this type is a *record* of two numbers read
+// back off disk rather than a claim about them. The pair is the whole of
+// `owner.lock`'s format — `docs/contract.md` names it "pid-with-start-token" —
+// and narrowing either field would change a serialized contract to describe a
+// state nothing acts on. Nothing here trusts a value: the only reader is
+// [`is_live`], which asks the kernel for the token `pid` holds *now* and
+// compares, so an out-of-range pid and an absent token both answer "not live"
+// by the same path a stale one does. That is also the direction that retains a
+// directory rather than reclaiming one still in use, and
+// `an_identity_answers_for_the_process_it_was_taken_from` holds it against a
+// pid that cannot exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessIdentity {
     /// The process id.
@@ -93,6 +105,7 @@ pub struct ProcessIdentity {
     /// was taken.
     pub start_token: u64,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A scratch directory this process owns for as long as it holds the handle.
 ///
@@ -314,25 +327,6 @@ mod platform {
                 return false;
             }
         }
-    }
-
-    /// This process's own identity.
-    pub fn own_identity() -> ProcessIdentity {
-        let pid = std::process::id() as i32;
-        ProcessIdentity {
-            pid,
-            start_token: start_token(pid).unwrap_or(0),
-        }
-    }
-
-    /// Whether `identity` still names the process it was taken from.
-    ///
-    /// A platform that cannot answer for a token answers `None` here, which is
-    /// never equal to a recorded token — so an identity is reported live only
-    /// where it can be *proven* live, and a sweeper on such a platform falls
-    /// back to the `flock`, which is the independent half of the same proof.
-    pub fn is_live(identity: ProcessIdentity) -> bool {
-        start_token(identity.pid).is_some_and(|token| token == identity.start_token)
     }
 
     /// Every live process carrying `stamp`, **or a scratch below it**, as its
@@ -568,7 +562,7 @@ mod platform {
     /// strength of the first check would be aimed at a number the kernel was
     /// free to hand to somebody else.
     pub fn signal(identity: ProcessIdentity, sig: i32) -> bool {
-        if !is_live(identity) {
+        if !super::is_live(identity) {
             return false;
         }
         // SAFETY: `kill` takes a pid and a signal number and reports failure
@@ -790,20 +784,6 @@ mod platform {
         }
     }
 
-    /// This process's own identity.
-    pub fn own_identity() -> ProcessIdentity {
-        let pid = std::process::id() as i32;
-        ProcessIdentity {
-            pid,
-            start_token: start_token(pid).unwrap_or(0),
-        }
-    }
-
-    /// Whether `identity` still names the process it was taken from.
-    pub fn is_live(identity: ProcessIdentity) -> bool {
-        start_token(identity.pid).is_some_and(|token| token == identity.start_token)
-    }
-
     /// The kernel's start token for `pid`: the wall-clock time that process
     /// started, in 100-nanosecond ticks, which a recycled number never repeats.
     ///
@@ -812,7 +792,7 @@ mod platform {
     /// A process that has *finished* but whose handle somebody still holds also
     /// answers `None`: its creation time is still readable, so the wait below is
     /// what separates "still that process" from "was that process".
-    fn start_token(pid: i32) -> Option<u64> {
+    pub fn start_token(pid: i32) -> Option<u64> {
         // SAFETY: `OpenProcess` takes a pid and reports failure with a null
         // handle; nothing is borrowed.
         let handle = unsafe {
@@ -1216,7 +1196,6 @@ mod platform {
             Some(Self(unsafe { OwnedHandle::from_raw_handle(handle.cast()) }))
         }
 
-        /// The raw handle, for the calls that take one.
         fn as_raw(&self) -> HANDLE {
             self.0.as_raw_handle().cast::<c_void>()
         }
@@ -1236,19 +1215,11 @@ mod platform {
         true
     }
 
-    /// A pid with no start token: this platform has no cheap one, so an identity
-    /// here is only ever compared against another taken the same way.
-    pub fn own_identity() -> ProcessIdentity {
-        ProcessIdentity {
-            pid: std::process::id() as i32,
-            start_token: 0,
-        }
-    }
-
-    /// Nothing can be proven live, so nothing is reported live — which retains
-    /// rather than removes, the safe direction.
-    pub fn is_live(_identity: ProcessIdentity) -> bool {
-        false
+    /// No start token to be had here, so every identity carries `0` and none is
+    /// ever reported live — which retains a directory rather than removing one
+    /// still in use, the safe direction.
+    pub fn start_token(_pid: i32) -> Option<u64> {
+        None
     }
 
     /// No way to enumerate a member's tree here, so reaping falls back to the
@@ -1293,8 +1264,34 @@ mod platform {
     }
 }
 
-pub use platform::{is_live, own_identity, stamped_for};
+pub use platform::stamped_for;
 use platform::{try_lock_exclusive, LOCK_PROVES_OWNERSHIP};
+
+/// This process's own identity.
+///
+/// Written once rather than per platform: what differs between them is only how
+/// a start token is read. A platform that cannot read one leaves the `0` below,
+/// which no real token ever equals — so an identity taken there is never
+/// mistaken for a live process.
+#[must_use]
+pub fn own_identity() -> ProcessIdentity {
+    let pid = std::process::id() as i32;
+    ProcessIdentity {
+        pid,
+        start_token: platform::start_token(pid).unwrap_or(0),
+    }
+}
+
+/// Whether `identity` still names the process it was taken from.
+///
+/// A platform that cannot answer for a token answers `None` here, which is never
+/// equal to a recorded token — so an identity is reported live only where it can
+/// be *proven* live, and a sweeper on such a platform falls back to the lock,
+/// which is the independent half of the same proof.
+#[must_use]
+pub fn is_live(identity: ProcessIdentity) -> bool {
+    platform::start_token(identity.pid).is_some_and(|token| token == identity.start_token)
+}
 
 /// Terminate every live process this scratch still holds — the member's own
 /// process and everything it started, whether or not their parents are still
