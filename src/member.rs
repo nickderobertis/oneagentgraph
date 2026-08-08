@@ -268,10 +268,23 @@ pub fn run(
     // paid provider, and the child this supervisor holds is only the first of
     // the three. Everything a cancel or a watchdog has to reach is reached
     // through the group, not through the child.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
+    // because no input a user can give reaches it. Opening a group is a no-op on
+    // POSIX — the stamp is applied by the `Command` below — so the arm cannot be
+    // taken there at all, and on Windows it is taken only when the kernel
+    // refuses a job object or the scratch this run created moments earlier has
+    // become unwritable underneath it. Both are host failures, not requests, and
+    // the journeys that *can* be driven — grouping, cancel, the killed launcher,
+    // the forged record — are in tests/e2e/liveness.rs. What matters about this
+    // arm is the direction it fails in, and that is decided here rather than
+    // observed: a member that could not be grouped is a member no cancel could
+    // ever reach, so it is refused rather than started.
     let group = match Group::open(scratch) {
         Ok(group) => group,
         Err(err) => return unstartable(emitter, err.to_string()),
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let child = match group.spawn(&mut command) {
         Ok(child) => child,
         Err(err) => {

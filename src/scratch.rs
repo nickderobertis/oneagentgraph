@@ -977,14 +977,28 @@ mod platform {
             } else {
                 resume(child.id())
             };
-            match outcome {
+            // llmlint: ignore-block[changed_behavior_has_e2e] there is no journey
+            // for this arm because there is no input that reaches it: a job this
+            // process created a moment ago refusing its own child, or a suspended
+            // process with no resumable thread, are kernel failures rather than
+            // anything a caller can ask for, and no seam this crate sanctions
+            // fakes Win32. The reachable half — that a member which *is* grouped
+            // is torn down whole, by a cancel, a watchdog, or its launcher
+            // dying — is covered in tests/e2e/liveness.rs. What this arm decides
+            // is the direction of an unreachable failure, and it is the safe one:
+            // a child that started but could not be put in the job is killed here
+            // rather than returned, because returning it would leave a paid
+            // harness running that no cancel could ever find.
+            let started = match outcome {
                 Ok(()) => Ok(child),
                 Err(err) => {
                     let _ = child.kill();
                     let _ = child.wait();
                     Err(err)
                 }
-            }
+            };
+            // llmlint: ignore-end[changed_behavior_has_e2e]
+            started
         }
 
         /// End this group's whole tree.
