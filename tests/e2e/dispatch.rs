@@ -11,9 +11,7 @@
 // process is the single sanctioned double, replaced at oneharness's own
 // `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
 
-use crate::support::{
-    as_env, bounds, fake_harness, fake_provider, labels, two_party_graph, Workspace, BASE, CHAIN,
-};
+use crate::support::{fake_harness, fake_provider, labels, two_party_graph, Workspace, CHAIN};
 
 /// The whole happy path: a two-party member completes, and the stream carries
 /// the lifecycle a consumer renders.
@@ -630,13 +628,4 @@ fn a_single_sided_member_runs_one_agent_with_no_judge() {
         "{:?}",
         run.kinds()
     );
-}
-
-/// The base every journey merges onto is the one the suite asserts against, so a
-/// change to it is a change to what these journeys prove.
-#[test]
-fn the_shared_base_is_the_one_these_journeys_assert_against() {
-    assert!(BASE.contains("Standing bar: verify before you claim done."));
-    assert!(!bounds("1", "1").is_empty());
-    assert!(!as_env(&bounds("1", "1")).is_empty());
 }

@@ -229,13 +229,22 @@ mod platform {
         start_token(identity.pid) == Some(identity.start_token)
     }
 
-    /// Every live process carrying `stamp` as its scratch directory.
+    /// Every live process carrying `stamp`, **or a scratch below it**, as its
+    /// scratch directory.
     ///
     /// This is the evidence, not a heuristic: the kernel fixes an environment at
     /// `exec`, so a descendant reparented to init still answers for the member
     /// that started it.
+    ///
+    /// The "or below" is what makes a *run* answerable for its members. A member
+    /// is stamped with its own scratch, `<run>/members/<name>`, and nothing is
+    /// ever stamped with the run directory itself — so an exact match asked
+    /// `cancel RUN --kill` to find processes that by construction do not exist,
+    /// and it reported a cancelled run while every member kept going. The
+    /// comparison is on path components, not bytes: `<run>-2` is not below
+    /// `<run>`.
     pub fn stamped_for(stamp: &str) -> Vec<ProcessIdentity> {
-        let needle = format!("{}={stamp}", super::SCRATCH_ENV);
+        let prefix = format!("{}=", super::SCRATCH_ENV);
         let mut found = Vec::new();
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return found;
@@ -249,7 +258,7 @@ mod platform {
             };
             if environ
                 .split(|byte| *byte == 0)
-                .any(|var| var == needle.as_bytes())
+                .any(|var| at_or_below(var, prefix.as_bytes(), stamp.as_bytes()))
             {
                 if let Some(start_token) = start_token(pid) {
                     found.push(ProcessIdentity { pid, start_token });
@@ -258,6 +267,14 @@ mod platform {
         }
         found.sort();
         found
+    }
+
+    /// Whether one `KEY=VALUE` pair names `stamp` or a path below it.
+    fn at_or_below(var: &[u8], prefix: &[u8], stamp: &[u8]) -> bool {
+        let Some(value) = var.strip_prefix(prefix) else {
+            return false;
+        };
+        value == stamp || (value.starts_with(stamp) && value.get(stamp.len()) == Some(&b'/'))
     }
 
     /// Signal one identity, but only while it is still itself.
@@ -281,6 +298,36 @@ mod platform {
     pub const TERM: i32 = libc::SIGTERM;
     /// The signal nothing survives.
     pub const KILL: i32 = libc::SIGKILL;
+
+    #[cfg(test)]
+    mod tests {
+        use super::at_or_below;
+
+        /// The comparison is on path components. A sibling run whose name merely
+        /// starts with this one's is not below it — and what this answers is
+        /// which processes to kill, so the cost of getting it wrong is reaping
+        /// another run's members.
+        #[test]
+        fn a_stamp_below_this_scratch_matches_and_a_sibling_does_not() {
+            let key = b"ONEAGENTGRAPH_SCRATCH_DIR=";
+            let run = b"/state/node-1";
+            for below in [
+                &b"ONEAGENTGRAPH_SCRATCH_DIR=/state/node-1"[..],
+                &b"ONEAGENTGRAPH_SCRATCH_DIR=/state/node-1/members/worker"[..],
+            ] {
+                assert!(at_or_below(below, key, run), "{below:?}");
+            }
+            for outside in [
+                &b"ONEAGENTGRAPH_SCRATCH_DIR=/state/node-12"[..],
+                &b"ONEAGENTGRAPH_SCRATCH_DIR=/state/node-1x/members/worker"[..],
+                &b"ONEAGENTGRAPH_SCRATCH_DIR=/state/node"[..],
+                &b"ONEAGENTGRAPH_SCRATCH=/state/node-1"[..],
+                &b"PATH=/state/node-1"[..],
+            ] {
+                assert!(!at_or_below(outside, key, run), "{outside:?}");
+            }
+        }
+    }
 }
 
 #[cfg(not(unix))]

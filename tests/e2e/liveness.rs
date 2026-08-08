@@ -284,6 +284,82 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
     );
 }
 
+/// `cancel RUN --kill`, with no member named, reaps every process stamped for
+/// the run — including one stamped for a member below it.
+///
+/// The whole-run reap is rooted at the run directory rather than a member's, so
+/// it is a different walk from the named-member one below, and the failure it
+/// guards against is a live member surviving the cancel of its own run.
+#[cfg(unix)]
+#[test]
+fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
+    let workspace = Workspace::new();
+    let release = workspace.at("release");
+    let state = workspace.state();
+
+    let handle = {
+        let workspace_dir = workspace.path().to_path_buf();
+        let state = state.clone();
+        let release = release.clone();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+                .args([
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    &format!("complete-now: fake:hold={}", release.display()),
+                    "--dir",
+                    &workspace_dir.join("work").display().to_string(),
+                ])
+                .current_dir(&workspace_dir)
+                .env("ONEAGENTGRAPH_STATE_DIR", &state)
+                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
+                .env(
+                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                    crate::support::oneharness_bin(),
+                )
+                .env_remove("ONEHARNESS_HARNESSES")
+                .output()
+                .expect("the run finishes")
+        })
+    };
+
+    until("the member's own scratch to be stamped", || {
+        member_scratch(&state).is_some_and(|scratch| {
+            !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+        })
+    });
+    let scratch = member_scratch(&state).expect("a member scratch");
+
+    // No member named: the reap is rooted at the *run*, so it has to reach a
+    // process stamped for a member below it rather than only one stamped for
+    // the run directory itself.
+    let run_id = run_id(&state);
+    let cancelled = workspace.run(&["cancel", &run_id, "--kill"]);
+    cancelled.expect_code(0);
+    assert!(
+        cancelled.stdout.contains("signalled"),
+        "a whole-run kill signalled nothing: {}",
+        cancelled.stdout
+    );
+    assert!(
+        !cancelled.stdout.contains("member"),
+        "a whole-run cancel named a member: {}",
+        cancelled.stdout
+    );
+
+    until("the stamped processes to be gone", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+
+    std::fs::write(&release, "go").ok();
+    let output = handle.join().expect("the run thread");
+    assert!(
+        output.status.code().is_some(),
+        "the cancelled run never exited"
+    );
+}
+
 /// A member's descendants carry the run's scratch stamp, and `cancel --kill`
 /// reaps exactly those — the evidence the kernel fixes at `exec`, which reaches
 /// a descendant whose parent has already exited.

@@ -889,6 +889,38 @@ fn a_record_naming_a_stream_elsewhere_does_not_move_where_a_signal_is_written() 
     );
 }
 
+/// A detached run that never records itself is a refusal that says where to
+/// look, not an exit 0 handing back a run id nothing produced.
+///
+/// `--detach` reports on a child it cannot watch: it prints where the stream
+/// will be and leaves. When the child dies immediately — an unreadable graph is
+/// the ordinary way — the only thing the parent knows is that no record
+/// appeared, and the caller must not be told a run started.
+#[test]
+fn detach_refuses_when_the_run_it_launched_never_records_itself() {
+    let workspace = Workspace::new();
+    let run = workspace.run(&[
+        "run",
+        "./no-such-graph.yaml",
+        "--task",
+        "complete-now: doomed",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--detach",
+    ]);
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains("did not record itself"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.trim().is_empty(),
+        "a refusal printed a detach answer on stdout: {}",
+        run.stdout
+    );
+}
+
 /// `reset-timer` is accepted for any member, but only a schedule that declared
 /// itself `resettable` restarts its clock.
 ///
