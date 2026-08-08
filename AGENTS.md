@@ -22,8 +22,8 @@ in-process, on a thread of this process, through onejudge's own config, plan, an
 streamed run driver. `oneharness run` is still a child process — its library
 surface prints its report to the process's stdout and returns only an exit code,
 and this process's stdout is the merged stream — and so are the agent harness and
-a `judge: {command: [...]}` provider. `docs/contract.md` records that split and
-what would have to change upstream to collapse it further.
+a `judge: {command: [...]}` provider. That hop collapses when oneharness grows a
+non-printing run entrypoint or an event-sink parameter.
 
 Ships as a Rust library plus the `oneagentgraph` binary, distributed on
 crates.io, PyPI (`oneagentgraph-cli`), and npm (`oneagentgraph-cli`).

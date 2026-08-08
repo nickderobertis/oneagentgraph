@@ -540,7 +540,7 @@ pub fn run(
         member_env.insert(key.clone(), expand(value, env));
     }
     let bounds = Bounds::from_env(&member_env).map_err(Error::InvalidConfig)?;
-    export(&graph.env, env);
+    export(&graph.env, env)?;
 
     let file = std::fs::File::create(&events_path).map_err(|err| {
         Error::InvalidConfig(format!("cannot create {}: {err}", events_path.display()))
@@ -809,11 +809,34 @@ fn describe(outcome: &Outcome) -> MemberOutcome {
 ///
 /// `PROCESS_WIDE_HARNESS_ENV` is removed first for the reason that constant
 /// gives, and re-added when the graph's own block asks for it.
-fn export(block: &BTreeMap<String, String>, env: &BTreeMap<String, String>) {
-    std::env::remove_var(invoke::PROCESS_WIDE_HARNESS_ENV);
-    for (key, value) in block {
-        std::env::set_var(key, expand(value, env));
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] naming the pair that cannot be a variable.
+/// `std::env::set_var` answers a name or value it cannot represent by
+/// *panicking*, and a graph is external input, so every pair is checked against
+/// the same rule [`crate::config::validate`] applies — here too, and not only
+/// there, because a panic reached through a second door is still a document
+/// taking the run down.
+fn export(block: &BTreeMap<String, String>, env: &BTreeMap<String, String>) -> Result<(), Error> {
+    let expanded: Vec<(&String, String)> = block
+        .iter()
+        .map(|(key, value)| (key, expand(value, env)))
+        .collect();
+    for (key, value) in &expanded {
+        if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+            return Err(Error::InvalidConfig(format!(
+                "env {key:?}: an environment variable name cannot be empty or contain '=' or a \
+                 NUL, and neither a name nor a value may carry one — this pair is exported to \
+                 every member"
+            )));
+        }
     }
+    std::env::remove_var(invoke::PROCESS_WIDE_HARNESS_ENV);
+    for (key, value) in expanded {
+        std::env::set_var(key, value);
+    }
+    Ok(())
 }
 
 /// Expand `${VAR}` references in a graph's `env` value.
@@ -1010,6 +1033,42 @@ mod tests {
         }
         let label = parse_label("tier=gate").unwrap();
         assert_eq!((label.key(), label.value()), ("tier", "gate"));
+    }
+
+    /// A graph's `env` block reaches this process's own environment, and a pair
+    /// the platform cannot represent is refused rather than allowed to panic
+    /// `set_var` — a graph is a document somebody wrote, not a reason to take
+    /// the run down.
+    #[test]
+    fn an_env_pair_the_platform_cannot_represent_is_refused_rather_than_fatal() {
+        let launching: BTreeMap<String, String> = BTreeMap::new();
+        for (key, value) in [
+            ("", "fine"),
+            ("HAS=EQUALS", "fine"),
+            ("HAS\0NUL", "fine"),
+            ("FINE", "has\0nul"),
+        ] {
+            let block: BTreeMap<String, String> =
+                [(key.to_string(), value.to_string())].into_iter().collect();
+            let err = export(&block, &launching).unwrap_err();
+            assert!(
+                err.to_string().contains("exported to every member"),
+                "{key:?}={value:?}: {err}"
+            );
+        }
+
+        // And the same pairs are refused by `validate`, so `oneagentgraph
+        // validate` answers for them without a run being started at all.
+        for document in [
+            "version: 1\nname: g\nenv:\n  \"HAS=EQUALS\": fine\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+            "version: 1\nname: g\nenv:\n  FINE: \"has\\0nul\"\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+        ] {
+            let err = crate::config::validate(&graph(document)).unwrap_err();
+            assert!(
+                err.to_string().contains("exported to every member"),
+                "{document}: {err}"
+            );
+        }
     }
 
     /// `${VAR}` expands from the launching environment; an unset one expands to

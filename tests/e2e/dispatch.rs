@@ -44,6 +44,32 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert_eq!(kinds.first().map(String::as_str), Some("graph-started"));
     assert_eq!(kinds.last().map(String::as_str), Some("graph-settled"));
 
+    // A two-party member says which runner it has, and what that runner is: the
+    // engine driving it and the effective config it was given. There is no
+    // `program` or `args` on this one, because nothing was spawned for it — and
+    // a consumer reading the stream is how an operator learns that.
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let payload = &started[0]["payload"];
+    assert_eq!(payload["runner"], serde_json::json!("library"));
+    assert_eq!(payload["engine"], serde_json::json!("onejudge"));
+    assert!(
+        payload["config"]
+            .as_str()
+            .is_some_and(|config| config.ends_with("onejudge.yaml")),
+        "the member named no effective config: {payload}"
+    );
+    assert!(
+        payload["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()),
+        "the member named no worktree: {payload}"
+    );
+    for absent in ["program", "args"] {
+        assert!(
+            payload.get(absent).is_none(),
+            "a member nothing was spawned for reported {absent}: {payload}"
+        );
+    }
+
     let settled = run.of_kind("member-settled");
     assert_eq!(settled.len(), 1, "{settled:?}");
     assert_eq!(settled[0]["payload"]["completed"], serde_json::json!(true));
@@ -55,6 +81,39 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     );
     assert!(settled[0]["artifacts"][0]["bytes"].as_u64().unwrap_or(0) > 0);
     assert!(settled[0]["payload"]["verdict"].is_array());
+}
+
+/// A single-sided member says the other thing: it is a child process, and it
+/// names the program and argv it was spawned with.
+///
+/// The pair with the journey above is the point. `member-started` now carries a
+/// `runner`, and a consumer branching on it has to be able to trust that the
+/// fields beside it match — a member reported as a process with no argv, or as a
+/// library call with one, is a stream that cannot be read.
+#[test]
+fn a_single_sided_member_reports_the_process_it_spawned() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_task("fake:complete-now: one sided");
+    run.expect_code(0);
+
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let payload = &started[0]["payload"];
+    assert_eq!(payload["runner"], serde_json::json!("process"));
+    assert!(
+        payload["program"]
+            .as_str()
+            .is_some_and(|program| program.contains("oneharness")),
+        "the member named no program: {payload}"
+    );
+    assert!(
+        payload["args"]
+            .as_array()
+            .is_some_and(|args| args.iter().any(|arg| arg == "run")),
+        "the member named no argv: {payload}"
+    );
+    assert!(payload.get("engine").is_none(), "{payload}");
 }
 
 /// A task that *talks about* the double's sentinels is steered by none of them.
