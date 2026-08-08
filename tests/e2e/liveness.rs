@@ -128,6 +128,41 @@ fn a_live_member_publishes_a_heartbeat_while_its_turn_runs() {
     );
 }
 
+/// The heartbeat rule is the other watchdog, and it fires on its own terms: a
+/// member whose liveness this supervisor could not confirm inside the deadline
+/// is declared dead, whatever it was publishing.
+///
+/// The deadline is set below the refresh cadence to reach the rule, which is
+/// exactly why the production default is far above it: at the cadence itself,
+/// the margin reaps healthy members under the load this crate creates.
+#[test]
+fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
+    let workspace = Workspace::new();
+    let env = vec![
+        ("ONEAGENTGRAPH_HEARTBEAT_TIMEOUT", "0.05".to_string()),
+        ("ONEAGENTGRAPH_STALL_TIMEOUT", "600".to_string()),
+    ];
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "complete-now: too tight a margin",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &as_env(&env),
+    );
+    run.expect_code(1);
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    assert_eq!(died[0]["payload"]["rule"], serde_json::json!("heartbeat"));
+    assert_eq!(
+        died[0]["payload"]["disposition"],
+        serde_json::json!("signaled")
+    );
+}
+
 /// A bound nobody meant refuses the run rather than supervising under it — and
 /// the refusal names the variable, so an operator knows which one to fix.
 #[test]

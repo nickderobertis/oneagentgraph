@@ -190,7 +190,15 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
     workspace.write("oneharness.toml", FALLBACK_CHAIN);
     let refusing = workspace.write(
         "refusing.sh",
-        "#!/bin/sh\necho '401 Unauthorized: no credentials' >&2\nexit 1\n",
+        // The zero-work 429 a subscription out of quota really answers with: a
+        // terminal record that reads as a success and declares the rejection
+        // only through `terminal_reason` and an embedded `api_error_status`,
+        // having spent nothing. The accounting is what oneharness classifies on,
+        // which is why every counter in it is zero.
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=quota exec {} \"$@\"\n",
+            fake_harness()
+        ),
     );
     make_executable(&refusing);
     workspace.graph(&format!(
@@ -214,7 +222,7 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
         advanced[0]["payload"]["identity"],
         serde_json::json!("claude-code")
     );
-    assert_eq!(advanced[0]["payload"]["reason"], serde_json::json!("auth"));
+    assert_eq!(advanced[0]["payload"]["reason"], serde_json::json!("quota"));
     assert!(!run.of_kind("member-settled").is_empty());
 }
 

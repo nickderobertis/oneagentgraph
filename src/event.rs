@@ -468,12 +468,24 @@ mod tests {
         let (short, cut) = bound_text("brief");
         assert_eq!((short.as_str(), cut), ("brief", false));
 
-        let long = format!("{}TAIL", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        // `é` is two bytes, so a five-byte ASCII tail puts the cut at an odd
+        // offset — *inside* a character — and it has to walk forward to the next
+        // boundary. That is the case a naive slice panics on.
+        let long = format!("{}TAILS", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
         let (bounded, cut) = bound_text(&long);
         assert!(cut);
-        assert!(bounded.len() <= MAX_PAYLOAD_TEXT_BYTES);
-        assert!(bounded.ends_with("TAIL"));
+        assert!(
+            bounded.len() < MAX_PAYLOAD_TEXT_BYTES,
+            "the cut did not move to a boundary"
+        );
+        assert!(bounded.ends_with("TAILS"));
         assert!(bounded.chars().all(|c| c == 'é' || c.is_ascii_uppercase()));
+
+        // And an even offset needs no walk, so the whole bound is used.
+        let aligned = format!("{}TAIL", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        let (bounded, cut) = bound_text(&aligned);
+        assert!(cut);
+        assert_eq!(bounded.len(), MAX_PAYLOAD_TEXT_BYTES);
     }
 
     /// A tool summary is bounded in characters and collapsed to one line, so a

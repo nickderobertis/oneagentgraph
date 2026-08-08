@@ -413,6 +413,28 @@ mod tests {
         assert!(merge("", "empty.yaml", &persona).is_ok());
     }
 
+    /// A `user` of any wrong shape is refused with the shape that was found, so
+    /// an author fixes the key rather than reading a serde trace.
+    #[test]
+    fn a_user_of_any_wrong_shape_names_what_was_found() {
+        let persona =
+            Persona::parse("agent:\n  instructions: r\nuser:\n  persona: p\n", "p").unwrap();
+        for (base, found) in [
+            ("user: null\n", "a mapping"),
+            ("user: true\n", "a boolean"),
+            ("user: 3\n", "a number"),
+            ("user: text\n", "a string"),
+            ("user: [1]\n", "a list"),
+        ] {
+            let merged = merge(base, "b.yaml", &persona);
+            match merged {
+                // A null `user` is an absent one, which the merge fills in.
+                Ok(config) => assert!(config["user"].is_object(), "{base}: {config}"),
+                Err(err) => assert!(err.to_string().contains(found), "{base}: {err}"),
+            }
+        }
+    }
+
     /// Names that would escape a catalog are refused before anything is written.
     #[test]
     fn a_name_that_escapes_its_catalog_is_refused() {

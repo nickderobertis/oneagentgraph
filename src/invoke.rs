@@ -492,4 +492,183 @@ mod tests {
         let stamped = stamp_model(ONE_FAMILY, "c.toml", "no-such-model-anywhere").unwrap();
         assert!(stamped.contains("no-such-model-anywhere"));
     }
+
+    /// One workspace with a graph's refs on disk, for the builders below.
+    fn workspace() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("oneharness.toml"), ONE_FAMILY).expect("chain");
+        std::fs::write(
+            dir.path().join("base.yaml"),
+            concat!(
+                "provider:\n  kind: oneharness\n",
+                "agent:\n  instructions: preamble\n",
+                "user:\n  persona: lead\n  done_when: done\n  max_turns: 4\n",
+            ),
+        )
+        .expect("base");
+        dir
+    }
+
+    /// A [`Context`] over `dir`.
+    fn context<'a>(dir: &'a Path, scratch: &'a Path) -> Context<'a> {
+        Context {
+            dir,
+            scratch,
+            graph_dir: Some(dir),
+            task: Some("do the thing"),
+            session: "s",
+            onejudge_bin: "onejudge",
+            oneharness_bin: "oneharness",
+        }
+    }
+
+    /// A member's own `max_turns` beats the merged config's, and the effective
+    /// config is written where onejudge is told to read it.
+    #[test]
+    fn a_members_own_turn_cap_reaches_the_effective_config() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let member: Member = serde_norway::from_str(concat!(
+            "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\nmax_turns: 9\n",
+            "agent: {oneharness_config: ./oneharness.toml}\n",
+            "judge: {oneharness_config: ./oneharness.toml}\n",
+        ))
+        .expect("a member");
+        let invocation = build(
+            &member,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .expect("built");
+        assert_eq!(invocation.kind, crate::member::Kind::Onejudge);
+        assert_eq!(
+            invocation.env,
+            vec![(MODE_ENV.to_string(), "bypass".to_string())]
+        );
+        let effective =
+            std::fs::read_to_string(scratch.join(ONEJUDGE_CONFIG_FILE)).expect("config");
+        assert!(effective.contains("max_turns: 9"), "{effective}");
+        assert!(effective.contains("system_prompt"), "{effective}");
+        // The member's own task beats the run's, because a member that carries
+        // one is asking for that task rather than the graph's.
+        assert!(invocation.args.contains(&"do the thing".to_string()));
+    }
+
+    /// A member with its own `task` uses it, and one with a persona file takes
+    /// its label from the file when the persona names none.
+    #[test]
+    fn a_member_takes_its_own_task_and_its_files_name() {
+        let dir = workspace();
+        std::fs::write(
+            dir.path().join("lead.yaml"),
+            "agent:\n  instructions: role\nuser:\n  persona: supervisor\n",
+        )
+        .expect("persona");
+        let scratch = dir.path().join("scratch");
+        let member: Member = serde_norway::from_str(concat!(
+            "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\n",
+            "task: its own task\npersona: ./lead.yaml\n",
+            "agent: {oneharness_config: ./oneharness.toml}\n",
+            "judge: {oneharness_config: ./oneharness.toml}\n",
+        ))
+        .expect("a member");
+        let invocation = build(
+            &member,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .expect("built");
+        assert!(invocation.args.contains(&"its own task".to_string()));
+        assert_eq!(invocation.persona.as_deref(), Some("lead"));
+    }
+
+    /// A single-sided member resolves its own persona, and a run with no task at
+    /// all is refused rather than launched with nothing to do.
+    #[test]
+    fn a_single_sided_member_carries_its_persona_and_needs_a_task() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let member: Member = serde_norway::from_str(
+            "kind: oneharness\noneharness_config: ./oneharness.toml\npersona: reviewer\n",
+        )
+        .expect("a member");
+        let invocation = build(
+            &member,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .expect("built");
+        assert_eq!(invocation.kind, crate::member::Kind::Oneharness);
+        assert_eq!(invocation.persona.as_deref(), Some("reviewer"));
+
+        let mut taskless = context(dir.path(), &scratch);
+        taskless.task = None;
+        let err = build(&member, &taskless, &mut Resolver::new()).unwrap_err();
+        assert!(err.to_string().contains("no task"), "{err}");
+    }
+
+    /// A command judge composes onejudge's `split` provider, and an empty
+    /// command is refused rather than written into a config nothing can run.
+    #[test]
+    fn a_command_judge_composes_the_split_provider() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let agent: AgentSide =
+            serde_norway::from_str("oneharness_config: ./oneharness.toml\n").expect("a side");
+        let judge = JudgeSide::Command(crate::config::JudgeCommand {
+            command: vec!["my-provider".into(), "--flag".into()],
+        });
+        let block = provider_block(
+            &judge,
+            &agent,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .expect("a provider");
+        assert_eq!(block["kind"], serde_json::json!("split"));
+        assert_eq!(
+            block["judge"]["command"][0],
+            serde_json::json!("my-provider")
+        );
+        assert_eq!(block["skill"]["stream"], serde_json::json!(true));
+
+        let empty = JudgeSide::Command(crate::config::JudgeCommand {
+            command: Vec::new(),
+        });
+        let err = provider_block(
+            &empty,
+            &agent,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs a command to run"), "{err}");
+    }
+
+    /// A config whose `harness` key is not a table of sections cannot take a
+    /// stamp, and says which key is wrong.
+    #[test]
+    fn a_config_whose_harness_section_is_not_a_table_is_refused() {
+        let err = stamp_model(
+            "harnesses = [\"codex\"]\n[harness]\ncodex = 3\n",
+            "c.toml",
+            "gpt-5.5",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("`harness.codex` must be a table"),
+            "{err}"
+        );
+    }
+
+    /// A generated file that cannot be written names the path, because the run
+    /// that could not write it is the one an operator has to fix.
+    #[test]
+    fn a_generated_file_that_cannot_be_written_names_its_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let blocked = dir.path().join("not-a-directory");
+        std::fs::write(&blocked, "").expect("write");
+        let err = write(&blocked.join("child").join("x.toml"), "body").unwrap_err();
+        assert!(err.to_string().contains("cannot create"), "{err}");
+    }
 }

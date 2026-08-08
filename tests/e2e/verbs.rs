@@ -130,6 +130,36 @@ fn detach_prints_where_to_watch_the_run_it_left_behind() {
     until("the detached run to settle", || {
         std::fs::read_to_string(&events).is_ok_and(|stream| stream.contains("\"graph-settled\""))
     });
+
+    // Every flag the run was given is forwarded to the process that actually
+    // runs it: a detached run under a different task, label, or override would
+    // otherwise be a different run from the one the caller asked for.
+    let task_file = workspace.write("task.md", "complete-now: detached from a file\n");
+    let forwarded = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task-file",
+        &task_file.display().to_string(),
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--label",
+        "round=7",
+        "--set",
+        "members.worker.mode=read-only",
+        "--detach",
+    ]);
+    forwarded.expect_code(0);
+    let started: serde_json::Value =
+        serde_json::from_str(forwarded.stdout.trim()).expect("one JSON object");
+    let stream_path = started["events_path"].as_str().expect("a path").to_string();
+    until("the forwarded run to settle", || {
+        std::fs::read_to_string(&stream_path).is_ok_and(|s| s.contains("\"graph-settled\""))
+    });
+    let forwarded_stream = std::fs::read_to_string(&stream_path).expect("the stream");
+    assert!(
+        forwarded_stream.contains("\"round\":\"7\""),
+        "{forwarded_stream}"
+    );
     let stream = std::fs::read_to_string(&events).expect("the stream");
     for line in stream.lines().filter(|l| !l.trim().is_empty()) {
         serde_json::from_str::<serde_json::Value>(line).expect("every line is an envelope");
@@ -166,6 +196,116 @@ fn history_lists_runs_and_shows_one_record() {
     let missing = workspace.run(&["history", "show", "no-such-run"]);
     missing.expect_code(2);
     assert!(missing.stderr.contains("no-such-run"), "{}", missing.stderr);
+}
+
+/// The refusals the surface owes a caller who typed something that cannot work:
+/// a task file that is not there, a `history RUN` naming no run, a persona
+/// argument pointing at nothing, and a catalog holding none.
+#[test]
+fn every_verb_refuses_what_cannot_work_by_name() {
+    let workspace = Workspace::new();
+
+    let missing_file = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task-file",
+        "./no-such-task.md",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    missing_file.expect_code(2);
+    assert!(
+        missing_file.stderr.contains("cannot read --task-file"),
+        "{}",
+        missing_file.stderr
+    );
+
+    let no_run = workspace.run(&["history", "no-such-run"]);
+    no_run.expect_code(2);
+    assert!(no_run.stderr.contains("no run"), "{}", no_run.stderr);
+
+    let nowhere = workspace.run(&["persona", "validate", "./nowhere"]);
+    nowhere.expect_code(2);
+    assert!(
+        nowhere.stderr.contains("no persona at"),
+        "{}",
+        nowhere.stderr
+    );
+
+    std::fs::create_dir_all(workspace.at("empty-catalog")).expect("mkdir");
+    let empty = workspace.run(&["persona", "validate", "empty-catalog"]);
+    empty.expect_code(2);
+    assert!(
+        empty.stderr.contains("no personas under"),
+        "{}",
+        empty.stderr
+    );
+
+    // A file that is not YAML at all fails as itself, naming the file.
+    workspace.write("catalog2/broken.yaml", "not: [a, mapping\n");
+    let broken = workspace.run(&["persona", "validate", "catalog2"]);
+    broken.expect_code(2);
+    assert!(broken.stderr.contains("broken.yaml"), "{}", broken.stderr);
+}
+
+/// `history RUN` narrows the listing to one run, and `cancel` with no member
+/// stops the whole run.
+#[test]
+fn history_narrows_to_one_run_and_cancel_stops_the_whole_run() {
+    let workspace = Workspace::new();
+    workspace.run_task("complete-now: one run").expect_code(0);
+    let id = run_id(&workspace.state()).expect("a run");
+
+    let narrowed = workspace.run(&["history", &id]);
+    narrowed.expect_code(0);
+    assert_eq!(narrowed.stdout.lines().count(), 1, "{}", narrowed.stdout);
+    assert!(narrowed.stdout.starts_with(&id), "{}", narrowed.stdout);
+
+    let cancelled = workspace.run(&["cancel", &id, "--kill"]);
+    cancelled.expect_code(0);
+    assert!(
+        cancelled.stdout.contains("cancelled"),
+        "{}",
+        cancelled.stdout
+    );
+    assert!(
+        !cancelled.stdout.contains("member"),
+        "a whole-run cancel named a member: {}",
+        cancelled.stdout
+    );
+}
+
+/// `smoke` with no `--dir` spends its turn in a throwaway directory of its own,
+/// so a caller never has to find one.
+#[test]
+fn smoke_makes_its_own_throwaway_directory() {
+    let workspace = Workspace::new();
+    let tmp = workspace.at("tmp");
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    let run = workspace.run_with(
+        &["smoke"],
+        &[
+            ("TMPDIR", &tmp.display().to_string()),
+            ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+            ("ONEHARNESS_HARNESSES", "claude-code"),
+        ],
+    );
+    run.expect_code(0);
+    assert!(
+        run.stdout.contains("smoke: passed via claude-code"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        std::fs::read_dir(&tmp)
+            .expect("tmp")
+            .flatten()
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("oneagentgraph-smoke-")),
+        "smoke did not make its own directory under TMPDIR"
+    );
 }
 
 /// `health` forwards what oneharness knows about each identity, and says why

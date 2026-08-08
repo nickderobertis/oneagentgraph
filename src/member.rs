@@ -617,6 +617,55 @@ mod tests {
         assert_eq!(summarize(&serde_json::json!({})), "");
     }
 
+    /// A published line this crate cannot model is skipped rather than crashing
+    /// the reader: the stream is a view, and a member that wrote one odd line is
+    /// still a member whose turn has to be read to its end.
+    #[test]
+    fn a_line_the_reader_cannot_model_is_skipped_rather_than_fatal() {
+        let recorder = crate::event::Emitter::new("s", Box::new(std::io::sink()));
+        let report = Arc::new(Mutex::new(None));
+        let mut turn = 0;
+        for line in [
+            "not json at all",
+            "[]",
+            "{\"type\":\"unknown\"}",
+            "{\"type\":\"result\"}",
+        ] {
+            ingest(line, &recorder, &mut turn, &report);
+        }
+        assert_eq!(turn, 0, "a line the reader cannot model started a turn");
+        assert!(report.lock().expect("report").is_none());
+
+        ingest(
+            "{\"type\":\"result\",\"report\":{\"usage\":{}}}",
+            &recorder,
+            &mut turn,
+            &report,
+        );
+        assert!(report.lock().expect("report").is_some());
+    }
+
+    /// A `member-died` payload reaches the wire as the four sibling fields the
+    /// contract names, with the truncation flag omitted when nothing was cut.
+    #[test]
+    fn a_death_reaches_the_wire_as_its_four_documented_fields() {
+        let payload = died_payload(&MemberDied {
+            rule: "activity".into(),
+            exit_code: Some(1),
+            disposition: Disposition::Exited,
+            stderr_tail: "harness failed (quota)".into(),
+            truncated: false,
+        });
+        assert_eq!(payload["rule"], Value::from("activity"));
+        assert_eq!(payload["exit_code"], Value::from(1));
+        assert_eq!(payload["disposition"], Value::from("exited"));
+        assert_eq!(
+            payload["stderr_tail"],
+            Value::from("harness failed (quota)")
+        );
+        assert!(!payload.contains_key("truncated"));
+    }
+
     /// Only oneharness's own classification becomes a `fallback-advanced`; a
     /// report with no chain produces none rather than an invented one.
     #[test]

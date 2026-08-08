@@ -453,6 +453,18 @@ mod tests {
         assert_eq!(reclaimable(&path), Ok(()));
     }
 
+    /// A scratch that cannot be created, or whose lock cannot be opened, is a
+    /// refusal naming the path — a run that proceeded without ownership would
+    /// have nothing to hold against a sweep.
+    #[test]
+    fn a_scratch_that_cannot_be_claimed_names_its_path() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let blocked = root.path().join("not-a-directory");
+        std::fs::write(&blocked, "").expect("write");
+        let err = Owned::claim(blocked.join("child")).unwrap_err();
+        assert!(err.to_string().contains("cannot create scratch"), "{err}");
+    }
+
     /// This process is stamped for nothing, so a sweep of an unstamped scratch
     /// signals nothing — and never itself.
     #[test]

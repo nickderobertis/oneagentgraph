@@ -284,11 +284,34 @@ fn a_command_judge_supervises_through_the_split_provider() {
         fake = fake_harness(),
         provider = fake_provider(),
     ));
+    // A base carrying evals and an assessment reaches every operation the
+    // protocol has, so the whole command-provider surface is driven rather than
+    // just the completion decision.
+    workspace.write(
+        "base.yaml",
+        concat!(
+            "provider:\n  kind: oneharness\n",
+            "agent:\n  instructions: |\n    Standing bar: verify before you claim done.\n",
+            "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
+            "evals:\n",
+            "  - criterion: \"the change is well-scoped\"\n    kind: numeric\n    scale: [1, 5]\n",
+            "assessment: \"Name the follow-up work this run left out of scope.\"\n",
+        ),
+    );
     let run = workspace.run_task("complete-now: judged by a command");
     run.expect_code(0);
     assert_eq!(
         run.of_kind("member-settled")[0]["payload"]["completed"],
         serde_json::json!(true)
+    );
+
+    // And the other half of the same supervisor: a member that never reaches its
+    // bar is asked for another turn until the cap, then settles incomplete.
+    let incomplete = workspace.run_task("should-fail: judged by a command");
+    incomplete.expect_code(1);
+    assert_eq!(
+        incomplete.of_kind("member-settled")[0]["payload"]["completed"],
+        serde_json::json!(false)
     );
 }
 

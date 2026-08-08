@@ -13,10 +13,13 @@
 # runs this every week on every OS, for both registries, and anything it had to
 # install first would be a second thing that can rot.
 #
-# While the crate is interface-only, the promise a published artifact makes is
-# its *surface*: it reports its version, prints the documented command list, and
-# refuses to pretend it ran a graph. Extend the assertions here as behavior
-# lands — this file is what a release proves.
+# What a published artifact is held to here is what it can prove *alone*: it
+# reports its version, prints the documented command list, refuses a graph it
+# cannot read with the contract's exit 2, and never reports a graph it did not
+# run as settled. Running one is deliberately out of scope — that needs the
+# `onejudge` and `oneharness` CLIs and a paid harness, which this script exists
+# to stay free of. The e2e suite drives those for real; this proves the artifact
+# that ships is the one the suite tested.
 set -euo pipefail
 
 expect_version=""
@@ -72,14 +75,34 @@ for command in run validate trigger reset-timer cancel history health smoke pers
   esac
 done
 
-# The refusal is part of the shipped contract while the crate is interface-only:
-# a build that silently succeeded here would report an unimplemented run as a
-# graph that settled.
+# A graph that is not there is the contract's exit 2, and nothing on stdout: a
+# caller reads a line on stdout as an event, so a refusal must not produce one.
 code=0
-oneagentgraph run graph.yaml >/dev/null 2>&1 || code=$?
-if [ "$code" -eq 0 ]; then
-  fail "'run' exited 0 without running anything" \
-    "an interface-only build must refuse; a caller reads exit 0 as a settled graph"
+out="$(oneagentgraph run no-such-graph.yaml 2>/dev/null)" || code=$?
+if [ "$code" -ne 2 ]; then
+  fail "'run' on a missing graph exited $code, not 2" \
+    "the contract assigns exit 2 to an invalid config; a caller branches on it"
+fi
+if [ -n "$out" ]; then
+  fail "'run' wrote to stdout while refusing a missing graph" \
+    "a caller reads stdout as the event stream; a refusal must leave it empty"
+fi
+
+# `validate` is the one verb that needs nothing else installed, so it is what
+# proves the artifact can actually read a graph rather than only parse argv.
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+printf 'version: 1\nname: smoke\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./h.toml\n' > "$work/graph.yaml"
+printf 'run_mode = "fallback"\nharnesses = ["claude-code"]\n' > "$work/h.toml"
+oneagentgraph validate "$work/graph.yaml" >/dev/null || fail \
+  "'validate' refused a graph it should read" \
+  "the installed binary cannot resolve a graph's own refs"
+
+code=0
+oneagentgraph validate "$work/nowhere.yaml" >/dev/null 2>&1 || code=$?
+if [ "$code" -ne 2 ]; then
+  fail "'validate' on a missing graph exited $code, not 2" \
+    "the contract assigns exit 2 to an invalid config"
 fi
 
 echo "$label: surface smoke test passed${expect_version:+ for $expect_version}"

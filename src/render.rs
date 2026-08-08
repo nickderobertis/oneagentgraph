@@ -288,6 +288,34 @@ mod tests {
         envelope(EventKind::TurnCompleted, json!({"usage": Value::Null}))
     }
 
+    /// The branches with nothing to add render the bare fact rather than a
+    /// trailing separator: a death with no stderr, a settle with no reason, and
+    /// a payload field the producer left null.
+    #[test]
+    fn an_event_with_nothing_to_add_renders_the_bare_fact() {
+        let died = line(&envelope(
+            EventKind::MemberDied,
+            json!({"rule": "heartbeat", "exit_code": Value::Null,
+                   "disposition": "signaled", "stderr_tail": ""}),
+        ));
+        assert!(
+            died.ends_with("member-died heartbeat exit= signaled"),
+            "{died}"
+        );
+
+        let settled = line(&envelope(
+            EventKind::MemberSettled,
+            json!({"completed": false, "completion_reason": Value::Null}),
+        ));
+        assert!(settled.ends_with("member-settled incomplete"), "{settled}");
+
+        let usage = line(&envelope(
+            EventKind::TurnCompleted,
+            json!({"usage": "not an object"}),
+        ));
+        assert!(usage.ends_with("turn-completed"), "{usage}");
+    }
+
     /// The text writer renders what came through it, forwards anything that is
     /// not an envelope rather than swallowing it, and emits exactly one line per
     /// event however the bytes were split across writes.

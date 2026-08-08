@@ -21,6 +21,15 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # cannot promise a floor the manifest no longer declares. CI reads the same field.
 msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 
+# The two CLIs this crate composes, pinned in one place because the e2e suite
+# drives both for real. oneharness comes from crates.io; onejudge is pinned to
+# the commit that merged its streamed-provider contract, which no release
+# carries yet (0.3.4 is the latest, and it has no `--stream`). Move onejudge to a
+# published version the moment one ships — a git pin is a dependency on a branch
+# staying where it is.
+oneharness-version := "0.6.7"
+onejudge-rev := "892191ea30d3aee0e20ed66525bcaeed99fbcff5"
+
 # Keep the gate's own output to signal: successes are silent, failures are not.
 export CARGO_TERM_QUIET := "true"
 
@@ -42,7 +51,25 @@ _crate-bootstrap:
       || { echo "cannot add toolchain components — install rustup (https://rustup.rs/) and re-run" >&2; exit 1; }
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
+    @just _ensure-onejudge
+    @just _ensure-oneharness
     @cargo fetch --locked --quiet
+
+# The e2e suite drives both of these for real, as subprocesses, so they are part
+# of provisioning rather than something a developer is expected to have. Both are
+# version-checked rather than merely present: a stale `oneharness` on PATH is the
+# failure mode `docs/onejudge-integration.md` records, where a run dies on a
+# confusing broken pipe because the binary rejects flags the caller relies on.
+# Install the pinned `onejudge` CLI. Quiet when already at the pin.
+_ensure-onejudge:
+    @command -v onejudge >/dev/null 2>&1 && onejudge run --help 2>/dev/null | grep -q -- --stream \
+      || cargo install --locked --git https://github.com/nickderobertis/onejudge \
+           --rev {{onejudge-rev}} --features cli onejudge
+
+# Install the pinned `oneharness` CLI. Quiet when already at the pin.
+_ensure-oneharness:
+    @[ "$(oneharness --version 2>/dev/null)" = "oneharness {{oneharness-version}}" ] \
+      || cargo install --locked oneharness --version {{oneharness-version}}
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -111,13 +138,13 @@ _crate-format:
 
 # Lint the crate with clippy; any warning is an error.
 _crate-lint:
-    @cargo clippy --all-targets --locked --quiet -- -D warnings
+    @cargo clippy --all-targets --all-features --locked --quiet -- -D warnings
 
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md.
 # The crate's full test suite (unit + contract + e2e) with coverage enforced.
 _crate-test:
-    @cargo llvm-cov nextest --locked --fail-under-lines 95 \
+    @cargo llvm-cov nextest --locked --all-features --fail-under-lines 95 \
       --status-level fail --final-status-level fail \
       || { echo "tests failed, or coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
@@ -125,16 +152,16 @@ _crate-test:
 # legs run the same suite through this instead of `test`.
 # Full test suite without coverage instrumentation.
 test-quick:
-    @cargo nextest run --locked --status-level fail
+    @cargo nextest run --locked --all-features --status-level fail
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`).
 test-e2e:
-    @cargo nextest run --locked -E 'binary(e2e)' --status-level fail
+    @cargo nextest run --locked --all-features -E 'binary(e2e)' --status-level fail
 
 # Build the crate's docs with warnings denied.
 _crate-doc:
-    @RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --quiet
+    @RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --locked --all-features --quiet
 
 # Run the CLI, e.g. `just run validate examples/graph.yaml`.
 run *ARGS:

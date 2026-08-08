@@ -8,12 +8,6 @@ and side, and `oneagentgraph` constructs the invocations, supervises liveness,
 and emits every turn, tool call, fallback, and settle as an event you can pipe
 into anything.
 
-> **Interface-only.** This repository currently ships the *contract* and the
-> types, config schema, and CLI surface that implement it — and nothing behind
-> them. Every command parses per the contract and then refuses with `NOT
-> IMPLEMENTED` and exit code 3. Install it to pin the interface; do not wire it
-> into a pipeline expecting work to happen. See [`docs/contract.md`].
-
 ## Install
 
 ```bash
@@ -31,6 +25,10 @@ cargo install --git https://github.com/nickderobertis/oneagentgraph --locked
 
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every [release], with `sha256` checksums.
+
+`run` and `smoke` drive the [onejudge] and [oneharness] CLIs, so both have to be
+on `PATH`; `validate`, `history`, and `persona` need neither. `ONEAGENTGRAPH_ONEJUDGE_BIN`
+and `ONEAGENTGRAPH_ONEHARNESS_BIN` name a pinned install instead.
 
 ## What it does
 

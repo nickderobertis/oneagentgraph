@@ -166,11 +166,19 @@ fn fetch(reference: &ConfigRef) -> Result<Resolved, Error> {
     let mut response = ureq::get(url)
         .call()
         .map_err(|err| Error::InvalidConfig(format!("cannot fetch {url}: {err}")))?;
+    ingest(url, response.body_mut().as_reader())
+}
+
+/// Read one remote answer, bound it, and record it.
+///
+/// Split from the request so the bound and the record are exercised by a reader
+/// this crate hands over, rather than only by whatever a network happened to
+/// answer during a test run.
+fn ingest(url: &str, body: impl std::io::Read) -> Result<Resolved, Error> {
     let mut content = String::new();
-    response
-        .body_mut()
-        .as_reader()
-        .take(MAX_REMOTE_BYTES as u64 + 1)
+    // One byte past the ceiling, so a document that is exactly at it still reads
+    // and anything larger is *seen* to be larger rather than silently cut.
+    body.take(MAX_REMOTE_BYTES as u64 + 1)
         .read_to_string(&mut content)
         .map_err(|err| Error::InvalidConfig(format!("cannot read {url}: {err}")))?;
     if content.len() > MAX_REMOTE_BYTES {
@@ -248,5 +256,102 @@ mod tests {
         assert!(is_remote(&ConfigRef("https://example.com/a.yaml".into())));
         assert!(is_remote(&ConfigRef("http://example.com/a.yaml".into())));
         assert!(!is_remote(&ConfigRef("./https-notes/a.yaml".into())));
+    }
+
+    /// A remote answer is recorded content-addressed and carries no base
+    /// directory: a relative ref inside a fetched document has no filesystem to
+    /// resolve against.
+    #[test]
+    fn a_remote_answer_is_recorded_with_no_base_directory() {
+        let resolved = ingest(
+            "https://example.com/g.yaml",
+            std::io::Cursor::new(b"version: 1\n"),
+        )
+        .unwrap();
+        assert_eq!(resolved.content, "version: 1\n");
+        assert_eq!(resolved.base_dir, None);
+        assert_eq!(resolved.record.origin, "https://example.com/g.yaml");
+        assert_eq!(resolved.record.bytes, 11);
+    }
+
+    /// A document exactly at the ceiling still reads; one byte past it is
+    /// refused, because a redirect onto something else must not be read into
+    /// memory and then treated as the config the graph named.
+    #[test]
+    fn an_answer_past_the_ceiling_is_refused_rather_than_cut() {
+        let at_bound = vec![b'x'; MAX_REMOTE_BYTES];
+        assert_eq!(
+            ingest("https://example.com/a", std::io::Cursor::new(at_bound))
+                .unwrap()
+                .content
+                .len(),
+            MAX_REMOTE_BYTES
+        );
+
+        let past = vec![b'x'; MAX_REMOTE_BYTES + 1];
+        let err = ingest("https://example.com/a", std::io::Cursor::new(past)).unwrap_err();
+        assert!(err.to_string().contains("ceiling"), "{err}");
+    }
+
+    /// A body that is not UTF-8 is a document this crate cannot read, and says
+    /// which URL answered it.
+    #[test]
+    fn a_body_that_is_not_utf8_names_the_url_that_answered_it() {
+        let err = ingest(
+            "https://example.com/a",
+            std::io::Cursor::new(vec![0xff, 0xfe]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("cannot read https://example.com/a"),
+            "{err}"
+        );
+    }
+
+    /// A host that cannot be reached is a refusal naming the URL, not a panic.
+    #[test]
+    fn an_unreachable_host_is_refused_by_url() {
+        let err = fetch(&ConfigRef(
+            "https://oneagentgraph.invalid/graph.yaml".into(),
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot fetch"), "{err}");
+    }
+
+    /// A remote ref is cached by its URL and a relative one by its base, so two
+    /// members naming the same document read it once — and two naming the same
+    /// relative path under different bases do not collide.
+    #[test]
+    fn refs_are_cached_by_what_identifies_them() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.yaml"), "version: 1\n").expect("write");
+        let mut resolver = Resolver::new();
+        let reference = ConfigRef("a.yaml".into());
+        assert_eq!(
+            resolver
+                .resolve(&reference, Some(dir.path()))
+                .unwrap()
+                .content,
+            "version: 1\n"
+        );
+        // Second read comes from the cache; the inventory still has one entry.
+        assert_eq!(
+            resolver
+                .resolve(&reference, Some(dir.path()))
+                .unwrap()
+                .content,
+            "version: 1\n"
+        );
+        assert_eq!(resolver.inventory().len(), 1);
+        assert_eq!(
+            cache_key(&ConfigRef("https://x/a".into()), Some(dir.path())),
+            "https://x/a"
+        );
+
+        let err = resolver
+            .resolve(&ConfigRef("nowhere.yaml".into()), Some(dir.path()))
+            .unwrap_err();
+        assert!(err.to_string().contains("nowhere.yaml"), "{err}");
     }
 }
