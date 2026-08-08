@@ -58,11 +58,17 @@ one NDJSON stream.
 - **References composed:** base.md, shapes/cli.md, languages/rust.md,
   intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, monorepo.md
 - **Cross-repo dependencies:** `oneharness-core` is a published version.
-  `onejudge` is a **git rev** — a temporary bridge, because `run_plan_streaming`
-  landed after 0.3.4 and nothing newer is released; without it a member's events
-  arrive only when a turn ends, which starves the activity watchdog. A git
-  dependency also blocks `cargo publish`, so **a onejudge release is a release
-  blocker for this crate**. Move it to a version the moment one ships.
+  `onejudge` is a **git rev** — the only one in the graph, and a temporary
+  bridge. 0.3.4 is the newest release and is short three things this crate's
+  supervision rests on: `run_plan_streaming*` (0.3.4 streams only under
+  `Format::Human`, and a `Format::Json` run — the one whose report this crate
+  needs — is buffered, which starves the activity watchdog); a *typed* event
+  (its `progress` callback takes `&str`, an already-rendered line); and
+  `RunFailure`, which does not exist there at all and is the only route to a
+  failed run's fallback telemetry. A git dependency also blocks `cargo publish`,
+  so **a onejudge release carrying all three is a release blocker for this
+  crate**. Move it to a version the moment one ships. `Cargo.toml` states the
+  same list at the dependency itself.
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so

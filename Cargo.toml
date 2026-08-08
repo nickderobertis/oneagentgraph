@@ -77,12 +77,26 @@ test-doubles = []
 # (`run_plan_streaming`), so this crate composes onejudge's own loop instead of
 # re-implementing it around `Engine`.
 #
-# A git rev, and the one in this graph: `run_plan_streaming` — a typed live event
-# sink over the same driver `--format json` uses — landed after 0.3.4, which is
-# still the newest release. Without it the choice is a buffered run, whose events
-# arrive only when a turn ends, and that starves the activity watchdog that is
-# supposed to be watching the turn. Move this to a published version the moment
-# one ships; `docs/contract.md` records what a release has to carry.
+# A git rev, and the only one in this graph. It is a **release blocker**, not a
+# preference: a git dependency blocks `cargo publish` outright, so this crate
+# cannot ship again until onejudge does. 0.3.4 is still the newest release, and
+# it is short three things this crate's supervision is built on, not one:
+#
+#   1. `run_plan_streaming*` — a typed live event sink. 0.3.4 streams only under
+#      `Format::Human`; a `Format::Json` run, which is the one whose report this
+#      crate needs, is buffered. Its events would arrive only when the run ends,
+#      which starves the activity watchdog that is supposed to be watching it.
+#   2. A *typed* event. 0.3.4's `progress` callback is `&mut dyn FnMut(&str)` and
+#      receives an already-rendered line ("· turn 3 — …"), so `turn-started` and
+#      `turn-activity` could only be rebuilt by parsing prose back apart — the
+#      exact string-scraping this conversion exists to delete.
+#   3. `RunFailure`, which does not exist in 0.3.4 at all. It is what carries
+#      `telemetry` off a run that produced **no** report, and that is the only
+#      route to `fallback-advanced` for a failed two-party member — which is
+#      precisely when an operator needs to know which subscription refused.
+#
+# Move this to a published version the moment one carries all three;
+# `docs/contract.md` records what a release has to carry.
 onejudge = { git = "https://github.com/nickderobertis/onejudge", rev = "eeb11338c4d167e9a076e7876bd93acdadb49f33", features = [
   "cli",
 ] }
