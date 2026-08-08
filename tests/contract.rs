@@ -517,6 +517,61 @@ fn the_documented_exit_codes_are_the_ones_the_crate_declares() {
     );
 }
 
+/// The two copies of the exit codes that live outside the contract and outside
+/// the crate, tied back to the constants.
+///
+/// Both exist for a reason and neither can read the contract where it is used:
+/// the README is the first place a reader meets the codes, and
+/// `scripts/smoke-published.sh` is deliberately toolchain-free bash that holds an
+/// *installed* artifact to them, on a machine with no checkout. A restated
+/// number with nothing checking it is the copy that goes stale — silently, since
+/// a wrong code in the smoke script means the smoke passes on the wrong
+/// behavior.
+#[test]
+fn every_restatement_of_the_exit_codes_matches_the_crate() {
+    let readme = squeeze(include_str!("../README.md"));
+    let sentence = format!(
+        "Exit `{EXIT_SUCCESS}` means every member settled, `{EXIT_MEMBER_FAILED}` that one \
+         failed or died, `{EXIT_INVALID_CONFIG}` that the config is invalid."
+    );
+    assert!(
+        readme.contains(&sentence),
+        "README.md no longer states the exit codes the crate declares — expected: {sentence}"
+    );
+
+    // The published smoke's only exit-code comparison is against the contract's
+    // invalid-config code: it refuses graphs, it never runs one.
+    let script = include_str!("../scripts/smoke-published.sh");
+    let compared: Vec<&str> = script
+        .split("-ne ")
+        .skip(1)
+        .map(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == ']')
+                .next()
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(
+        !compared.is_empty(),
+        "scripts/smoke-published.sh no longer compares an exit code at all"
+    );
+    for code in &compared {
+        assert_eq!(
+            *code,
+            EXIT_INVALID_CONFIG.to_string(),
+            "scripts/smoke-published.sh checks for exit {code}, which is not \
+             EXIT_INVALID_CONFIG ({EXIT_INVALID_CONFIG}); every code it asserts must be one the \
+             crate declares"
+        );
+    }
+}
+
+/// One block of prose as a single line, so a gate on a sentence is not a gate on
+/// where the paragraph happened to wrap.
+fn squeeze(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 #[test]
 fn the_documented_liveness_bounds_are_the_ones_the_crate_declares() {
     assert!(

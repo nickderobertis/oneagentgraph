@@ -18,8 +18,11 @@
 // and `scripts/smoke-published.sh` — because the script is what checks an
 // *installed* binary from PyPI/npm, and a shell script cannot read the contract
 // to find the command list. There is no user-facing interface at which that
-// drift is observable; by the time it is, the release has shipped. Every other
-// test here drives the compiled binary as a subprocess.
+// drift is observable; by the time it is, the release has shipped. This is the
+// narrowest scope the directive has: a line-scoped `ignore` is not honored.
+// Every other test here drives the compiled binary as a subprocess — including
+// `the_published_smoke_passes_against_the_binary_this_repo_compiled`, which runs
+// that same script for real.
 
 mod dispatch;
 mod liveness;
@@ -185,4 +188,55 @@ fn cancel_takes_an_optional_member_and_the_kill_flag() {
         .success()
         .stdout(predicate::str::contains("--kill"))
         .stdout(predicate::str::contains("MEMBER"));
+}
+
+/// The published smoke, run for real over the binary this repo just compiled.
+///
+/// `release.yml` and `published-smoke.yml` run this same file over an artifact
+/// installed from PyPI or npm, where a failure is a release that already shipped.
+/// Running it here is what makes that a gate rather than a report: the script's
+/// own assertions — the version it reports, the command list, the refusals and
+/// their exit codes, and the graph `validate` must read — are held to the
+/// compiled binary on every `just check`.
+///
+/// Unix-only because the script is bash and the release legs that run it on
+/// Windows do so under a bash CI shell rather than a bare shell this test can
+/// assume.
+#[cfg(unix)]
+#[test]
+fn the_published_smoke_passes_against_the_binary_this_repo_compiled() {
+    let path_dir = tempfile::tempdir().expect("a PATH directory");
+    // The script reaches its subject as `oneagentgraph` on PATH — that is the
+    // thing it is written to check — so the compiled binary is put there under
+    // that name rather than the script being told where to look.
+    std::os::unix::fs::symlink(
+        env!("CARGO_BIN_EXE_oneagentgraph"),
+        path_dir.path().join("oneagentgraph"),
+    )
+    .expect("link the binary onto a PATH");
+
+    let existing = std::env::var("PATH").unwrap_or_default();
+    let output = std::process::Command::new("bash")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/smoke-published.sh"
+        ))
+        .args(["--expect-version", env!("CARGO_PKG_VERSION")])
+        .args(["--label", "the binary just compiled"])
+        .env("PATH", format!("{}:{existing}", path_dir.path().display()))
+        .output()
+        .expect("bash runs the published smoke");
+
+    assert!(
+        output.status.success(),
+        "scripts/smoke-published.sh failed against this build\n--- stdout ---\n{}\n--- stderr \
+         ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("surface smoke test passed"),
+        "the smoke exited 0 without reporting a pass: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
