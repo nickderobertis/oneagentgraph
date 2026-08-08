@@ -7,7 +7,7 @@ resolver = "2"
 
 [package]
 name = "oneagentgraph"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream."
