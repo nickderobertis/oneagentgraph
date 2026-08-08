@@ -91,7 +91,15 @@ impl Refusal {
 const MARK: &str = "fake:";
 
 fn main() -> std::process::ExitCode {
-    let argv: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`/`vars_os` rather than the Unicode-only iterators: both panic on
+    // input this process did not choose, and a double that panics reports itself
+    // as a crashed provider — a journey failing for a reason that is not the one
+    // under test. Anything that is not text is dropped, which is what every
+    // reader below expects.
+    let argv: Vec<String> = std::env::args_os()
+        .skip(1)
+        .filter_map(|arg| arg.into_string().ok())
+        .collect();
     // The turn arrives in two halves and both matter: the task is the `-p`
     // prompt, and the merged base-plus-persona instructions are the
     // `--append-system-prompt` claude-code takes a system prompt on. A double
@@ -243,7 +251,8 @@ fn answer(prompt: &str) -> String {
 /// process is the far end of the inheritance a per-side choice travels down —
 /// the place the choice either arrived or did not.
 fn selection_environment() -> String {
-    let mut selection: Vec<(String, String)> = std::env::vars()
+    let mut selection: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
         .filter(|(name, _)| {
             name.ends_with("_HARNESSES")
                 || name.ends_with("_MODEL")

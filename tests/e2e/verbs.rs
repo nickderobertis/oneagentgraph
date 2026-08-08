@@ -954,15 +954,13 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
     handle.join().expect("the run thread");
 }
 
-/// A detached run that never records itself is a refusal that says where to
-/// look, not an exit 0 handing back a run id nothing produced.
+/// `--detach` refuses a graph it cannot read, by name, without spawning anything.
 ///
-/// `--detach` reports on a child it cannot watch: it prints where the stream
-/// will be and leaves. When the child dies immediately — an unreadable graph is
-/// the ordinary way — the only thing the parent knows is that no record
-/// appeared, and the caller must not be told a run started.
+/// `--detach` reports on a child it then cannot watch, so everything knowable has
+/// to be known before it leaves: it checks the graph itself first, and a caller
+/// given `{run_id, …}` and exit 0 has been told a run really started.
 #[test]
-fn detach_refuses_when_the_run_it_launched_never_records_itself() {
+fn detach_refuses_a_graph_it_cannot_read_before_it_launches_anything() {
     let workspace = Workspace::new();
     let run = workspace.run(&[
         "run",
@@ -975,14 +973,67 @@ fn detach_refuses_when_the_run_it_launched_never_records_itself() {
     ]);
     run.expect_code(2);
     assert!(
-        run.stderr.contains("did not record itself"),
-        "{}",
+        run.stderr.contains("no-such-graph.yaml"),
+        "the refusal did not name the graph it could not read: {}",
         run.stderr
     );
     assert!(
         run.stdout.trim().is_empty(),
         "a refusal printed a detach answer on stdout: {}",
         run.stdout
+    );
+    assert!(
+        run_id(&workspace.state()).is_none(),
+        "a refused --detach still left a run behind"
+    );
+}
+
+/// A graph that parses but could never run is refused by `--detach` too, with the
+/// contract's exit 2 and nothing on stdout.
+///
+/// This is the harder half: the child writes its run record *before* it builds
+/// member invocations, so a graph that dies there leaves a record behind. Waiting
+/// only for one to appear reported it as a started run — `{run_id, …}` and exit 0
+/// for a config the contract gives exit 2, and a caller left watching a stream
+/// that would never have a second line.
+#[test]
+fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started() {
+    let workspace = Workspace::new();
+    // A model paired with a chain spanning two harness families: it parses, it
+    // resolves, and it fails when the member's invocation is built.
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\", \"codex\"]\n",
+    );
+    workspace.graph(&two_party_graph(&fake_harness(), "").replace(
+        "    agent:\n      oneharness_config: ./oneharness.toml\n",
+        "    agent:\n      oneharness_config: ./oneharness.toml\n      model: claude-opus-5\n",
+    ));
+
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "complete-now: never gets here",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--detach",
+    ]);
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains("one harness family"),
+        "the refusal did not name what made the graph unrunnable: {}",
+        run.stderr
+    );
+    assert!(
+        run.stdout.trim().is_empty(),
+        "a graph that could never run was reported as started: {}",
+        run.stdout
+    );
+    // And nothing was launched: no run recorded itself at all.
+    assert!(
+        run_id(&workspace.state()).is_none(),
+        "a refused --detach still left a run behind"
     );
 }
 

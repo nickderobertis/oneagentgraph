@@ -135,6 +135,13 @@ fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error
 /// has been handed a path to the same events and a terminal that closes must not
 /// take the run with it.
 fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    // Before anything is spawned. The child writes its record and *then* builds
+    // every member's invocation, so a graph that cannot run — an unpairable
+    // model, a persona that will not load — produces a record and dies. Waiting
+    // only for a record to appear would report that as a started run: `{run_id,
+    // …}` on stdout and exit 0, for a config the contract gives exit 2.
+    preflight(&args.graph, env)?;
+
     let state = state_dir(env);
     let before: Vec<run::RunId> = history::list(&state)
         .into_iter()
@@ -203,11 +210,24 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
 /// all found here rather than after a paid turn has been spent on the members
 /// that did start.
 fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let graph = preflight(&args.graph, env)?;
+    println!("{}: {} member(s) OK", graph.name, graph.members.len());
+    Ok(EXIT_SUCCESS)
+}
+
+/// Everything `run` does short of launching, without reporting anything.
+///
+/// Shared with `--detach`, which must not answer `{run_id, …}` and exit 0 for a
+/// graph that cannot run: the child writes its record *before* it builds member
+/// invocations, so a failure past that point would otherwise reach the caller as
+/// a started run. The contract gives that case exit 2, and this is where the
+/// parent earns it.
+fn preflight(graph_ref: &str, env: &BTreeMap<String, String>) -> Result<GraphConfig, Error> {
     let mut resolver = Resolver::new();
-    let reference = config::ConfigRef(args.graph.clone());
+    let reference = config::ConfigRef(graph_ref.to_string());
     let document = resolver.resolve(&reference, None)?.clone();
     let graph: GraphConfig = serde_norway::from_str(&document.content)
-        .map_err(|err| Error::InvalidConfig(format!("{}: {err}", args.graph)))?;
+        .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?;
     config::validate(&graph)?;
     run::ready_order(&graph)?;
 
@@ -231,9 +251,7 @@ fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, 
             .map_err(|err| Error::InvalidConfig(format!("member {name:?}: {err}")))?;
     }
     let _ = std::fs::remove_dir_all(&scratch);
-
-    println!("{}: {} member(s) OK", graph.name, graph.members.len());
-    Ok(EXIT_SUCCESS)
+    Ok(graph)
 }
 
 /// The two out-of-band signals the contract gives an operator.
