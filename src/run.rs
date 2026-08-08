@@ -89,7 +89,7 @@ pub enum MemberOutcome {
     /// The member drove the task but did not complete it.
     Incomplete,
     /// The member died; the liveness rule that found it is named.
-    Died(String),
+    Died(crate::member::Rule),
     /// The member could not be started at all.
     Unstartable(String),
 }
@@ -99,7 +99,7 @@ impl From<MemberOutcome> for String {
         match outcome {
             MemberOutcome::Settled => "settled".into(),
             MemberOutcome::Incomplete => "incomplete".into(),
-            MemberOutcome::Died(rule) => format!("died ({rule})"),
+            MemberOutcome::Died(rule) => format!("died ({})", rule.as_str()),
             MemberOutcome::Unstartable(reason) => format!("unstartable ({reason})"),
         }
     }
@@ -115,19 +115,19 @@ impl TryFrom<String> for MemberOutcome {
         if recorded == "incomplete" {
             return Ok(MemberOutcome::Incomplete);
         }
-        for (prefix, wrap) in [
-            ("died (", MemberOutcome::Died as fn(String) -> MemberOutcome),
-            (
-                "unstartable (",
-                MemberOutcome::Unstartable as fn(String) -> MemberOutcome,
-            ),
-        ] {
-            if let Some(rest) = recorded
-                .strip_prefix(prefix)
-                .and_then(|r| r.strip_suffix(')'))
-            {
-                return Ok(wrap(rest.to_string()));
-            }
+        if let Some(rule) = recorded
+            .strip_prefix("died (")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            return crate::member::Rule::named(rule)
+                .map(MemberOutcome::Died)
+                .ok_or_else(|| format!("{rule:?} is not a liveness rule this build knows"));
+        }
+        if let Some(reason) = recorded
+            .strip_prefix("unstartable (")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            return Ok(MemberOutcome::Unstartable(reason.to_string()));
         }
         Err(format!("{recorded:?} is not an outcome this build records"))
     }
@@ -137,7 +137,7 @@ impl TryFrom<String> for MemberOutcome {
 #[derive(Debug, Clone)]
 pub struct Request {
     /// The graph config, by path or URL.
-    pub graph: String,
+    pub graph: crate::config::ConfigRef,
     /// The task prose every member that takes one is given.
     pub task: Option<String>,
     /// The directory members work in.
@@ -325,16 +325,15 @@ pub fn run(
     env: &BTreeMap<String, String>,
 ) -> Result<i32, Error> {
     let mut resolver = Resolver::new();
-    let graph_ref = crate::config::ConfigRef(request.graph.clone());
-    let graph_document = resolver.resolve(&graph_ref, None)?.clone();
+    let graph_document = resolver.resolve(&request.graph, None)?.clone();
     let mut parsed: Value = serde_norway::from_str(&graph_document.content)
-        .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph)))?;
+        .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?;
     apply_overrides(&mut parsed, &request.overrides)?;
     let graph: GraphConfig = serde_norway::from_value(
         serde_norway::to_value(&parsed)
-            .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph)))?,
+            .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?,
     )
-    .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph)))?;
+    .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?;
     crate::config::validate(&graph)?;
     let waves = ready_order(&graph)?;
 
@@ -373,7 +372,7 @@ pub fn run(
 
     let mut record = Record {
         run_id: run_id.clone(),
-        graph: request.graph.clone(),
+        graph: request.graph.0.clone(),
         name: graph.name.clone(),
         started_ms: unix_millis(SystemTime::now()),
         finished_ms: None,
@@ -417,7 +416,7 @@ pub fn run(
     emitter.emit(
         EventKind::GraphStarted,
         [
-            ("graph".to_string(), Value::String(request.graph.clone())),
+            ("graph".to_string(), Value::String(request.graph.0.clone())),
             ("name".to_string(), Value::String(graph.name.clone())),
             (
                 "dir".to_string(),
@@ -597,7 +596,7 @@ fn describe(outcome: &Outcome) -> MemberOutcome {
     match outcome {
         Outcome::Settled { completed: true } => MemberOutcome::Settled,
         Outcome::Settled { completed: false } => MemberOutcome::Incomplete,
-        Outcome::Died(died) => MemberOutcome::Died(died.rule.clone()),
+        Outcome::Died(died) => MemberOutcome::Died(died.rule),
         Outcome::Unstartable(reason) => MemberOutcome::Unstartable(reason.clone()),
     }
 }
@@ -821,12 +820,15 @@ mod tests {
                 "incomplete",
             ),
             (
-                describe(&Outcome::Died(crate::event::MemberDied {
-                    rule: "activity".into(),
-                    exit_code: None,
-                    disposition: crate::event::Disposition::Signaled,
-                    stderr_tail: String::new(),
-                    truncated: false,
+                describe(&Outcome::Died(crate::member::Death {
+                    rule: crate::member::Rule::Activity,
+                    payload: crate::event::MemberDied {
+                        rule: "activity".into(),
+                        exit_code: None,
+                        disposition: crate::event::Disposition::Signaled,
+                        stderr_tail: String::new(),
+                        truncated: false,
+                    },
                 })),
                 "died (activity)",
             ),

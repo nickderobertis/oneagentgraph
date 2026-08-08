@@ -56,6 +56,34 @@ use serde_json::{json, Value};
 /// one: the turn failed, so the record is `nonzero` with exit code 1.
 const REFUSAL_EXIT: i32 = 1;
 
+/// The ways this double can refuse a turn.
+///
+/// A closed set parsed once, because an unknown value is a journey asserting
+/// against a turn it never configured — which passes for the wrong reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// An unauthenticated identity, which fails before the turn.
+    Auth,
+    /// A subscription out of quota, which answers having spent nothing.
+    Quota,
+    /// The same shape after billed work, which a chain does not step past.
+    RateLimit,
+}
+
+impl Refusal {
+    /// The refusal a value asks for: `Some(None)` for no refusal at all, and
+    /// `None` for a value this double cannot read.
+    fn parse(requested: &str) -> Option<Option<Self>> {
+        match requested {
+            "" => Some(None),
+            "auth" => Some(Some(Refusal::Auth)),
+            "quota" => Some(Some(Refusal::Quota)),
+            "rate_limit" => Some(Some(Refusal::RateLimit)),
+            _ => None,
+        }
+    }
+}
+
 /// The prefix every steering sentinel carries.
 ///
 /// A prompt is the whole rendered system prompt plus the task, so an unprefixed
@@ -94,18 +122,19 @@ fn main() -> std::process::ExitCode {
         eprintln!("fake-harness: exiting {code} having published nothing");
         return exit(code);
     }
-    let refusal = std::env::var("FAKE_HARNESS_REFUSAL").unwrap_or_default();
-    if !matches!(refusal.as_str(), "" | "auth" | "quota" | "rate_limit") {
+    let requested = std::env::var("FAKE_HARNESS_REFUSAL").unwrap_or_default();
+    let Some(refusal) = Refusal::parse(&requested) else {
         eprintln!(
-            "fake-harness: FAKE_HARNESS_REFUSAL must be auth, quota, or rate_limit, got {refusal:?}"
+            "fake-harness: FAKE_HARNESS_REFUSAL must be auth, quota, or rate_limit, got \
+             {requested:?}"
         );
         return exit(2);
-    }
-    match refusal.as_str() {
+    };
+    match refusal {
         // An unauthenticated identity never gets far enough to answer: it fails
         // before the turn and says so on stderr alone. oneharness classifies
         // that as `auth`, which is a classification a chain steps past.
-        "auth" => {
+        Some(Refusal::Auth) => {
             eprintln!("401 Unauthorized: no credentials");
             return exit(REFUSAL_EXIT);
         }
@@ -114,7 +143,7 @@ fn main() -> std::process::ExitCode {
         // the rejection only through `terminal_reason` and an embedded
         // `api_error_status`, having spent nothing. The accounting is what
         // oneharness classifies on, which is why every counter here is zero.
-        "quota" => {
+        Some(Refusal::Quota) => {
             emit(&json!({
                 "type": "result", "subtype": "success", "terminal_reason": "api_error",
                 "api_error_status": 429, "result": "",
@@ -126,7 +155,7 @@ fn main() -> std::process::ExitCode {
         // The same 429 shape *after* billed work. oneharness stops a chain on
         // one, because that record carries work the provider already charged
         // for — which is what `smoke` refuses to excuse as a fall-through.
-        "rate_limit" => {
+        Some(Refusal::RateLimit) => {
             emit(&json!({
                 "type": "result", "subtype": "success", "terminal_reason": "rate_limit",
                 "api_error_status": 429, "result": "",
@@ -134,7 +163,7 @@ fn main() -> std::process::ExitCode {
             }));
             return exit(REFUSAL_EXIT);
         }
-        _ => {}
+        None => {}
     }
 
     if prompt.contains(&format!("{MARK}hang")) {

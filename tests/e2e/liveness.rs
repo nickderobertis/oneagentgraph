@@ -13,7 +13,7 @@
 //! is killed, a sweep racing a live run, and processes left behind by a member
 //! whose parent is already gone.
 
-// llmlint: ignore-file[live_tier_compiles_and_requires_credential, tests_mirror_real_usage] three
+// llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; three
 // journeys here are `#[cfg(unix)]` because their *subject* is a kernel
 // facility: an `flock` on `owner.lock`, a `/proc` environment stamp no process
 // can shed, and a signal to a proven identity. `src/scratch.rs` documents the

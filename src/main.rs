@@ -93,7 +93,7 @@ fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error
         (None, None) => None,
     };
     let request = run::Request {
-        graph: args.graph.clone(),
+        graph: config::ConfigRef(args.graph.clone()),
         task,
         dir: args.dir.clone().unwrap_or_else(|| PathBuf::from(".")),
         labels: args

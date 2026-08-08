@@ -57,8 +57,8 @@ done
 
 # One scratch file for a probe's stderr, so a failure report can carry the
 # binary's own diagnostic rather than only the assertion that tripped.
-TMPDIR_ERR="$(mktemp)"
-trap 'rm -f "$TMPDIR_ERR"' EXIT
+probe_stderr="$(mktemp)"
+trap 'rm -f "$probe_stderr"' EXIT
 
 command -v oneagentgraph >/dev/null 2>&1 || fail "no 'oneagentgraph' on PATH" \
   "install it first — 'pip install oneagentgraph-cli' or 'npm install -g oneagentgraph-cli'"
@@ -83,9 +83,9 @@ done
 # A graph that is not there is the contract's exit 2, and nothing on stdout: a
 # caller reads a line on stdout as an event, so a refusal must not produce one.
 code=0
-why="$(oneagentgraph run no-such-graph.yaml 2>"$TMPDIR_ERR")" || code=$?
+why="$(oneagentgraph run no-such-graph.yaml 2>"$probe_stderr")" || code=$?
 out="$why"
-why="$(cat "$TMPDIR_ERR")"
+why="$(cat "$probe_stderr")"
 if [ "$code" -ne 2 ]; then
   fail "'run' on a missing graph exited $code, not 2: $why" \
     "reinstall this version and re-run; if it still does, the published artifact is not the revision CI gated — re-cut the release"
@@ -98,7 +98,7 @@ fi
 # `validate` is the one verb that needs nothing else installed, so it is what
 # proves the artifact can actually read a graph rather than only parse argv.
 work="$(mktemp -d)"
-trap 'rm -rf "$work" "$TMPDIR_ERR"' EXIT
+trap 'rm -rf "$work" "$probe_stderr"' EXIT
 printf 'version: 1\nname: smoke\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./h.toml\n' > "$work/graph.yaml"
 printf 'run_mode = "fallback"\nharnesses = ["claude-code"]\n' > "$work/h.toml"
 if ! why="$(oneagentgraph validate "$work/graph.yaml" 2>&1 >/dev/null)"; then

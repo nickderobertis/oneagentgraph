@@ -58,8 +58,6 @@ that one failed or died, `2` that the config is invalid.
 owning identity chains, fallback, model pins, and quota classification; onejudge
 keeps owning the two-party conversation. This composes them.
 
-`docs/contract.md` is the full surface: the event envelope, the graph schema,
-every command, the event kinds, and the liveness rules.
 
 ## Develop
 

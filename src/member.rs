@@ -109,6 +109,20 @@ pub enum Rule {
 }
 
 impl Rule {
+    /// The rule a name spells, or `None` for one this build does not know.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        [
+            Rule::Unstartable,
+            Rule::Signalled,
+            Rule::ProviderFailure,
+            Rule::Heartbeat,
+            Rule::Activity,
+        ]
+        .into_iter()
+        .find(|rule| rule.as_str() == name)
+    }
+
     /// The rule's name on the wire.
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -133,7 +147,7 @@ pub enum Outcome {
     },
     /// The member died. The payload says which rule fired and what the process
     /// left behind.
-    Died(MemberDied),
+    Died(Death),
     /// The member could not be started at all.
     Unstartable(String),
 }
@@ -144,6 +158,15 @@ impl Outcome {
     pub fn is_success(&self) -> bool {
         matches!(self, Outcome::Settled { completed: true })
     }
+}
+
+/// One member's death: the rule that found it, and what the process left behind.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Death {
+    /// The liveness rule that fired.
+    pub rule: Rule,
+    /// The payload the stream carried.
+    pub payload: MemberDied,
 }
 
 /// The liveness bounds one run supervises its members under.
@@ -540,7 +563,7 @@ fn died(
         truncated,
     };
     emitter.emit(EventKind::MemberDied, died_payload(&payload));
-    Outcome::Died(payload)
+    Outcome::Died(Death { rule, payload })
 }
 
 /// Kill a member a watchdog condemned, then report it.
@@ -565,7 +588,7 @@ fn kill_and_report(
         truncated,
     };
     emitter.emit(EventKind::MemberDied, died_payload(&payload));
-    Outcome::Died(payload)
+    Outcome::Died(Death { rule, payload })
 }
 
 /// How a process ended.
