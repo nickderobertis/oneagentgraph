@@ -204,18 +204,16 @@ fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
 /// whoever owns the subscription, with nothing left watching them.
 #[test]
 fn a_member_the_activity_watchdog_condemns_leaves_no_descendant_running() {
-    // The default two-party member — `onejudge`, with `oneharness` under it and
-    // the doubled provider under that — which is the deepest tree this suite can
-    // condemn, and the shape the guarantee is written about.
-    //
-    // The stall bound is wide where the journey above sets it to 2s, and the
+    // The stall bound is wider than the 2s the journey above uses, and the
     // difference is the point: that one asserts on the *event*, which needs only
     // the member, while this one asserts on the *tree*, which has to have
-    // launched. Three real CLIs starting at once with the rest of this suite
-    // took longer than two seconds to reach the third, so a bound near it
-    // condemned a member that had not started a descendant yet and left nothing
-    // to watch die.
-    a_condemned_member_leaves_no_descendant_running(None, "activity", "60", "15");
+    // launched by the time the rule fires.
+    a_condemned_member_leaves_no_descendant_running(
+        Some(&single_sided_graph()),
+        "activity",
+        "60",
+        "5",
+    );
 }
 
 /// The same guarantee for the **heartbeat** rule, which condemns on its own
@@ -224,13 +222,6 @@ fn a_member_the_activity_watchdog_condemns_leaves_no_descendant_running() {
 /// Two rules, two `kill_and_report` call sites: a teardown wired into one and
 /// not the other is a real regression, and one journey cannot see it.
 ///
-/// A **single-sided** member here rather than the two-party default, and that is
-/// forced by the rule rather than chosen. The heartbeat deadline is only
-/// reachable below the supervisor's refresh cadence, so this rule always fires
-/// at the first refresh — half a second after the member starts — and a tree
-/// that does not exist by then is not a tree this journey can watch die. The
-/// two-party chain is three real CLIs deep and never made it; `kind: oneharness`
-/// is one shallower, is a member kind the contract ships, and does.
 #[test]
 fn a_member_the_heartbeat_rule_condemns_leaves_no_descendant_running() {
     a_condemned_member_leaves_no_descendant_running(
@@ -243,6 +234,15 @@ fn a_member_the_heartbeat_rule_condemns_leaves_no_descendant_running() {
 
 /// The shallowest real member this crate builds: one agent, no judge, so the
 /// doubled provider is the member's own child rather than its grandchild.
+///
+/// Both condemnation journeys use it, and that is forced rather than chosen. A
+/// condemnation races process startup: the rule fires on a clock that starts
+/// with the member, and the tree has to be up by then. The heartbeat rule leaves
+/// half a second — it is only reachable below the supervisor's refresh cadence —
+/// and the two-party chain, three real CLIs deep, did not reach its provider
+/// inside fifteen *seconds* under this suite's own load on a CI runner. The
+/// two-party tree is condemned by the journeys above and torn down by the cancel
+/// journeys below; what these two need is a tree that is reliably *there*.
 fn single_sided_graph() -> String {
     format!(
         concat!(
@@ -628,6 +628,75 @@ fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
     std::fs::write(&release, "go").ok();
     let status = member.wait().expect("the run exits");
     assert!(status.code().is_some(), "the cancelled run never exited");
+}
+
+/// A group reaps a descendant **whose parent has already exited** — the process
+/// no walk from the member's own pid would ever reach.
+///
+/// This is the case the whole grouping rule exists for, and the one the two
+/// condemnation journeys above turn out not to reach. Measured, not assumed:
+/// with the Windows layer compiled out, both of those still passed, because the
+/// chain a member is contains its own tree — kill `onejudge` and it ends
+/// `oneharness`, which ends the provider, and a detached grandchild goes with
+/// them. So the guarantee the *group* adds is only visible where that
+/// containment cannot apply: an orphan, with nothing above it left to end it.
+///
+/// Driven at [`Group`] rather than through a verb because no graph can produce
+/// one on demand — the real CLIs decline to leak. The double is still a real
+/// subprocess, the orphan is a real detached process, and the group is the same
+/// one `run` puts every member in.
+#[test]
+fn a_group_reaps_a_descendant_whose_parent_has_already_exited() {
+    use oneagentgraph::scratch::{Group, SCRATCH_ENV};
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let scratch = root.path().join("oneagentgraph-orphaning");
+    std::fs::create_dir_all(&scratch).expect("the scratch");
+    let ticks = root.path().join("descendant.ticks");
+
+    let group = Group::open(&scratch).expect("a group");
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args([
+            "-p",
+            &format!("fake:hang fake:spawn-ticker={}", ticks.display()),
+        ])
+        // The stamp the POSIX half of a group *is*, applied here the way
+        // `member::run` applies it. On Windows the job the spawn goes into
+        // carries the same membership, and neither platform needs the other's.
+        .env(SCRATCH_ENV, &scratch)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = group.spawn(&mut parked).expect("the parked process starts");
+
+    until("the detached ticker to start", || ticks_written(&ticks) > 0);
+
+    // Orphaned on purpose: the process that started the ticker goes first, so
+    // nothing above the ticker is left to end it.
+    child.kill().expect("the parked process is killed");
+    child.wait().expect("the parked process is reaped");
+    let orphaned = ticks_written(&ticks);
+    std::thread::sleep(SETTLE);
+    assert!(
+        ticks_written(&ticks) > orphaned,
+        "the ticker stopped when its parent did, so this journey never reached the orphan it \
+         asserts on"
+    );
+
+    // The group is the only thing that can still reach it.
+    let reaped = group.terminate();
+    assert!(
+        reaped > 0,
+        "the group reported reaping nothing, so an orphaned descendant is beyond it"
+    );
+    let ended = ticks_written(&ticks);
+    std::thread::sleep(SETTLE);
+    assert_eq!(
+        ticks_written(&ticks),
+        ended,
+        "the group reported reaping {reaped} process(es), but the orphan is still running"
+    );
 }
 
 /// A finished run leaves nothing of its own running: the reap on the way out is
