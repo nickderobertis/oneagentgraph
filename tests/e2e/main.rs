@@ -14,6 +14,8 @@
 
 mod dispatch;
 mod liveness;
+mod origin;
+mod remote;
 mod selection;
 mod support;
 mod verbs;

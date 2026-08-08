@@ -78,9 +78,25 @@ thiserror = "2"
 # A remote ref is recorded content-addressed, so replay never depends on the URL
 # staying stable — that record is a SHA-256 of the exact bytes fetched.
 sha2 = "0.10"
-# Fetching those remote refs. `rustls` rather than a system TLS stack so the
-# fetch behaves the same on every CI leg the matrix runs.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Fetching those remote refs, over `rustls` so the TLS stack itself is the same on
+# every CI leg the matrix runs.
+#
+# `platform-verifier` makes the *trust anchors* the host's own rather than the
+# Mozilla set compiled into `webpki-roots`. That is a deliberate trade, and it cuts
+# both ways: a graph served from an internal host under a private CA — or through a
+# TLS-inspecting proxy — resolves without this crate having to grow a trust knob of
+# its own, which is the environment a config-by-URL feature actually lands in; and
+# `SSL_CERT_FILE` / `SSL_CERT_DIR` become the documented way to name a bundle,
+# which is what `tests/e2e/remote.rs` uses to serve a real HTTPS graph to the real
+# fetch path. The cost is that trust now depends on the host: a machine whose store
+# is empty or misconfigured fails where the compiled-in set would have worked, and
+# a CA an operator installed for interception is one this crate honours. That is
+# how `curl` and `git` behave, and it is the behaviour an operator can inspect and
+# change; a private set nothing on the host can see is not.
+ureq = { version = "3", default-features = false, features = [
+  "rustls",
+  "platform-verifier",
+] }
 # A side's `model` override is stamped into that side's resolved oneharness
 # config; `toml_edit` keeps the rest of the operator's file — comments included —
 # byte-identical, so the copy in the run record still reads as what they wrote.
@@ -95,6 +111,16 @@ libc = "0.2"
 assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
+# A real HTTPS origin for the remote-ref journeys: `rcgen` mints a throwaway CA and
+# a `localhost` leaf, and `rustls` serves them to the compiled binary's own fetch
+# path. Dev-only, so nothing here reaches a consumer's build; the point is that the
+# transport under test is the production one, reached over a real socket.
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Recomputing the digest the run record claims, so the assertion is against what an
+# auditor would compute rather than against the code under test. Already a normal
+# dependency, so this adds nothing to the graph.
+sha2 = "0.10"
 
 [[test]]
 name = "e2e"

@@ -161,20 +161,32 @@ pub fn local_path(reference: &ConfigRef, base_dir: Option<&Path>) -> PathBuf {
     }
 }
 
-// llmlint: ignore-block[changed_behavior_has_e2e] the reachable-remote paths below
-// cannot be driven end to end on this gate's terms, and the alternatives are worse
-// than the gap. `just check` is offline and credential-free by AGENTS.md, so the
-// remote would have to be a local server; this module refuses cleartext on
-// purpose, so that server needs a certificate the fetch trusts; and `ureq` is
-// built here with `rustls` + `webpki-roots` — compiled-in Mozilla roots, with no
-// `rustls-native-certs` in the tree and so no `SSL_CERT_FILE` to point at a local
-// CA. Reaching these lines would mean either relaxing the https rule or moving
-// production TLS onto the system trust store to make a test possible. What *can*
-// be driven is: `an_https_ref_is_fetched_and_an_unreachable_one_is_refused_by_url`
-// runs the whole path through the compiled binary against an RFC 6761 `.invalid`
-// host and against a cleartext URL, and `ingest` is split from the request
-// precisely so its bound, its UTF-8 check, and its digest are exercised against
-// readers this crate hands over rather than whatever a network answered.
+/// The HTTP client every remote ref is fetched through.
+///
+/// Built rather than taken from `ureq`'s free functions for one reason: the trust
+/// anchors. `ureq`'s default is the Mozilla set compiled into `webpki-roots`,
+/// which no operator can inspect or extend; this asks for the *host's* store
+/// instead, so a graph served from an internal host under a private CA — or
+/// through a TLS-inspecting proxy — resolves without this crate growing a trust
+/// knob of its own, and `SSL_CERT_FILE` / `SSL_CERT_DIR` are how a bundle is
+/// named. The cost is that trust now depends on the host: a machine whose store
+/// is empty fails where the compiled-in set would have worked, and a CA installed
+/// for interception is one this crate honours. `curl` and `git` make the same
+/// trade, and it is the one an operator can see and change.
+///
+/// The scheme check in [`fetch`] is what this does *not* soften: the store says
+/// which certificates are believed, never whether a certificate is required.
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
+        .build()
+        .new_agent()
+}
+
 /// Fetch one remote ref over `https`.
 fn fetch(reference: &ConfigRef) -> Result<Resolved, Error> {
     let url = reference.0.trim();
@@ -184,7 +196,8 @@ fn fetch(reference: &ConfigRef) -> Result<Resolved, Error> {
              intermediary chooses"
         )));
     }
-    let mut response = ureq::get(url)
+    let mut response = agent()
+        .get(url)
         .call()
         .map_err(|err| Error::InvalidConfig(format!("cannot fetch {url}: {err}")))?;
     ingest(url, response.body_mut().as_reader())
@@ -214,8 +227,6 @@ fn ingest(url: &str, body: impl std::io::Read) -> Result<Resolved, Error> {
         base_dir: None,
     })
 }
-
-// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The content-addressed record of one document.
 fn record(origin: &str, content: &str) -> ResolvedRef {
