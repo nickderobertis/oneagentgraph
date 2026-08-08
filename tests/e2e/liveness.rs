@@ -25,9 +25,16 @@
 // verb does answer — `cancel --kill` reporting what it signalled — the journey
 // asserts on that instead.
 
+// The scratch-ownership journeys below are Unix-only, and so is everything that
+// exists only to serve them: on a platform without those facilities they compile
+// away, and an import or helper left behind is a `-D warnings` build failure
+// rather than dead weight.
+#[cfg(unix)]
 use std::path::Path;
 
-use crate::support::{as_env, fake_harness, labels, two_party_graph, until, Workspace};
+use crate::support::{as_env, fake_harness, labels, Workspace};
+#[cfg(unix)]
+use crate::support::{two_party_graph, until};
 
 /// A member that publishes nothing is condemned by the activity watchdog, and
 /// the death says which rule fired and what the process left behind.
@@ -147,11 +154,23 @@ fn a_live_member_publishes_a_heartbeat_while_its_turn_runs() {
 /// The deadline is set below the refresh cadence to reach the rule, which is
 /// exactly why the production default is far above it: at the cadence itself,
 /// the margin reaps healthy members under the load this crate creates.
+///
+/// The turn hangs rather than completing, and that is what makes the
+/// *disposition* an assertion rather than a coin toss. The supervisor refreshes
+/// on a 500ms interval, so the rule always fires after the first one — but a
+/// task that finishes inside that window has already exited by the time the
+/// kill lands, and `member-died` then truthfully reports `exited`. This is the
+/// same margin the production default is wide for, read from the other side: on
+/// a loaded host the member outlives the window and the kill is what ends it,
+/// while on an idle one the turn wins the race. A member that cannot finish
+/// leaves the watchdog as the only thing that can end it, on a host of any
+/// speed.
 #[test]
 fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
     let workspace = Workspace::new();
     let env = vec![
         ("ONEAGENTGRAPH_HEARTBEAT_TIMEOUT", "0.05".to_string()),
+        // Wide, so the rule that fires is the heartbeat and not this one.
         ("ONEAGENTGRAPH_STALL_TIMEOUT", "600".to_string()),
     ];
     let run = workspace.run_with(
@@ -159,7 +178,7 @@ fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
             "run",
             "./graph.yaml",
             "--task",
-            "complete-now: too tight a margin",
+            "fake:hang against too tight a margin",
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -524,6 +543,7 @@ fn the_documented_defaults_are_what_a_run_supervises_under() {
 }
 
 /// The first `owner.lock` under a state directory, once a run has claimed one.
+#[cfg(unix)]
 fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
     let lock = std::fs::read_dir(state)
         .ok()?
@@ -534,6 +554,7 @@ fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// The `worker` member's own scratch under a state directory.
+#[cfg(unix)]
 fn member_scratch(state: &Path) -> Option<std::path::PathBuf> {
     std::fs::read_dir(state)
         .ok()?
@@ -543,6 +564,7 @@ fn member_scratch(state: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// The one run a state directory holds.
+#[cfg(unix)]
 fn run_id(state: &Path) -> String {
     std::fs::read_dir(state)
         .expect("state")

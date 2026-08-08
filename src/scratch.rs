@@ -23,8 +23,17 @@
 //!   descendant can shed — including one reparented to init, which no walk from
 //!   the member's own pid would ever reach.
 //!
-//! On a platform without those facilities the ownership claim degrades to the
-//! directory's own existence, and reaping to the child this process holds. The
+//! Both proofs are per-platform, and neither is `/proc`. Linux reads the start
+//! token out of `/proc/<pid>/stat` and the stamp out of `/proc/<pid>/environ`;
+//! Darwin has no `/proc` at all and answers the same two questions through
+//! `libproc` and `KERN_PROCARGS2`. Reading the Linux path on Darwin is not a
+//! degraded answer but a wrong one — every identity reports dead, so no
+//! directory is ever pinned and a live run's scratch is free for the taking.
+//!
+//! On a platform that can do neither the ownership claim degrades to the
+//! `flock` alone plus the directory's own existence, and reaping to the child
+//! this process holds. Nothing is reported live that cannot be *proven* live,
+//! which retains a directory rather than reclaiming one still in use. The
 //! liveness journeys are Unix-only for exactly that reason.
 
 use std::fs::{File, OpenOptions};
@@ -178,6 +187,8 @@ fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
 
 #[cfg(unix)]
 mod platform {
+    #[cfg(target_vendor = "apple")]
+    use std::ffi::c_int;
     use std::fs::File;
     use std::os::unix::io::AsRawFd as _;
 
@@ -213,20 +224,14 @@ mod platform {
         }
     }
 
-    /// The kernel's start token for `pid` — field 22 of `/proc/<pid>/stat`, the
-    /// jiffies since boot at which that process started.
-    ///
-    /// Parsed from after the last `)` because field 2 is the executable name in
-    /// parentheses and may itself contain spaces and parentheses.
-    pub fn start_token(pid: i32) -> Option<u64> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let tail = &stat[stat.rfind(')')? + 1..];
-        tail.split_whitespace().nth(19)?.parse().ok()
-    }
-
     /// Whether `identity` still names the process it was taken from.
+    ///
+    /// A platform that cannot answer for a token answers `None` here, which is
+    /// never equal to a recorded token — so an identity is reported live only
+    /// where it can be *proven* live, and a sweeper on such a platform falls
+    /// back to the `flock`, which is the independent half of the same proof.
     pub fn is_live(identity: ProcessIdentity) -> bool {
-        start_token(identity.pid) == Some(identity.start_token)
+        start_token(identity.pid).is_some_and(|token| token == identity.start_token)
     }
 
     /// Every live process carrying `stamp`, **or a scratch below it**, as its
@@ -245,6 +250,30 @@ mod platform {
     /// `<run>`.
     pub fn stamped_for(stamp: &str) -> Vec<ProcessIdentity> {
         let prefix = format!("{}=", super::SCRATCH_ENV);
+        let mut found: Vec<ProcessIdentity> = enumerate(&prefix, stamp);
+        found.sort();
+        found
+    }
+
+    /// The kernel's start token for `pid`: a value fixed when that process
+    /// started, so a recycled number carries a different one.
+    ///
+    /// `None` means this platform cannot prove the identity — see [`is_live`]
+    /// for what a caller does with that.
+    #[cfg(target_os = "linux")]
+    pub fn start_token(pid: i32) -> Option<u64> {
+        // Field 22 of `/proc/<pid>/stat`, the jiffies since boot at which the
+        // process started. Parsed from after the last `)` because field 2 is the
+        // executable name in parentheses and may itself contain spaces and
+        // parentheses.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let tail = &stat[stat.rfind(')')? + 1..];
+        tail.split_whitespace().nth(19)?.parse().ok()
+    }
+
+    /// Every process whose environment carries `stamp`, read from `/proc`.
+    #[cfg(target_os = "linux")]
+    fn enumerate(prefix: &str, stamp: &str) -> Vec<ProcessIdentity> {
         let mut found = Vec::new();
         let Ok(entries) = std::fs::read_dir("/proc") else {
             return found;
@@ -256,17 +285,170 @@ mod platform {
             let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
                 continue;
             };
-            if environ
-                .split(|byte| *byte == 0)
-                .any(|var| at_or_below(var, prefix.as_bytes(), stamp.as_bytes()))
-            {
+            if carries(&environ, prefix, stamp) {
                 if let Some(start_token) = start_token(pid) {
                     found.push(ProcessIdentity { pid, start_token });
                 }
             }
         }
-        found.sort();
         found
+    }
+
+    /// The kernel's start token for `pid`, from `libproc`: the wall-clock time
+    /// at which that process started, in microseconds.
+    ///
+    /// Darwin has no `/proc`, and reading the Linux path here is what reported
+    /// every identity as dead — a scratch directory nobody could pin, because
+    /// the proof it rests on was never available.
+    #[cfg(target_vendor = "apple")]
+    pub fn start_token(pid: i32) -> Option<u64> {
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = c_int::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+        // SAFETY: `proc_pidinfo` fills at most `size` bytes of the buffer, which
+        // is a live `proc_bsdinfo` this frame owns, and reports how many it
+        // wrote. A short write is rejected below rather than read.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                std::ptr::from_mut(&mut info).cast(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        // Both halves, because the seconds alone cannot separate two runs of a
+        // recycled number inside one second — which is exactly the window a
+        // busy host recycles pids in.
+        Some(
+            info.pbi_start_tvsec
+                .saturating_mul(1_000_000)
+                .saturating_add(info.pbi_start_tvusec),
+        )
+    }
+
+    /// Every process whose arguments-and-environment block carries `stamp`.
+    ///
+    /// Darwin exposes that block as one `KERN_PROCARGS2` buffer of
+    /// null-separated strings rather than as a file per process. The whole
+    /// buffer is scanned rather than parsed into argv and environ: the only
+    /// thing being looked for is a [`super::SCRATCH_ENV`] assignment, which this
+    /// crate only ever puts in an environment, and splitting the two halves
+    /// correctly means replaying a layout that has no stable contract.
+    #[cfg(target_vendor = "apple")]
+    fn enumerate(prefix: &str, stamp: &str) -> Vec<ProcessIdentity> {
+        let mut found = Vec::new();
+        for pid in all_pids() {
+            let Some(block) = process_args(pid) else {
+                continue;
+            };
+            if carries(&block, prefix, stamp) {
+                if let Some(start_token) = start_token(pid) {
+                    found.push(ProcessIdentity { pid, start_token });
+                }
+            }
+        }
+        found
+    }
+
+    /// Every pid on the host, as `libproc` reports them.
+    #[cfg(target_vendor = "apple")]
+    fn all_pids() -> Vec<i32> {
+        // SAFETY: a null buffer asks `proc_listallpids` for the size it needs
+        // rather than writing anything.
+        let bytes = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        let Ok(count) = usize::try_from(bytes) else {
+            return Vec::new();
+        };
+        if count == 0 {
+            return Vec::new();
+        }
+        // Room to spare, because processes start between the two calls and a
+        // full buffer is indistinguishable from a truncated one.
+        let mut pids = vec![0i32; count + 64];
+        let Ok(size) = c_int::try_from(std::mem::size_of_val(pids.as_slice())) else {
+            return Vec::new();
+        };
+        // SAFETY: the buffer is `size` bytes of live, owned, initialised memory,
+        // and the call reports how many bytes it filled.
+        let written = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+        let Ok(written) = usize::try_from(written) else {
+            return Vec::new();
+        };
+        pids.truncate(written / std::mem::size_of::<i32>());
+        pids.retain(|pid| *pid > 0);
+        pids
+    }
+
+    /// One process's `KERN_PROCARGS2` block, when this process may read it.
+    ///
+    /// A process owned by another user answers `EPERM`, which is not an error
+    /// worth reporting: it cannot be one this run stamped.
+    #[cfg(target_vendor = "apple")]
+    fn process_args(pid: i32) -> Option<Vec<u8>> {
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        let mut needed: libc::size_t = 0;
+        // SAFETY: a null output buffer asks for the size the answer needs. `mib`
+        // is a live array of the length passed alongside it.
+        let sized = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                std::ptr::null_mut(),
+                std::ptr::from_mut(&mut needed),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if sized != 0 || needed == 0 {
+            return None;
+        }
+        let mut block = vec![0u8; needed];
+        // SAFETY: `block` is `needed` bytes of live, owned, initialised memory,
+        // and `needed` is updated to what was actually written.
+        let read = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                3,
+                block.as_mut_ptr().cast(),
+                std::ptr::from_mut(&mut needed),
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if read != 0 {
+            return None;
+        }
+        block.truncate(needed);
+        Some(block)
+    }
+
+    /// No way to prove an identity here, so none is claimed. [`is_live`] reports
+    /// nothing live, which retains a directory rather than reclaiming one that
+    /// may still be in use.
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    pub fn start_token(_pid: i32) -> Option<u64> {
+        None
+    }
+
+    /// No way to enumerate a stamped process here, so reaping falls back to the
+    /// child this process holds directly.
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    fn enumerate(_prefix: &str, _stamp: &str) -> Vec<ProcessIdentity> {
+        Vec::new()
+    }
+
+    /// Whether a block of null-separated `KEY=VALUE` strings stamps this scratch.
+    ///
+    /// Shared by the two platforms that can read one; a platform that cannot
+    /// enumerate a process's environment never asks.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn carries(block: &[u8], prefix: &str, stamp: &str) -> bool {
+        block
+            .split(|byte| *byte == 0)
+            .any(|var| at_or_below(var, prefix.as_bytes(), stamp.as_bytes()))
     }
 
     /// Whether one `KEY=VALUE` pair names `stamp` or a path below it.
