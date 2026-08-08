@@ -201,13 +201,11 @@ msrv:
 
 # `src/scratch.rs` carries this crate's one large `cfg(windows)` body — the job
 # objects the liveness rules rest on there — and a Linux or macOS `check` never
-# compiles a line of it. The first thing that does is `cross (windows-latest)`, a
-# required check a whole CI round-trip away, so this is the same lint against the
-# same code without the wait. Outside `check` for the reason `msrv` is: it needs
-# a target and a cross compiler a clean clone does not have. The gnu target
-# rather than msvc because `cargo clippy` only has to *check*, and gnu is the one
-# a Linux host can provision.
-# Type-check and lint the Windows-only code on this host.
+# compiles a line of it. Outside `check` for the reason `msrv` is: it needs a
+# target and a cross compiler a clean clone does not have. The gnu target rather
+# than msvc because clippy only has to *check*, and gnu is the one a Linux host
+# can provision.
+# Reproduce the `cross (windows-latest)` leg here instead of waiting for CI.
 lint-windows:
     @rustup target list --installed | grep -qx x86_64-pc-windows-gnu \
       || { echo "the Windows target is missing — run 'rustup target add x86_64-pc-windows-gnu'" >&2; exit 1; }

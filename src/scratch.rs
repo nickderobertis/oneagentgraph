@@ -54,10 +54,12 @@
 //!   nothing rather than guessing — the direction that retains a directory
 //!   rather than killing something still using it.
 //!
-//! On a platform that is neither the ownership claim degrades to the `flock`
-//! alone plus the directory's own existence, and reaping to the child this
-//! process holds. Nothing is reported live that cannot be *proven* live, which
-//! retains a directory rather than reclaiming one still in use.
+//! On a platform that is neither, there is no kernel lock to degrade *to*: a
+//! claim is granted on the directory's own existence, and taking it proves
+//! nothing, so [`reclaimable`] retains every directory and reaping falls back to
+//! the child the supervisor holds. That is the safe direction of each answer —
+//! nothing is reported live that cannot be *proven* live, and nothing is
+//! reclaimed or killed on an unproven one.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
