@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::error::Error;
-use crate::run::{Record, RECORD_FILE};
+use crate::run::{Record, RunId, RECORD_FILE};
 
 /// Every run in `state_dir`, newest first.
 ///
@@ -32,37 +32,23 @@ pub fn list(state_dir: &Path) -> Vec<Record> {
     records
 }
 
-/// Whether `run_id` is one this crate could have minted.
+/// One run's record.
 ///
 /// A run id arrives on the argv and becomes a *path component*, so a value
 /// carrying a separator or a parent reference would read a record — and, through
-/// `cancel`, write a signal — outside the state directory entirely. Run ids are
-/// minted by [`crate::run::new_run_id`] from a slug, a timestamp, and a pid, so
-/// this is the shape of one and nothing else.
-#[must_use]
-pub fn is_run_id(run_id: &str) -> bool {
-    !run_id.is_empty()
-        && run_id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-}
-
-/// One run's record.
+/// `cancel`, write a signal — outside the state directory entirely. [`RunId`]
+/// parses that shape, here and again when the record itself is read back.
 ///
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when the id is not one this crate mints, when there
 /// is no such run, or when its record cannot be read.
 pub fn show(state_dir: &Path, run_id: &str) -> Result<Record, Error> {
-    if !is_run_id(run_id) {
-        return Err(Error::InvalidConfig(format!(
-            "{run_id:?} is not a run id: a run id is lowercase letters, digits, hyphens, and \
-             underscores, and this one would name a path outside the run store"
-        )));
-    }
-    read(&state_dir.join(run_id)).map_err(|err| {
+    let run_id = RunId::parse(run_id)?;
+    read(&state_dir.join(&run_id)).map_err(|err| {
         Error::InvalidConfig(format!(
-            "no run {run_id:?} under {}: {err}",
+            "no run {:?} under {}: {err}",
+            run_id.as_str(),
             state_dir.display()
         ))
     })
@@ -94,7 +80,7 @@ mod tests {
 
     fn record(state: &Path, run_id: &str, started_ms: u64) -> Record {
         let record = Record {
-            run_id: run_id.to_string(),
+            run_id: RunId::parse(run_id).expect("a run id"),
             graph: "./g.yaml".into(),
             name: "g".into(),
             started_ms,
@@ -141,7 +127,10 @@ mod tests {
     fn show_reads_one_run_and_names_one_that_is_not_there() {
         let state = tempfile::tempdir().expect("tempdir");
         record(state.path(), "r-1", 1);
-        assert_eq!(show(state.path(), "r-1").expect("a record").run_id, "r-1");
+        assert_eq!(
+            show(state.path(), "r-1").expect("a record").run_id.as_str(),
+            "r-1"
+        );
         assert_eq!(
             events(state.path(), "r-1").expect("a stream"),
             "{\"v\":1}\n"

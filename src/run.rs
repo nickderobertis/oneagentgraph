@@ -51,7 +51,7 @@ const TICK: Duration = Duration::from_millis(100);
 #[serde(deny_unknown_fields)]
 pub struct Record {
     /// The run's id.
-    pub run_id: String,
+    pub run_id: RunId,
     /// The graph it ran.
     pub graph: String,
     /// The graph's own name.
@@ -159,7 +159,7 @@ pub struct Request {
 #[serde(deny_unknown_fields)]
 pub struct Started {
     /// The run's id.
-    pub run_id: String,
+    pub run_id: RunId,
     /// Where its merged NDJSON is being written.
     pub events_path: String,
     /// The process producing it.
@@ -167,24 +167,90 @@ pub struct Started {
 }
 
 /// A run id: sortable, unique on one host, and readable in a directory listing.
-#[must_use]
-pub fn new_run_id(name: &str, at: SystemTime) -> String {
-    let slug: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    format!(
-        "{}-{}-{}",
-        slug.trim_matches('-'),
-        unix_millis(at),
-        std::process::id()
-    )
+///
+/// A type rather than a `String` because a run id is *joined onto the state
+/// directory* by every verb that reaches a run — and it arrives not only on the
+/// argv but out of `record.json`, which is a file on disk this crate re-reads
+/// and therefore external input like any other. Left as a `String`, a record
+/// carrying `../..` in this field sends `cancel` on to create a directory and
+/// write a stop signal outside the run store entirely. Parsing at the boundary
+/// is what makes that unrepresentable: a value of this type is one this crate
+/// could have minted, so the joins downstream need no guard of their own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct RunId(String);
+
+impl RunId {
+    /// Mint one for `name`, sortable by `at` and unique on this host.
+    #[must_use]
+    pub fn mint(name: &str, at: SystemTime) -> Self {
+        let slug: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .collect();
+        Self(format!(
+            "{}-{}-{}",
+            slug.trim_matches('-'),
+            unix_millis(at),
+            std::process::id()
+        ))
+    }
+
+    /// Whether `raw` is the shape [`RunId::mint`] produces, and nothing else.
+    #[must_use]
+    pub fn is_run_id(raw: &str) -> bool {
+        !raw.is_empty()
+            && raw
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+
+    /// One run id, parsed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] when `raw` is not a shape this crate mints, and
+    /// so would name a path outside the run store.
+    pub fn parse(raw: &str) -> Result<Self, Error> {
+        if !Self::is_run_id(raw) {
+            return Err(Error::InvalidConfig(format!(
+                "{raw:?} is not a run id: a run id is lowercase letters, digits, hyphens, and \
+                 underscores, and this one would name a path outside the run store"
+            )));
+        }
+        Ok(Self(raw.to_string()))
+    }
+
+    /// This id as it is written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RunId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<Path> for RunId {
+    fn as_ref(&self) -> &Path {
+        Path::new(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for RunId {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).map_err(serde::de::Error::custom)
+    }
 }
 
 /// One `--set PATH=VALUE`, parsed.
@@ -401,7 +467,7 @@ pub fn run(
     crate::config::validate(&graph)?;
     let waves = ready_order(&graph)?;
 
-    let run_id = new_run_id(&graph.name, SystemTime::now());
+    let run_id = RunId::mint(&graph.name, SystemTime::now());
     let root = request.state_dir.join(&run_id);
     let mut owned = Owned::claim(&root)?;
     owned.keep();
@@ -422,9 +488,9 @@ pub fn run(
     let file = std::fs::File::create(&events_path).map_err(|err| {
         Error::InvalidConfig(format!("cannot create {}: {err}", events_path.display()))
     })?;
-    let emitter = Emitter::new(run_id.clone(), Box::new(Tee { sink, file })).with_labels(
+    let emitter = Emitter::new(run_id.to_string(), Box::new(Tee { sink, file })).with_labels(
         crate::event::Labels {
-            run_id: Some(run_id.clone()),
+            run_id: Some(run_id.to_string()),
             extra: request
                 .labels
                 .iter()
@@ -880,10 +946,29 @@ mod tests {
     #[test]
     fn a_run_id_is_readable_and_sortable() {
         let at = SystemTime::UNIX_EPOCH + Duration::from_millis(1_700_000_000_000);
-        let id = new_run_id("Node Scope/2", at);
-        assert!(id.starts_with("node-scope-2-1700000000000-"), "{id}");
-        let later = new_run_id("Node Scope/2", at + Duration::from_millis(1));
+        let id = RunId::mint("Node Scope/2", at);
+        assert!(
+            id.as_str().starts_with("node-scope-2-1700000000000-"),
+            "{id}"
+        );
+        let later = RunId::mint("Node Scope/2", at + Duration::from_millis(1));
         assert!(later > id, "{later} did not sort after {id}");
+
+        // What the type is for: a minted id parses, and a record carrying a
+        // traversal in this field is refused rather than joined onto the state
+        // directory by whichever verb reads it back.
+        assert_eq!(RunId::parse(id.as_str()).expect("a run id"), id);
+        for hostile in ["../../etc", "a/b", "", "has space"] {
+            let err = RunId::parse(hostile).unwrap_err();
+            assert!(err.to_string().contains("is not a run id"), "{err}");
+        }
+        let err = serde_json::from_str::<RunId>("\"../escape\"").unwrap_err();
+        assert!(err.to_string().contains("is not a run id"), "{err}");
+        assert_eq!(
+            serde_json::to_string(&id).expect("json"),
+            format!("\"{id}\""),
+            "a run id must still serialize as the bare string a reader expects"
+        );
     }
 
     /// Each outcome has one spelling in the record, and it round-trips — an

@@ -1,3 +1,12 @@
+// llmlint: ignore-file[boundary_inputs_validated] this whole file is a test
+// double, behind the non-default `test-doubles` feature so a published
+// `cargo install oneagentgraph` never builds it. Its inputs are not external:
+// the prompt carrying the `fake:` sentinels below is written by this repo's own
+// e2e suite, and the paths those sentinels name are the suite's own temp
+// directories. Parsing them against a trust boundary would be validating this
+// crate's tests against themselves — and would make the double able to refuse a
+// journey for a reason the product it stands in for has no equivalent of.
+
 //! `oneagentgraph-fake-harness` — a stand-in for a paid harness CLI.
 //!
 //! This is the **one** thing the e2e suite is allowed to fake, and it is faked

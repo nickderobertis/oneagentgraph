@@ -129,7 +129,7 @@ fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error
 /// take the run with it.
 fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     let state = state_dir(env);
-    let before: Vec<String> = history::list(&state)
+    let before: Vec<run::RunId> = history::list(&state)
         .into_iter()
         .map(|r| r.run_id)
         .collect();
@@ -351,7 +351,10 @@ fn show_history(args: &HistoryArgs, env: &BTreeMap<String, String>) -> Result<i3
         None => {
             let records = history::list(&state);
             let selected: Vec<_> = match &args.run {
-                Some(run) => records.into_iter().filter(|r| &r.run_id == run).collect(),
+                Some(run) => records
+                    .into_iter()
+                    .filter(|r| r.run_id.as_str() == run)
+                    .collect(),
                 None => records,
             };
             for record in &selected {

@@ -25,7 +25,7 @@ use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
     STALL_TIMEOUT_ENV,
 };
-use oneagentgraph::run::Started;
+use oneagentgraph::run::{RunId, Started};
 use serde_json::{json, Value};
 
 /// The approved contract itself.
@@ -722,7 +722,7 @@ fn the_detach_answer_carries_the_three_keys_the_contract_names() {
     }
 
     let started = Started {
-        run_id: "node-scope-1786171301679-1447994".into(),
+        run_id: RunId::parse("node-scope-1786171301679-1447994").expect("a run id"),
         events_path: "/state/node-scope/events.jsonl".into(),
         pid: 1_447_994,
     };

@@ -12,6 +12,15 @@
 //! where the accumulated failure knowledge of this system lives — each is named
 //! after the thing that once broke.
 
+// llmlint: ignore-file[tests_mirror_real_usage] one test in this file is not a
+// journey and could not be: `the_published_smoke_checks_the_same_commands_the
+// _contract_documents` compares two committed artifacts — the contract document
+// and `scripts/smoke-published.sh` — because the script is what checks an
+// *installed* binary from PyPI/npm, and a shell script cannot read the contract
+// to find the command list. There is no user-facing interface at which that
+// drift is observable; by the time it is, the release has shipped. Every other
+// test here drives the compiled binary as a subprocess.
+
 mod dispatch;
 mod liveness;
 mod selection;

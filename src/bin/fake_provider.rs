@@ -10,6 +10,14 @@
 //! `split`-provider path — real onejudge, real oneharness on the agent side —
 //! with only the paid supervisor replaced.
 
+// llmlint: ignore-file[boundary_inputs_validated] this whole file is a test
+// double, behind the non-default `test-doubles` feature so a published
+// `cargo install oneagentgraph` never builds it. The request it reads comes from
+// the real `onejudge` this suite drives, one process over, and answering it is
+// the double's entire job; a validating parse here would be this crate asserting
+// onejudge's protocol against onejudge, and a refusal would surface as a journey
+// failure naming the double rather than the thing under test.
+
 // The JSON-lines protocol IS stdout, and a diagnostic IS stderr: onejudge reads
 // one response object from the first and a classified failure from the second.
 #![allow(clippy::print_stdout, clippy::print_stderr)]

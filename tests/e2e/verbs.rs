@@ -770,6 +770,52 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
     );
 }
 
+/// A run id is a *path component* every verb joins onto the state directory,
+/// and it arrives out of `record.json` as well as off the argv — so a record
+/// carrying a traversal in that field is refused rather than followed.
+///
+/// `cancel` is the verb this matters most for: it is the one that *writes*
+/// through the joined path, so a record naming `../..` would have it create a
+/// directory and drop a stop signal outside the run store.
+#[test]
+fn a_record_naming_a_path_outside_the_run_store_is_refused() {
+    let workspace = Workspace::new();
+    let escapee = workspace.at("escapee");
+    let run = workspace.state().join("hostile");
+    std::fs::create_dir_all(&run).expect("run dir");
+    std::fs::write(
+        run.join("record.json"),
+        serde_json::json!({
+            "run_id": format!("../../{}", escapee.file_name().expect("a name").to_string_lossy()),
+            "graph": "./graph.yaml",
+            "name": "hostile",
+            "started_ms": 1_u64,
+            "events_path": run.join("events.jsonl").display().to_string(),
+        })
+        .to_string(),
+    )
+    .expect("record");
+
+    let cancelled = workspace.run(&["cancel", "hostile"]);
+    cancelled.expect_code(2);
+    assert!(
+        cancelled.stderr.contains("is not a run id"),
+        "{}",
+        cancelled.stderr
+    );
+    assert!(
+        !escapee.exists(),
+        "cancel wrote through a record's run id and escaped the run store: {}",
+        escapee.display()
+    );
+
+    // And the same record never shows up in a listing, rather than listing as
+    // a run whose id nothing else would accept.
+    let listed = workspace.run(&["history"]);
+    listed.expect_code(0);
+    assert!(!listed.stdout.contains("hostile"), "{}", listed.stdout);
+}
+
 /// The one run a state directory holds, once one has recorded itself.
 fn run_id(state: &std::path::Path) -> Option<String> {
     std::fs::read_dir(state)
