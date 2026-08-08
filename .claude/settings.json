@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR}/scripts/session-setup.sh\"",
+            "timeout": 180
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(just bootstrap)",
+      "Bash(just check)",
+      "Bash(just check-affected)",
+      "Bash(just gate)",
+      "Bash(just test)",
+      "Bash(just test-e2e)",
+      "Bash(just lint)",
+      "Bash(just format)",
+      "Bash(just fmt-check)",
+      "Bash(just doc)",
+      "Bash(just msrv)",
+      "Bash(just upgrade)",
+      "Bash(just deps-check)",
+      "Bash(just nx show projects)",
+      "Bash(just nx graph)",
+      "Bash(just session-setup)",
+      "Bash(just setup-llmlint)",
+      "Bash(just lint-llm)",
+      "Bash(just lint-llm-diff)",
+      "Bash(just lint-llm-validate)",
+      "Bash(just run:*)",
+      "Bash(llmlint doctor)",
+      "Bash(llmlint history)",
+      "Bash(llmlint --version)",
+      "Bash(./scripts/session-setup.sh)",
+      "Bash(./scripts/setup-llmlint.sh)",
+      "Bash(cargo metadata --no-deps --format-version 1)",
+      "Bash(cargo update --dry-run)",
+      "Bash(rustup show active-toolchain)",
+      "Bash(git status)",
+      "Bash(git status --short)",
+      "Bash(git diff)",
+      "Bash(git diff --cached)",
+      "Bash(git diff --stat)",
+      "Bash(git log --oneline -20)",
+      "Bash(git add -A)",
+      "Bash(gh pr status)",
+      "Bash(gh pr merge --auto --squash)",
+      "Bash(gh run list)"
+    ],
+    "deny": [
+      "Bash(git push --force:*)",
+      "Bash(git push -f:*)",
+      "Bash(git reset --hard:*)",
+      "Bash(git clean:*)",
+      "Bash(git tag:*)",
+      "Bash(git add -f:*)",
+      "Bash(cargo publish:*)",
+      "Bash(npm publish:*)",
+      "Bash(gh auth:*)",
+      "Bash(gh secret:*)",
+      "Bash(gh variable:*)"
+    ]
+  }
+}
