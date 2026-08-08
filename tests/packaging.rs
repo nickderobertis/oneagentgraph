@@ -30,6 +30,11 @@ fn the_package_carries_every_file_the_crate_is_built_from() {
     // inputs, not documentation that merely happens to sit nearby.
     needed.push("personas/_template.yaml".into());
     needed.push("docs/contract.md".into());
+    // The persisted-record goldens, read the same way by `tests/record_golden.rs`.
+    // Every version this build understands, so dropping the older one — the thing
+    // that proves an old record still reads — is caught here too.
+    needed.push("tests/golden/record.v1.json".into());
+    needed.push("tests/golden/record.v2.json".into());
 
     for path in &needed {
         assert!(

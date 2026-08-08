@@ -1,0 +1,20 @@
+{
+  "run_id": "node-scope-1786171301679-1447994",
+  "graph": "./graph.yaml",
+  "name": "node-scope",
+  "started_ms": 1786171301679,
+  "finished_ms": 1786171308421,
+  "exit_code": 0,
+  "members": {
+    "reporter": "died (activity)",
+    "worker": "settled"
+  },
+  "refs": [
+    {
+      "origin": "./graph.yaml",
+      "sha256": "3b1f2c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e",
+      "bytes": 412
+    }
+  ],
+  "events_path": "/state/node-scope-1786171301679-1447994/events.jsonl"
+}

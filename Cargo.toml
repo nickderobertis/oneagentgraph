@@ -25,6 +25,10 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "src/**/*.rs",
   "tests/**/*.rs",
+  # The `record.json` goldens `tests/record_golden.rs` reads. Shipping the test
+  # without them would ship a crate whose own test cannot run, exactly as for
+  # `docs/contract.md` below.
+  "tests/golden/*.json",
   "personas/**/*.yaml",
   "Cargo.toml",
   "README.md",

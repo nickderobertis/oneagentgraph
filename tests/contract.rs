@@ -572,6 +572,62 @@ fn squeeze(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The published smoke checks an *installed* binary against the same command
+/// surface this document spells, and it is toolchain-free bash that cannot read
+/// the document to find it.
+///
+/// This is the one place the contract's CLI block is parsed. `tests/e2e/main.rs`
+/// holds `--help` to the script's list rather than to this document, so the
+/// document has a single reader and the two lists cannot drift apart behind a
+/// second parser.
+#[test]
+fn the_published_smoke_checks_the_same_commands_the_contract_documents() {
+    let script = include_str!("../scripts/smoke-published.sh");
+    let loop_line = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("for command in "))
+        .expect("scripts/smoke-published.sh no longer loops over the command list");
+    let mut checked: Vec<String> = loop_line
+        .trim()
+        .trim_start_matches("for command in ")
+        .trim_end_matches("; do")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    checked.sort();
+    checked.dedup();
+
+    let mut documented = documented_commands();
+    documented.sort();
+    documented.dedup();
+    assert!(
+        documented.len() >= 9,
+        "the contract's CLI block stopped parsing: {documented:?}"
+    );
+    assert_eq!(
+        checked, documented,
+        "scripts/smoke-published.sh and docs/contract.md disagree about the command surface"
+    );
+}
+
+/// Every command the contract's CLI usage block spells.
+fn documented_commands() -> Vec<String> {
+    // Only the usage block — the document's prose says "oneagentgraph owns no
+    // harness logic", and a scan of the whole file would read `owns` as a command
+    // nobody typed.
+    let usage = CONTRACT
+        .split("```")
+        .find(|block| block.starts_with("\noneagentgraph run GRAPH"))
+        .expect("the contract's CLI usage block moved");
+    usage
+        .lines()
+        .filter_map(|line| line.strip_prefix("oneagentgraph "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|word| word.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn the_documented_liveness_bounds_are_the_ones_the_crate_declares() {
     assert!(

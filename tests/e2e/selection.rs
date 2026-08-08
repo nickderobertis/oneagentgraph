@@ -17,15 +17,6 @@
 // double under a second `ONEHARNESS_BIN_*` key, because a fall-through needs two
 // candidates and neither may be a real subscription.
 
-// llmlint: ignore-file[tests_mirror_real_usage] the journeys here assert on a file
-// the doubled harness writes recording the argv and environment it was given,
-// for the reason tests/e2e/dispatch.rs spells out: *which identity and model a
-// side ran on* is the subject, and it is legible nowhere a user reads. A run
-// that silently spent the wrong subscription exits 0 with a stream identical to
-// a correct one — which is exactly the failure
-// `each_side_runs_the_config_it_was_given` caught. The far end of the
-// invocation is the only place that distinction exists.
-
 use crate::support::{
     fake_harness, two_party_graph, Workspace, CHAIN, FALLBACK_CHAIN, MIXED_CHAIN,
 };

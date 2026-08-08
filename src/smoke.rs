@@ -14,18 +14,6 @@
 //! of the last one is what failed this smoke for weeks of healthy launches while
 //! one subscription's quota was gone and the next served every turn.
 
-// llmlint: ignore-file[changed_behavior_has_e2e] one branch below cannot be driven
-// end to end: the refusal of a candidate that fell through on a classification a
-// chain does not step past. oneharness never produces that report. Driven for
-// real against 0.6.6 — the fake harness's `FAKE_HARNESS_REFUSAL=rate_limit`
-// record, on a one- and a two-identity chain — it answers
-// `{"ran":"claude-code","fell_through":[]}`: it stops the chain and records the
-// candidate as having *run*, so no `fell_through` entry with such a reason
-// exists to construct. The branch is the guard for a oneharness that classifies
-// differently, and `judge` is unit-tested against that report shape. Reaching it
-// through the CLI would mean faking oneharness itself, which is the second seam
-// AGENTS.md forbids.
-
 // llmlint: ignore-file[invalid_states_unrepresentable] the harness *identity* on a
 // `FellThrough` and a `Verdict` stays a `String` on purpose: `docs/contract.md` is
 // explicit that this crate owns no harness logic, and what counts as an identity —

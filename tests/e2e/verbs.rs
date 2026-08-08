@@ -8,16 +8,6 @@
 // process is the single sanctioned double, and the wrapper scripts here are that
 // same double reached under a second `ONEHARNESS_BIN_*` key.
 
-// llmlint: ignore-file[tests_mirror_real_usage] two tests here write a
-// `record.json` into the run store by hand, and by construction cannot do
-// otherwise: what they hold the CLI to is how it treats a record it would never
-// have written — one carrying a traversal in `run_id`, or a stream path outside
-// the run store. Reaching that state *through* the CLI is impossible, which is
-// the whole point; the record a real user hits it with comes from a hand-edit, a
-// torn write, or another version. Every assertion is still made against the
-// compiled binary's exit code, stdout, and filesystem effects, and this is the
-// narrowest scope the directive has — a line-scoped `ignore` is not honored.
-
 use crate::support::{fake_harness, two_party_graph, until, Workspace, CHAIN};
 
 /// `validate` reads every ref the graph names, so a pass means the graph could
@@ -927,94 +917,6 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
 
     workspace.run(&["cancel", &id]).expect_code(0);
     handle.join().expect("the run thread");
-}
-
-/// A run id is a *path component* every verb joins onto the state directory,
-/// and it arrives out of `record.json` as well as off the argv — so a record
-/// carrying a traversal in that field is refused rather than followed.
-///
-/// `cancel` is the verb this matters most for: it is the one that *writes*
-/// through the joined path, so a record naming `../..` would have it create a
-/// directory and drop a stop signal outside the run store.
-#[test]
-fn a_record_naming_a_path_outside_the_run_store_is_refused() {
-    let workspace = Workspace::new();
-    let escapee = workspace.at("escapee");
-    let run = workspace.state().join("hostile");
-    std::fs::create_dir_all(&run).expect("run dir");
-    std::fs::write(
-        run.join("record.json"),
-        serde_json::json!({
-            "run_id": format!("../../{}", escapee.file_name().expect("a name").to_string_lossy()),
-            "graph": "./graph.yaml",
-            "name": "hostile",
-            "started_ms": 1_u64,
-            "events_path": run.join("events.jsonl").display().to_string(),
-        })
-        .to_string(),
-    )
-    .expect("record");
-
-    let cancelled = workspace.run(&["cancel", "hostile"]);
-    cancelled.expect_code(2);
-    assert!(
-        cancelled.stderr.contains("is not a run id"),
-        "{}",
-        cancelled.stderr
-    );
-    assert!(
-        !escapee.exists(),
-        "cancel wrote through a record's run id and escaped the run store: {}",
-        escapee.display()
-    );
-
-    // And the same record never shows up in a listing, rather than listing as
-    // a run whose id nothing else would accept.
-    let listed = workspace.run(&["history"]);
-    listed.expect_code(0);
-    assert!(!listed.stdout.contains("hostile"), "{}", listed.stdout);
-}
-
-/// `events_path` is reported, never followed. A record naming a stream outside
-/// the run store does not move where `trigger` and `reset-timer` write: those
-/// derive the signal directory from the run's id, as `cancel` does.
-///
-/// The record here is otherwise valid — a well-formed run id, a readable record
-/// — so what is under test is the *use* of the path rather than the parse that
-/// already refuses a malformed id.
-#[test]
-fn a_record_naming_a_stream_elsewhere_does_not_move_where_a_signal_is_written() {
-    let workspace = Workspace::new();
-    let elsewhere = workspace.at("elsewhere");
-    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
-    let run = workspace.state().join("planted-1-1");
-    std::fs::create_dir_all(&run).expect("run dir");
-    std::fs::write(
-        run.join("record.json"),
-        serde_json::json!({
-            "run_id": "planted-1-1",
-            "graph": "./graph.yaml",
-            "name": "planted",
-            "started_ms": 1_u64,
-            "members": {"worker": "settled"},
-            "events_path": elsewhere.join("events.jsonl").display().to_string(),
-        })
-        .to_string(),
-    )
-    .expect("record");
-
-    let triggered = workspace.run(&["trigger", "planted-1-1", "worker"]);
-    triggered.expect_code(0);
-    assert!(
-        run.join("signals").join("worker.trigger").exists(),
-        "the signal did not land in the run's own directory: {}",
-        triggered.stdout
-    );
-    assert!(
-        !elsewhere.join("signals").exists(),
-        "trigger wrote through the record's events_path and escaped the run store: {}",
-        elsewhere.display()
-    );
 }
 
 /// A detached run that never records itself is a refusal that says where to

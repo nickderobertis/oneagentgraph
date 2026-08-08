@@ -10,14 +10,6 @@
 //! `split`-provider path — real onejudge, real oneharness on the agent side —
 //! with only the paid supervisor replaced.
 
-// llmlint: ignore-file[boundary_inputs_validated] this whole file is a test
-// double, behind the non-default `test-doubles` feature so a published
-// `cargo install oneagentgraph` never builds it. The request it reads comes from
-// the real `onejudge` this suite drives, one process over, and answering it is
-// the double's entire job; a validating parse here would be this crate asserting
-// onejudge's protocol against onejudge, and a refusal would surface as a journey
-// failure naming the double rather than the thing under test.
-
 // The JSON-lines protocol IS stdout, and a diagnostic IS stderr: onejudge reads
 // one response object from the first and a classified failure from the second.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -25,6 +17,9 @@
 use std::io::Read as _;
 
 use serde_json::{json, Value};
+
+/// The score a numeric judgement answers when the request names no usable bound.
+const DEFAULT_MAX_SCORE: u64 = 5;
 
 fn main() -> std::process::ExitCode {
     let mut raw = String::new();
@@ -54,8 +49,18 @@ fn main() -> std::process::ExitCode {
         Some("judge") if request.get("kind").and_then(Value::as_str) == Some("boolean") => {
             json!({"value": !task.contains("should-fail"), "reason": "fake judge verdict"})
         }
-        Some("judge") => json!({"value": request.get("max").cloned().unwrap_or(json!(5)),
-                                "reason": "fake numeric verdict"}),
+        // A numeric verdict has to be a number, and `max` is the *request's* —
+        // another process's JSON. Reflecting it unread would answer a string or a
+        // mapping as this side's "score", and onejudge would reject a response
+        // this double claimed to have produced. Anything that is not a usable
+        // bound falls back to the default rather than being echoed.
+        Some("judge") => json!({
+            "value": request
+                .get("max")
+                .and_then(Value::as_u64)
+                .unwrap_or(DEFAULT_MAX_SCORE),
+            "reason": "fake numeric verdict",
+        }),
         Some("assess") => json!({"text": "None"}),
         other => {
             eprintln!("fake-provider: unknown op {other:?}");

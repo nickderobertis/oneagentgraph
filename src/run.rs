@@ -42,6 +42,29 @@ pub const EVENTS_FILE: &str = "events.jsonl";
 /// The run record `history` reads back.
 pub const RECORD_FILE: &str = "record.json";
 
+/// The schema version this build writes into every [`Record`].
+///
+/// A run record outlives the binary that wrote it — `history` is expected to read
+/// runs from months ago — so the shape needs a number a reader can branch on
+/// rather than a guess from which keys happen to be present.
+///
+/// * **1** — the original shape, written without this field at all.
+/// * **2** — adds `declared_members`, the graph's member list, so `trigger`,
+///   `reset-timer`, and `cancel` can tell a member of the run from a typo while
+///   it is still in flight.
+///
+/// A record with no version reads as 1, and every field added since is optional
+/// and omitted when empty, so a 1 still reads exactly as it did. A version
+/// *above* this one is refused by name instead of parsed: those records were
+/// written by a build that knew something this one does not, and `deny_unknown_fields`
+/// would otherwise reject them with a message about a key rather than a version.
+pub const RECORD_SCHEMA_VERSION: u32 = 2;
+
+/// The version a record that names none was written under.
+fn unversioned_record() -> u32 {
+    1
+}
+
 /// How often a run notices a `trigger` / `reset-timer` signal, and re-checks a
 /// schedule's clock.
 const TICK: Duration = Duration::from_millis(100);
@@ -50,6 +73,12 @@ const TICK: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Record {
+    /// The shape this record was written under — see [`RECORD_SCHEMA_VERSION`].
+    ///
+    /// Defaulted rather than required, because a record from before the field
+    /// existed is a version 1 record and still has to read.
+    #[serde(default = "unversioned_record")]
+    pub schema_version: u32,
     /// The run's id.
     pub run_id: RunId,
     /// The graph it ran.
@@ -530,6 +559,7 @@ pub fn run(
     );
 
     let mut record = Record {
+        schema_version: RECORD_SCHEMA_VERSION,
         run_id: run_id.clone(),
         graph: request.graph.0.clone(),
         name: graph.name.clone(),

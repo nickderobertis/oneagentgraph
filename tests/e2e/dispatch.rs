@@ -11,19 +11,6 @@
 // process is the single sanctioned double, replaced at oneharness's own
 // `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
 
-// llmlint: ignore-file[tests_mirror_real_usage] several journeys here assert on a
-// file the doubled harness writes recording the prompt, environment, or argv it
-// was given. That is the observation point *because* of what is under test: the
-// subject is what arrived at the far end of the invocation this crate builds —
-// the exact task, the merged persona, the graph's env, the member's mode — and
-// nothing a user reads carries it. The stream reports that a member settled, not
-// what the harness was asked. Asserting only on the stream would leave the whole
-// delivery path unproven, which is the path these journeys were ported to cover:
-// ai-orchestrator's originals record at the same point, for the same reason. The
-// harness writing the file is the sanctioned double, not a stub of this crate,
-// and every assertion about *behaviour* — exit codes, event kinds, the record —
-// is still made through the CLI.
-
 use crate::support::{fake_harness, fake_provider, labels, two_party_graph, Workspace, CHAIN};
 
 /// The whole happy path: a two-party member completes, and the stream carries

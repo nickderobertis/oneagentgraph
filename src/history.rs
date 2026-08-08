@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::error::Error;
-use crate::run::{Record, RunId, EVENTS_FILE, RECORD_FILE};
+use crate::run::{Record, RunId, EVENTS_FILE, RECORD_FILE, RECORD_SCHEMA_VERSION};
 
 /// Every run in `state_dir`, newest first.
 ///
@@ -71,9 +71,24 @@ pub fn events(state_dir: &Path, run_id: &str) -> Result<String, Error> {
 }
 
 /// Read one run directory's record.
+///
+/// The version is read before the record, so a record from a *newer* build is
+/// refused for being one — `Record` denies unknown fields, so parsing first would
+/// blame whichever key that build added instead of the version that explains it.
 fn read(dir: &Path) -> Result<Record, String> {
     let path = dir.join(RECORD_FILE);
     let raw = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+    let loose: serde_json::Value = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    let version = loose
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if version > u64::from(RECORD_SCHEMA_VERSION) {
+        return Err(format!(
+            "record schema version {version} is newer than this build reads \
+             ({RECORD_SCHEMA_VERSION}); the run was recorded by a later oneagentgraph"
+        ));
+    }
     serde_json::from_str(&raw).map_err(|err| err.to_string())
 }
 
@@ -85,6 +100,7 @@ mod tests {
 
     fn record(state: &Path, run_id: &str, started_ms: u64) -> Record {
         let record = Record {
+            schema_version: crate::run::RECORD_SCHEMA_VERSION,
             run_id: RunId::parse(run_id).expect("a run id"),
             graph: "./g.yaml".into(),
             name: "g".into(),

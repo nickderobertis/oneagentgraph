@@ -19,19 +19,6 @@
 // and the field it protects is provenance rather than a decision anything branches
 // on. Revisit if a record ever arrives from somewhere this crate did not write.
 
-// llmlint: ignore-file[changed_behavior_has_e2e] one path here has no e2e and
-// cannot get one on this gate's terms: a *reachable* https ref. `just check` is
-// offline and credential-free by AGENTS.md, so the remote would have to be a
-// local server — and this module refuses cleartext on purpose, so that server
-// would need a certificate the fetch trusts, which means a test-only hook into
-// what `ureq` trusts. Weakening the https rule to prove the https rule is a
-// worse trade than the gap. What *can* be driven for real is, and is:
-// `an_https_ref_is_fetched_and_an_unreachable_one_is_refused_by_url` runs the
-// whole fetch path through the compiled binary against an RFC 6761 `.invalid`
-// host and against a cleartext URL, and `ingest` — the response half, bound and
-// digest — is split out precisely so it is exercised against readers this crate
-// hands over rather than against whatever a network happened to answer.
-
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
