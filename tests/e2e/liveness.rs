@@ -13,28 +13,26 @@
 //! is killed, a sweep racing a live run, and processes left behind by a member
 //! whose parent is already gone.
 
-// llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; three
-// journeys here are `#[cfg(unix)]` because their *subject* is a kernel
-// facility: an `flock` on `owner.lock`, a `/proc` environment stamp no process
-// can shed, and a signal to a proven identity. `src/scratch.rs` documents the
-// degraded contract on a platform without them, and compiling these there would
-// assert behaviour this crate deliberately does not promise. They also read
-// `oneagentgraph::scratch` directly, because scratch ownership is a liveness rule
-// the contract gives no CLI verb of its own — the sweep a future operator runs is
-// this same library call, so this is the interface, not a reach past one. Where a
-// verb does answer — `cancel --kill` reporting what it signalled — the journey
-// asserts on that instead.
+// llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; one
+// journey here is `#[cfg(unix)]` because its *subject* is a POSIX signal — a
+// descendant declining `SIGTERM` — and Windows has no signal to decline, so
+// compiling it there would assert an escalation this crate deliberately does not
+// promise (`src/scratch.rs` documents what stands in its place). Every other
+// journey runs on all three platforms. They also read `oneagentgraph::scratch`
+// directly, because scratch ownership is a liveness rule the contract gives no
+// CLI verb of its own — the sweep a future operator runs is this same library
+// call, so this is the interface, not a reach past one. Where a verb does
+// answer — `cancel --kill` reporting what it signalled — the journey asserts on
+// that instead.
 
-// The scratch-ownership journeys below are Unix-only, and so is everything that
-// exists only to serve them: on a platform without those facilities they compile
-// away, and an import or helper left behind is a `-D warnings` build failure
-// rather than dead weight.
-#[cfg(unix)]
 use std::path::Path;
 
-use crate::support::{as_env, fake_harness, labels, Workspace};
+use crate::support::{as_env, fake_harness, labels, until, Workspace};
+// The one Unix-only journey's own helper: on a platform without `SIGTERM` it
+// compiles away, and an import left behind is a `-D warnings` build failure
+// rather than dead weight.
 #[cfg(unix)]
-use crate::support::{two_party_graph, until};
+use crate::support::two_party_graph;
 
 /// A member that publishes nothing is condemned by the activity watchdog, and
 /// the death says which rule fired and what the process left behind.
@@ -232,7 +230,6 @@ fn an_unusable_liveness_bound_refuses_the_run_by_name() {
 /// A run holds an exclusive `owner.lock` on its scratch for as long as it is
 /// live, which is the proof a sweeper asks for — and the pid-with-start-token
 /// beside it is what stops a recycled number from pinning it forever.
-#[cfg(unix)]
 #[test]
 fn a_live_run_holds_its_scratch_against_a_sweep() {
     let workspace = Workspace::new();
@@ -309,7 +306,6 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
 /// The whole-run reap is rooted at the run directory rather than a member's, so
 /// it is a different walk from the named-member one below, and the failure it
 /// guards against is a live member surviving the cancel of its own run.
-#[cfg(unix)]
 #[test]
 fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
     let workspace = Workspace::new();
@@ -382,7 +378,6 @@ fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
 /// A member's descendants carry the run's scratch stamp, and `cancel --kill`
 /// reaps exactly those — the evidence the kernel fixes at `exec`, which reaches
 /// a descendant whose parent has already exited.
-#[cfg(unix)]
 #[test]
 fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
     let workspace = Workspace::new();
@@ -444,6 +439,65 @@ fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
     assert!(
         output.status.code().is_some(),
         "the cancelled run never exited"
+    );
+}
+
+/// A cancelled run reaps a member that published **nothing at all**, and the
+/// run itself then returns.
+///
+/// The other cancel journeys reach a member mid-turn, which is a member whose
+/// tree has already announced itself up the pipe. This one never writes a byte:
+/// its provider parks on its first turn and stays there, so the only thing that
+/// can end the tree is the reap, and the only thing that can end the *run* is
+/// the tree's pipes closing when it does. That is one failure on POSIX and two
+/// on Windows, where a descendant inherits its launcher's pipe handles outright
+/// — a cancel that reached the member alone would leave this supervisor blocked
+/// forever on a stream a process it just cancelled is still holding open.
+#[test]
+fn a_cancelled_run_reaps_a_member_that_published_nothing() {
+    let workspace = Workspace::new();
+    let state = workspace.state();
+
+    let mut member = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:hang and publish nothing at all",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    until("the member's own scratch to be stamped", || {
+        member_scratch(&state).is_some_and(|scratch| {
+            !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+        })
+    });
+    let scratch = member_scratch(&state).expect("a member scratch");
+
+    let run_id = run_id(&state);
+    let cancelled = workspace.run(&["cancel", &run_id, "--kill"]);
+    cancelled.expect_code(0);
+    // The count, not just the word: `0 process(es) signalled` carries it too,
+    // and a cancel that found nothing to reap is exactly the failure here.
+    assert!(
+        cancelled.stdout.contains("signalled") && !cancelled.stdout.contains("0 process(es)"),
+        "a cancel of a silent member signalled nothing: {}",
+        cancelled.stdout
+    );
+
+    until("the stamped processes to be gone", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+
+    // Nothing releases this member, so a run that returns is one whose reap
+    // reached every process holding its streams open.
+    let status = member.wait().expect("the run exits");
+    assert!(
+        status.code().is_some(),
+        "the cancelled run never exited: its member's tree still holds its streams"
     );
 }
 
@@ -515,7 +569,6 @@ fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
 
 /// A finished run leaves nothing of its own running: the reap on the way out is
 /// what stops one run's leavings from polluting the next.
-#[cfg(unix)]
 #[test]
 fn a_finished_run_leaves_nothing_stamped_for_it() {
     let workspace = Workspace::new();
@@ -543,7 +596,6 @@ fn the_documented_defaults_are_what_a_run_supervises_under() {
 }
 
 /// The first `owner.lock` under a state directory, once a run has claimed one.
-#[cfg(unix)]
 fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
     let lock = std::fs::read_dir(state)
         .ok()?
@@ -554,7 +606,6 @@ fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// The `worker` member's own scratch under a state directory.
-#[cfg(unix)]
 fn member_scratch(state: &Path) -> Option<std::path::PathBuf> {
     std::fs::read_dir(state)
         .ok()?
@@ -564,7 +615,6 @@ fn member_scratch(state: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// The one run a state directory holds.
-#[cfg(unix)]
 fn run_id(state: &Path) -> String {
     std::fs::read_dir(state)
         .expect("state")

@@ -50,7 +50,7 @@ use crate::invoke::Invocation;
 use crate::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
 };
-use crate::scratch::SCRATCH_ENV;
+use crate::scratch::{Group, SCRATCH_ENV};
 
 /// How often this supervisor refreshes a live member's heartbeat.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
@@ -263,29 +263,46 @@ pub fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let child = match command.spawn() {
+    // The group is opened before the spawn because it is what the spawn goes
+    // *into*: a member is `onejudge`, which starts `oneharness`, which starts the
+    // paid provider, and the child this supervisor holds is only the first of
+    // the three. Everything a cancel or a watchdog has to reach is reached
+    // through the group, not through the child.
+    let group = match Group::open(scratch) {
+        Ok(group) => group,
+        Err(err) => return unstartable(emitter, err.to_string()),
+    };
+    let child = match group.spawn(&mut command) {
         Ok(child) => child,
         Err(err) => {
-            let reason = format!("cannot start {}: {err}", invocation.program);
-            emitter.emit(
-                EventKind::MemberDied,
-                died_payload(&MemberDied {
-                    rule: Rule::Unstartable.as_str().into(),
-                    exit_code: None,
-                    disposition: Disposition::Exited,
-                    stderr_tail: reason.clone(),
-                    truncated: false,
-                }),
-            );
-            return Outcome::Unstartable(reason);
+            return unstartable(
+                emitter,
+                format!("cannot start {}: {err}", invocation.program),
+            )
         }
     };
-    supervise(child, invocation.kind, emitter, bounds, scratch)
+    supervise(child, &group, invocation.kind, emitter, bounds, scratch)
+}
+
+/// Report a member that never started, and say why.
+fn unstartable(emitter: &Emitter, reason: String) -> Outcome {
+    emitter.emit(
+        EventKind::MemberDied,
+        died_payload(&MemberDied {
+            rule: Rule::Unstartable.as_str().into(),
+            exit_code: None,
+            disposition: Disposition::Exited,
+            stderr_tail: reason.clone(),
+            truncated: false,
+        }),
+    );
+    Outcome::Unstartable(reason)
 }
 
 /// Supervise a spawned member: read what it publishes, watch it live, and settle.
 fn supervise(
     mut child: Child,
+    group: &Group,
     kind: Kind,
     emitter: &Emitter,
     bounds: Bounds,
@@ -351,6 +368,7 @@ fn supervise(
         if now.duration_since(last_heartbeat) > bounds.heartbeat {
             return kill_and_report(
                 &mut child,
+                group,
                 emitter,
                 Rule::Heartbeat,
                 &tail,
@@ -367,6 +385,7 @@ fn supervise(
         if Duration::from_millis(quiet) > bounds.stall {
             return kill_and_report(
                 &mut child,
+                group,
                 emitter,
                 Rule::Activity,
                 &tail,
@@ -623,6 +642,7 @@ fn died(
 /// Kill a member a watchdog condemned, then report it.
 fn kill_and_report(
     child: &mut Child,
+    group: &Group,
     emitter: &Emitter,
     rule: Rule,
     tail: &Arc<Mutex<String>>,
@@ -637,6 +657,13 @@ fn kill_and_report(
     // `member-died` is for is which of those happened, so it is recorded rather
     // than inferred from a status that spells both the same way.
     let settled_first = child.try_wait().ok().flatten();
+    // The whole tree, and the child only after it. A condemned member is
+    // `onejudge` with `oneharness` and a paid provider still running under it,
+    // and those two are the ones holding the pipes the two readers below are
+    // waiting on — killing the child alone leaves this supervisor blocked on a
+    // stream a process it just condemned is still keeping open, which is the
+    // condemnation never being reported at all.
+    let _ = group.terminate();
     let _ = child.kill();
     let status = child.wait().ok();
     let _ = reader.join();

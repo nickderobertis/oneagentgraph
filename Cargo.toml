@@ -113,6 +113,22 @@ toml_edit = "0.23"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# The same four facilities on Windows, which has none of the POSIX ones: the
+# ownership lock is `LockFileEx`, the start token is `GetProcessTimes`, and both
+# the grouping and the teardown of a member's process tree are a job object —
+# the only thing on this platform that holds a descendant whose parent has
+# already exited. `src/scratch.rs` documents the mapping and what differs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
