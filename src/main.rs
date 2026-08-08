@@ -140,7 +140,12 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     // model, a persona that will not load — produces a record and dies. Waiting
     // only for a record to appear would report that as a started run: `{run_id,
     // …}` on stdout and exit 0, for a config the contract gives exit 2.
-    preflight(&args.graph, env)?;
+    let overrides = args
+        .set
+        .iter()
+        .map(|raw| run::parse_set(raw))
+        .collect::<Result<Vec<_>, _>>()?;
+    preflight(&args.graph, &overrides, env)?;
 
     let state = state_dir(env);
     let before: Vec<run::RunId> = history::list(&state)
@@ -210,7 +215,7 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
 /// all found here rather than after a paid turn has been spent on the members
 /// that did start.
 fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
-    let graph = preflight(&args.graph, env)?;
+    let graph = preflight(&args.graph, &[], env)?;
     println!("{}: {} member(s) OK", graph.name, graph.members.len());
     Ok(EXIT_SUCCESS)
 }
@@ -222,12 +227,25 @@ fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, 
 /// invocations, so a failure past that point would otherwise reach the caller as
 /// a started run. The contract gives that case exit 2, and this is where the
 /// parent earns it.
-fn preflight(graph_ref: &str, env: &BTreeMap<String, String>) -> Result<GraphConfig, Error> {
+fn preflight(
+    graph_ref: &str,
+    overrides: &[run::Override],
+    env: &BTreeMap<String, String>,
+) -> Result<GraphConfig, Error> {
     let mut resolver = Resolver::new();
     let reference = config::ConfigRef(graph_ref.to_string());
     let document = resolver.resolve(&reference, None)?.clone();
-    let graph: GraphConfig = serde_norway::from_str(&document.content)
+    // Parsed loosely, overridden, and only then read as a graph — the order
+    // `run` itself uses. Checking the document as written would pass a `--set`
+    // that names nothing, and `--detach` forwards those to the child.
+    let mut parsed: serde_json::Value = serde_norway::from_str(&document.content)
         .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?;
+    run::apply_overrides(&mut parsed, overrides)?;
+    let graph: GraphConfig = serde_norway::from_value(
+        serde_norway::to_value(&parsed)
+            .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?,
+    )
+    .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?;
     config::validate(&graph)?;
     run::ready_order(&graph)?;
 

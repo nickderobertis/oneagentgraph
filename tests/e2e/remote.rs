@@ -22,6 +22,14 @@ const SERVED_BASE: &str = concat!(
     "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
 );
 
+// llmlint: ignore-block[tests_mirror_real_usage] the assertion below reads a file
+// the doubled harness wrote recording the prompt it was given, and that is the
+// subject: whether the document this crate resolved is the one the agent actually
+// ran on. Nothing a user reads carries it — a graph that silently fell back to a
+// local file of the same name settles identically and records a digest just the
+// same. This is the observation point ai-orchestrator's originals use, for the
+// same reason; the recorder is the single sanctioned double, and the exit code,
+// the stream, and the run record are all still asserted through the CLI.
 /// A member's `base_config` named by URL is fetched over real TLS, the run
 /// completes on it, and the record keeps it content-addressed by digest.
 ///
@@ -90,6 +98,8 @@ fn a_base_config_named_by_url_is_fetched_over_tls_and_recorded_by_digest() {
         run.kinds()
     );
 }
+
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A certificate the binary cannot verify is refused, naming the URL — the run
 /// never starts against a document nobody could authenticate.

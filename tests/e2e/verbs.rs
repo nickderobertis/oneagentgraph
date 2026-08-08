@@ -703,6 +703,14 @@ fn every_shipped_persona_validates_through_the_cli() {
         .expect_code(0);
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the assertion below reads a file
+// the doubled harness wrote recording the prompt it was given, and that is the
+// subject: whether the document this crate resolved is the one the agent actually
+// ran on. Nothing a user reads carries it — a graph that silently fell back to a
+// local file of the same name settles identically and records a digest just the
+// same. This is the observation point ai-orchestrator's originals use, for the
+// same reason; the recorder is the single sanctioned double, and the exit code,
+// the stream, and the run record are all still asserted through the CLI.
 /// A shipped persona is reachable by name, with nothing to resolve — a graph can
 /// say `persona: engineer` and get one.
 #[test]
@@ -728,6 +736,8 @@ fn a_shipped_persona_is_reachable_by_name() {
         "the shipped persona's role never reached the agent"
     );
 }
+
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A cron member fires again on `trigger`, and `reset-timer` restarts a
 /// resettable clock. `cancel` is what ends it.
@@ -1034,6 +1044,32 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
     assert!(
         run_id(&workspace.state()).is_none(),
         "a refused --detach still left a run behind"
+    );
+
+    // A `--set` that names nothing is the same class: `--detach` forwards every
+    // override to the child, so the parent has to apply them to know whether the
+    // run it is about to report could start.
+    let bad_override = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "complete-now: never gets here",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--set",
+        "members.ghost.mode=read-only",
+        "--detach",
+    ]);
+    bad_override.expect_code(2);
+    assert!(
+        bad_override.stderr.contains("no ghost"),
+        "the refusal did not name the override that could not apply: {}",
+        bad_override.stderr
+    );
+    assert!(
+        bad_override.stdout.trim().is_empty(),
+        "an override that names nothing was reported as a started run: {}",
+        bad_override.stdout
     );
 }
 
