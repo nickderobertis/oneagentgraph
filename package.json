@@ -1,0 +1,10 @@
+{
+  "name": "oneagentgraph-workspace",
+  "private": true,
+  "description": "Nx project graph for the oneagentgraph monorepo. Not published; it carries the orchestrator and nothing else. Every deliverable's version comes from Cargo.toml.",
+  "license": "MIT",
+  "devDependencies": {
+    "@biomejs/biome": "2.5.7",
+    "nx": "^23.1.1"
+  }
+}

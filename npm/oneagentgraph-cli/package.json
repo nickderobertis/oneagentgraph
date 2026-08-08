@@ -1,0 +1,36 @@
+{
+  "name": "oneagentgraph-cli",
+  "version": "0.0.0-managed",
+  "description": "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream.",
+  "keywords": [
+    "agents",
+    "orchestration",
+    "cli",
+    "ndjson",
+    "llm"
+  ],
+  "homepage": "https://github.com/nickderobertis/oneagentgraph",
+  "bugs": "https://github.com/nickderobertis/oneagentgraph/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nickderobertis/oneagentgraph.git"
+  },
+  "license": "MIT",
+  "author": "Nick DeRobertis",
+  "bin": {
+    "oneagentgraph": "bin/oneagentgraph.js"
+  },
+  "files": [
+    "bin/oneagentgraph.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "oneagentgraph-cli-linux-x64": "0.0.0-managed",
+    "oneagentgraph-cli-linux-arm64": "0.0.0-managed",
+    "oneagentgraph-cli-darwin-x64": "0.0.0-managed",
+    "oneagentgraph-cli-darwin-arm64": "0.0.0-managed",
+    "oneagentgraph-cli-win32-x64": "0.0.0-managed"
+  }
+}

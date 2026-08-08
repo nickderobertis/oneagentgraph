@@ -1,0 +1,48 @@
+# Automated releases from conventional commits, driven by release-plz.
+#
+# Flow:
+#   1. Commits land on `main` (pre-1.0: feat -> minor, fix/perf/refactor/build ->
+#      patch, `!`/BREAKING -> minor; chore/docs/ci/test/style do not release).
+#      release-plz only *sees* a commit that touched the crate's packaged files,
+#      so what releases is governed by `[package] include` in Cargo.toml.
+#   2. The `release-pr` job opens/updates a PR that bumps the version in
+#      Cargo.toml + Cargo.lock and writes the CHANGELOG section.
+#   3. Merging that PR makes the `release` job tag `vX.Y.Z` and cut a GitHub
+#      Release with the changelog notes. That Release (created with a PAT, not
+#      the default GITHUB_TOKEN) triggers release.yml, which builds and publishes
+#      the archives, the PyPI wheels, and the npm packages.
+
+[workspace]
+# release-plz only versions, changelogs, tags, and cuts the GitHub Release — it
+# never runs `cargo publish`. crates.io publishing is a separate step: the
+# `publish-crate` job in release.yml, which self-activates when the
+# CARGO_REGISTRY_TOKEN secret is set. Keeping it out of release-plz decouples
+# versioning/tagging from every registry push, so one registry's outage cannot
+# strand the tag.
+publish = false
+
+# API breaking-change detection (cargo-semver-checks) needs an extra tool and
+# would block releases on any surface change — which, for a crate whose whole
+# current job is to publish an interface, is every release. Rely on review and
+# the conventional-commit type instead (a `!` or `BREAKING CHANGE:` still bumps).
+semver_check = false
+
+git_tag_name = "v{{ version }}"
+git_release_name = "v{{ version }}"
+
+# Keep-a-Changelog-style grouping. The version bump is computed from the
+# conventional-commit *type*, independent of these display groups.
+[changelog]
+commit_parsers = [
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Changed" },
+  { message = "^docs", group = "Documentation" },
+  { message = "^test", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^build", skip = true },
+  { message = "^style", skip = true },
+  { body = ".*", group = "Other" },
+]

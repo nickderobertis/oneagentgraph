@@ -1,0 +1,66 @@
+[workspace]
+# One member today — the crate at the root. Declared explicitly so a second
+# crate (a future runtime, a test-support crate) joins the graph by being listed
+# here rather than by changing what `--workspace` means.
+members = ["."]
+resolver = "2"
+
+[package]
+name = "oneagentgraph"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream."
+license = "MIT"
+repository = "https://github.com/nickderobertis/oneagentgraph"
+homepage = "https://github.com/nickderobertis/oneagentgraph"
+readme = "README.md"
+keywords = ["agents", "orchestration", "cli", "ndjson", "llm"]
+categories = ["command-line-utilities", "development-tools"]
+# What a crates.io consumer receives: the sources, the manifest, the readme, the
+# licence, and the contract the API is written against — `tests/contract.rs`
+# reads `docs/contract.md`, so shipping the code without it would ship a crate
+# whose own test cannot run. Excludes the CLAUDE.md/AGENTS.md symlink (registries
+# reject symlinks), CI config, and the packaging scaffolding.
+include = [
+  "src/**/*.rs",
+  "tests/**/*.rs",
+  "Cargo.toml",
+  "README.md",
+  "LICENSE",
+  "/docs/contract.md",
+]
+
+[[bin]]
+name = "oneagentgraph"
+path = "src/main.rs"
+
+[lib]
+name = "oneagentgraph"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4.6", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
+# envelope carries its payload's fields in the order they arrived — what the
+# contract's "deterministic rendering" promise needs from the JSON mode.
+serde_json = { version = "1", features = ["preserve_order"] }
+# The graph config is YAML. serde_norway is the maintained fork of the
+# deprecated serde_yaml; `cargo deny` is what keeps that choice honest.
+serde_norway = "0.9"
+thiserror = "2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+
+[[test]]
+name = "e2e"
+path = "tests/e2e/main.rs"
+
+# A CLI binary: optimize for a small, fast-starting artifact.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1

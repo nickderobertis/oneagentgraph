@@ -1,0 +1,48 @@
+# PyPI packaging for the oneagentgraph CLI.
+#
+# maturin's `bin` bindings wrap the prebuilt Rust binary in a per-platform wheel
+# (the ruff/uv pattern), so `pip install oneagentgraph-cli` is a seconds-fast
+# binary install — the quickest trustworthy path on a CI image with no Rust
+# toolchain, or in a restricted-egress network where github.com is blocked but
+# PyPI is reachable. The distribution is `oneagentgraph-cli`; the console command
+# it installs is `oneagentgraph`, from the `[[bin]]` in Cargo.toml.
+#
+# The version is deliberately NOT set here (`dynamic = ["version"]`): maturin
+# sources it from Cargo.toml, so release-plz stays the single version driver —
+# the same rule scripts/npm-build.mjs follows for the npm packages. Wheels are
+# built and published by .github/workflows/release.yml.
+
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "oneagentgraph-cli"
+description = "Compose agents into a graph over oneharness/onejudge and merge their outputs into one event stream."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Nick DeRobertis" }]
+keywords = ["agents", "orchestration", "cli", "ndjson", "llm"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Rust",
+    "Topic :: Software Development :: Build Tools",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/nickderobertis/oneagentgraph"
+Repository = "https://github.com/nickderobertis/oneagentgraph"
+
+[tool.maturin]
+# Package the compiled `oneagentgraph` binary as a wheel entry point, not a
+# Python extension module. manifest-path names the binary crate explicitly so
+# maturin never has to guess which manifest at the root it should build.
+bindings = "bin"
+manifest-path = "Cargo.toml"
+strip = true

@@ -1,0 +1,119 @@
+name: Published smoke
+
+# What the registries serve as `latest`, installed and smoke-tested weekly.
+#
+# release.yml's verify jobs prove a version at publish time. This proves it is
+# still installable *now*: a yanked wheel, an unpublished platform package, a
+# registry that lost a tag, or a runner image whose Python or Node moved on all
+# surface here rather than in a user's terminal. It installs exactly the way the
+# README tells users to and runs the same scripts/smoke-published.sh every other
+# tier runs, so a green run means the documented path works.
+#
+# Manual dispatch takes an optional version, for confirming a specific release.
+#
+# llmlint: ignore-file[changed_behavior_has_e2e] this workflow's subject is the public
+# registries themselves — what npm and PyPI serve to a fresh machine. There is no local
+# stand-in for that; a test could only assert against a fake registry, and the fake is
+# what would then be under test. The scripts it drives are covered locally: the smoke
+# script by ci.yml's `install` and `wheel` jobs on every pull request, and the retry
+# wrapper by every release.
+
+on:
+  schedule:
+    # Mondays, 07:00 UTC — a working-week morning, so a red run is seen.
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact version to smoke (default: whatever the registry serves as latest)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: published-smoke
+  cancel-in-progress: true
+
+jobs:
+  pypi:
+    name: pypi (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # The smoke script, at the current main.
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install from PyPI
+        # The dispatch input is untrusted data, so it reaches the shell through
+        # `env:` as a quoted variable rather than being interpolated into it.
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          spec="oneagentgraph-cli"
+          if [ -n "${REQUESTED:-}" ]; then
+            if ! [[ "$REQUESTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::'$REQUESTED' is not an X.Y.Z version"
+              exit 1
+            fi
+            spec="oneagentgraph-cli==$REQUESTED"
+          fi
+          bash scripts/retry-install.sh \
+            --label "PyPI $spec on $RUNNER_OS/$RUNNER_ARCH" \
+            --action "check https://pypi.org/project/oneagentgraph-cli/ — the version may be yanked or missing a wheel for this platform" \
+            -- pip install --no-cache-dir "$spec"
+      - name: Smoke-test what PyPI serves
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          bash scripts/smoke-published.sh \
+            ${REQUESTED:+--expect-version "$REQUESTED"} \
+            --label "PyPI oneagentgraph-cli on $RUNNER_OS/$RUNNER_ARCH"
+
+  npm:
+    name: npm (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install from npm
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          spec="oneagentgraph-cli"
+          if [ -n "${REQUESTED:-}" ]; then
+            if ! [[ "$REQUESTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::'$REQUESTED' is not an X.Y.Z version"
+              exit 1
+            fi
+            spec="oneagentgraph-cli@$REQUESTED"
+          fi
+          bash scripts/retry-install.sh \
+            --label "npm $spec on $RUNNER_OS/$RUNNER_ARCH" \
+            --action "check https://www.npmjs.com/package/oneagentgraph-cli — the platform package for this runner may be missing" \
+            -- npm install -g --prefer-online "$spec"
+      - name: Smoke-test what npm serves
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          bash scripts/smoke-published.sh \
+            ${REQUESTED:+--expect-version "$REQUESTED"} \
+            --label "npm oneagentgraph-cli on $RUNNER_OS/$RUNNER_ARCH"

@@ -1,0 +1,28 @@
+{
+  "name": "oneagentgraph-npm",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "npm/oneagentgraph-cli",
+  "tags": ["scope:packaging", "lang:js"],
+  "targets": {
+    "bootstrap": { "executor": "nx:noop" },
+    "format": { "command": "node_modules/.bin/biome format --write npm scripts" },
+    "format-check": { "command": "node_modules/.bin/biome format npm scripts" },
+    "lint": { "command": "node_modules/.bin/biome lint npm scripts" },
+    "test": {
+      "command": "node --test npm/test/*.test.mjs",
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/src/**/*",
+        "{workspaceRoot}/Cargo.toml",
+        "{workspaceRoot}/Cargo.lock",
+        "sharedGlobals"
+      ]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}

@@ -1,0 +1,23 @@
+/target
+# The Nx orchestrator's own install and computation cache. `scripts/nx.sh`
+# re-creates node_modules from the committed lockfile whenever it is missing.
+/node_modules
+/.nx
+# Preserved command output (scripts/nx.sh). Owner-only, truncated per run, and
+# never a source: it is the evidence a captured run leaves behind.
+/.logs
+# Assembled by scripts/npm-build.mjs and maturin; the committed sources are
+# npm/oneagentgraph-cli/ and pyproject.toml.
+/npm/dist
+/dist
+/wheels
+# Coverage instrumentation writes these wherever an instrumented binary happens
+# to run. They are raw counter dumps, never sources.
+*.profraw
+# Composed once during buildout and deliberately not committed (see AGENTS.md /
+# the create-repo skill): the one-time llmlint structural tier.
+llmlint.buildout.yml
+REPO_PLAN.md
+# Local sync bookkeeping for gh-secrets (per-machine; the manifest itself is
+# tracked).
+.gh-secrets-state.json

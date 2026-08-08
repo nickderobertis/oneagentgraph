@@ -1,0 +1,4 @@
+# Every change routes to the maintainer. Add per-project owners here as the
+# graph grows — the npm distribution and the Rust crate are separate Nx projects
+# and can take separate reviewers.
+* @nickderobertis

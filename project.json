@@ -1,0 +1,19 @@
+{
+  "name": "oneagentgraph",
+  "$schema": "node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "src",
+  "tags": ["scope:cli", "lang:rust"],
+  "targets": {
+    "bootstrap": { "command": "just _crate-bootstrap" },
+    "format": { "command": "just _crate-format" },
+    "format-check": { "command": "just _crate-fmt-check", "inputs": ["crateSource"] },
+    "lint": { "command": "just _crate-lint", "inputs": ["crateSource"] },
+    "test": { "command": "just _crate-test", "inputs": ["crateSource"] },
+    "doc": { "command": "just _crate-doc", "inputs": ["crateSource"] },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test", "doc"]
+    }
+  }
+}
