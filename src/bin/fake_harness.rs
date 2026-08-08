@@ -35,6 +35,7 @@
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
 //! | `fake:record-env=<path>` | append this process's selection-shaped environment |
+//! | `fake:record-argv=<path>` | append the argv this side was spawned with |
 //! | `FAKE_HARNESS_REFUSAL=quota` | a zero-work 429 the chain steps past |
 //! | `FAKE_HARNESS_REFUSAL=auth` | an unauthenticated refusal, on stderr alone |
 //! | `FAKE_HARNESS_REFUSAL=rate_limit` | the refusal a chain does **not** step past |
@@ -78,6 +79,9 @@ fn main() -> std::process::ExitCode {
 
     record(&prompt, "record-prompt", &prompt);
     record(&prompt, "record-env", &selection_environment());
+    // The argv is where a model reaches a harness, so it is where a journey can
+    // see that the side it was written on is the side that got it.
+    record(&prompt, "record-argv", &argv.join(" "));
 
     // These two variables are how a journey steers this double, and a value it
     // cannot read is a journey asserting against a turn it never configured —

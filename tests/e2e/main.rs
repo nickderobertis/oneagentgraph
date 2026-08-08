@@ -5,7 +5,7 @@
 //! Behind it run the real `onejudge` CLI and the real `oneharness` CLI, also as
 //! subprocesses. The **only** thing standing in for something real is the paid
 //! harness process, replaced at oneharness's own `ONEHARNESS_BIN_<ID>` seam by
-//! this crate's `fake-provider` double, because a model turn is the one genuinely
+//! this crate's `test-doubles` stand-in, because a model turn is the one genuinely
 //! external thing a gate cannot run for free.
 //!
 //! The journeys themselves are ported from `ai-orchestrator/tests/e2e/`, which is

@@ -12,6 +12,13 @@
 //! for a remote ref and not for a local one has the weaker of the two answers
 //! everywhere.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] `ResolvedRef.sha256` stays a
+// `String` because this crate is its only producer — `record()` writes it from
+// `Sha256::digest`, and the one reader is a run record this same crate wrote. A
+// newtype would add a validated parse to a value that never arrives unvalidated,
+// and the field it protects is provenance rather than a decision anything branches
+// on. Revisit if a record ever arrives from somewhere this crate did not write.
+
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};

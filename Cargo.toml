@@ -39,26 +39,26 @@ path = "src/main.rs"
 # The deterministic doubles the e2e suite drives as real subprocesses: one stands
 # in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, the
 # other speaks onejudge's `CommandProvider` JSON-lines protocol. Both are behind
-# `fake-provider` so a published `cargo install oneagentgraph` never builds them.
+# `test-doubles` so a published `cargo install oneagentgraph` never builds them.
 [[bin]]
 name = "oneagentgraph-fake-harness"
 path = "src/bin/fake_harness.rs"
-required-features = ["fake-provider"]
+required-features = ["test-doubles"]
 
 [[bin]]
 name = "oneagentgraph-fake-provider"
 path = "src/bin/fake_provider.rs"
-required-features = ["fake-provider"]
+required-features = ["test-doubles"]
 
 [lib]
 name = "oneagentgraph"
 path = "src/lib.rs"
 
 [features]
-# Test-only doubles for the two seams the suite is allowed to fake. Non-default,
-# so they are never in a consumer's build; `just check` and the coverage run
-# enable them because the e2e journeys spawn them.
-fake-provider = []
+# The deterministic doubles the e2e suite spawns: a paid-harness stand-in and a
+# onejudge `CommandProvider` backend. Non-default, so neither is ever in a
+# consumer's build; `just check` and the coverage run enable them.
+test-doubles = []
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }

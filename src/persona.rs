@@ -54,13 +54,59 @@ pub struct Persona {
     pub evals: Option<Vec<Value>>,
 }
 
+/// A persona's name: one lowercase segment, or several separated by `/` for a
+/// catalog under a directory.
+///
+/// A newtype because the name decides a *path* — `persona new` writes
+/// `<name>.yaml` — so a value carrying `..`, a leading `/`, or a backslash would
+/// write outside the catalog. Parsing it here means a document carrying one is
+/// rejected when it is read, rather than after something has been created.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
+pub struct PersonaName(String);
+
+impl PersonaName {
+    /// The name as written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::str::FromStr for PersonaName {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<Self, String> {
+        if is_persona_name(name) {
+            return Ok(Self(name.to_string()));
+        }
+        Err(format!(
+            "invalid persona name {name:?}: use slash-separated segments of lowercase letters, \
+             digits, and hyphens"
+        ))
+    }
+}
+
+impl<'de> Deserialize<'de> for PersonaName {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+impl std::fmt::Display for PersonaName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The agent half of a persona.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PersonaAgent {
     /// A label for the role, stamped on every event as the `persona` label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: Option<PersonaName>,
     /// The role, appended after the base config's shared preamble.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
@@ -112,21 +158,13 @@ impl Persona {
         if self.user.max_turns == Some(0) {
             errors.push("user.max_turns must be a positive integer".to_string());
         }
-        if self
-            .agent
-            .name
-            .as_deref()
-            .is_some_and(|name| !is_persona_name(name))
-        {
-            errors.push("agent.name must be lowercase letters, digits, and hyphens".to_string());
-        }
         errors
     }
 
     /// The name to stamp on this member's events, when the persona gave one.
     #[must_use]
     pub fn label(&self) -> Option<&str> {
-        self.agent.name.as_deref()
+        self.agent.name.as_ref().map(PersonaName::as_str)
     }
 }
 
@@ -387,12 +425,17 @@ mod tests {
     #[test]
     fn validation_names_every_failure_at_once() {
         let persona = Persona::parse(
-            "agent:\n  name: Bad Name\n  instructions: '  '\nuser:\n  persona: ''\n  max_turns: 0\n",
+            "agent:\n  instructions: '  '\nuser:\n  persona: ''\n  max_turns: 0\n",
             "p",
         )
         .unwrap();
         let errors = persona.validate();
-        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert_eq!(errors.len(), 3, "{errors:?}");
+
+        // A name that would write outside its catalog is refused when the
+        // document is *read*, not later: by then `persona new` has created it.
+        let err = Persona::parse("agent:\n  name: ../escape\n", "p.yaml").unwrap_err();
+        assert!(err.to_string().contains("invalid persona name"), "{err}");
     }
 
     /// A base that is not a mapping, or whose `user` is not one, is refused with
@@ -445,6 +488,33 @@ mod tests {
         ] {
             assert!(!is_persona_name(bad), "{bad} was accepted");
         }
+    }
+
+    /// The catalog and the directory it is compiled from cannot drift: a file
+    /// added to `personas/` and forgotten here would ship as a persona no graph
+    /// can name, and one removed there would fail to compile — so only the first
+    /// direction needs a gate, and this is it.
+    #[test]
+    fn the_catalog_names_every_persona_the_directory_holds() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("personas");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("the personas directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            // `_`-prefixed files are scaffolding, not personas.
+            .filter(|name| name.ends_with(".yaml") && !name.starts_with('_'))
+            .map(|name| name.trim_end_matches(".yaml").to_string())
+            .collect();
+        on_disk.sort();
+        let shipped: Vec<String> = SHIPPED_PERSONAS
+            .iter()
+            .map(|(name, _)| (*name).into())
+            .collect();
+        assert_eq!(
+            shipped, on_disk,
+            "SHIPPED_PERSONAS and personas/ disagree; a persona in one and not the other \
+             either ships unnamed or is named and absent"
+        );
     }
 
     /// Every shipped persona validates and merges to a complete config — the

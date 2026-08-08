@@ -55,6 +55,11 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# One scratch file for a probe's stderr, so a failure report can carry the
+# binary's own diagnostic rather than only the assertion that tripped.
+TMPDIR_ERR="$(mktemp)"
+trap 'rm -f "$TMPDIR_ERR"' EXIT
+
 command -v oneagentgraph >/dev/null 2>&1 || fail "no 'oneagentgraph' on PATH" \
   "install it first — 'pip install oneagentgraph-cli' or 'npm install -g oneagentgraph-cli'"
 
@@ -78,9 +83,11 @@ done
 # A graph that is not there is the contract's exit 2, and nothing on stdout: a
 # caller reads a line on stdout as an event, so a refusal must not produce one.
 code=0
-out="$(oneagentgraph run no-such-graph.yaml 2>/dev/null)" || code=$?
+why="$(oneagentgraph run no-such-graph.yaml 2>"$TMPDIR_ERR")" || code=$?
+out="$why"
+why="$(cat "$TMPDIR_ERR")"
 if [ "$code" -ne 2 ]; then
-  fail "'run' on a missing graph exited $code, not 2" \
+  fail "'run' on a missing graph exited $code, not 2: $why" \
     "reinstall this version and re-run; if it still does, the published artifact is not the revision CI gated — re-cut the release"
 fi
 if [ -n "$out" ]; then
@@ -91,7 +98,7 @@ fi
 # `validate` is the one verb that needs nothing else installed, so it is what
 # proves the artifact can actually read a graph rather than only parse argv.
 work="$(mktemp -d)"
-trap 'rm -rf "$work"' EXIT
+trap 'rm -rf "$work" "$TMPDIR_ERR"' EXIT
 printf 'version: 1\nname: smoke\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./h.toml\n' > "$work/graph.yaml"
 printf 'run_mode = "fallback"\nharnesses = ["claude-code"]\n' > "$work/h.toml"
 if ! why="$(oneagentgraph validate "$work/graph.yaml" 2>&1 >/dev/null)"; then
@@ -100,9 +107,9 @@ if ! why="$(oneagentgraph validate "$work/graph.yaml" 2>&1 >/dev/null)"; then
 fi
 
 code=0
-oneagentgraph validate "$work/nowhere.yaml" >/dev/null 2>&1 || code=$?
+why="$(oneagentgraph validate "$work/nowhere.yaml" 2>&1 >/dev/null)" || code=$?
 if [ "$code" -ne 2 ]; then
-  fail "'validate' on a missing graph exited $code, not 2" \
+  fail "'validate' on a missing graph exited $code, not 2: $why" \
     "reinstall this version and re-run 'oneagentgraph validate <a missing path>'; a code other than 2 means this artifact predates the contract's exit codes"
 fi
 

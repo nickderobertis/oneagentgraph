@@ -396,12 +396,9 @@ fn tempdir(env: &BTreeMap<String, String>) -> Result<PathBuf, Error> {
 fn persona(args: &PersonaArgs) -> Result<i32, Error> {
     match &args.command {
         PersonaCommand::New { name } => {
-            if !oneagentgraph::persona::is_persona_name(name) {
-                return Err(Error::InvalidConfig(format!(
-                    "invalid persona name {name:?}: use slash-separated segments of lowercase \
-                     letters, digits, and hyphens"
-                )));
-            }
+            // Parsed before anything is created: the name decides the path.
+            let name: oneagentgraph::persona::PersonaName =
+                name.parse().map_err(Error::InvalidConfig)?;
             let path = PathBuf::from(format!("{name}.yaml"));
             if path.exists() {
                 return Err(Error::InvalidConfig(format!(

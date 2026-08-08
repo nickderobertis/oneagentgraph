@@ -3,7 +3,7 @@
 //! A journey builds a real graph on disk, runs the real `oneagentgraph` binary
 //! against it, and reads back the NDJSON it produced. The only thing standing in
 //! for something real is the paid harness process, replaced at oneharness's own
-//! `ONEHARNESS_BIN_<ID>` seam by the crate's own `fake-provider` double — real
+//! `ONEHARNESS_BIN_<ID>` seam by the crate's own `test-doubles` stand-in — real
 //! `onejudge` drives the conversation and real `oneharness` selects the identity
 //! in between.
 

@@ -14,6 +14,14 @@
 //! of the last one is what failed this smoke for weeks of healthy launches while
 //! one subscription's quota was gone and the next served every turn.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] the harness *identity* on a
+// `FellThrough` and a `Verdict` stays a `String` on purpose: `docs/contract.md` is
+// explicit that this crate owns no harness logic, and what counts as an identity —
+// `codex`, `claude-code:alternate2` — is oneharness's to define and to change.
+// Minting a validated identity type here would be this crate claiming that domain,
+// and would refuse an identity oneharness accepts. What this module *does* decide,
+// the classification, is the closed `Reason` set above.
+
 use std::path::Path;
 use std::process::Command;
 

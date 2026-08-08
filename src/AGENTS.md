@@ -44,7 +44,7 @@ is the one place that distinction lives.
 on a harness id and no spelling of it reaches a variant, so a chain naming
 `claude-code:alternate` spawns the real paid provider with the double sitting
 unused beside it. That is a money hazard, not a style point. `src/bin/` holds the
-two doubles, behind the non-default `fake-provider` feature; keep them
+two doubles, behind the non-default `test-doubles` feature; keep them
 deterministic and free of anything the crate does not already depend on.
 
 **Provisioning installs both CLIs.** `just bootstrap` pins them, and the versions

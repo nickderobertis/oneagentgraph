@@ -41,24 +41,46 @@ fn a_model_reaches_only_the_side_it_was_written_on() {
         "    agent:\n      oneharness_config: ./oneharness.toml\n",
         "    agent:\n      oneharness_config: ./oneharness.toml\n      model: agent-only-model\n",
     ));
+    // Asserted at the provider boundary rather than in the generated config: the
+    // argv is where a model actually reaches a harness, so this is what proves
+    // the side it was written on is the side that got it.
+    let argv = workspace.at("argv.txt");
     workspace
-        .run_task("complete-now: per-side model")
+        .run_task(&format!(
+            "complete-now: per-side model fake:record-argv={}",
+            argv.display()
+        ))
         .expect_code(0);
 
-    let members = workspace.state();
-    let agent = read_side(&members, "oneharness.toml");
-    let judge = read_side(&members, "oneharness.judge.toml");
+    let spawned = std::fs::read_to_string(&argv).expect("the harness recorded its argv");
+    let lines: Vec<&str> = spawned.lines().collect();
     assert!(
-        agent.contains("agent-only-model"),
-        "the agent side kept its config's model: {agent}"
+        lines.len() >= 2,
+        "not every side reached the double: {spawned}"
     );
     assert!(
-        !agent.contains("agent-side-default"),
-        "the override did not replace the pinned model: {agent}"
+        lines
+            .iter()
+            .any(|line| line.contains("--model agent-only-model")),
+        "the agent side never got its override: {spawned}"
     );
     assert!(
-        judge.contains("judge-side-default") && !judge.contains("agent-only-model"),
-        "the agent's model reached the judge: {judge}"
+        lines
+            .iter()
+            .any(|line| line.contains("--model judge-side-default")),
+        "the judge side did not keep the model its own config pins: {spawned}"
+    );
+    assert!(
+        !spawned.contains("agent-side-default"),
+        "the override did not replace the pinned model: {spawned}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.contains("agent-only-model"))
+            .count(),
+        1,
+        "the agent's model reached the judge: {spawned}"
     );
 }
 
@@ -93,10 +115,19 @@ fn the_model_value_itself_is_forwarded_unchecked() {
         "    agent:\n      oneharness_config: ./oneharness.toml\n",
         "    agent:\n      oneharness_config: ./oneharness.toml\n      model: no-such-model-anywhere\n",
     ));
+    let argv = workspace.at("argv.txt");
     workspace
-        .run_task("complete-now: unchecked model")
+        .run_task(&format!(
+            "complete-now: unchecked model fake:record-argv={}",
+            argv.display()
+        ))
         .expect_code(0);
-    assert!(read_side(&workspace.state(), "oneharness.toml").contains("no-such-model-anywhere"));
+    assert!(
+        std::fs::read_to_string(&argv)
+            .expect("argv")
+            .contains("--model no-such-model-anywhere"),
+        "a model this crate never checked did not reach the harness"
+    );
 }
 
 /// The chain the member's own config declares is what selects the identity — a
@@ -229,17 +260,6 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
     );
     assert_eq!(advanced[0]["payload"]["reason"], serde_json::json!("quota"));
     assert!(!run.of_kind("member-settled").is_empty());
-}
-
-/// One side's resolved config, as the run wrote it into that member's scratch.
-fn read_side(state: &std::path::Path, name: &str) -> String {
-    let members = std::fs::read_dir(state)
-        .expect("state")
-        .flatten()
-        .map(|entry| entry.path().join("members").join("worker"))
-        .find(|path| path.exists())
-        .expect("the member's scratch");
-    std::fs::read_to_string(members.join(name)).unwrap_or_default()
 }
 
 /// Mark a generated helper script executable, so oneharness can spawn it.
