@@ -31,8 +31,18 @@ fn main() -> std::process::ExitCode {
         eprintln!("fake-provider: the request is not JSON");
         return std::process::ExitCode::from(1);
     };
-    let task = first_user_message(&request);
-    let turns = assistant_turns(&request);
+    // `messages` is the half of the protocol every answer below is derived from:
+    // the task steers the verdict, and the turn count decides whether the
+    // supervisor lets the conversation finish. A request without it is one this
+    // double cannot answer, and defaulting to an empty conversation would answer
+    // *something* — a journey passing against a request it never received. So it
+    // is refused here, once, rather than absorbed twice below.
+    let Some(messages) = request.get("messages").and_then(Value::as_array) else {
+        eprintln!("fake-provider: the request has no `messages` array to answer from");
+        return std::process::ExitCode::from(1);
+    };
+    let task = first_user_message(messages);
+    let turns = assistant_turns(messages);
     let response = match request.get("op").and_then(Value::as_str) {
         // The unified per-turn supervisor: it decides completion, or supplies the
         // next simulated-user message.
@@ -72,12 +82,13 @@ fn main() -> std::process::ExitCode {
 }
 
 /// The task, which onejudge always sends as the first user message.
-fn first_user_message(request: &Value) -> String {
-    request
-        .get("messages")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
+///
+/// A conversation with no user message at all is not malformed — the supervisor is
+/// asked before the first one exists — so an absent task is empty rather than a
+/// refusal. That the array itself is present is settled by the caller.
+fn first_user_message(messages: &[Value]) -> String {
+    messages
+        .iter()
         .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
         .and_then(|message| message.get("content").and_then(Value::as_str))
         .unwrap_or_default()
@@ -85,15 +96,9 @@ fn first_user_message(request: &Value) -> String {
 }
 
 /// How many turns the agent has taken so far.
-fn assistant_turns(request: &Value) -> usize {
-    request
-        .get("messages")
-        .and_then(Value::as_array)
-        .map(|messages| {
-            messages
-                .iter()
-                .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
-                .count()
-        })
-        .unwrap_or(0)
+fn assistant_turns(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .filter(|m| m.get("role").and_then(Value::as_str) == Some("assistant"))
+        .count()
 }
