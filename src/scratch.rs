@@ -837,7 +837,10 @@ mod platform {
     /// ever grouped under the run directory itself — so `cancel RUN --kill` has
     /// to reach a group recorded beneath the one it was given.
     pub fn stamped_for(stamp: &str) -> Vec<ProcessIdentity> {
-        let mut found: Vec<ProcessIdentity> = groups_under(Path::new(stamp))
+        // Asking, not acting: a handle opened for `JOB_OBJECT_QUERY` alone
+        // cannot terminate the tree it reports on, so a reader that is only ever
+        // meant to enumerate cannot become a teardown by mistake.
+        let mut found: Vec<ProcessIdentity> = groups_under(Path::new(stamp), JOB_OBJECT_QUERY)
             .into_iter()
             .flat_map(|job| pids_in(job.as_raw()))
             .filter_map(|pid| {
@@ -863,7 +866,7 @@ mod platform {
     pub fn terminate(scratch: &Path, targets: &[ProcessIdentity]) -> usize {
         let own = std::process::id();
         let mut ended = 0;
-        for job in groups_under(scratch) {
+        for job in groups_under(scratch, JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE) {
             let pids = pids_in(job.as_raw());
             if pids.contains(&own) {
                 continue;
@@ -1025,7 +1028,11 @@ mod platform {
             .collect()
     }
 
-    /// Every group recorded at or below `root`, opened for query and teardown.
+    /// Every group recorded at or below `root`, opened for `access` and no more.
+    ///
+    /// The rights are the caller's to name because they are not the same:
+    /// enumerating a tree and ending one are different acts, and a handle that
+    /// could do both is one an enumeration could end a member's tree through.
     ///
     /// A record naming a job nothing holds open any more simply does not open,
     /// which is the same answer as an empty group: that tree is gone.
@@ -1039,7 +1046,7 @@ mod platform {
     /// operator read which one; what it may not do is choose. A record that does
     /// not match the name this directory computes is not this crate's, and is
     /// skipped rather than opened.
-    fn groups_under(root: &Path) -> Vec<Job> {
+    fn groups_under(root: &Path, access: u32) -> Vec<Job> {
         let mut found = Vec::new();
         let mut walking = vec![(root.to_path_buf(), 0usize)];
         while let Some((dir, depth)) = walking.pop() {
@@ -1050,9 +1057,7 @@ mod platform {
                 let name = wide(&expected);
                 // SAFETY: `name` is a live, null-terminated wide string for the
                 // duration of the call; failure is reported with a null handle.
-                let job = unsafe {
-                    OpenJobObjectW(JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE, 0, name.as_ptr())
-                };
+                let job = unsafe { OpenJobObjectW(access, 0, name.as_ptr()) };
                 found.extend(Job::own(job));
             }
             if depth >= RECORD_DEPTH {

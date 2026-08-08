@@ -35,6 +35,7 @@
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
+//! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
 //! | `fake:record-env=<path>` | append this process's selection-shaped environment |
 //! | `fake:record-argv=<path>` | append the argv this side was spawned with |
@@ -137,6 +138,12 @@ fn main() -> std::process::ExitCode {
     // be refusing it by the time a journey can reach it.
     ignore_term();
 
+    // Likewise before the turn blocks, because the whole point of this one is
+    // that it is already running when the supervisor decides to end the tree.
+    if let Some(path) = sentinel_path(&prompt, "spawn-ticker") {
+        spawn_ticker(&path);
+    }
+
     // Before every refusal branch, because what a journey counts here is
     // *launches*: a smoke that relaunches a failed start is asserting on the
     // attempts that failed as much as on the one that worked.
@@ -237,6 +244,35 @@ const TICK_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 /// host went away.
 const TICK_FOR: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Leave a ticker behind that outlives this process.
+///
+/// This is the descendant nothing *upstream* reaches. The chain a member is —
+/// `onejudge`, then `oneharness`, then this — tears itself down when its head is
+/// killed: each CLI ends the child it holds. A process whose parent has already
+/// exited has nobody left to be ended by, so it is the one a supervisor that
+/// kills only the process it holds leaks, and it is what a real harness leaving a
+/// background worker behind looks like. Reaching it is the whole reason
+/// membership is proven by something the kernel keeps — an environment stamp, or
+/// a job object — rather than by walking the tree from the member's own pid.
+///
+/// Detached from this process's streams as well as its lifetime: a leaked
+/// descendant holding a pipe open is a *different* failure, covered by the
+/// cancel journeys, and one that would make this journey pass for the wrong
+/// reason by hanging the run instead of leaving something running.
+fn spawn_ticker(path: &std::path::Path) {
+    let Ok(own) = std::env::current_exe() else {
+        eprintln!("fake-harness: cannot find this binary to launch a ticker from");
+        return;
+    };
+    let _ = std::process::Command::new(own)
+        .arg("-p")
+        .arg(format!("{MARK}hang {MARK}tick={}", path.display()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Never answer, and — when a journey asked for it — leave a tick behind for as
 /// long as this process is alive.
 ///
@@ -264,8 +300,17 @@ fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
         }
         std::thread::sleep(TICK_EVERY);
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey drives this arm
+    // because reaching it *is* a journey failing: it runs only when nothing
+    // reaped this process for thirty seconds, and the two journeys that use the
+    // tick assert the teardown happened within one and a half. A test asserting
+    // on this branch would be asserting that the reap did not work. What it is
+    // for is the failing run — where it stops a leaked double from outliving the
+    // suite that leaked it — and it was observed doing exactly that on the
+    // throwaway branch that compiled the Windows layer out.
     eprintln!("fake-harness: a ticking turn outlived its bound, so nothing ever reaped it");
     exit(1)
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// What this side answers, decided by which side onejudge is asking.

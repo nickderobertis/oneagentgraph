@@ -808,13 +808,25 @@ const REACH_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Condemn a member by `rule` and hold that its descendant stopped running.
 ///
-/// The witness is the descendant itself. Neither of the obvious alternatives
-/// works here: a pid is not reachable from outside the run, and this crate's own
-/// `stamped_for` is *the facility under test* — on the platform this journey is
-/// newest on it answered "nothing is running" whether or not anything was, so an
-/// assertion resting on it would have passed against a leak. So the doubled
-/// harness appends to a file for as long as it is alive, and a file that has
-/// stopped growing once the run returns is a tree that is gone.
+/// The witness is a **detached** descendant, and both halves of that are load
+/// bearing.
+///
+/// *Detached*, because the chain tears itself down without any help: kill
+/// `onejudge` and it ends `oneharness`, which ends the double. A journey watching
+/// those goes green whether or not this supervisor did anything, which is a test
+/// that proves nothing — measured, not assumed: the first version of this one
+/// watched the double and passed with the whole Windows layer compiled out. What
+/// no cascade reaches is a process whose parent has already exited, so the double
+/// leaves one behind, and that is also the real hazard — a harness that forks a
+/// background worker and dies.
+///
+/// *A descendant*, because the alternatives cannot answer. A pid is not reachable
+/// from outside the run, and this crate's own `stamped_for` is the facility under
+/// test — on the platform this is newest on it answered "nothing is running"
+/// whether or not anything was, so an assertion resting on it goes green against
+/// exactly the leak it is written to catch. So the descendant answers for itself:
+/// it appends to a file while it lives, and a file that stops growing once the
+/// run returns is a tree that is gone.
 ///
 /// The retry is how the *precondition* is reached, not tolerance for a flaky
 /// assertion. A condemnation is a race against process startup by construction:
@@ -842,7 +854,7 @@ fn a_condemned_member_leaves_no_descendant_running(
                 "run",
                 "./graph.yaml",
                 "--task",
-                &format!("fake:hang fake:tick={}", ticks.display()),
+                &format!("fake:hang fake:spawn-ticker={}", ticks.display()),
                 "--dir",
                 &workspace.dir().display().to_string(),
             ],
