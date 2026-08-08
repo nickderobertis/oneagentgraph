@@ -33,14 +33,13 @@ proposal to the planner who owns that contract, never a unilateral edit.
 and drives them through the public types, so the doc and the types cannot drift.
 Adding a contract type without extending that test leaves the doc unproven.
 
-### Interface-only, for now
+### Interface-only
 
-The crate is deliberately at an **interface-only** stage: the contract's types
-and CLI surface compile and are proven, and nothing implements them. Every
-command parses and then refuses with `NOT IMPLEMENTED` and **exit code 3**, so a
-caller wired in early fails visibly instead of reading an empty stream as a graph
-that settled. Anything published in this state — a wheel, an npm package, a crate
-— makes that promise and no other; `scripts/smoke-published.sh` asserts it.
+The crate implements the contract's surface and nothing behind it. Every command
+parses and then refuses with `NOT IMPLEMENTED` and **exit code 3**: a caller
+wired in early must fail visibly rather than read an empty stream as a graph that
+settled, and anything published makes that promise and no other. Hold that
+promise until the implementation lands — `scripts/smoke-published.sh` asserts it.
 
 ## Stack and composition
 
@@ -59,47 +58,32 @@ that settled. Anything published in this state — a wheel, an npm package, a cr
 
 ## Command surface
 
-`just --list` is the index; do not hand-roll equivalents.
-
-- `just bootstrap` works from a clean clone.
-- `just check` is the deterministic gate: format check, clippy `-D warnings`,
-  tests (unit + contract + e2e) with coverage enforced, and rustdoc with
-  warnings denied. It fails on any issue — no warnings-only mode.
-- `just gate` is the complete pre-push bar: `check` plus the diff-scoped llmlint
-  tier. A change is not done until `just gate` is green.
-- `just deps-check` (`cargo deny` + `cargo machete`) and `just msrv` are their
-  own steps: the first needs a network advisory DB, the second another
-  toolchain, so neither belongs in the offline deterministic gate. CI runs both.
+`just --list` is the index; do not hand-roll equivalents. `just check` is the
+deterministic gate and `just gate` is the complete pre-push bar — `check` plus
+the diff-scoped llmlint tier — and a change is not done until `gate` is green.
+`deps-check` and `msrv` sit outside both because one needs a network advisory
+database and the other a second toolchain; CI runs them as their own jobs.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
-over projects by hand in a recipe.
+over projects by hand in a recipe, and declare a cross-project dependency in the
+consuming `project.json` — an undeclared one silently drops that project out of
+`nx affected`, so a pull request runs a gate that never touched it.
 
 ## Invariants (non-negotiable)
 
-- **Coverage is enforced at 95% line coverage** (`cargo llvm-cov
-  --fail-under-lines 95`). `just check` fails below it.
-- **Tests are realistic — never mock the layer under test.** The e2e suite
-  spawns the *compiled binary* as a subprocess and asserts on exit code, stdout,
-  and stderr; the packaging suite assembles the real npm package around the real
-  binary and runs the launcher. An in-process `main()` call is not an e2e.
-- **E2E runs inside `just check`**, never `#[ignore]`-d out of it.
+- **Coverage is enforced at 95% line coverage.** `just check` fails below it.
+  Lower the bar only with the reason written here.
+- **Tests are realistic — never mock the layer under test.** Drive the compiled
+  binary as a subprocess and assert on exit code, stdout, and stderr; assemble
+  the real package around the real binary. An in-process `main()` call is not an
+  e2e, and every journey it covers runs inside `just check` rather than behind
+  `#[ignore]`.
 - **Validate external input at its trust boundary.** Graph configs and event
-  envelopes are external input: the schema structs reject unknown fields where
-  serde allows it, so a typo fails loudly instead of being silently dropped.
+  envelopes are external input: the schema structs reject unknown fields, so a
+  typo fails loudly instead of being silently dropped.
 - **Secrets never enter the tree.** `gh-secrets.json` names the required secrets
   and where they come from; the values live in the platform secret store.
-
-## Tests are context engineering
-
-Agents do nearly all the work here, so the suite is the only QA loop.
-
-- `tests/contract.rs` — the committed contract text drives the public types.
-- `tests/e2e/` — every CLI journey a user reaches, happy path and failure:
-  `--help`, `--version`, each subcommand's refusal and its exit code, an unknown
-  subcommand, and a missing required argument.
-- `npm/test/` — the packaged launcher resolves and execs the real binary, and
-  reports a missing platform package as an actionable error.
 
 When a journey lands, its real e2e lands with it.
 

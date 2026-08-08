@@ -4,6 +4,7 @@
   "projectType": "library",
   "sourceRoot": "npm/oneagentgraph-cli",
   "tags": ["scope:packaging", "lang:js"],
+  "implicitDependencies": ["oneagentgraph"],
   "targets": {
     "bootstrap": { "executor": "nx:noop" },
     "format": {

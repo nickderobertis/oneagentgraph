@@ -23,10 +23,9 @@ Rules while that holds:
   items fail the gate.** That is deliberate: at this stage the docs are most of
   what the crate delivers.
 
-Two llmlint rules are suppressed at their sites in `config.rs` and `event.rs`,
-each naming which of the rules above forbids the fix. Both are follow-ups for the
-implementation change, not permanent exemptions — revisit them there rather than
-widening either directive.
+The llmlint directives in these files name which rule above forbids their fix.
+They are exemptions for this stage, not permanent ones: revisit each with the
+implementation rather than widening its directive.
 
 `tests/contract.rs` reads `docs/contract.md` itself, so a type added here without
 a matching assertion there leaves the document unproven. Extend it in the same

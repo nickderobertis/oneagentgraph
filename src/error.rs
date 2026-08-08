@@ -1,5 +1,10 @@
 //! The failure modes the contract names, and the exit codes they map to.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] the failing member is named by a
+// `String` because a `MemberName` newtype is a public item `docs/contract.md` does not
+// name, and minting one is the interface drift the interface-only stage forbids (see
+// AGENTS.md). Revisit when the runtime owns a member registry to validate against.
+
 /// What can go wrong running a graph.
 ///
 /// The variants are exactly the two failures `docs/contract.md` distinguishes,

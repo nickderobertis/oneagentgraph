@@ -19,7 +19,14 @@ into anything.
 ```bash
 pip install oneagentgraph-cli      # prebuilt binary, no Rust toolchain
 npm install -g oneagentgraph-cli   # the same binary, via npm
-cargo install oneagentgraph        # from source
+cargo install oneagentgraph        # from crates.io, compiled locally
+```
+
+To install a revision that has not been released yet, build it from the
+repository:
+
+```bash
+cargo install --git https://github.com/nickderobertis/oneagentgraph --locked
 ```
 
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and

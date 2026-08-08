@@ -50,7 +50,6 @@
       "Bash(git diff --cached)",
       "Bash(git diff --stat)",
       "Bash(git log --oneline -20)",
-      "Bash(git add -A)",
       "Bash(gh pr status)",
       "Bash(gh pr merge --auto --squash)",
       "Bash(gh run list)"

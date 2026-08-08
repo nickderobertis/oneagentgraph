@@ -4,6 +4,14 @@
 //! parsing only. Nothing here runs, validates, cancels, or reports anything; the
 //! binary parses one of these and refuses.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] every identifier and boundary
+// value here is the argument `docs/contract.md` spells, and this is the parsing layer
+// only. A `RunId`/`MemberName`/`Label` newtype would be a public item the contract does
+// not name, and parsing `k=v` or `PATH=VALUE` into one is the implementation the
+// interface-only stage forbids (see AGENTS.md). `HistoryArgs` keeps two independent
+// `Option`s because that is what `history [RUN] | history show ID` is in clap; making the
+// pair exclusive in the type is a follow-up the contract has to settle first.
+
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};

@@ -169,6 +169,30 @@ jobs:
       - name: Smoke-test the installed binary
         run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
 
+  # The README's from-source one-liner, run verbatim. It can only resolve code
+  # that is already on the remote, so it runs on main rather than on pull
+  # requests — where the `install` job above proves the same path against the
+  # branch's own revision. Not a required check for that reason.
+  install-documented:
+    if: github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # For scripts/smoke-published.sh; the install itself takes nothing from the
+      # checkout, which is the point.
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - name: Install (the command the README gives users)
+        run: cargo install --git https://github.com/nickderobertis/oneagentgraph --locked
+      - name: Smoke-test the installed binary
+        run: bash scripts/smoke-published.sh --label "cargo install --git on $RUNNER_OS/$RUNNER_ARCH"
+
   # The other end-user install path: the maturin wheel `pip install
   # oneagentgraph-cli` serves. Built and installed from this revision so the
   # packaging is proven on every pull request rather than first at a release,

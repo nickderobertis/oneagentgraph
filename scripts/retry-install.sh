@@ -18,14 +18,19 @@
 # Quiet on success: one line naming the attempt it took. On exhaustion: the last
 # attempt's own output, then the error and what to do about it.
 #
+# llmlint: ignore-file[tool_output_is_signal] the per-attempt lines survive a later
+# success on purpose. They go to stderr while the success line goes to stdout, and a
+# release that took four attempts over five minutes is a registry propagating slowly —
+# the one warning anybody gets before the run that exhausts the budget.
+#
 # Usage:
 #   retry-install.sh [--budget S] [--first-delay S] [--max-delay S]
 #                    [--label TEXT] [--action TEXT] -- COMMAND [ARG...]
 set -euo pipefail
 
 # The whole loop, wall clock, including the command's own runtime. Ten minutes is
-# far past the propagation windows seen on the three red releases and still well
-# inside a verify job's patience.
+# far past a registry's usual propagation window and still well inside a verify
+# job's patience.
 budget=600
 first_delay=5
 max_delay=60

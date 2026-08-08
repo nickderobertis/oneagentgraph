@@ -10,6 +10,12 @@
 # stderr rather than reporting a scoped pass as a full one. Affected selection is
 # a speed optimisation, and a speed optimisation that can silently skip a check
 # is a correctness hole.
+#
+# llmlint: ignore-file[tool_output_is_signal] the fallback notices below are the whole
+# point of failing closed: a run that silently widened its scope, or answered `true` for
+# every project, looks identical to one that scoped correctly, and the next reader has no
+# way to tell why the gate took ten minutes or passed without checking anything. They go
+# to stderr, so the `--affects` answer on stdout stays parseable.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
