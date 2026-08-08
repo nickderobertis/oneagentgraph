@@ -25,6 +25,7 @@ use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
     STALL_TIMEOUT_ENV,
 };
+use oneagentgraph::run::Started;
 use serde_json::{json, Value};
 
 /// The approved contract itself.
@@ -702,4 +703,46 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
             "the contract's CLI block no longer documents `{flag}`"
         );
     }
+}
+
+/// `--detach` prints `{run_id, events_path, pid}` and exits 0 — three keys the
+/// contract names, and the shape a caller parses to find the run it just left
+/// behind. Driven through the type so a rename here fails against the document.
+#[test]
+fn the_detach_answer_carries_the_three_keys_the_contract_names() {
+    let sentence = CONTRACT
+        .lines()
+        .find(|line| line.contains("--detach` prints"))
+        .expect("the contract no longer describes what --detach prints");
+    for key in ["run_id", "events_path", "pid"] {
+        assert!(
+            sentence.contains(key),
+            "the contract's --detach answer no longer names `{key}`"
+        );
+    }
+
+    let started = Started {
+        run_id: "node-scope-1786171301679-1447994".into(),
+        events_path: "/state/node-scope/events.jsonl".into(),
+        pid: 1_447_994,
+    };
+    let rendered = serde_json::to_value(&started).expect("an answer");
+    let keys: BTreeSet<&str> = rendered
+        .as_object()
+        .expect("a mapping")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["run_id", "events_path", "pid"]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    // And it round-trips, because a caller that reads it back has to get the
+    // same three values it was handed.
+    assert_eq!(
+        serde_json::from_value::<Started>(rendered).expect("round-trips"),
+        started
+    );
 }

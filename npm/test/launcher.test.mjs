@@ -156,11 +156,13 @@ describe("the npm distribution", () => {
     const project = mkdtempSync(join(work, "app-"));
     installInto(project, [launcherTgz, platformTgz]);
 
-    // The interface-only refusal exits 3; a launcher that collapsed every
-    // failure to 1 would hide the contract's own codes from a caller.
-    const refused = launch(project, ["run", "graph.yaml"]);
-    assert.equal(refused.code, 3, refused.stderr);
-    assert.match(refused.stderr, /NOT IMPLEMENTED/);
+    // The contract assigns exit 2 to an invalid config, and a caller branches on
+    // it; a launcher that collapsed every failure to 1 would hide the contract's
+    // own codes. A graph that is not there is the cheapest way to reach one.
+    const refused = launch(project, ["run", "no-such-graph.yaml"]);
+    assert.equal(refused.code, 2, refused.stderr);
+    assert.match(refused.stderr, /no-such-graph\.yaml/);
+    assert.equal(refused.stdout, "", "a refusal must not read as an event stream");
   });
 
   it("says what to do when the platform package is missing", () => {
