@@ -161,7 +161,7 @@ _crate-test:
 # legs run the same suite through this instead of `test`.
 # Full test suite without coverage instrumentation.
 test-quick:
-    @cargo nextest run --locked --all-features --status-level fail
+    @cargo nextest run --locked --all-features --no-fail-fast --status-level fail
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`).
