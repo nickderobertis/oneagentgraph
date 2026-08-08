@@ -1,19 +1,30 @@
 //! End-to-end journeys against the compiled binary.
 //!
-//! Every test here spawns the real `oneagentgraph` executable as a subprocess
+//! Every journey here spawns the real `oneagentgraph` executable as a subprocess
 //! and asserts on its exit code, stdout, and stderr — the way a user reaches it.
-//! Nothing is stubbed: at the interface-only stage the product *is* the argument
-//! surface and the refusal, so that is what these drive.
+//! Behind it run the real `onejudge` CLI and the real `oneharness` CLI, also as
+//! subprocesses. The **only** thing standing in for something real is the paid
+//! harness process, replaced at oneharness's own `ONEHARNESS_BIN_<ID>` seam by
+//! this crate's `fake-provider` double, because a model turn is the one genuinely
+//! external thing a gate cannot run for free.
+//!
+//! The journeys themselves are ported from `ai-orchestrator/tests/e2e/`, which is
+//! where the accumulated failure knowledge of this system lives — each is named
+//! after the thing that once broke.
+
+mod dispatch;
+mod liveness;
+mod selection;
+mod support;
+mod verbs;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-/// The exit code the interface-only build refuses with, distinct from every code
-/// the contract assigns (`0`, `1`, `2`).
-const NOT_IMPLEMENTED: i32 = 3;
-
 /// clap's exit code for a usage error — a command line the surface does not
-/// accept, rejected before anything is attempted.
+/// accept, rejected before anything is attempted. It coincides with the
+/// contract's `2` for an invalid config, and deliberately so: both are "this
+/// invocation was never going to run."
 const USAGE_ERROR: i32 = 2;
 
 /// The compiled binary under test, resolved by cargo rather than by PATH.
@@ -21,17 +32,17 @@ fn oneagentgraph() -> Command {
     Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
 }
 
-/// Every command the contract documents, with a minimal legal invocation.
-const COMMANDS: &[(&str, &[&str])] = &[
-    ("run", &["run", "graph.yaml"]),
-    ("validate", &["validate", "graph.yaml"]),
-    ("trigger", &["trigger", "run-1", "worker"]),
-    ("reset-timer", &["reset-timer", "run-1", "reporter"]),
-    ("cancel", &["cancel", "run-1"]),
-    ("history", &["history"]),
-    ("health", &["health"]),
-    ("smoke", &["smoke"]),
-    ("persona", &["persona", "new", "engineer"]),
+/// Every command the contract documents.
+const COMMANDS: &[&str] = &[
+    "run",
+    "validate",
+    "trigger",
+    "reset-timer",
+    "cancel",
+    "history",
+    "health",
+    "smoke",
+    "persona",
 ];
 
 #[test]
@@ -39,7 +50,7 @@ fn help_lists_every_documented_command() {
     let assert = oneagentgraph().arg("--help").assert().success();
     let help = String::from_utf8(assert.get_output().stdout.clone()).expect("help is UTF-8");
 
-    for (name, _) in COMMANDS {
+    for name in COMMANDS {
         assert!(
             help.contains(name),
             "`--help` does not mention `{name}`:\n{help}"
@@ -57,77 +68,17 @@ fn version_reports_the_crate_version() {
 }
 
 #[test]
-fn every_command_parses_and_then_refuses_loudly() {
-    for (name, argv) in COMMANDS {
-        let assert = oneagentgraph()
-            .args(*argv)
-            .assert()
-            .code(NOT_IMPLEMENTED)
-            .stderr(predicate::str::contains("NOT IMPLEMENTED"))
-            .stderr(predicate::str::contains(*name))
-            .stderr(predicate::str::contains("ACTION:"));
-
-        assert!(
-            assert.get_output().stdout.is_empty(),
-            "`{name}` wrote to stdout; a caller must never read a refusal as an event stream"
-        );
-    }
-}
-
-#[test]
-fn run_accepts_every_documented_flag_before_refusing() {
+fn run_accepts_every_documented_flag() {
     oneagentgraph()
-        .args([
-            "run",
-            "https://example.com/graph.yaml",
-            "--task",
-            "do the thing",
-            "--task-file",
-            "task.md",
-            "--dir",
-            ".",
-            "--label",
-            "run_id=R",
-            "--label",
-            "round=2",
-            "--set",
-            "members.worker.agent.model=some-model",
-            "--output",
-            "text",
-            "--detach",
-        ])
+        .args(["run", "--help"])
         .assert()
-        .code(NOT_IMPLEMENTED)
-        .stderr(predicate::str::contains("`run`"));
-}
-
-#[test]
-fn history_takes_either_a_run_or_a_record_to_show() {
-    for argv in [vec!["history", "run-1"], vec!["history", "show", "rec-9"]] {
-        oneagentgraph()
-            .args(&argv)
-            .assert()
-            .code(NOT_IMPLEMENTED)
-            .stderr(predicate::str::contains("`history`"));
-    }
-}
-
-#[test]
-fn cancel_takes_an_optional_member_and_the_kill_flag() {
-    oneagentgraph()
-        .args(["cancel", "run-1", "worker", "--kill"])
-        .assert()
-        .code(NOT_IMPLEMENTED)
-        .stderr(predicate::str::contains("`cancel`"));
-}
-
-#[test]
-fn persona_validate_takes_a_path() {
-    oneagentgraph()
-        .args(["persona", "validate", "personas/engineer.yaml"])
-        .assert()
-        .code(NOT_IMPLEMENTED)
-        .stderr(predicate::str::contains("`persona`"));
+        .success()
+        .stdout(predicate::str::contains("--task-file"))
+        .stdout(predicate::str::contains("--label"))
+        .stdout(predicate::str::contains("--set"))
+        .stdout(predicate::str::contains("--output"))
+        .stdout(predicate::str::contains("--detach"))
+        .stdout(predicate::str::contains("--dir"));
 }
 
 #[test]
@@ -178,11 +129,11 @@ fn no_arguments_at_all_is_a_usage_error_that_shows_the_surface() {
 }
 
 #[test]
-fn a_subcommands_help_documents_its_own_flags() {
+fn cancel_takes_an_optional_member_and_the_kill_flag() {
     oneagentgraph()
-        .args(["run", "--help"])
+        .args(["cancel", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("--task-file"))
-        .stdout(predicate::str::contains("--detach"));
+        .stdout(predicate::str::contains("--kill"))
+        .stdout(predicate::str::contains("MEMBER"));
 }

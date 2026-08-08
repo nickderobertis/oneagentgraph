@@ -61,9 +61,18 @@ const MARK: &str = "fake:";
 
 fn main() -> std::process::ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    let prompt = flag(&argv, "-p")
+    // The turn arrives in two halves and both matter: the task is the `-p`
+    // prompt, and the merged base-plus-persona instructions are the
+    // `--append-system-prompt` claude-code takes a system prompt on. A double
+    // that read only the first would report the agent side as having been given
+    // no role at all.
+    let task = flag(&argv, "-p")
         .or_else(|| flag(&argv, "--prompt"))
         .unwrap_or_default();
+    let system = flag(&argv, "--append-system-prompt")
+        .or_else(|| flag(&argv, "--system"))
+        .unwrap_or_default();
+    let prompt = format!("{system}\n{task}");
 
     record(&prompt, "record-prompt", &prompt);
     record(&prompt, "record-env", &selection_environment());

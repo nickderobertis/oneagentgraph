@@ -1,0 +1,324 @@
+//! The workspace every journey drives, and the assertions they share.
+//!
+//! A journey builds a real graph on disk, runs the real `oneagentgraph` binary
+//! against it, and reads back the NDJSON it produced. The only thing standing in
+//! for something real is the paid harness process, replaced at oneharness's own
+//! `ONEHARNESS_BIN_<ID>` seam by the crate's own `fake-provider` double — real
+//! `onejudge` drives the conversation and real `oneharness` selects the identity
+//! in between.
+
+#![allow(dead_code)]
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde_json::Value;
+
+/// One journey's directories and the graph inside them.
+pub struct Workspace {
+    root: tempfile::TempDir,
+}
+
+/// What one `oneagentgraph` invocation produced.
+pub struct Run {
+    /// The process exit code.
+    pub code: i32,
+    /// Everything it wrote to stdout.
+    pub stdout: String,
+    /// Everything it wrote to stderr.
+    pub stderr: String,
+}
+
+impl Run {
+    /// Every envelope on stdout, in the order it was written.
+    ///
+    /// Panics with the whole stream when a line is not an envelope, because a
+    /// stream a consumer cannot parse is the failure — not something to skip
+    /// past on the way to an assertion.
+    pub fn events(&self) -> Vec<Value> {
+        self.stdout
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str(line)
+                    .unwrap_or_else(|err| panic!("stdout line is not an envelope ({err}): {line}"))
+            })
+            .collect()
+    }
+
+    /// Every envelope of one kind.
+    pub fn of_kind(&self, kind: &str) -> Vec<Value> {
+        self.events()
+            .into_iter()
+            .filter(|event| event["kind"] == kind)
+            .collect()
+    }
+
+    /// The kinds the stream carried, in order, deduplicated consecutively.
+    pub fn kinds(&self) -> Vec<String> {
+        self.events()
+            .iter()
+            .filter_map(|event| event["kind"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Assert an exit code, showing the whole run when it is not the one meant.
+    pub fn expect_code(&self, code: i32) -> &Self {
+        assert_eq!(
+            self.code, code,
+            "expected exit {code}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            self.stdout, self.stderr
+        );
+        self
+    }
+}
+
+impl Workspace {
+    /// A workspace whose graph has one two-party member called `worker`.
+    ///
+    /// Both sides run a one-identity `claude-code` chain, which is what makes the
+    /// fake reachable: `ONEHARNESS_BIN_*` keys on a harness id, and there is no
+    /// spelling of it that reaches a *variant* — a chain naming variants here
+    /// would spawn the real paid provider with the double sitting unused beside
+    /// it, which is a money hazard rather than a style point.
+    pub fn new() -> Self {
+        let workspace = Self {
+            root: tempfile::tempdir().expect("a workspace"),
+        };
+        std::fs::create_dir_all(workspace.dir()).expect("work dir");
+        std::fs::create_dir_all(workspace.state()).expect("state dir");
+        workspace.write("oneharness.toml", CHAIN);
+        workspace.write("oneharness.judge.toml", CHAIN);
+        workspace.write("base.yaml", BASE);
+        workspace.write("graph.yaml", &two_party_graph(&fake_harness(), ""));
+        workspace
+    }
+
+    /// The directory the graph and its configs live in.
+    pub fn path(&self) -> &Path {
+        self.root.path()
+    }
+
+    /// The directory members work in.
+    pub fn dir(&self) -> PathBuf {
+        self.root.path().join("work")
+    }
+
+    /// Where run state lives.
+    pub fn state(&self) -> PathBuf {
+        self.root.path().join("state")
+    }
+
+    /// One path inside the workspace.
+    pub fn at(&self, name: &str) -> PathBuf {
+        self.root.path().join(name)
+    }
+
+    /// Write one file into the workspace, creating what holds it.
+    pub fn write(&self, name: &str, content: &str) -> PathBuf {
+        let path = self.at(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("parent");
+        }
+        std::fs::write(&path, content).expect("write");
+        path
+    }
+
+    /// Read one file back.
+    pub fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.at(name)).unwrap_or_default()
+    }
+
+    /// Replace the graph with `document`.
+    pub fn graph(&self, document: &str) -> &Self {
+        self.write("graph.yaml", document);
+        self
+    }
+
+    /// Run the binary with these arguments, and this extra environment.
+    pub fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Run {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_oneagentgraph"));
+        command
+            .args(args)
+            .current_dir(self.path())
+            .env("ONEAGENTGRAPH_STATE_DIR", self.state())
+            .env("ONEAGENTGRAPH_ONEJUDGE_BIN", onejudge_bin())
+            .env("ONEAGENTGRAPH_ONEHARNESS_BIN", oneharness_bin())
+            // A journey must never inherit an enclosing dispatch's selection:
+            // this suite runs inside one, and a leaked value would put the run
+            // on an identity — and a bill — nobody in this test chose.
+            .env_remove("ONEHARNESS_HARNESSES")
+            .env_remove("ONEHARNESS_MODEL")
+            .env_remove("ONEHARNESS_MODELS")
+            .env_remove("ONEHARNESS_MODE")
+            .env_remove("ONEHARNESS_TIMEOUT");
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command.output().expect("the binary runs");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// Run the binary with these arguments.
+    pub fn run(&self, args: &[&str]) -> Run {
+        self.run_with(args, &[])
+    }
+
+    /// Run the default graph against one task, under bounds short enough that a
+    /// watchdog journey does not wait out a production default.
+    pub fn run_task(&self, task: &str) -> Run {
+        self.run(&[
+            "run",
+            "./graph.yaml",
+            "--task",
+            task,
+            "--dir",
+            &self.dir().display().to_string(),
+        ])
+    }
+
+    /// The one run this workspace recorded.
+    pub fn record(&self) -> Value {
+        let mut runs: Vec<PathBuf> = std::fs::read_dir(self.state())
+            .expect("state")
+            .flatten()
+            .map(|entry| entry.path())
+            .collect();
+        runs.sort();
+        let run = runs.last().expect("a recorded run");
+        let raw = std::fs::read_to_string(run.join("record.json")).expect("a record");
+        serde_json::from_str(&raw).expect("the record is JSON")
+    }
+}
+
+/// A one-identity `claude-code` fallback chain — the only shape that keeps the
+/// `ONEHARNESS_BIN_CLAUDE_CODE` double reachable.
+pub const CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n";
+
+/// A two-identity chain whose first candidate is the one a journey makes refuse.
+pub const FALLBACK_CHAIN: &str =
+    "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"codex\"]\n";
+
+/// A chain spanning two harness families, which the model pairing rule forbids.
+pub const MIXED_CHAIN: &str =
+    "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\", \"codex\"]\n";
+
+/// The onejudge base every member merges its persona onto.
+pub const BASE: &str = concat!(
+    "provider:\n  kind: oneharness\n",
+    "agent:\n  instructions: |\n    Standing bar: verify before you claim done.\n",
+    "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
+);
+
+/// The default graph: one two-party member, both sides on the doubled chain.
+pub fn two_party_graph(fake: &str, extra_env: &str) -> String {
+    format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n{extra}",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        fake = fake,
+        extra = extra_env,
+    )
+}
+
+/// The compiled paid-harness double.
+pub fn fake_harness() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-harness").to_string()
+}
+
+/// The compiled onejudge `CommandProvider` double.
+pub fn fake_provider() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-provider").to_string()
+}
+
+/// The real `onejudge` this suite drives.
+///
+/// Resolved from the environment so a host or CI can pin an install, and
+/// asserted present rather than skipped: a journey that quietly did not run the
+/// real CLI proves nothing, and a suite that reports itself green on that basis
+/// is worse than one that fails.
+pub fn onejudge_bin() -> String {
+    required("ONEAGENTGRAPH_TEST_ONEJUDGE", "onejudge")
+}
+
+/// The real `oneharness` this suite drives, on the same terms.
+pub fn oneharness_bin() -> String {
+    required("ONEAGENTGRAPH_TEST_ONEHARNESS", "oneharness")
+}
+
+/// One required external CLI, from `variable` or from `PATH`.
+fn required(variable: &str, program: &str) -> String {
+    if let Ok(pinned) = std::env::var(variable) {
+        return pinned;
+    }
+    let found = Command::new(program).arg("--version").output();
+    assert!(
+        found.is_ok(),
+        "`{program}` is not on PATH. The e2e suite drives the real CLI as a subprocess — run \
+         `just bootstrap`, or set {variable} to a pinned install."
+    );
+    program.to_string()
+}
+
+/// The environment a journey uses to shorten the liveness bounds it is testing.
+pub fn bounds(heartbeat: &str, stall: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("ONEAGENTGRAPH_HEARTBEAT_TIMEOUT", heartbeat.to_string()),
+        ("ONEAGENTGRAPH_STALL_TIMEOUT", stall.to_string()),
+    ]
+}
+
+/// Turn owned pairs into the borrowed ones [`Workspace::run_with`] takes.
+pub fn as_env<'a>(pairs: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    pairs
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect()
+}
+
+/// Every reserved label an envelope carries, for an assertion that names them.
+pub fn labels(event: &Value) -> BTreeMap<String, String> {
+    event["labels"]
+        .as_object()
+        .map(|map| {
+            map.iter()
+                .map(|(key, value)| {
+                    (
+                        key.clone(),
+                        value
+                            .as_str()
+                            .map_or_else(|| value.to_string(), str::to_string),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Wait for `condition`, or fail saying what never happened.
+///
+/// The deadline is generous on purpose. Every journey here spawns three real
+/// CLIs, and the suite runs many of them at once, so a threshold near one run's
+/// unloaded wall clock fails healthy journeys under exactly the load the suite
+/// creates — the same mistake a heartbeat near its write cadence makes.
+pub fn until(what: &str, condition: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
+}

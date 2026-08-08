@@ -59,6 +59,35 @@ pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
 /// own [`crate::event::MAX_PAYLOAD_TEXT_BYTES`] bound is applied to the tail.
 const STDERR_KEEP_BYTES: usize = 64 * 1024;
 
+/// Which program a member is, because the two read their exit codes differently.
+///
+/// This is not a detail: `onejudge` exits `1` for a task it drove but did not
+/// complete — the member's own verdict, and a settle. `oneharness` exits
+/// non-zero when it could not run the turn at all, which is a death. Reading one
+/// by the other's contract turns a chain that reached nothing into a member that
+/// settled incomplete, and that is the failure a supervisor most needs told
+/// apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    /// `onejudge run`: `0` completed, `1` incomplete, `2` a config or provider
+    /// failure.
+    Onejudge,
+    /// `oneharness run`: `0` ran the turn, anything else did not.
+    Oneharness,
+}
+
+impl Kind {
+    /// Whether `code` is a verdict this program's member settled on, rather than
+    /// a failure to run at all.
+    #[must_use]
+    pub fn settled(self, code: i32) -> bool {
+        match self {
+            Kind::Onejudge => code == 0 || code == 1,
+            Kind::Oneharness => code == 0,
+        }
+    }
+}
+
 /// What became of one member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -186,11 +215,17 @@ pub fn run(
             return Outcome::Unstartable(reason);
         }
     };
-    supervise(child, emitter, bounds, scratch)
+    supervise(child, invocation.kind, emitter, bounds, scratch)
 }
 
 /// Supervise a spawned member: read what it publishes, watch it live, and settle.
-fn supervise(mut child: Child, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
+fn supervise(
+    mut child: Child,
+    kind: Kind,
+    emitter: &Emitter,
+    bounds: Bounds,
+    scratch: &Path,
+) -> Outcome {
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
 
@@ -281,7 +316,7 @@ fn supervise(mut child: Child, emitter: &Emitter, bounds: Bounds, scratch: &Path
     let settled = report.lock().expect("report").take();
 
     match status {
-        Ok(status) => settle(emitter, status, settled, &tail),
+        Ok(status) => settle(emitter, kind, status, settled, &tail),
         Err(reason) => Outcome::Unstartable(reason),
     }
 }
@@ -361,6 +396,7 @@ fn summarize(event: &Value) -> String {
 /// Settle a member that exited on its own.
 fn settle(
     emitter: &Emitter,
+    kind: Kind,
     status: std::process::ExitStatus,
     report: Option<Value>,
     tail: &Arc<Mutex<String>>,
@@ -371,15 +407,17 @@ fn settle(
     if disposition(status) == Disposition::Signaled {
         return died(emitter, "signalled", status, tail);
     }
-    let code = status.code().unwrap_or(-1);
-    // onejudge's own contract: `0` completed, `1` incomplete, `2` a bad config or
-    // a provider failure. Only the last is a death — the first two are the
-    // member's own verdict on the task.
-    if code >= 2 || report.is_none() {
-        return died(emitter, "provider-failure", status, tail);
-    }
+    // A chain names every candidate it stepped past, and it does so whether or
+    // not a later one ran. Those records are evidence either way — which
+    // subscription to restore is exactly what an operator needs from a member
+    // that reached nothing — so they are published before the verdict, not
+    // conditionally on it.
     for advance in fallback_advances(report.as_ref()) {
         emitter.emit(EventKind::FallbackAdvanced, advance);
+    }
+    let code = status.code().unwrap_or(-1);
+    if report.is_none() || !kind.settled(code) {
+        return died(emitter, "provider-failure", status, tail);
     }
     let completed = code == 0;
     let document = report.unwrap_or(Value::Null);
@@ -593,6 +631,19 @@ mod tests {
 
         assert!(fallback_advances(None).is_empty());
         assert!(fallback_advances(Some(&serde_json::json!({}))).is_empty());
+    }
+
+    /// The two programs' exit codes are read by their own contracts. `onejudge`
+    /// exits `1` for a task it drove but did not complete, which is a settle;
+    /// `oneharness` exits non-zero when it could not run the turn at all, which
+    /// is a death. Reading one by the other turns a chain that reached nothing
+    /// into a member that settled incomplete.
+    #[test]
+    fn each_program_s_exit_code_is_read_by_its_own_contract() {
+        assert!(Kind::Onejudge.settled(0) && Kind::Onejudge.settled(1));
+        assert!(!Kind::Onejudge.settled(2) && !Kind::Onejudge.settled(-1));
+        assert!(Kind::Oneharness.settled(0));
+        assert!(!Kind::Oneharness.settled(1) && !Kind::Oneharness.settled(2));
     }
 
     /// Only a completed settle is a success; a death and an unstartable member

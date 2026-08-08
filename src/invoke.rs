@@ -57,6 +57,8 @@ pub const MODE_ENV: &str = "ONEHARNESS_MODE";
 /// One member's invocation, ready to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
+    /// Which program this is, because the two read their exit codes differently.
+    pub kind: crate::member::Kind,
     /// The program to run.
     pub program: String,
     /// Its arguments.
@@ -131,6 +133,7 @@ pub fn build(
             ];
             args.retain(|arg| !arg.is_empty());
             Ok(Invocation {
+                kind: crate::member::Kind::Oneharness,
                 program: context.oneharness_bin.to_string(),
                 args,
                 cwd: context.scratch.to_path_buf(),
@@ -196,6 +199,7 @@ fn onejudge(
     };
 
     Ok(Invocation {
+        kind: crate::member::Kind::Onejudge,
         program: context.onejudge_bin.to_string(),
         args: vec![
             "run".to_string(),

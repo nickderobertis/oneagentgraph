@@ -324,24 +324,13 @@ pub fn run(
     };
     write_record(&root, &record)?;
 
-    emitter.emit(
-        EventKind::GraphStarted,
-        [
-            ("graph".to_string(), Value::String(request.graph.clone())),
-            ("name".to_string(), Value::String(graph.name.clone())),
-            (
-                "dir".to_string(),
-                Value::String(request.dir.display().to_string()),
-            ),
-        ]
-        .into_iter()
-        .collect::<Map<String, Value>>(),
-    );
-
-    // Every member's invocation is built before anything is launched: the model
-    // pairing rule, a persona that does not validate, and a ref that cannot be
-    // read are all refusals, and a graph that refuses half way has already spent
-    // a paid turn on the members it did start.
+    // Every member's invocation is built before *anything* is launched, and
+    // before the first envelope is written. The model pairing rule, a persona
+    // that does not validate, and a ref that cannot be read are all refusals —
+    // and a graph that refuses half way has already spent a paid turn on the
+    // members it did start. Emitting `graph-started` first would also make a
+    // refusal read as a graph that began, which is exactly what a caller wired
+    // in early must not see.
     let mut invocations = BTreeMap::new();
     for (name, member) in &graph.members {
         let scratch = root.join("members").join(name);
@@ -364,6 +353,20 @@ pub fn run(
     }
     record.refs = resolver.inventory();
     write_record(&root, &record)?;
+
+    emitter.emit(
+        EventKind::GraphStarted,
+        [
+            ("graph".to_string(), Value::String(request.graph.clone())),
+            ("name".to_string(), Value::String(graph.name.clone())),
+            (
+                "dir".to_string(),
+                Value::String(request.dir.display().to_string()),
+            ),
+        ]
+        .into_iter()
+        .collect::<Map<String, Value>>(),
+    );
 
     let mut failed = false;
     for wave in waves {
