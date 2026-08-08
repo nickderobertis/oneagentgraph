@@ -54,6 +54,22 @@ pub const ONEJUDGE_CONFIG_FILE: &str = "onejudge.yaml";
 /// rewritten behind its author's back.
 pub const MODE_ENV: &str = "ONEHARNESS_MODE";
 
+/// oneharness's process-wide identity selection — the one variable that *beats*
+/// a config's own `harnesses` chain.
+///
+/// The mirror image of the `ONEHARNESS_MODEL` case above, and the dangerous half.
+/// A graph names an oneharness config per side and this crate hands each side
+/// exactly that config; if a value the launching process happened to export then
+/// overrides it, the graph did not choose anything — the run silently spends a
+/// different subscription than the one it was pointed at. That launcher is not
+/// hypothetical: ai-orchestrator, the system this crate was extracted from,
+/// *exports* this variable around everything it dispatches.
+///
+/// So it is dropped from what a member inherits. It is not forbidden: a graph
+/// that means to select this way says so in its own `env:` block, which is
+/// applied afterwards and wins.
+pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
+
 /// One member's invocation, ready to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {

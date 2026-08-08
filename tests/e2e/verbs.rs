@@ -61,6 +61,34 @@ fn validate_refuses_a_graph_that_could_never_run() {
             "version: 1\nname: ' '\nmembers: {}\n",
             "a graph needs a name",
         ),
+        // A member's name becomes a directory this run creates and a signal file
+        // an operator writes, so one that would leave the run's own directory is
+        // refused before anything is created.
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  \"../escape\":\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+            ),
+            "member name",
+        ),
+        // An `env:` key is exported to every member, and one the platform cannot
+        // name is not a variable at all.
+        (
+            concat!(
+                "version: 1\nname: g\nenv:\n  \"A=B\": v\n",
+                "members:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+            ),
+            "env key",
+        ),
+        (
+            concat!(
+                "version: 1\nname: g\nenv:\n  \"\": v\n",
+                "members:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+            ),
+            "env key",
+        ),
         (
             concat!(
                 "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",

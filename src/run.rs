@@ -494,6 +494,9 @@ pub fn run(
     let events_path = root.join(EVENTS_FILE);
 
     let mut member_env = env.clone();
+    // Before the graph's own block, so a graph that means to select this way
+    // still can — see `invoke::PROCESS_WIDE_HARNESS_ENV`.
+    member_env.remove(invoke::PROCESS_WIDE_HARNESS_ENV);
     for (key, value) in &graph.env {
         member_env.insert(key.clone(), expand(value, env));
     }

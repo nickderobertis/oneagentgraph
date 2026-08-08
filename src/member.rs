@@ -250,6 +250,12 @@ pub fn run(
     command
         .args(&invocation.args)
         .current_dir(&invocation.cwd)
+        // Dropping it from `env` is not enough: a child *inherits* this
+        // process's environment, and `envs` only adds to it. So the one variable
+        // that beats the per-side config a graph named has to be unset here, on
+        // the command itself — and re-added by `envs` below when the graph's own
+        // block asked for it. See `invoke::PROCESS_WIDE_HARNESS_ENV`.
+        .env_remove(crate::invoke::PROCESS_WIDE_HARNESS_ENV)
         .envs(env)
         .envs(invocation.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env(SCRATCH_ENV, scratch.display().to_string())

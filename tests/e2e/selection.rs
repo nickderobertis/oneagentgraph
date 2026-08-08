@@ -17,6 +17,15 @@
 // double under a second `ONEHARNESS_BIN_*` key, because a fall-through needs two
 // candidates and neither may be a real subscription.
 
+// llmlint: ignore-file[tests_mirror_real_usage] the journeys here assert on a file
+// the doubled harness writes recording the argv and environment it was given,
+// for the reason tests/e2e/dispatch.rs spells out: *which identity and model a
+// side ran on* is the subject, and it is legible nowhere a user reads. A run
+// that silently spent the wrong subscription exits 0 with a stream identical to
+// a correct one — which is exactly the failure
+// `each_side_runs_the_config_it_was_given` caught. The far end of the
+// invocation is the only place that distinction exists.
+
 use crate::support::{
     fake_harness, two_party_graph, Workspace, CHAIN, FALLBACK_CHAIN, MIXED_CHAIN,
 };
@@ -139,6 +148,17 @@ fn the_model_value_itself_is_forwarded_unchecked() {
 fn each_side_runs_the_config_it_was_given() {
     let workspace = Workspace::new();
     let record = workspace.at("env.txt");
+
+    // If the ambient selection *did* win, the run would resolve `codex` — so
+    // that identity is bound to a script that refuses rather than left to reach
+    // a real paid provider. The refusal is the safety net; the assertion is that
+    // it never runs.
+    let never = workspace.write(
+        "never.sh",
+        "#!/bin/sh\necho 'the ambient selection reached a side that had its own config' >&2\nexit 1\n",
+    );
+    make_executable(&never);
+
     let run = workspace.run_with(
         &[
             "run",
@@ -154,7 +174,10 @@ fn each_side_runs_the_config_it_was_given() {
         // oneharness's own process-wide selection, exported by whatever launched
         // this run. Both sides still resolve their own config's chain, because
         // that is what the graph named.
-        &[("ONEAGENTGRAPH_TEST_AMBIENT", "set")],
+        &[
+            ("ONEHARNESS_HARNESSES", "codex"),
+            ("ONEHARNESS_BIN_CODEX", &never.display().to_string()),
+        ],
     );
     run.expect_code(0);
     // Every side reached the doubled `claude-code` candidate — if either had
