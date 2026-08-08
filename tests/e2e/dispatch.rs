@@ -44,6 +44,71 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert_eq!(kinds.first().map(String::as_str), Some("graph-started"));
     assert_eq!(kinds.last().map(String::as_str), Some("graph-settled"));
 
+    // The turn events a two-party member produces are built from onejudge's
+    // *typed* live sink now, so what they carry is asserted here rather than
+    // only that they arrived. This is the CLI half of the conversion: every
+    // field the engine hands this process in-library has to be reachable by a
+    // caller who only has the stream, and machine-readable when it gets there.
+    let activity = run.of_kind("turn-activity");
+    assert!(!activity.is_empty(), "{kinds:?}");
+    for event in &activity {
+        let payload = &event["payload"];
+        for named in ["kind", "name", "detail"] {
+            assert!(
+                payload[named].is_string(),
+                "turn-activity carried no {named}: {payload}"
+            );
+        }
+        assert!(
+            payload["name"]
+                .as_str()
+                .is_some_and(|name| !name.is_empty()),
+            "an action this crate could not name was published anyway: {payload}"
+        );
+        // The contract's bound on a tool summary, on the wire where a consumer
+        // meets it.
+        assert!(
+            payload["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                <= 160,
+            "the tool detail outgrew its documented bound: {payload}"
+        );
+        assert!(payload["truncated"].is_boolean(), "{payload}");
+    }
+    for event in &run.of_kind("turn-started") {
+        assert!(
+            event["payload"]["turn"].as_u64().is_some(),
+            "turn-started named no turn: {event}"
+        );
+    }
+    // `turn-completed` carries the usage the contract names. It comes off the
+    // report onejudge returns to this process, so a caller reading only the
+    // stream still gets the accounting rather than having to open the artifact.
+    let completed = run.of_kind("turn-completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    let usage = &completed[0]["payload"]["usage"];
+    assert!(
+        usage.is_object(),
+        "turn-completed carried no usage: {usage}"
+    );
+    // Every field the contract names for this payload: tokens in and out, cache
+    // reads and writes, and cost.
+    for counted in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cost_usd",
+    ] {
+        assert!(
+            usage.get(counted).is_some_and(|value| value.is_number()),
+            "the usage a consumer bills on has no {counted}: {usage}"
+        );
+    }
+
     // A two-party member says which runner it has, and what that runner is: the
     // engine driving it and the effective config it was given. There is no
     // `program` or `args` on this one, because nothing was spawned for it — and
