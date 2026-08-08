@@ -267,7 +267,7 @@ fn make_executable(path: &std::path::Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).expect("chmod");
     }
     #[cfg(not(unix))]
     let _ = path;

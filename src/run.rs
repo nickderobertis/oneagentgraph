@@ -72,6 +72,15 @@ pub struct Record {
     #[serde(default)]
     pub refs: Vec<ResolvedRef>,
     /// Where the run's merged NDJSON is.
+    ///
+    /// Reported, never followed. A run always writes its stream to
+    /// [`EVENTS_FILE`] inside its own directory, so every reader in this crate
+    /// derives that location from the run's id instead — this field is here so a
+    /// consumer of the record, or of the `--detach` answer, is told the path
+    /// without having to know how one is composed. Nothing branches on it, and
+    /// no path this process reads or writes is built from it, so it stays a
+    /// plain `String`: a validated path type would promise a guarantee about a
+    /// value this crate never acts on.
     pub events_path: String,
 }
 

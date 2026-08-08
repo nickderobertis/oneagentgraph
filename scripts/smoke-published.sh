@@ -65,13 +65,21 @@ command -v oneagentgraph >/dev/null 2>&1 || fail "no 'oneagentgraph' on PATH" \
 
 # Windows ships the same bytes with CRLF once anything touches them, so strip CR
 # rather than let a line ending decide the verdict.
-reported="$(oneagentgraph --version | tr -d '\r')"
+#
+# Each probe carries its own `|| fail`: under `set -e` an install that cannot run
+# at all would otherwise end the script on the binary's exit status, with no
+# cause and no next action — the report a broken artifact most needs.
+reported="$(oneagentgraph --version 2>"$probe_stderr" | tr -d '\r')" || fail \
+  "'--version' failed: $(cat "$probe_stderr")" \
+  "the installed binary cannot run at all — reinstall it, and check the platform package matches this machine"
 if [ -n "$expect_version" ] && [ "$reported" != "oneagentgraph $expect_version" ]; then
   fail "reports '$reported', not 'oneagentgraph $expect_version'" \
     "the install resolved a different version than the one just published"
 fi
 
-help="$(oneagentgraph --help | tr -d '\r')"
+help="$(oneagentgraph --help 2>"$probe_stderr" | tr -d '\r')" || fail \
+  "'--help' failed: $(cat "$probe_stderr")" \
+  "the installed binary runs but cannot print its own surface — reinstall this version and re-run"
 for command in run validate trigger reset-timer cancel history health smoke persona; do
   case "$help" in
     *"$command"*) ;;

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use crate::error::Error;
-use crate::run::{Record, RunId, RECORD_FILE};
+use crate::run::{Record, RunId, EVENTS_FILE, RECORD_FILE};
 
 /// Every run in `state_dir`, newest first.
 ///
@@ -56,13 +56,18 @@ pub fn show(state_dir: &Path, run_id: &str) -> Result<Record, Error> {
 
 /// One run's merged NDJSON, as it was written.
 ///
+/// Located from the run's id rather than from the record's `events_path`: a run
+/// always writes its stream to [`EVENTS_FILE`] inside its own directory, so the
+/// two name the same file — but only one of them is a string read back off disk.
+///
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when the run, or its stream, cannot be read.
 pub fn events(state_dir: &Path, run_id: &str) -> Result<String, Error> {
     let record = show(state_dir, run_id)?;
-    std::fs::read_to_string(&record.events_path)
-        .map_err(|err| Error::InvalidConfig(format!("cannot read {}: {err}", record.events_path)))
+    let path = state_dir.join(&record.run_id).join(EVENTS_FILE);
+    std::fs::read_to_string(&path)
+        .map_err(|err| Error::InvalidConfig(format!("cannot read {}: {err}", path.display())))
 }
 
 /// Read one run directory's record.

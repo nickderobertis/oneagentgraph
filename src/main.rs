@@ -255,12 +255,13 @@ impl Signal {
 /// `oneagentgraph trigger` / `reset-timer`: leave the run a signal to pick up.
 fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: Signal) -> Result<i32, Error> {
     let member = member_name(&args.member)?;
-    let record = history::show(&state_dir(env), &args.run)?;
-    let dir = PathBuf::from(&record.events_path)
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default()
-        .join(run::SIGNAL_DIR);
+    let state = state_dir(env);
+    let record = history::show(&state, &args.run)?;
+    // From the run's *id*, the way `cancel` derives the same directory — not
+    // from the record's `events_path`. That field is a string this crate wrote
+    // into a file it later reads back, and a signal is a write: deriving a write
+    // path from it would let a record place one anywhere the process can reach.
+    let dir = state.join(&record.run_id).join(run::SIGNAL_DIR);
     if !record.members.is_empty() && !record.members.contains_key(&args.member) {
         return Err(Error::InvalidConfig(format!(
             "run {:?} has no member {:?}; it has {}",
