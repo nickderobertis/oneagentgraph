@@ -195,6 +195,50 @@ fn agent() -> Result<ureq::Agent, Error> {
         .new_agent())
 }
 
+/// Whether a path was named as a bundle in its own right or found inside one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Strictness {
+    /// `SSL_CERT_FILE`: the operator pointed at this file and said "trust what
+    /// is in here", so content it cannot read is a refusal.
+    Declared,
+    /// A member of `SSL_CERT_DIR`: a real certificate directory carries README
+    /// files and hash symlinks beside its anchors, so a member that parses to
+    /// no certificate is passed over rather than failing the run. An entry that
+    /// cannot be *read at all* is still a refusal.
+    Collected,
+}
+
+/// Every trust anchor one PEM file carries.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when the file cannot be read, or — for a
+/// [`Strictness::Declared`] one — when its PEM cannot be parsed.
+fn anchors(
+    path: &Path,
+    strictness: Strictness,
+) -> Result<Vec<ureq::tls::Certificate<'static>>, Error> {
+    let pem = std::fs::read(path)
+        .map_err(|err| Error::InvalidConfig(format!("cannot read {}: {err}", path.display())))?;
+    let mut found = Vec::new();
+    for item in ureq::tls::parse_pem(&pem) {
+        match item {
+            Ok(ureq::tls::PemItem::Certificate(certificate)) => found.push(certificate),
+            // A private key beside a certificate is ordinary, and not an anchor.
+            Ok(_) => {}
+            Err(err) if strictness == Strictness::Declared => {
+                return Err(Error::InvalidConfig(format!(
+                    "cannot read a certificate from {}: {err}",
+                    path.display()
+                )))
+            }
+            // Whatever this file is, it is not more certificates.
+            Err(_) => break,
+        }
+    }
+    Ok(found)
+}
+
 /// The trust anchors `SSL_CERT_FILE` / `SSL_CERT_DIR` name, when either does.
 ///
 /// # Errors
@@ -210,35 +254,44 @@ fn named_bundle() -> Result<Option<Vec<ureq::tls::Certificate<'static>>>, Error>
         return Ok(None);
     }
 
-    let mut named: Vec<PathBuf> = file.map(PathBuf::from).into_iter().collect();
-    if let Some(dir) = dir {
-        // Sorted, so a bundle assembled from a directory is the same bundle on
-        // every host rather than whatever order the filesystem answers in.
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .map_err(|err| {
-                Error::InvalidConfig(format!(
-                    "cannot read SSL_CERT_DIR {}: {err}",
-                    PathBuf::from(&dir).display()
-                ))
-            })?
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| path.is_file())
-            .collect();
-        entries.sort();
-        named.extend(entries);
-    }
-
+    let mut named: Vec<PathBuf> = Vec::new();
     let mut certificates = Vec::new();
-    for path in &named {
-        let pem = std::fs::read(path).map_err(|err| {
-            Error::InvalidConfig(format!("cannot read {}: {err}", path.display()))
+    if let Some(file) = file {
+        // A file named on its own is a *declaration*: every byte of it is meant
+        // to be a trust anchor, so anything in it this cannot read is a mistake
+        // worth stopping for.
+        let path = PathBuf::from(file);
+        certificates.extend(anchors(&path, Strictness::Declared)?);
+        named.push(path);
+    }
+    if let Some(dir) = dir {
+        let dir = PathBuf::from(dir);
+        let listing = std::fs::read_dir(&dir).map_err(|err| {
+            Error::InvalidConfig(format!("cannot read SSL_CERT_DIR {}: {err}", dir.display()))
         })?;
-        for item in ureq::tls::parse_pem(&pem).flatten() {
-            if let ureq::tls::PemItem::Certificate(certificate) = item {
-                certificates.push(certificate);
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for entry in listing {
+            // Not skipped: an entry the directory will not describe is a
+            // filesystem this cannot enumerate, and carrying on would assemble
+            // a bundle quietly missing an anchor the operator put there.
+            let entry = entry.map_err(|err| {
+                Error::InvalidConfig(format!(
+                    "cannot read an entry of SSL_CERT_DIR {}: {err}",
+                    dir.display()
+                ))
+            })?;
+            let path = entry.path();
+            if path.is_file() {
+                entries.push(path);
             }
         }
+        // Sorted, so a bundle assembled from a directory is the same bundle on
+        // every host rather than whatever order the filesystem answers in.
+        entries.sort();
+        for path in &entries {
+            certificates.extend(anchors(path, Strictness::Collected)?);
+        }
+        named.extend(entries);
     }
     if certificates.is_empty() {
         return Err(Error::InvalidConfig(format!(

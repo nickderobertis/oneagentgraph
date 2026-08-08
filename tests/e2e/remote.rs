@@ -146,6 +146,59 @@ fn a_certificate_from_an_untrusted_authority_refuses_the_ref() {
     );
 }
 
+/// A bundle this cannot read is refused by name, rather than assembled with
+/// whatever part of it happened to parse.
+///
+/// Both halves of the trust set answer for themselves: a file the operator
+/// *declared* must be readable all the way through, and a directory must be
+/// enumerable. Silently skipping either builds a trust set quietly missing an
+/// anchor somebody put there — which fails later, at a TLS handshake, naming
+/// the host instead of the misconfiguration.
+///
+/// No origin is needed: the bundle is assembled before the request leaves, so
+/// an address that resolves nowhere still reaches this refusal.
+#[test]
+fn a_bundle_that_cannot_be_read_is_refused_by_name() {
+    let workspace = Workspace::new();
+    let url = "https://oneagentgraph.invalid/graph.yaml";
+    let nowhere = workspace.at("no-certificates-here");
+    std::fs::create_dir_all(&nowhere).expect("an empty certificate directory");
+
+    // A declared file whose PEM will not parse: the operator said "trust what is
+    // in here", and this cannot tell what that is.
+    let torn = workspace.write(
+        "torn.pem",
+        "-----BEGIN CERTIFICATE-----\nnot base64 at all !!!\n-----END CERTIFICATE-----\n",
+    );
+    let run = workspace.run_with(
+        &["validate", url],
+        &[
+            ("SSL_CERT_FILE", &torn.display().to_string()),
+            ("SSL_CERT_DIR", &nowhere.display().to_string()),
+        ],
+    );
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains("cannot read a certificate from"),
+        "an unreadable declared bundle was not refused: {}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("torn.pem"), "{}", run.stderr);
+
+    // And a directory that cannot be enumerated at all.
+    let missing = workspace.at("no-such-directory");
+    let run = workspace.run_with(
+        &["validate", url],
+        &[("SSL_CERT_DIR", &missing.display().to_string())],
+    );
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains("cannot read SSL_CERT_DIR"),
+        "an unreadable certificate directory was not refused: {}",
+        run.stderr
+    );
+}
+
 /// A named bundle that carries no certificate is a refusal, not a quiet fall
 /// back to the platform's own store.
 ///

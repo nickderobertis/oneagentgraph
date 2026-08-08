@@ -294,7 +294,11 @@ fn a_command_judge_supervises_through_the_split_provider() {
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
-            "    judge:\n      command: [\"{provider}\"]\n",
+            // Single-quoted, because this is a path and one of the three
+            // platforms spells paths with backslashes: in a double-quoted YAML
+            // scalar `C:\Users` is an unknown escape and the graph will not
+            // parse. A single-quoted scalar takes backslashes literally.
+            "    judge:\n      command: ['{provider}']\n",
             "    mode: bypass\n",
         ),
         fake = fake_harness(),

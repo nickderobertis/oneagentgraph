@@ -161,6 +161,11 @@ fn the_model_value_itself_is_forwarded_unchecked() {
 /// move a side that was given its own config.
 ///
 /// Ported from `test_each_side_runs_the_provider_it_was_given_over_a_process_wide_selection`.
+// A POSIX shell stands in for a provider here, which is a platform
+// capability like the others this suite gates on: the behaviour under test
+// needs one *identity* to answer differently from another, and a script is
+// how that is expressed without a second compiled binary per case.
+#[cfg(unix)]
 #[test]
 fn each_side_runs_the_config_it_was_given() {
     let workspace = Workspace::new();
@@ -266,6 +271,11 @@ fn a_chain_that_refuses_every_candidate_reports_each_one_and_fails() {
 
 /// The other half of the same chain: when a later candidate *can* run, the step
 /// past is reported with the identity and oneharness's own classification.
+// A POSIX shell stands in for a provider here, which is a platform
+// capability like the others this suite gates on: the behaviour under test
+// needs one *identity* to answer differently from another, and a script is
+// how that is expressed without a second compiled binary per case.
+#[cfg(unix)]
 #[test]
 fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
     let workspace = Workspace::new();
@@ -309,6 +319,7 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
 }
 
 /// Mark a generated helper script executable, so oneharness can spawn it.
+#[cfg(unix)]
 fn make_executable(path: &std::path::Path) {
     #[cfg(unix)]
     {

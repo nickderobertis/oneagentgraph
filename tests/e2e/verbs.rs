@@ -423,6 +423,11 @@ fn smoke_makes_its_own_throwaway_directory() {
 
 /// `health` forwards what oneharness knows about each identity, and says why
 /// there is no answer when there is none.
+// A POSIX shell stands in for a provider here, which is a platform
+// capability like the others this suite gates on: the behaviour under test
+// needs one *identity* to answer differently from another, and a script is
+// how that is expressed without a second compiled binary per case.
+#[cfg(unix)]
 #[test]
 fn health_reads_oneharness_data_and_names_a_missing_binary() {
     let workspace = Workspace::new();
@@ -779,6 +784,11 @@ fn smoke_refuses_a_turn_that_was_spent_and_failed() {
 /// `smoke::judge` against a real report shape rather than here, because
 /// oneharness stops the chain on one and so never produces a `fell_through`
 /// entry a journey could construct.
+// A POSIX shell stands in for a provider here, which is a platform
+// capability like the others this suite gates on: the behaviour under test
+// needs one *identity* to answer differently from another, and a script is
+// how that is expressed without a second compiled binary per case.
+#[cfg(unix)]
 #[test]
 fn smoke_names_the_candidate_the_chain_stepped_past() {
     let workspace = Workspace::new();
@@ -1428,6 +1438,7 @@ fn run_id(state: &std::path::Path) -> Option<String> {
 }
 
 /// Mark a generated helper script executable, so oneharness can spawn it.
+#[cfg(unix)]
 fn executable(path: &std::path::Path) {
     #[cfg(unix)]
     {
