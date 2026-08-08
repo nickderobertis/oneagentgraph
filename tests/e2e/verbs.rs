@@ -819,6 +819,17 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
         );
     }
 
+    // A well-formed name that is simply not a member of this run is refused too,
+    // by every verb that takes one — `cancel` included, which would otherwise
+    // report having cancelled something that was never there.
+    let cancelled = workspace.run(&["cancel", &id, "ghost"]);
+    cancelled.expect_code(2);
+    assert!(
+        cancelled.stderr.contains("no member \"ghost\""),
+        "{}",
+        cancelled.stderr
+    );
+
     // And a run id is a path component too.
     let traversal = workspace.run(&["history", "show", "../elsewhere"]);
     traversal.expect_code(2);
@@ -827,6 +838,95 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
         "{}",
         traversal.stderr
     );
+}
+
+/// A typo is refused *while the run is in flight*, which is when these verbs are
+/// actually used.
+///
+/// The run record fills its outcomes in as members settle, so for the whole of a
+/// live run there are none — and a check that read only those accepted any name
+/// at all, answering an operator's typo with exit 0 and a signal file nothing
+/// would ever read. The graph's own member list is written before anything
+/// launches for exactly this.
+#[test]
+fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
+    let workspace = Workspace::new();
+    workspace.graph(&format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {{every: 3600, resettable: true}}\n",
+        ),
+        fake = fake_harness(),
+    ));
+    let state = workspace.state();
+    let handle = {
+        let dir = workspace.path().to_path_buf();
+        let state = state.clone();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+                .args([
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    "complete-now: in flight",
+                    "--dir",
+                    &dir.join("work").display().to_string(),
+                ])
+                .current_dir(&dir)
+                .env("ONEAGENTGRAPH_STATE_DIR", &state)
+                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
+                .env(
+                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                    crate::support::oneharness_bin(),
+                )
+                .env_remove("ONEHARNESS_HARNESSES")
+                .output()
+                .expect("the run finishes")
+        })
+    };
+
+    until("the run to record itself", || run_id(&state).is_some());
+    let id = run_id(&state).expect("a run");
+    let record = state.join(&id).join("record.json");
+
+    // The record has the graph's members and no outcomes yet: exactly the state
+    // the old check could say nothing about.
+    let raw = std::fs::read_to_string(&record).expect("a record");
+    let parsed: serde_json::Value = serde_json::from_str(&raw).expect("the record is JSON");
+    assert_eq!(
+        parsed["members"],
+        serde_json::json!({}),
+        "this journey needs a run with no settled member yet: {raw}"
+    );
+
+    for verb in ["trigger", "reset-timer"] {
+        let refused = workspace.run(&[verb, &id, "ghost"]);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains("no member \"ghost\""),
+            "{verb}: {}",
+            refused.stderr
+        );
+        assert!(
+            refused.stderr.contains("reporter"),
+            "{verb}: {}",
+            refused.stderr
+        );
+    }
+    assert!(
+        !state
+            .join(&id)
+            .join("signals")
+            .join("ghost.trigger")
+            .exists(),
+        "a refused signal still left its file behind"
+    );
+
+    workspace.run(&["cancel", &id]).expect_code(0);
+    handle.join().expect("the run thread");
 }
 
 /// A run id is a *path component* every verb joins onto the state directory,

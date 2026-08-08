@@ -67,6 +67,18 @@ pub struct Record {
     /// What became of each member, by name.
     #[serde(default)]
     pub members: BTreeMap<String, MemberOutcome>,
+    /// Every member the graph declared, written before any of them runs.
+    ///
+    /// `members` above fills in as members *settle*, so for the whole of a live
+    /// run it is empty — and that is exactly when `trigger`, `reset-timer`, and
+    /// `cancel` are used. Without this, those verbs had nothing to check a member
+    /// name against while the run was in flight, and answered a typo with a
+    /// signal file nothing would ever read and an exit 0.
+    ///
+    /// Optional and omitted when empty, so a record written before this field
+    /// existed still reads, and the verbs fall back to `members` for one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_members: Vec<String>,
     /// Every config ref the run read, content-addressed, so replay and audit
     /// never depend on a URL staying stable.
     #[serde(default)]
@@ -525,6 +537,7 @@ pub fn run(
         finished_ms: None,
         exit_code: None,
         members: BTreeMap::new(),
+        declared_members: graph.members.keys().cloned().collect(),
         refs: Vec::new(),
         events_path: events_path.display().to_string(),
     };
@@ -710,11 +723,14 @@ fn cron(
     first: Outcome,
 ) -> Outcome {
     let stop = signals.join("stop");
+    // A member-scoped `cancel` stops this member alone; the whole-run `stop`
+    // above stops every one of them.
+    let own_stop = signals.join(format!("{name}.stop"));
     let trigger = signals.join(format!("{name}.trigger"));
     let reset = signals.join(format!("{name}.reset"));
     let mut last = first;
     let mut due = Instant::now() + Duration::from_secs(schedule.every);
-    while !stop.exists() {
+    while !stop.exists() && !own_stop.exists() {
         std::thread::sleep(TICK);
         if schedule.resettable && reset.exists() {
             let _ = std::fs::remove_file(&reset);

@@ -92,6 +92,7 @@ mod tests {
             finished_ms: None,
             exit_code: None,
             members: BTreeMap::new(),
+            declared_members: Vec::new(),
             refs: Vec::new(),
             events_path: state
                 .join(run_id)

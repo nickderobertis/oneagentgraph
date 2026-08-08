@@ -259,6 +259,28 @@ impl Signal {
     }
 }
 
+/// Refuse a member this run does not have, naming the ones it does.
+///
+/// The names come from the graph, written into the record before anything
+/// launches, because `members` fills in only as members *settle* — so during a
+/// live run, which is when these verbs are used, it is empty. A record from
+/// before that field existed falls back to the outcomes, and one that carries
+/// neither is not second-guessed: refusing then would refuse a member that is
+/// really there.
+fn belongs_to_run(record: &run::Record, run: &str, member: &str) -> Result<(), Error> {
+    let mut known: Vec<&str> = record.declared_members.iter().map(String::as_str).collect();
+    if known.is_empty() {
+        known = record.members.keys().map(String::as_str).collect();
+    }
+    if known.is_empty() || known.contains(&member) {
+        return Ok(());
+    }
+    Err(Error::InvalidConfig(format!(
+        "run {run:?} has no member {member:?}; it has {}",
+        known.join(", ")
+    )))
+}
+
 /// `oneagentgraph trigger` / `reset-timer`: leave the run a signal to pick up.
 fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: Signal) -> Result<i32, Error> {
     let member = member_name(&args.member)?;
@@ -269,19 +291,7 @@ fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: Signal) -> Re
     // into a file it later reads back, and a signal is a write: deriving a write
     // path from it would let a record place one anywhere the process can reach.
     let dir = state.join(&record.run_id).join(run::SIGNAL_DIR);
-    if !record.members.is_empty() && !record.members.contains_key(&args.member) {
-        return Err(Error::InvalidConfig(format!(
-            "run {:?} has no member {:?}; it has {}",
-            args.run,
-            args.member,
-            record
-                .members
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ")
-        )));
-    }
+    belongs_to_run(&record, &args.run, &args.member)?;
     std::fs::create_dir_all(&dir)
         .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
     let path = dir.join(format!("{member}.{}", kind.as_str()));
@@ -298,10 +308,20 @@ fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Erro
     let member = args.member.as_deref().map(member_name).transpose()?;
     let state = state_dir(env);
     let record = history::show(&state, &args.run)?;
+    if let Some(named) = &args.member {
+        belongs_to_run(&record, &args.run, named)?;
+    }
     let root = state.join(&record.run_id);
     std::fs::create_dir_all(root.join(run::SIGNAL_DIR))
         .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", root.display())))?;
-    std::fs::write(root.join(run::SIGNAL_DIR).join("stop"), "stop")
+    // Scoped to the member when one is named. The whole-run `stop` is what every
+    // scheduled member watches, so writing it for a member-scoped cancel stopped
+    // the rest of the run along with the one the operator named.
+    let stop = match &member {
+        Some(member) => root.join(run::SIGNAL_DIR).join(format!("{member}.stop")),
+        None => root.join(run::SIGNAL_DIR).join("stop"),
+    };
+    std::fs::write(&stop, "stop")
         .map_err(|err| Error::InvalidConfig(format!("cannot signal run {:?}: {err}", args.run)))?;
     let reaped = if args.kill {
         // Only a proven process is signalled: every live process still carrying
