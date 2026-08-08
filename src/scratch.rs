@@ -1033,12 +1033,25 @@ mod platform {
     ///
     /// A record naming a job nothing holds open any more simply does not open,
     /// which is the same answer as an empty group: that tree is gone.
+    ///
+    /// The name a group is opened under is **derived from the directory**, never
+    /// taken from the file. `owner.job` is a file in a scratch directory — a
+    /// trust boundary like any other, and one whose content would otherwise
+    /// decide what `TerminateJobObject` is aimed at, so a record somebody else
+    /// wrote would point a `cancel` at any job object this user can open. What
+    /// the file is for is saying *that* a group was recorded here and letting an
+    /// operator read which one; what it may not do is choose. A record that does
+    /// not match the name this directory computes is not this crate's, and is
+    /// skipped rather than opened.
     fn groups_under(root: &Path) -> Vec<Job> {
         let mut found = Vec::new();
         let mut walking = vec![(root.to_path_buf(), 0usize)];
         while let Some((dir, depth)) = walking.pop() {
-            if let Ok(name) = std::fs::read_to_string(dir.join(OWNER_JOB_FILE)) {
-                let name = wide(name.trim());
+            let expected = job_name(&dir);
+            if std::fs::read_to_string(dir.join(OWNER_JOB_FILE))
+                .is_ok_and(|recorded| recorded.trim() == expected)
+            {
+                let name = wide(&expected);
                 // SAFETY: `name` is a live, null-terminated wide string for the
                 // duration of the call; failure is reported with a null handle.
                 let job = unsafe {

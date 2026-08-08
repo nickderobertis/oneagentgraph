@@ -13,17 +13,18 @@
 //! is killed, a sweep racing a live run, and processes left behind by a member
 //! whose parent is already gone.
 
-// llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; one
-// journey here is `#[cfg(unix)]` because its *subject* is a POSIX signal — a
-// descendant declining `SIGTERM` — and Windows has no signal to decline, so
-// compiling it there would assert an escalation this crate deliberately does not
-// promise (`src/scratch.rs` documents what stands in its place). Every other
-// journey runs on all three platforms. They also read `oneagentgraph::scratch`
-// directly, because scratch ownership is a liveness rule the contract gives no
-// CLI verb of its own — the sweep a future operator runs is this same library
-// call, so this is the interface, not a reach past one. Where a verb does
-// answer — `cancel --kill` reporting what it signalled — the journey asserts on
-// that instead.
+// llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; two
+// journeys here are platform-gated because their *subject* is a facility only
+// that platform has, not because the rule is weaker elsewhere: a descendant
+// declining `SIGTERM` is POSIX-only, since Windows has no signal to decline, and
+// the forged `owner.job` is Windows-only, since that record exists only where a
+// job object stands in for the environment stamp. `src/scratch.rs` documents
+// both mappings. Every other journey runs on all three platforms. They also read
+// `oneagentgraph::scratch` directly, because scratch ownership is a liveness rule
+// the contract gives no CLI verb of its own — the sweep a future operator runs is
+// this same library call, so this is the interface, not a reach past one. Where a
+// verb does answer — `cancel --kill` reporting what it signalled — the journey
+// asserts on that instead.
 
 use std::path::Path;
 
@@ -579,6 +580,89 @@ fn a_finished_run_leaves_nothing_stamped_for_it() {
     assert!(
         oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty(),
         "a finished run left processes carrying its stamp"
+    );
+}
+
+/// A forged `owner.job` cannot aim a reap at somebody else's process tree, and
+/// the real group beside it still tears down.
+///
+/// On Windows a scratch directory records the job object its tree belongs to, so
+/// that a second process — an operator's `cancel --kill` — can find it. That
+/// record is a file, which makes it external input: read as the name to open,
+/// its content would choose what `TerminateJobObject` is aimed at, and a record
+/// written by anything else would point a cancel at any job object this user can
+/// open. So the name is derived from the directory and the record is only
+/// honoured when it agrees.
+///
+/// Both halves are asserted, because either alone passes for the wrong reason: a
+/// reap that refused everything would satisfy the first, and one that trusted
+/// the file would satisfy the second.
+#[cfg(windows)]
+#[test]
+fn a_forged_group_record_cannot_redirect_a_reap() {
+    use oneagentgraph::scratch::Group;
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let legitimate = root.path().join("oneagentgraph-legitimate");
+    let forged = root.path().join("oneagentgraph-forged");
+    std::fs::create_dir_all(&legitimate).expect("the real scratch");
+    std::fs::create_dir_all(&forged).expect("the forged scratch");
+
+    // A real group with a real process parked in it: the doubled harness, driven
+    // straight rather than through a run, because the subject here is the group
+    // rather than anything a graph does with one.
+    let group = Group::open(&legitimate).expect("a group");
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args(["-p", "fake:hang so the group has something to hold"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = group.spawn(&mut parked).expect("the parked process starts");
+
+    let stamp = legitimate.display().to_string();
+    until("the parked process to join its group", || {
+        !oneagentgraph::scratch::stamped_for(&stamp).is_empty()
+    });
+
+    // The forgery: the real group's name, in a directory that has no claim to
+    // it. This is the record `cancel --kill` would read on its way to a reap.
+    let stolen =
+        std::fs::read_to_string(legitimate.join("owner.job")).expect("the group recorded itself");
+    std::fs::write(forged.join("owner.job"), &stolen).expect("plant the forged record");
+
+    assert_eq!(
+        oneagentgraph::scratch::reap(&forged),
+        0,
+        "a forged record was honoured, so a reap reached a tree it does not own"
+    );
+    assert!(
+        !oneagentgraph::scratch::stamped_for(&stamp).is_empty(),
+        "a reap of {} killed the tree {} owns",
+        forged.display(),
+        legitimate.display()
+    );
+    assert!(
+        child
+            .try_wait()
+            .expect("the parked process is waitable")
+            .is_none(),
+        "the parked process was terminated through a directory that never launched it"
+    );
+
+    // And the directory that does own the group still tears it down, so what the
+    // check refuses is the forgery rather than the mechanism.
+    assert!(
+        oneagentgraph::scratch::reap(&legitimate) > 0,
+        "the real record was refused along with the forged one"
+    );
+    until("the real group's processes to be gone", || {
+        oneagentgraph::scratch::stamped_for(&stamp).is_empty()
+    });
+    let status = child.wait().expect("the parked process is reaped");
+    assert!(
+        !status.success(),
+        "a terminated process reported a clean exit: {status:?}"
     );
 }
 
