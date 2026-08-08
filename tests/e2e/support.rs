@@ -180,8 +180,12 @@ impl Workspace {
         self.run_with(args, &[])
     }
 
-    /// Run the default graph against one task, under bounds short enough that a
-    /// watchdog journey does not wait out a production default.
+    /// Run the default graph against one task, in this workspace's own work
+    /// directory.
+    ///
+    /// Under the contract's production liveness bounds: a journey that needs
+    /// shorter ones is testing a watchdog, and passes them itself through
+    /// [`run_with`](Workspace::run_with) and [`bounds`].
     pub fn run_task(&self, task: &str) -> Run {
         self.run(&[
             "run",

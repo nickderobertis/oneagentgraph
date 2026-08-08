@@ -172,8 +172,8 @@ fn main() -> std::process::ExitCode {
             std::thread::sleep(std::time::Duration::from_secs(3600));
         }
     }
-    if let Some(path) = sentinel(&prompt, &format!("{MARK}hold=")) {
-        while !std::path::Path::new(&path).exists() {
+    if let Some(path) = sentinel_path(&prompt, "hold") {
+        while !path.exists() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
@@ -259,20 +259,19 @@ fn selection_environment() -> String {
     Value::Object(map).to_string()
 }
 
-/// Append one line to the path a sentinel named, when it named a usable one.
+/// The path one sentinel names, once it is one this process will act on.
 ///
-/// The path arrives inside a prompt — text that reaches this process from
-/// somewhere else — so it is checked before anything is written: an absolute
-/// path, no parent reference, and a directory that already exists. A journey
-/// names a file in its own temp directory, so a sentinel that does not describe
-/// one is a mistake in the prompt rather than a file to create, and saying so on
-/// stderr is what turns it into a failure a reader can diagnose instead of an
-/// assertion that silently finds nothing recorded.
-fn record(prompt: &str, key: &str, line: &str) {
-    let Some(path) = sentinel(prompt, &format!("{MARK}{key}=")) else {
-        return;
-    };
-    let path = std::path::PathBuf::from(&path);
+/// Every path here arrives inside a prompt — text that reaches this process from
+/// somewhere else — so all of them are checked the same way, whether they will be
+/// written to or merely waited on: absolute, no parent reference, and a directory
+/// that already exists. A journey names a file in its own temp directory, so a
+/// sentinel that does not describe one is a mistake in the prompt rather than a
+/// path to act on, and saying so on stderr is what turns it into a failure a
+/// reader can diagnose instead of a journey that silently records nothing or
+/// waits forever.
+fn sentinel_path(prompt: &str, key: &str) -> Option<std::path::PathBuf> {
+    let named = sentinel(prompt, &format!("{MARK}{key}="))?;
+    let path = std::path::PathBuf::from(&named);
     let usable = path.is_absolute()
         && !path
             .components()
@@ -281,10 +280,18 @@ fn record(prompt: &str, key: &str, line: &str) {
     if !usable {
         eprintln!(
             "fake-harness: {MARK}{key} must name an absolute path in an existing directory, got \
-             {path:?}"
+             {named:?}"
         );
-        return;
+        return None;
     }
+    Some(path)
+}
+
+/// Append one line to the path a sentinel named, when it named a usable one.
+fn record(prompt: &str, key: &str, line: &str) {
+    let Some(path) = sentinel_path(prompt, key) else {
+        return;
+    };
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
