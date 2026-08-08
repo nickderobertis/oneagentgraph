@@ -25,9 +25,20 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "src/**/*.rs",
   "tests/**/*.rs",
-  "Cargo.toml",
-  "README.md",
-  "LICENSE",
+  # The `record.json` goldens `tests/record.rs` reads. Shipping the test
+  # without them would ship a crate whose own test cannot run, exactly as for
+  # `docs/contract.md` below.
+  "tests/golden/*.json",
+  "personas/**/*.yaml",
+  # Anchored with a leading `/`, every one of them. These are gitignore-style
+  # patterns: one with no separator in it matches at *any* depth, so a bare
+  # `README.md` and `LICENSE` matched every vendored copy under `node_modules`
+  # and shipped 154 files of somebody else's package — and their licences — to
+  # crates.io. `/docs/contract.md` already carried the slash for this reason;
+  # the rest did not.
+  "/Cargo.toml",
+  "/README.md",
+  "/LICENSE",
   "/docs/contract.md",
 ]
 
@@ -35,9 +46,29 @@ include = [
 name = "oneagentgraph"
 path = "src/main.rs"
 
+# The deterministic doubles the e2e suite drives as real subprocesses: one stands
+# in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, the
+# other speaks onejudge's `CommandProvider` JSON-lines protocol. Both are behind
+# `test-doubles` so a published `cargo install oneagentgraph` never builds them.
+[[bin]]
+name = "oneagentgraph-fake-harness"
+path = "src/bin/fake_harness.rs"
+required-features = ["test-doubles"]
+
+[[bin]]
+name = "oneagentgraph-fake-provider"
+path = "src/bin/fake_provider.rs"
+required-features = ["test-doubles"]
+
 [lib]
 name = "oneagentgraph"
 path = "src/lib.rs"
+
+[features]
+# The deterministic doubles the e2e suite spawns: a paid-harness stand-in and a
+# onejudge `CommandProvider` backend. Non-default, so neither is ever in a
+# consumer's build; `just check` and the coverage run enable them.
+test-doubles = []
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -50,10 +81,52 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # deprecated serde_yaml; `cargo deny` is what keeps that choice honest.
 serde_norway = "0.9"
 thiserror = "2"
+# A remote ref is recorded content-addressed, so replay never depends on the URL
+# staying stable — that record is a SHA-256 of the exact bytes fetched.
+sha2 = "0.10"
+# Fetching those remote refs, over `rustls` so the TLS stack itself is the same on
+# every CI leg the matrix runs.
+#
+# `platform-verifier` makes the *trust anchors* the host's own rather than the
+# Mozilla set compiled into `webpki-roots`. That is a deliberate trade, and it cuts
+# both ways: a graph served from an internal host under a private CA — or through a
+# TLS-inspecting proxy — resolves without this crate having to grow a trust knob of
+# its own, which is the environment a config-by-URL feature actually lands in; and
+# `SSL_CERT_FILE` / `SSL_CERT_DIR` become the documented way to name a bundle,
+# which is what `tests/e2e/remote.rs` uses to serve a real HTTPS graph to the real
+# fetch path. The cost is that trust now depends on the host: a machine whose store
+# is empty or misconfigured fails where the compiled-in set would have worked, and
+# a CA an operator installed for interception is one this crate honours. That is
+# how `curl` and `git` behave, and it is the behaviour an operator can inspect and
+# change; a private set nothing on the host can see is not.
+ureq = { version = "3", default-features = false, features = [
+  "rustls",
+  "platform-verifier",
+] }
+# A side's `model` override is stamped into that side's resolved oneharness
+# config; `toml_edit` keeps the rest of the operator's file — comments included —
+# byte-identical, so the copy in the run record still reads as what they wrote.
+toml_edit = "0.23"
+# Scratch ownership is an `owner.lock` flock plus a pid-with-start-token, and
+# reaping a member's descendants is a signal to a proven process group. All four
+# are kernel facilities with no safe-Rust equivalent in std.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+tempfile = "3"
+# A real HTTPS origin for the remote-ref journeys: `rcgen` mints a throwaway CA and
+# a `localhost` leaf, and `rustls` serves them to the compiled binary's own fetch
+# path. Dev-only, so nothing here reaches a consumer's build; the point is that the
+# transport under test is the production one, reached over a real socket.
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# Recomputing the digest the run record claims, so the assertion is against what an
+# auditor would compute rather than against the code under test. Already a normal
+# dependency, so this adds nothing to the graph.
+sha2 = "0.10"
 
 [[test]]
 name = "e2e"

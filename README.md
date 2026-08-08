@@ -8,12 +8,6 @@ and side, and `oneagentgraph` constructs the invocations, supervises liveness,
 and emits every turn, tool call, fallback, and settle as an event you can pipe
 into anything.
 
-> **Interface-only.** This repository currently ships the *contract* and the
-> types, config schema, and CLI surface that implement it — and nothing behind
-> them. Every command parses per the contract and then refuses with `NOT
-> IMPLEMENTED` and exit code 3. Install it to pin the interface; do not wire it
-> into a pipeline expecting work to happen. See [`docs/contract.md`].
-
 ## Install
 
 ```bash
@@ -31,6 +25,11 @@ cargo install --git https://github.com/nickderobertis/oneagentgraph --locked
 
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every [release], with `sha256` checksums.
+
+`run` drives the [onejudge] and [oneharness] CLIs, and `smoke` and `health` drive
+[oneharness], so those have to be on `PATH`; `validate`, `history`, `persona`,
+`trigger`, `reset-timer`, and `cancel` need neither. `ONEAGENTGRAPH_ONEJUDGE_BIN`
+and `ONEAGENTGRAPH_ONEHARNESS_BIN` name a pinned install instead.
 
 ## What it does
 
@@ -60,19 +59,14 @@ that one failed or died, `2` that the config is invalid.
 owning identity chains, fallback, model pins, and quota classification; onejudge
 keeps owning the two-party conversation. This composes them.
 
-The full surface — the shared event envelope, the graph schema, every CLI
-command, the event kinds, and the liveness rules — is [`docs/contract.md`].
 
 ## Develop
 
 ```bash
-just bootstrap   # from a clean clone
+just bootstrap   # from a clean clone; installs the onejudge and oneharness CLIs
 just check       # the deterministic gate: format, clippy, tests, coverage, docs
 just gate        # check + the LLM-judge tier; the pre-push bar
 ```
-
-[`AGENTS.md`](AGENTS.md) is the durable instruction layer for anyone — human or
-agent — working here.
 
 ## Licence
 
@@ -81,4 +75,3 @@ MIT. See [LICENSE](LICENSE).
 [oneharness]: https://github.com/nickderobertis/oneharness
 [onejudge]: https://pypi.org/project/onejudge/
 [release]: https://github.com/nickderobertis/oneagentgraph/releases
-[`docs/contract.md`]: docs/contract.md

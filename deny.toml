@@ -19,6 +19,14 @@ allow = [
     "MIT",
     "Apache-2.0",
     "Unicode-3.0",
+    # Reviewed with the TLS stack a remote graph/persona ref is fetched over
+    # (`ureq` → `rustls`): ISC covers `ring` and `rustls-webpki`, BSD-3-Clause
+    # `subtle`, and CDLA-Permissive-2.0 the `webpki-roots` trust store. All four
+    # are permissive, attribution-only, and impose no term this MIT crate cannot
+    # carry downstream.
+    "ISC",
+    "BSD-3-Clause",
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 exceptions = []

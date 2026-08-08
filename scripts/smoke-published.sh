@@ -13,10 +13,13 @@
 # runs this every week on every OS, for both registries, and anything it had to
 # install first would be a second thing that can rot.
 #
-# While the crate is interface-only, the promise a published artifact makes is
-# its *surface*: it reports its version, prints the documented command list, and
-# refuses to pretend it ran a graph. Extend the assertions here as behavior
-# lands — this file is what a release proves.
+# What a published artifact is held to here is what it can prove *alone*: it
+# reports its version, prints the documented command list, refuses a graph it
+# cannot read with the contract's exit 2, and never reports a graph it did not
+# run as settled. Running one is deliberately out of scope — that needs the
+# `onejudge` and `oneharness` CLIs and a paid harness, which this script exists
+# to stay free of. The e2e suite drives those for real; this proves the artifact
+# that ships is the one the suite tested.
 set -euo pipefail
 
 expect_version=""
@@ -52,18 +55,31 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+# One scratch file for a probe's stderr, so a failure report can carry the
+# binary's own diagnostic rather than only the assertion that tripped.
+probe_stderr="$(mktemp)"
+trap 'rm -f "$probe_stderr"' EXIT
+
 command -v oneagentgraph >/dev/null 2>&1 || fail "no 'oneagentgraph' on PATH" \
   "install it first — 'pip install oneagentgraph-cli' or 'npm install -g oneagentgraph-cli'"
 
 # Windows ships the same bytes with CRLF once anything touches them, so strip CR
 # rather than let a line ending decide the verdict.
-reported="$(oneagentgraph --version | tr -d '\r')"
+#
+# Each probe carries its own `|| fail`: under `set -e` an install that cannot run
+# at all would otherwise end the script on the binary's exit status, with no
+# cause and no next action — the report a broken artifact most needs.
+reported="$(oneagentgraph --version 2>"$probe_stderr" | tr -d '\r')" || fail \
+  "'--version' failed: $(cat "$probe_stderr")" \
+  "the installed binary cannot run at all — reinstall it, and check the platform package matches this machine"
 if [ -n "$expect_version" ] && [ "$reported" != "oneagentgraph $expect_version" ]; then
   fail "reports '$reported', not 'oneagentgraph $expect_version'" \
     "the install resolved a different version than the one just published"
 fi
 
-help="$(oneagentgraph --help | tr -d '\r')"
+help="$(oneagentgraph --help 2>"$probe_stderr" | tr -d '\r')" || fail \
+  "'--help' failed: $(cat "$probe_stderr")" \
+  "the installed binary runs but cannot print its own surface — reinstall this version and re-run"
 for command in run validate trigger reset-timer cancel history health smoke persona; do
   case "$help" in
     *"$command"*) ;;
@@ -72,14 +88,37 @@ for command in run validate trigger reset-timer cancel history health smoke pers
   esac
 done
 
-# The refusal is part of the shipped contract while the crate is interface-only:
-# a build that silently succeeded here would report an unimplemented run as a
-# graph that settled.
+# A graph that is not there is the contract's exit 2, and nothing on stdout: a
+# caller reads a line on stdout as an event, so a refusal must not produce one.
 code=0
-oneagentgraph run graph.yaml >/dev/null 2>&1 || code=$?
-if [ "$code" -eq 0 ]; then
-  fail "'run' exited 0 without running anything" \
-    "an interface-only build must refuse; a caller reads exit 0 as a settled graph"
+why="$(oneagentgraph run no-such-graph.yaml 2>"$probe_stderr")" || code=$?
+out="$why"
+why="$(cat "$probe_stderr")"
+if [ "$code" -ne 2 ]; then
+  fail "'run' on a missing graph exited $code, not 2: $why" \
+    "reinstall this version and re-run; if it still does, the published artifact is not the revision CI gated — re-cut the release"
+fi
+if [ -n "$out" ]; then
+  fail "'run' wrote to stdout while refusing a missing graph" \
+    "reinstall this version and re-run; if it still does, revert the change that made a refusal write to stdout"
+fi
+
+# `validate` is the one verb that needs nothing else installed, so it is what
+# proves the artifact can actually read a graph rather than only parse argv.
+work="$(mktemp -d)"
+trap 'rm -rf "$work" "$probe_stderr"' EXIT
+printf 'version: 1\nname: smoke\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./h.toml\n' > "$work/graph.yaml"
+printf 'run_mode = "fallback"\nharnesses = ["claude-code"]\n' > "$work/h.toml"
+if ! why="$(oneagentgraph validate "$work/graph.yaml" 2>&1 >/dev/null)"; then
+  fail "'validate' refused a graph it should read: $why" \
+    "fix what that refusal names, or reinstall — an install that cannot read a graph is truncated or from the wrong revision"
+fi
+
+code=0
+why="$(oneagentgraph validate "$work/nowhere.yaml" 2>&1 >/dev/null)" || code=$?
+if [ "$code" -ne 2 ]; then
+  fail "'validate' on a missing graph exited $code, not 2: $why" \
+    "reinstall this version and re-run 'oneagentgraph validate <a missing path>'; a code other than 2 means this artifact predates the contract's exit codes"
 fi
 
 echo "$label: surface smoke test passed${expect_version:+ for $expect_version}"

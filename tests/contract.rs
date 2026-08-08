@@ -25,6 +25,7 @@ use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
     STALL_TIMEOUT_ENV,
 };
+use oneagentgraph::run::{RunId, Started};
 use serde_json::{json, Value};
 
 /// The approved contract itself.
@@ -516,6 +517,117 @@ fn the_documented_exit_codes_are_the_ones_the_crate_declares() {
     );
 }
 
+/// The two copies of the exit codes that live outside the contract and outside
+/// the crate, tied back to the constants.
+///
+/// Both exist for a reason and neither can read the contract where it is used:
+/// the README is the first place a reader meets the codes, and
+/// `scripts/smoke-published.sh` is deliberately toolchain-free bash that holds an
+/// *installed* artifact to them, on a machine with no checkout. A restated
+/// number with nothing checking it is the copy that goes stale — silently, since
+/// a wrong code in the smoke script means the smoke passes on the wrong
+/// behavior.
+#[test]
+fn every_restatement_of_the_exit_codes_matches_the_crate() {
+    let readme = squeeze(include_str!("../README.md"));
+    let sentence = format!(
+        "Exit `{EXIT_SUCCESS}` means every member settled, `{EXIT_MEMBER_FAILED}` that one \
+         failed or died, `{EXIT_INVALID_CONFIG}` that the config is invalid."
+    );
+    assert!(
+        readme.contains(&sentence),
+        "README.md no longer states the exit codes the crate declares — expected: {sentence}"
+    );
+
+    // The published smoke's only exit-code comparison is against the contract's
+    // invalid-config code: it refuses graphs, it never runs one.
+    let script = include_str!("../scripts/smoke-published.sh");
+    let compared: Vec<&str> = script
+        .split("-ne ")
+        .skip(1)
+        .map(|rest| {
+            rest.split(|c: char| c.is_whitespace() || c == ']')
+                .next()
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(
+        !compared.is_empty(),
+        "scripts/smoke-published.sh no longer compares an exit code at all"
+    );
+    for code in &compared {
+        assert_eq!(
+            *code,
+            EXIT_INVALID_CONFIG.to_string(),
+            "scripts/smoke-published.sh checks for exit {code}, which is not \
+             EXIT_INVALID_CONFIG ({EXIT_INVALID_CONFIG}); every code it asserts must be one the \
+             crate declares"
+        );
+    }
+}
+
+/// One block of prose as a single line, so a gate on a sentence is not a gate on
+/// where the paragraph happened to wrap.
+fn squeeze(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The published smoke checks an *installed* binary against the same command
+/// surface this document spells, and it is toolchain-free bash that cannot read
+/// the document to find it.
+///
+/// This is the one place the contract's CLI block is parsed. `tests/e2e/main.rs`
+/// holds `--help` to the script's list rather than to this document, so the
+/// document has a single reader and the two lists cannot drift apart behind a
+/// second parser.
+#[test]
+fn the_published_smoke_checks_the_same_commands_the_contract_documents() {
+    let script = include_str!("../scripts/smoke-published.sh");
+    let loop_line = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("for command in "))
+        .expect("scripts/smoke-published.sh no longer loops over the command list");
+    let mut checked: Vec<String> = loop_line
+        .trim()
+        .trim_start_matches("for command in ")
+        .trim_end_matches("; do")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    checked.sort();
+    checked.dedup();
+
+    let mut documented = documented_commands();
+    documented.sort();
+    documented.dedup();
+    assert!(
+        documented.len() >= 9,
+        "the contract's CLI block stopped parsing: {documented:?}"
+    );
+    assert_eq!(
+        checked, documented,
+        "scripts/smoke-published.sh and docs/contract.md disagree about the command surface"
+    );
+}
+
+/// Every command the contract's CLI usage block spells.
+fn documented_commands() -> Vec<String> {
+    // Only the usage block — the document's prose says "oneagentgraph owns no
+    // harness logic", and a scan of the whole file would read `owns` as a command
+    // nobody typed.
+    let usage = CONTRACT
+        .split("```")
+        .find(|block| block.starts_with("\noneagentgraph run GRAPH"))
+        .expect("the contract's CLI usage block moved");
+    usage
+        .lines()
+        .filter_map(|line| line.strip_prefix("oneagentgraph "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|word| word.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+        .map(str::to_string)
+        .collect()
+}
+
 #[test]
 fn the_documented_liveness_bounds_are_the_ones_the_crate_declares() {
     assert!(
@@ -702,4 +814,46 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
             "the contract's CLI block no longer documents `{flag}`"
         );
     }
+}
+
+/// `--detach` prints `{run_id, events_path, pid}` and exits 0 — three keys the
+/// contract names, and the shape a caller parses to find the run it just left
+/// behind. Driven through the type so a rename here fails against the document.
+#[test]
+fn the_detach_answer_carries_the_three_keys_the_contract_names() {
+    let sentence = CONTRACT
+        .lines()
+        .find(|line| line.contains("--detach` prints"))
+        .expect("the contract no longer describes what --detach prints");
+    for key in ["run_id", "events_path", "pid"] {
+        assert!(
+            sentence.contains(key),
+            "the contract's --detach answer no longer names `{key}`"
+        );
+    }
+
+    let started = Started {
+        run_id: RunId::parse("node-scope-1786171301679-1447994").expect("a run id"),
+        events_path: "/state/node-scope/events.jsonl".into(),
+        pid: 1_447_994,
+    };
+    let rendered = serde_json::to_value(&started).expect("an answer");
+    let keys: BTreeSet<&str> = rendered
+        .as_object()
+        .expect("a mapping")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        ["run_id", "events_path", "pid"]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    );
+    // And it round-trips, because a caller that reads it back has to get the
+    // same three values it was handed.
+    assert_eq!(
+        serde_json::from_value::<Started>(rendered).expect("round-trips"),
+        started
+    );
 }
