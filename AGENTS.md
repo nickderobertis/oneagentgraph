@@ -66,6 +66,16 @@ over projects by hand in a recipe, and declare a cross-project dependency in the
 consuming `project.json` — an undeclared one silently drops that project out of
 `nx affected`, so a pull request runs a gate that never touched it.
 
+`src/scratch.rs` is the one file with a large `cfg(windows)` body, and `just
+check` on Linux never compiles it — the first thing that reads it is
+`cross (windows-latest)`, a required check and a whole CI round-trip away. To
+type-check and lint it locally instead: `rustup target add
+x86_64-pc-windows-gnu`, install `mingw-w64` (`ring`'s build script needs a
+cross `cc`), then `cargo clippy --target x86_64-pc-windows-gnu --all-targets
+--all-features -- -D warnings`. Deliberately not a recipe or a pinned target:
+it provisions a toolchain and a system package that only this one file needs,
+and the gate that actually decides is the Windows leg.
+
 ## Invariants (non-negotiable)
 
 - **Coverage is enforced at 95% line coverage.** `just check` fails below it.

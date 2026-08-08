@@ -694,9 +694,9 @@ mod platform {
 ///   `TerminateJobObject` ends the whole tree at once and cannot be refused. The
 ///   safety property — nothing stamped for this scratch is still running when
 ///   the reap returns — holds identically; what a member loses is the chance to
-///   shut itself down cleanly first. `a_descendant_that_refuses_to_stop_is_
-///   killed_anyway` in the e2e suite is POSIX-only for that reason: its subject
-///   is the escalation, and here there is nothing to escalate past.
+///   shut itself down cleanly first. The e2e journey named for a descendant
+///   that refuses to stop is POSIX-only for that reason: its subject is the
+///   escalation, and here there is nothing to escalate past.
 ///
 /// A job is created `KILL_ON_JOB_CLOSE`, so the tree also dies with the
 /// supervisor that launched it — a leaked paid harness is what the whole rule
