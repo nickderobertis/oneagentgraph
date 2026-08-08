@@ -610,12 +610,12 @@ fn persona_validate_walks_a_catalog_and_names_the_failing_file() {
 /// binary rather than asserted in a unit test.
 #[test]
 fn every_shipped_persona_validates_through_the_cli() {
-    let workspace = Workspace::new();
-    for (name, document) in oneagentgraph::persona::SHIPPED_PERSONAS {
-        workspace.write(&format!("shipped/{name}.yaml"), document);
-    }
-    workspace
-        .run(&["persona", "validate", "shipped"])
+    // The catalog on disk is what is compiled in and what a user reads, so it is
+    // what the verb is pointed at — a suite that rebuilt it from a library
+    // constant would pass on a file the crate does not ship.
+    let catalog = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("personas");
+    Workspace::new()
+        .run(&["persona", "validate", &catalog.display().to_string()])
         .expect_code(0);
 }
 
@@ -738,6 +738,36 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
     let missing = workspace.run(&["reset-timer", "no-such-run", "worker"]);
     missing.expect_code(2);
     assert!(missing.stderr.contains("no-such-run"), "{}", missing.stderr);
+
+    // A member argument becomes a path — the signal file, and the scratch
+    // `cancel --kill` reaps — so one that could leave the run's own directory is
+    // refused before either is touched.
+    for escape in ["../elsewhere", "a/b"] {
+        let refused = workspace.run(&["trigger", &id, escape]);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains("member"),
+            "{escape}: {}",
+            refused.stderr
+        );
+
+        let killed = workspace.run(&["cancel", &id, escape, "--kill"]);
+        killed.expect_code(2);
+        assert!(
+            killed.stderr.contains("member"),
+            "{escape}: {}",
+            killed.stderr
+        );
+    }
+
+    // And a run id is a path component too.
+    let traversal = workspace.run(&["history", "show", "../elsewhere"]);
+    traversal.expect_code(2);
+    assert!(
+        traversal.stderr.contains("is not a run id"),
+        "{}",
+        traversal.stderr
+    );
 }
 
 /// The one run a state directory holds, once one has recorded itself.

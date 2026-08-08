@@ -32,30 +32,70 @@ fn oneagentgraph() -> Command {
     Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
 }
 
-/// Every command the contract documents.
-const COMMANDS: &[&str] = &[
-    "run",
-    "validate",
-    "trigger",
-    "reset-timer",
-    "cancel",
-    "history",
-    "health",
-    "smoke",
-    "persona",
-];
+/// Every command `docs/contract.md`'s CLI block spells, read out of the document
+/// rather than restated here — a list restated is a list that goes stale.
+fn documented_commands() -> Vec<String> {
+    // Only the CLI usage block — the document's prose says "oneagentgraph owns
+    // no harness logic", and a scan of the whole file would read `owns` as a
+    // command nobody typed.
+    let contract = include_str!("../../docs/contract.md");
+    let usage = contract
+        .split("```")
+        .find(|block| block.starts_with("\noneagentgraph run GRAPH"))
+        .expect("the contract's CLI usage block moved");
+    usage
+        .lines()
+        .filter_map(|line| line.strip_prefix("oneagentgraph "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|word| word.chars().all(|c| c.is_ascii_lowercase() || c == '-'))
+        .map(str::to_string)
+        .collect()
+}
 
 #[test]
 fn help_lists_every_documented_command() {
     let assert = oneagentgraph().arg("--help").assert().success();
     let help = String::from_utf8(assert.get_output().stdout.clone()).expect("help is UTF-8");
 
-    for name in COMMANDS {
+    let documented = documented_commands();
+    assert!(
+        documented.len() >= 9,
+        "the contract's CLI block stopped parsing: {documented:?}"
+    );
+    for name in &documented {
         assert!(
             help.contains(name),
             "`--help` does not mention `{name}`:\n{help}"
         );
     }
+}
+
+/// The published smoke asserts the same command list against an installed
+/// binary, and it is a shell script that cannot read the contract. This is its
+/// drift gate: the loop it iterates has to name exactly what the document does.
+#[test]
+fn the_published_smoke_checks_the_same_commands_the_contract_documents() {
+    let script = include_str!("../../scripts/smoke-published.sh");
+    let loop_line = script
+        .lines()
+        .find(|line| line.trim_start().starts_with("for command in "))
+        .expect("scripts/smoke-published.sh no longer loops over the command list");
+    let checked: Vec<&str> = loop_line
+        .trim()
+        .trim_start_matches("for command in ")
+        .trim_end_matches("; do")
+        .split_whitespace()
+        .collect();
+    let mut documented = documented_commands();
+    documented.sort();
+    documented.dedup();
+    let mut checked: Vec<String> = checked.iter().map(|c| (*c).to_string()).collect();
+    checked.sort();
+    checked.dedup();
+    assert_eq!(
+        checked, documented,
+        "scripts/smoke-published.sh and docs/contract.md disagree about the command surface"
+    );
 }
 
 #[test]

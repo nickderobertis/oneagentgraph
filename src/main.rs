@@ -254,6 +254,7 @@ impl Signal {
 
 /// `oneagentgraph trigger` / `reset-timer`: leave the run a signal to pick up.
 fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: Signal) -> Result<i32, Error> {
+    let member = member_name(&args.member)?;
     let record = history::show(&state_dir(env), &args.run)?;
     let dir = PathBuf::from(&record.events_path)
         .parent()
@@ -275,7 +276,7 @@ fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: Signal) -> Re
     }
     std::fs::create_dir_all(&dir)
         .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
-    let path = dir.join(format!("{}.{}", args.member, kind.as_str()));
+    let path = dir.join(format!("{member}.{}", kind.as_str()));
     std::fs::write(&path, kind.as_str())
         .map_err(|err| Error::InvalidConfig(format!("cannot write {}: {err}", path.display())))?;
     println!("{}: {} {}", args.run, args.member, kind.as_str());
@@ -286,6 +287,7 @@ use std::path::Path;
 
 /// `oneagentgraph cancel`.
 fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let member = args.member.as_deref().map(member_name).transpose()?;
     let state = state_dir(env);
     let record = history::show(&state, &args.run)?;
     let root = state.join(&record.run_id);
@@ -296,7 +298,7 @@ fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Erro
     let reaped = if args.kill {
         // Only a proven process is signalled: every live process still carrying
         // this run's scratch stamp, and nothing derived from a remembered number.
-        match &args.member {
+        match member {
             Some(member) => oneagentgraph::scratch::reap(&root.join("members").join(member)),
             None => oneagentgraph::scratch::reap(&root),
         }
@@ -317,6 +319,22 @@ fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Erro
         }
     );
     Ok(EXIT_SUCCESS)
+}
+
+/// One `MEMBER` argument, checked against the shape a graph's own member names
+/// are checked against.
+///
+/// The argument becomes a path — the signal file a run watches for, and the
+/// member scratch `cancel --kill` reaps — so a value carrying a separator or a
+/// parent reference would write or reap outside the run's own directory.
+fn member_name(member: &str) -> Result<&str, Error> {
+    if config::is_member_name(member) {
+        return Ok(member);
+    }
+    Err(Error::InvalidConfig(format!(
+        "member {member:?}: a member name is letters, digits, hyphens, and underscores — this \
+         one would name a path outside the run's own directory"
+    )))
 }
 
 /// `oneagentgraph history`.

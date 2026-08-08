@@ -143,9 +143,9 @@ pub struct Request {
     /// The directory members work in.
     pub dir: PathBuf,
     /// Extra labels stamped on every event.
-    pub labels: Vec<(String, String)>,
+    pub labels: Vec<Label>,
     /// `members.worker.agent.model=NAME`-style overrides, already parsed.
-    pub overrides: Vec<(String, String)>,
+    pub overrides: Vec<Override>,
     /// Where run state lives.
     pub state_dir: PathBuf,
     /// The `onejudge` binary.
@@ -187,12 +187,52 @@ pub fn new_run_id(name: &str, at: SystemTime) -> String {
     )
 }
 
+/// One `--set PATH=VALUE`, parsed.
+///
+/// A type rather than a pair, because the parse is what makes the path usable:
+/// it names a field of the graph document, and one that names nothing refuses
+/// the run. A `(String, String)` in the public request would let a caller hand
+/// in an unparsed pair and reach the same code by another door.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Override {
+    /// The dotted path into the graph document.
+    path: String,
+    /// What to set it to.
+    value: String,
+}
+
+/// One `--label k=v`, parsed.
+///
+/// A type for the same reason: the key lands in an envelope's flattened labels,
+/// and which keys are usable there is decided once, here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Label {
+    /// The label key.
+    key: String,
+    /// Its value.
+    value: String,
+}
+
+impl Label {
+    /// The key, as an envelope carries it.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The value.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
 /// Parse one `--set members.worker.agent.model=NAME` override.
 ///
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when the argument carries no `=`, or an empty path.
-pub fn parse_set(raw: &str) -> Result<(String, String), Error> {
+pub fn parse_set(raw: &str) -> Result<Override, Error> {
     let (path, value) = raw.split_once('=').ok_or_else(|| {
         Error::InvalidConfig(format!(
             "--set {raw:?}: expected PATH=VALUE, as in members.worker.agent.model=NAME"
@@ -203,7 +243,10 @@ pub fn parse_set(raw: &str) -> Result<(String, String), Error> {
             "--set {raw:?}: the path before `=` is empty"
         )));
     }
-    Ok((path.to_string(), value.to_string()))
+    Ok(Override {
+        path: path.to_string(),
+        value: value.to_string(),
+    })
 }
 
 /// Parse one `--label k=v`.
@@ -211,7 +254,7 @@ pub fn parse_set(raw: &str) -> Result<(String, String), Error> {
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when the argument carries no `=`, or an empty key.
-pub fn parse_label(raw: &str) -> Result<(String, String), Error> {
+pub fn parse_label(raw: &str) -> Result<Label, Error> {
     let (key, value) = raw
         .split_once('=')
         .ok_or_else(|| Error::InvalidConfig(format!("--label {raw:?}: expected k=v")))?;
@@ -235,7 +278,10 @@ pub fn parse_label(raw: &str) -> Result<(String, String), Error> {
              name so a consumer can tell the two apart"
         )));
     }
-    Ok((key.to_string(), value.to_string()))
+    Ok(Label {
+        key: key.to_string(),
+        value: value.to_string(),
+    })
 }
 
 /// The label keys `docs/contract.md` reserves, which a run stamps itself.
@@ -251,8 +297,8 @@ const RESERVED_LABELS: &[&str] = &["run_id", "member", "persona"];
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when a path names nothing the document has.
-pub fn apply_overrides(document: &mut Value, overrides: &[(String, String)]) -> Result<(), Error> {
-    for (path, value) in overrides {
+pub fn apply_overrides(document: &mut Value, overrides: &[Override]) -> Result<(), Error> {
+    for Override { path, value } in overrides {
         let mut cursor = &mut *document;
         let segments: Vec<&str> = path.split('.').collect();
         let (last, parents) = segments.split_last().ok_or_else(|| {
@@ -382,7 +428,7 @@ pub fn run(
             extra: request
                 .labels
                 .iter()
-                .map(|(key, value)| (key.clone(), Value::String(value.clone())))
+                .map(|label| (label.key.clone(), Value::String(label.value.clone())))
                 .collect(),
             ..crate::event::Labels::default()
         },
@@ -735,12 +781,13 @@ mod tests {
         let mut document: Value = serde_json::json!({
             "members": {"worker": {"agent": {"model": Value::Null, "stream": true}, "max_turns": 4}}
         });
+        let set = |raw: &str| parse_set(raw).expect("a parsed override");
         apply_overrides(
             &mut document,
             &[
-                ("members.worker.agent.model".into(), "claude-opus-5".into()),
-                ("members.worker.agent.stream".into(), "false".into()),
-                ("members.worker.max_turns".into(), "9".into()),
+                set("members.worker.agent.model=claude-opus-5"),
+                set("members.worker.agent.stream=false"),
+                set("members.worker.max_turns=9"),
             ],
         )
         .expect("every path exists");
@@ -761,20 +808,14 @@ mod tests {
             ("members.ghost.model", "this graph has no ghost"),
             ("members.worker.ghost", "this graph has no ghost"),
         ] {
-            let err = apply_overrides(&mut document, &[(path.into(), "x".into())]).unwrap_err();
+            let err = apply_overrides(&mut document, &[set(&format!("{path}=x"))]).unwrap_err();
             assert!(err.to_string().contains(expected), "{path}: {err}");
         }
-        let err = apply_overrides(
-            &mut document,
-            &[("members.worker.max_turns".into(), "many".into())],
-        )
-        .unwrap_err();
+        let err =
+            apply_overrides(&mut document, &[set("members.worker.max_turns=many")]).unwrap_err();
         assert!(err.to_string().contains("not a number"), "{err}");
-        let err = apply_overrides(
-            &mut document,
-            &[("members.worker.agent.stream".into(), "yes".into())],
-        )
-        .unwrap_err();
+        let err =
+            apply_overrides(&mut document, &[set("members.worker.agent.stream=yes")]).unwrap_err();
         assert!(err.to_string().contains("not a boolean"), "{err}");
     }
 
@@ -790,7 +831,13 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("path before `=` is empty"));
-        assert_eq!(parse_set("a.b=c").unwrap(), ("a.b".into(), "c".into()));
+        assert_eq!(
+            parse_set("a.b=c").unwrap(),
+            Override {
+                path: "a.b".into(),
+                value: "c".into()
+            }
+        );
         assert!(parse_label("bare").unwrap_err().to_string().contains("k=v"));
         for bad in ["=v", "a b=v", "a-b=v"] {
             assert!(
@@ -810,10 +857,8 @@ mod tests {
                 "{reserved}: {err}"
             );
         }
-        assert_eq!(
-            parse_label("tier=gate").unwrap(),
-            ("tier".into(), "gate".into())
-        );
+        let label = parse_label("tier=gate").unwrap();
+        assert_eq!((label.key(), label.value()), ("tier", "gate"));
     }
 
     /// `${VAR}` expands from the launching environment; an unset one expands to
