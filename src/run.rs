@@ -211,29 +211,28 @@ impl RunId {
         ))
     }
 
-    /// Whether `raw` is the shape [`RunId::mint`] produces, and nothing else.
+    /// One run id, parsed: nonempty, and drawn only from the alphabet
+    /// [`RunId::mint`] writes — lowercase ASCII, digits, and `-`.
     ///
-    /// Exactly that alphabet: `mint` lowercases the graph's name and joins it to
-    /// two decimal numbers with hyphens, so lowercase ASCII, digits, and `-` is
-    /// the whole of it. Accepting more than `mint` emits would make this a check
-    /// on what a path component may safely contain rather than on what a run id
-    /// *is*, and the two stop agreeing the moment either moves.
-    #[must_use]
-    pub fn is_run_id(raw: &str) -> bool {
-        !raw.is_empty()
-            && raw
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-    }
-
-    /// One run id, parsed.
+    /// That alphabet, and deliberately not `mint`'s *structure*
+    /// (`<slug>-<millis>-<pid>`). A run directory outlives the version that made
+    /// it, and `history` is expected to still read it; a parse tied to today's
+    /// layout would make every earlier run unreadable the first time that layout
+    /// gains a field, which is a worse failure than the one it would prevent.
+    /// What the joins downstream actually depend on is that the value is a
+    /// single path component that cannot traverse out of the run store, and the
+    /// alphabet is exactly that guarantee — no separator, no `.`, so no `..`.
     ///
     /// # Errors
     ///
-    /// [`Error::InvalidConfig`] when `raw` is not a shape this crate mints, and
-    /// so would name a path outside the run store.
+    /// [`Error::InvalidConfig`] when `raw` is outside that alphabet, and so
+    /// could name a path outside the run store.
     pub fn parse(raw: &str) -> Result<Self, Error> {
-        if !Self::is_run_id(raw) {
+        let path_component = !raw.is_empty()
+            && raw
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        if !path_component {
             return Err(Error::InvalidConfig(format!(
                 "{raw:?} is not a run id: a run id is lowercase letters, digits, and hyphens, and \
                  this one would name a path outside the run store"
