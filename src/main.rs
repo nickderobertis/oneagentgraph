@@ -33,7 +33,14 @@ const ONEHARNESS_BIN_ENV: &str = "ONEAGENTGRAPH_ONEHARNESS_BIN";
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    let env: BTreeMap<String, String> = std::env::vars().collect();
+    // `vars()` panics on an environment this process did not choose: one
+    // variable that is not UTF-8 would take down every verb, including the ones
+    // that never read the environment. Every consumer here wants a `String`, so
+    // a name or value that is not one is a variable this crate cannot act on
+    // and drops, rather than a reason to abort.
+    let env: BTreeMap<String, String> = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
     match dispatch(cli.command, &env) {
         Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
         Err(err) => {
@@ -493,8 +500,18 @@ fn personas_under(path: &Path) -> Result<Vec<PathBuf>, Error> {
     while let Some(dir) = stack.pop() {
         let entries = std::fs::read_dir(&dir)
             .map_err(|err| Error::InvalidConfig(format!("cannot read {}: {err}", dir.display())))?;
-        for entry in entries.flatten() {
-            let entry = entry.path();
+        for entry in entries {
+            // A catalog walk that skipped what it could not read would report
+            // OK for a directory it never finished — the one answer `persona
+            // validate` must never give.
+            let entry = entry
+                .map_err(|err| {
+                    Error::InvalidConfig(format!(
+                        "cannot read an entry of {}: {err}",
+                        dir.display()
+                    ))
+                })?
+                .path();
             let name = entry
                 .file_name()
                 .and_then(|n| n.to_str())

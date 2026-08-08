@@ -36,7 +36,7 @@
 //! as the same dead process.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead as _, BufReader};
+use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -139,12 +139,14 @@ impl Rule {
 /// What became of one member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The member settled. `completed` is onejudge's own verdict: exit 0 means
-    /// it drove the task to completion, exit 1 that it did not.
-    Settled {
-        /// Whether the member reached its completion bar.
-        completed: bool,
-    },
+    /// The member settled having reached its completion bar — onejudge's own
+    /// verdict, its exit 0.
+    Settled,
+    /// The member settled without reaching it — onejudge's exit 1. A settle
+    /// either way, and the graph's exit 1 either way, but not the same outcome:
+    /// [`crate::run::MemberOutcome`] spells the two differently in the record,
+    /// and a single variant carrying a flag is how one gets read as the other.
+    Incomplete,
     /// The member died. The payload says which rule fired and what the process
     /// left behind.
     Died(Death),
@@ -156,7 +158,7 @@ impl Outcome {
     /// Whether this outcome lets the graph exit `0`.
     #[must_use]
     pub fn is_success(&self) -> bool {
-        matches!(self, Outcome::Settled { completed: true })
+        matches!(self, Outcome::Settled)
     }
 }
 
@@ -296,7 +298,7 @@ fn supervise(
             (emitter.clone(), Arc::clone(&activity), Arc::clone(&report));
         std::thread::spawn(move || {
             let mut turn = 0u64;
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in readable(BufReader::new(stdout)) {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
                 ingest(&line, &emitter, &mut turn, &report);
             }
@@ -305,7 +307,7 @@ fn supervise(
     let stderr_reader = {
         let tail = Arc::clone(&tail);
         std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            for line in readable(BufReader::new(stderr)) {
                 let mut kept = tail.lock().expect("stderr tail");
                 kept.push_str(&line);
                 kept.push('\n');
@@ -442,6 +444,26 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
     }
 }
 
+/// Every line a child stream yields, past the ones that are not text.
+///
+/// A member's stdout is another process's output, and the two ways reading it
+/// fails are not the same failure. A line that is not UTF-8 is *this* line being
+/// unreadable: skipping it and carrying on is what the rest of the reader
+/// already does with a line it cannot model, and stopping there would drop the
+/// `result` report that follows and condemn a healthy member for producing no
+/// report. A genuine read failure is the stream itself ending, and is where the
+/// loop stops — `map_while` treated both as the second.
+fn readable(stream: impl BufRead) -> impl Iterator<Item = String> {
+    let mut lines = stream.lines();
+    std::iter::from_fn(move || loop {
+        match lines.next() {
+            Some(Ok(line)) => return Some(line),
+            Some(Err(err)) if err.kind() == std::io::ErrorKind::InvalidData => continue,
+            Some(Err(_)) | None => return None,
+        }
+    })
+}
+
 /// One tool event as the contract's bounded summary: what it acted on.
 fn summarize(event: &Value) -> String {
     match event.get("input") {
@@ -519,7 +541,11 @@ fn settle(
             bytes,
         }],
     );
-    Outcome::Settled { completed }
+    if completed {
+        Outcome::Settled
+    } else {
+        Outcome::Incomplete
+    }
 }
 
 /// Every candidate a fallback chain stepped past, as the contract's event.
@@ -775,8 +801,8 @@ mod tests {
     /// are both the graph's exit `1`.
     #[test]
     fn only_a_completed_settle_is_a_success() {
-        assert!(Outcome::Settled { completed: true }.is_success());
-        assert!(!Outcome::Settled { completed: false }.is_success());
+        assert!(Outcome::Settled.is_success());
+        assert!(!Outcome::Incomplete.is_success());
         assert!(!Outcome::Unstartable("no".into()).is_success());
     }
 }

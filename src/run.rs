@@ -739,8 +739,8 @@ fn cron(
 /// One member's outcome, as the run record keeps it.
 fn describe(outcome: &Outcome) -> MemberOutcome {
     match outcome {
-        Outcome::Settled { completed: true } => MemberOutcome::Settled,
-        Outcome::Settled { completed: false } => MemberOutcome::Incomplete,
+        Outcome::Settled => MemberOutcome::Settled,
+        Outcome::Incomplete => MemberOutcome::Incomplete,
         Outcome::Died(died) => MemberOutcome::Died(died.rule),
         Outcome::Unstartable(reason) => MemberOutcome::Unstartable(reason.clone()),
     }
@@ -993,11 +993,8 @@ mod tests {
     #[test]
     fn each_outcome_has_one_spelling_that_round_trips() {
         let cases = [
-            (describe(&Outcome::Settled { completed: true }), "settled"),
-            (
-                describe(&Outcome::Settled { completed: false }),
-                "incomplete",
-            ),
+            (describe(&Outcome::Settled), "settled"),
+            (describe(&Outcome::Incomplete), "incomplete"),
             (
                 describe(&Outcome::Died(crate::member::Death {
                     rule: crate::member::Rule::Activity,
