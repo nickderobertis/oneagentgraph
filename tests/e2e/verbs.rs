@@ -1243,6 +1243,34 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
         "a refused --detach still left a run behind"
     );
 
+    // The task is part of what makes an invocation buildable, and `--detach`
+    // knows the real one — so a run with no task is the same refusal here as in
+    // the foreground. Checking a stand-in task instead is what let this exit 0
+    // with a `{run_id, …}` on stdout for a config `run` exits 2 for.
+    let workspace = Workspace::new();
+    let taskless = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--detach",
+    ]);
+    taskless.expect_code(2);
+    assert!(
+        taskless.stderr.contains("no task"),
+        "the refusal did not name the missing task: {}",
+        taskless.stderr
+    );
+    assert!(
+        taskless.stdout.trim().is_empty(),
+        "a taskless run was reported as started: {}",
+        taskless.stdout
+    );
+    assert!(
+        run_id(&workspace.state()).is_none(),
+        "a taskless --detach still left a run behind"
+    );
+
     // A `--set` that names nothing is the same class: `--detach` forwards every
     // override to the child, so the parent has to apply them to know whether the
     // run it is about to report could start.

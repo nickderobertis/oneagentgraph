@@ -85,20 +85,28 @@ fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Err
     }
 }
 
+/// The task this invocation names, from whichever flag carries it.
+///
+/// One reader for both the foreground run and the `--detach` preflight: the
+/// detached child is handed these same flags, so a preflight that resolved the
+/// task differently would be checking a different invocation than the one it
+/// goes on to launch.
+fn requested_task(args: &RunArgs) -> Result<Option<String>, Error> {
+    match (&args.task, &args.task_file) {
+        (Some(_), Some(_)) => Err(Error::InvalidConfig(
+            "--task and --task-file both name the task; give exactly one".into(),
+        )),
+        (Some(text), None) => Ok(Some(text.clone())),
+        (None, Some(path)) => Ok(Some(std::fs::read_to_string(path).map_err(|err| {
+            Error::InvalidConfig(format!("cannot read --task-file {}: {err}", path.display()))
+        })?)),
+        (None, None) => Ok(None),
+    }
+}
+
 /// `oneagentgraph run`.
 fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
-    let task = match (&args.task, &args.task_file) {
-        (Some(_), Some(_)) => {
-            return Err(Error::InvalidConfig(
-                "--task and --task-file both name the task; give exactly one".into(),
-            ))
-        }
-        (Some(text), None) => Some(text.clone()),
-        (None, Some(path)) => Some(std::fs::read_to_string(path).map_err(|err| {
-            Error::InvalidConfig(format!("cannot read --task-file {}: {err}", path.display()))
-        })?),
-        (None, None) => None,
-    };
+    let task = requested_task(&args)?;
     let request = run::Request {
         graph: config::ConfigRef(args.graph.clone()),
         task,
@@ -145,7 +153,12 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
         .iter()
         .map(|raw| run::parse_set(raw))
         .collect::<Result<Vec<_>, _>>()?;
-    preflight(&args.graph, &overrides, env)?;
+    // Against the task this invocation actually carries, not a stand-in: the
+    // child is handed the same flags, so a taskless `--detach` is the same
+    // invalid config the foreground run exits 2 for — and reporting it as a
+    // started run on stdout is the exact failure this preflight exists for.
+    let task = requested_task(args)?;
+    preflight(&args.graph, &overrides, env, task.as_deref())?;
 
     let state = state_dir(env);
     let before: Vec<run::RunId> = history::list(&state)
@@ -206,6 +219,15 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     ))
 }
 
+/// The task `validate` checks a member's invocation against.
+///
+/// `validate` is given a graph and nothing else, and a graph is not invalid for
+/// lacking prose nobody has typed yet — so a stand-in stands in for the one a
+/// run would carry. This is the *only* caller entitled to one: a `--detach`
+/// preflight knows the real task, and substituting here is how a taskless run
+/// was reported as started.
+const VALIDATE_TASK: &str = "validate: no task is run";
+
 /// `oneagentgraph validate`.
 ///
 /// Everything `run` does short of launching: the graph parses, its schema holds,
@@ -215,7 +237,7 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
 /// all found here rather than after a paid turn has been spent on the members
 /// that did start.
 fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
-    let graph = preflight(&args.graph, &[], env)?;
+    let graph = preflight(&args.graph, &[], env, Some(VALIDATE_TASK))?;
     println!("{}: {} member(s) OK", graph.name, graph.members.len());
     Ok(EXIT_SUCCESS)
 }
@@ -231,6 +253,7 @@ fn preflight(
     graph_ref: &str,
     overrides: &[run::Override],
     env: &BTreeMap<String, String>,
+    task: Option<&str>,
 ) -> Result<GraphConfig, Error> {
     let mut resolver = Resolver::new();
     let reference = config::ConfigRef(graph_ref.to_string());
@@ -250,9 +273,9 @@ fn preflight(
     run::ready_order(&graph)?;
 
     // The generated configs go to a directory that is thrown away: what is being
-    // checked is that they *can* be generated, not what they say. A stand-in task
-    // stands in for the one `run` would be given, because a graph is not invalid
-    // for lacking prose nobody has typed yet.
+    // checked is that they *can* be generated, not what they say. The task is
+    // the caller's to supply, because the two callers mean different things by
+    // its absence — see [`VALIDATE_TASK`].
     let scratch = tempdir(env)?;
     for (name, member) in &graph.members {
         let member_scratch = scratch.join(name);
@@ -260,7 +283,7 @@ fn preflight(
             dir: Path::new("."),
             scratch: &member_scratch,
             graph_dir: document.base_dir.as_deref(),
-            task: Some("validate: no task is run"),
+            task,
             session: "validate",
             onejudge_bin: &onejudge_bin(env),
             oneharness_bin: &oneharness_bin(env),
