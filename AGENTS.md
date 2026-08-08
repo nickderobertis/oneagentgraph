@@ -33,24 +33,8 @@ proposal to the planner who owns that contract, never a unilateral edit.
 and drives them through the public types, so the doc and the types cannot drift.
 Adding a contract type without extending that test leaves the doc unproven.
 
-### What runs behind it
-
-The contract is implemented. `oneagentgraph run` resolves the graph, builds every
-member's invocation *before* launching anything, and merges what the members
-publish into one NDJSON stream on stdout and into the run's own `events.jsonl`.
-
-Two facts about the stack are load-bearing and easy to lose:
-
-- **Each conversation side is pinned without a wrapper script.** onejudge gives
-  the judge side `oneharness run --config <judge_config>` and the agent side
-  none, so the agent side is pinned by *placing* its resolved config at
-  `<member scratch>/oneharness.toml` and running `onejudge` from there —
-  oneharness discovers it upward from its own working directory. The harness
-  still works in the graph's `--dir`, which onejudge passes through as `--cwd`.
-- **The two CLIs read their exit codes differently.** `onejudge` exits `1` for a
-  task it drove but did not complete, which is a settle; `oneharness` exits
-  non-zero when it could not run the turn at all, which is a death.
-  `member::Kind` is the one place that distinction lives.
+The contract is implemented. How each part of it is, and the seams that are easy
+to get wrong, live in `src/AGENTS.md` beside the code they govern.
 
 ## Stack and composition
 
@@ -90,18 +74,8 @@ consuming `project.json` — an undeclared one silently drops that project out o
   the real package around the real binary. An in-process `main()` call is not an
   e2e, and every journey it covers runs inside `just check` rather than behind
   `#[ignore]`.
-- **One seam may be faked, and only one.** The e2e suite drives the real
-  `onejudge` and the real `oneharness` as subprocesses and replaces the *paid
-  harness process* at oneharness's own `ONEHARNESS_BIN_<ID>` seam, with the
-  doubles in `src/bin/` behind the non-default `fake-provider` feature. Name bare
-  identities in a test chain, never variants: `ONEHARNESS_BIN_*` keys on a
-  harness id and no spelling of it reaches a variant, so `claude-code:alternate`
-  would spawn the real paid provider with the double sitting unused beside it.
-  That is a money hazard, not a style point.
-- **Provisioning installs both CLIs.** `just bootstrap` pins them; the versions
-  live at the top of the `justfile`. `onejudge` is a **git pin** because its
-  streamed-provider contract is merged but unreleased — move it to a published
-  version as soon as one ships.
+- **One seam may be faked, and only one:** the paid harness process. Everything
+  else in a journey is real. `src/AGENTS.md` says how.
 - **Validate external input at its trust boundary.** Graph configs and event
   envelopes are external input: the schema structs reject unknown fields, so a
   typo fails loudly instead of being silently dropped.

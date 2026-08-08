@@ -88,6 +88,40 @@ impl Kind {
     }
 }
 
+/// The liveness rules a member can die by.
+///
+/// A closed set, because `member-died`'s `rule` is what a supervisor branches
+/// on: provider throttling, an OOM kill, a watchdog, and a harness that never
+/// started otherwise all reach it as the same dead process, and a rule spelled
+/// two ways is a branch that silently stops matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rule {
+    /// The member could not be started at all.
+    Unstartable,
+    /// The member was terminated by a signal.
+    Signalled,
+    /// The member exited without a report it could settle on.
+    ProviderFailure,
+    /// This supervisor could not confirm the member alive inside its deadline.
+    Heartbeat,
+    /// The member published nothing for the whole stall bound.
+    Activity,
+}
+
+impl Rule {
+    /// The rule's name on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Rule::Unstartable => "unstartable",
+            Rule::Signalled => "signalled",
+            Rule::ProviderFailure => "provider-failure",
+            Rule::Heartbeat => "heartbeat",
+            Rule::Activity => "activity",
+        }
+    }
+}
+
 /// What became of one member.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
@@ -205,7 +239,7 @@ pub fn run(
             emitter.emit(
                 EventKind::MemberDied,
                 died_payload(&MemberDied {
-                    rule: "unstartable".into(),
+                    rule: Rule::Unstartable.as_str().into(),
                     exit_code: None,
                     disposition: Disposition::Exited,
                     stderr_tail: reason.clone(),
@@ -287,7 +321,7 @@ fn supervise(
             return kill_and_report(
                 &mut child,
                 emitter,
-                "heartbeat",
+                Rule::Heartbeat,
                 &tail,
                 reader,
                 stderr_reader,
@@ -303,7 +337,7 @@ fn supervise(
             return kill_and_report(
                 &mut child,
                 emitter,
-                "activity",
+                Rule::Activity,
                 &tail,
                 reader,
                 stderr_reader,
@@ -333,7 +367,26 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
     };
     match value.get("type").and_then(Value::as_str) {
         Some("event") => {
-            let observed = value.get("turn").and_then(Value::as_u64).unwrap_or(1);
+            // A trust boundary: this is a child process's stdout. An `event`
+            // line with no tool event in it is not an event, and publishing a
+            // `turn-activity` invented from its absence would report the member
+            // as having done something it never did. Skip it instead — the
+            // stream is a view, and the turn is still read to its end.
+            let Some(event) = value.get("event").filter(|event| event.is_object()) else {
+                return;
+            };
+            let Some(name) = event.get("name").and_then(Value::as_str) else {
+                return;
+            };
+            let Some(kind) = event.get("kind").and_then(Value::as_str) else {
+                return;
+            };
+            // A turn index this build cannot read is one it does not renumber
+            // on: the events still publish, under the turn already open.
+            let observed = value
+                .get("turn")
+                .and_then(Value::as_u64)
+                .unwrap_or((*turn).max(1));
             if observed != *turn {
                 *turn = observed;
                 emitter.emit(
@@ -341,31 +394,12 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
                     payload([("turn", Value::from(observed))]),
                 );
             }
-            let event = value.get("event").cloned().unwrap_or(Value::Null);
-            let (detail, truncated) = bound_detail(&summarize(&event));
+            let (detail, truncated) = bound_detail(&summarize(event));
             emitter.emit(
                 EventKind::TurnActivity,
                 payload([
-                    (
-                        "kind",
-                        Value::String(
-                            event
-                                .get("kind")
-                                .and_then(Value::as_str)
-                                .unwrap_or("tool_call")
-                                .into(),
-                        ),
-                    ),
-                    (
-                        "name",
-                        Value::String(
-                            event
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default()
-                                .into(),
-                        ),
-                    ),
+                    ("kind", Value::String(kind.into())),
+                    ("name", Value::String(name.into())),
                     ("detail", Value::String(detail)),
                     ("truncated", Value::Bool(truncated)),
                 ]),
@@ -405,7 +439,7 @@ fn settle(
     // first — that is a death, and the disposition is what distinguishes it from
     // an exit status the member itself returned.
     if disposition(status) == Disposition::Signaled {
-        return died(emitter, "signalled", status, tail);
+        return died(emitter, Rule::Signalled, status, tail);
     }
     // A chain names every candidate it stepped past, and it does so whether or
     // not a later one ran. Those records are evidence either way — which
@@ -417,7 +451,7 @@ fn settle(
     }
     let code = status.code().unwrap_or(-1);
     if report.is_none() || !kind.settled(code) {
-        return died(emitter, "provider-failure", status, tail);
+        return died(emitter, Rule::ProviderFailure, status, tail);
     }
     let completed = code == 0;
     let document = report.unwrap_or(Value::Null);
@@ -493,13 +527,13 @@ fn fallback_advances(report: Option<&Value>) -> Vec<Map<String, Value>> {
 /// Report a member that died, and say which rule found it.
 fn died(
     emitter: &Emitter,
-    rule: &str,
+    rule: Rule,
     status: std::process::ExitStatus,
     tail: &Arc<Mutex<String>>,
 ) -> Outcome {
     let (stderr_tail, truncated) = bound_text(tail.lock().expect("stderr tail").trim());
     let payload = MemberDied {
-        rule: rule.to_string(),
+        rule: rule.as_str().to_string(),
         exit_code: status.code(),
         disposition: disposition(status),
         stderr_tail,
@@ -513,7 +547,7 @@ fn died(
 fn kill_and_report(
     child: &mut Child,
     emitter: &Emitter,
-    rule: &str,
+    rule: Rule,
     tail: &Arc<Mutex<String>>,
     reader: std::thread::JoinHandle<()>,
     stderr_reader: std::thread::JoinHandle<()>,
@@ -524,7 +558,7 @@ fn kill_and_report(
     let _ = stderr_reader.join();
     let (stderr_tail, truncated) = bound_text(tail.lock().expect("stderr tail").trim());
     let payload = MemberDied {
-        rule: rule.to_string(),
+        rule: rule.as_str().to_string(),
         exit_code: status.and_then(|status| status.code()),
         disposition: status.map_or(Disposition::Signaled, disposition),
         stderr_tail,
@@ -630,6 +664,13 @@ mod tests {
             "[]",
             "{\"type\":\"unknown\"}",
             "{\"type\":\"result\"}",
+            // An `event` line carrying nothing this build can model: no event,
+            // an event that is not an object, and one missing either half of the
+            // summary a `turn-activity` is.
+            "{\"type\":\"event\"}",
+            "{\"type\":\"event\",\"event\":7}",
+            "{\"type\":\"event\",\"event\":{\"kind\":\"tool_call\"}}",
+            "{\"type\":\"event\",\"event\":{\"name\":\"bash\"}}",
         ] {
             ingest(line, &recorder, &mut turn, &report);
         }

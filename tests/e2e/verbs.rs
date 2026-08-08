@@ -4,6 +4,10 @@
 //! `test_smoke_contention_e2e.py`, `test_environment_isolation_e2e.py`, and the
 //! persona half of `test_dispatch_e2e.py`.
 
+// llmlint: ignore-file[e2e_not_mocked] see tests/e2e/support.rs: the paid harness
+// process is the single sanctioned double, and the wrapper scripts here are that
+// same double reached under a second `ONEHARNESS_BIN_*` key.
+
 use crate::support::{fake_harness, two_party_graph, until, Workspace, CHAIN};
 
 /// `validate` reads every ref the graph names, so a pass means the graph could
@@ -42,6 +46,44 @@ fn validate_refuses_a_graph_that_could_never_run() {
                 "    oneharness_config: ./oneharness.toml\n    typo: 3\n",
             ),
             "typo",
+        ),
+        (
+            "version: 1\nname: ' '\nmembers: {}\n",
+            "a graph needs a name",
+        ),
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n    schedule: {every: 0}\n",
+            ),
+            "never stops firing",
+        ),
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n    mode: ' '\n",
+                "    agent: {oneharness_config: ./oneharness.toml}\n",
+                "    judge: {oneharness_config: ./oneharness.judge.toml}\n",
+            ),
+            "names none",
+        ),
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n    mode: bypass\n    max_turns: 0\n",
+                "    agent: {oneharness_config: ./oneharness.toml}\n",
+                "    judge: {oneharness_config: ./oneharness.judge.toml}\n",
+            ),
+            "no turn at all",
+        ),
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n    mode: bypass\n",
+                "    agent: {oneharness_config: ./oneharness.toml}\n",
+                "    judge: {command: []}\n",
+            ),
+            "needs a command to run",
         ),
     ] {
         workspace.graph(document);
@@ -330,6 +372,40 @@ fn health_reads_oneharness_data_and_names_a_missing_binary() {
         "{}",
         missing.stderr
     );
+
+    // A binary that runs and refuses forwards its own diagnostic, and one that
+    // answers something that is not a report is refused rather than forwarded:
+    // a caller would read either as an answer about its identities.
+    let refusing = workspace.write(
+        "refuse.sh",
+        "#!/bin/sh\necho 'no identities configured' >&2\nexit 1\n",
+    );
+    executable(&refusing);
+    let refused = workspace.run_with(
+        &["health"],
+        &[(
+            "ONEAGENTGRAPH_ONEHARNESS_BIN",
+            &refusing.display().to_string(),
+        )],
+    );
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("refused the probe"),
+        "{}",
+        refused.stderr
+    );
+
+    let babbling = workspace.write("babble.sh", "#!/bin/sh\necho 'not a report'\n");
+    executable(&babbling);
+    let babbled = workspace.run_with(
+        &["health"],
+        &[(
+            "ONEAGENTGRAPH_ONEHARNESS_BIN",
+            &babbling.display().to_string(),
+        )],
+    );
+    babbled.expect_code(2);
+    assert!(babbled.stderr.contains("not JSON"), "{}", babbled.stderr);
 }
 
 /// `smoke` spends one turn through the real chain and names the identity that

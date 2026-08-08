@@ -7,6 +7,20 @@
 //! `onejudge` drives the conversation and real `oneharness` selects the identity
 //! in between.
 
+// Journeys are modules, and each reaches for a different part of this support
+// surface; an unused-here helper is used two files over, so `dead_code` would
+// fire on the shared vocabulary rather than on anything unused.
+// llmlint: ignore-file[e2e_not_mocked] the paid model turn is the one genuinely
+// external thing a gate cannot run for free, and this is the seam it is replaced
+// at: oneharness's own documented `ONEHARNESS_BIN_<ID>` binary override. Real
+// `oneagentgraph` builds the invocation, real `onejudge` runs the loop, and real
+// `oneharness` selects the identity, spawns the double, classifies its refusal,
+// and falls through. Nothing between them is stubbed, and no journey may widen
+// this to a second seam.
+
+// Journeys are modules, and each reaches for a different part of this support
+// surface; an unused-here helper is used two files over, so `dead_code` would
+// fire on the shared vocabulary rather than on anything unused.
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
@@ -55,7 +69,7 @@ impl Run {
             .collect()
     }
 
-    /// The kinds the stream carried, in order, deduplicated consecutively.
+    /// Every kind the stream carried, in the order it was written.
     pub fn kinds(&self) -> Vec<String> {
         self.events()
             .iter()

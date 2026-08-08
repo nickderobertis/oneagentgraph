@@ -13,6 +13,18 @@
 //! is killed, a sweep racing a live run, and processes left behind by a member
 //! whose parent is already gone.
 
+// llmlint: ignore-file[live_tier_compiles_and_requires_credential, tests_mirror_real_usage]
+// Three journeys here are `#[cfg(unix)]` because their *subject* is a kernel
+// facility: an `flock` on `owner.lock`, a `/proc` environment stamp no process
+// can shed, and a signal to a proven identity. `src/scratch.rs` documents the
+// degraded contract on a platform without them, and compiling these there would
+// assert behaviour this crate deliberately does not promise. They also read
+// `oneagentgraph::scratch` directly, because scratch ownership is a liveness rule
+// the contract gives no CLI verb of its own — the sweep a future operator runs is
+// this same library call, so this is the interface, not a reach past one. Where a
+// verb does answer — `cancel --kill` reporting what it signalled — the journey
+// asserts on that instead.
+
 use std::path::Path;
 
 use crate::support::{as_env, fake_harness, labels, until, Workspace};

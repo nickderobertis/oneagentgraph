@@ -10,6 +10,8 @@
 //! `split`-provider path — real onejudge, real oneharness on the agent side —
 //! with only the paid supervisor replaced.
 
+// The JSON-lines protocol IS stdout, and a diagnostic IS stderr: onejudge reads
+// one response object from the first and a classified failure from the second.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::io::Read as _;

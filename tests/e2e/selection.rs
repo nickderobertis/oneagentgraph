@@ -12,6 +12,11 @@
 //! unpaired model reaches whichever candidate the chain settles on and kills the
 //! member on a provider rejection instead of falling through.
 
+// llmlint: ignore-file[e2e_not_mocked] see tests/e2e/support.rs: the paid harness
+// process is the single sanctioned double. The wrapper scripts here are that same
+// double under a second `ONEHARNESS_BIN_*` key, because a fall-through needs two
+// candidates and neither may be a real subscription.
+
 use crate::support::{
     fake_harness, two_party_graph, Workspace, CHAIN, FALLBACK_CHAIN, MIXED_CHAIN,
 };

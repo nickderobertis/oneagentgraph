@@ -66,13 +66,71 @@ pub struct Record {
     pub exit_code: Option<i32>,
     /// What became of each member, by name.
     #[serde(default)]
-    pub members: BTreeMap<String, String>,
+    pub members: BTreeMap<String, MemberOutcome>,
     /// Every config ref the run read, content-addressed, so replay and audit
     /// never depend on a URL staying stable.
     #[serde(default)]
     pub refs: Vec<ResolvedRef>,
     /// Where the run's merged NDJSON is.
     pub events_path: String,
+}
+
+/// What became of one member, as the run record keeps it.
+///
+/// A closed set rather than free-form prose: `history` and anything reading
+/// `record.json` branch on it, and "incomplete" and "died" are the distinction a
+/// supervisor most needs. It is written as the same one-line string it always
+/// was, so the record's shape is unchanged and an existing reader still parses.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum MemberOutcome {
+    /// The member reached its completion bar.
+    Settled,
+    /// The member drove the task but did not complete it.
+    Incomplete,
+    /// The member died; the liveness rule that found it is named.
+    Died(String),
+    /// The member could not be started at all.
+    Unstartable(String),
+}
+
+impl From<MemberOutcome> for String {
+    fn from(outcome: MemberOutcome) -> Self {
+        match outcome {
+            MemberOutcome::Settled => "settled".into(),
+            MemberOutcome::Incomplete => "incomplete".into(),
+            MemberOutcome::Died(rule) => format!("died ({rule})"),
+            MemberOutcome::Unstartable(reason) => format!("unstartable ({reason})"),
+        }
+    }
+}
+
+impl TryFrom<String> for MemberOutcome {
+    type Error = String;
+
+    fn try_from(recorded: String) -> Result<Self, String> {
+        if recorded == "settled" {
+            return Ok(MemberOutcome::Settled);
+        }
+        if recorded == "incomplete" {
+            return Ok(MemberOutcome::Incomplete);
+        }
+        for (prefix, wrap) in [
+            ("died (", MemberOutcome::Died as fn(String) -> MemberOutcome),
+            (
+                "unstartable (",
+                MemberOutcome::Unstartable as fn(String) -> MemberOutcome,
+            ),
+        ] {
+            if let Some(rest) = recorded
+                .strip_prefix(prefix)
+                .and_then(|r| r.strip_suffix(')'))
+            {
+                return Ok(wrap(rest.to_string()));
+            }
+        }
+        Err(format!("{recorded:?} is not an outcome this build records"))
+    }
 }
 
 /// What a run was asked to do.
@@ -179,7 +237,9 @@ pub fn apply_overrides(document: &mut Value, overrides: &[(String, String)]) -> 
     for (path, value) in overrides {
         let mut cursor = &mut *document;
         let segments: Vec<&str> = path.split('.').collect();
-        let (last, parents) = segments.split_last().expect("a non-empty path");
+        let (last, parents) = segments.split_last().ok_or_else(|| {
+            Error::InvalidConfig(format!("--set {path}=…: the path before `=` is empty"))
+        })?;
         for segment in parents {
             cursor = cursor.get_mut(segment).ok_or_else(|| {
                 Error::InvalidConfig(format!("--set {path}=…: this graph has no {segment}"))
@@ -400,7 +460,9 @@ pub fn run(
                     record
                         .members
                         .iter()
-                        .map(|(name, outcome)| (name.clone(), Value::String(outcome.clone())))
+                        .map(|(name, outcome)| {
+                            (name.clone(), Value::String(String::from(outcome.clone())))
+                        })
                         .collect(),
                 ),
             ),
@@ -485,6 +547,10 @@ fn run_wave(
 /// clock — the last only on a schedule that declared itself `resettable`, so an
 /// operator cannot quietly defer a member whose author said its cadence is
 /// fixed.
+// Every parameter is one thing a firing needs and none is derivable from
+// another: the schedule, the member's name and invocation, where its events go,
+// its environment and bounds, its scratch, the signal directory, and the outcome
+// so far. Bundling them into a struct would name the same nine values twice.
 #[allow(clippy::too_many_arguments)]
 fn cron(
     schedule: &crate::config::Schedule,
@@ -526,13 +592,13 @@ fn cron(
     last
 }
 
-/// One member's outcome, as the run record spells it.
-fn describe(outcome: &Outcome) -> String {
+/// One member's outcome, as the run record keeps it.
+fn describe(outcome: &Outcome) -> MemberOutcome {
     match outcome {
-        Outcome::Settled { completed: true } => "settled".into(),
-        Outcome::Settled { completed: false } => "incomplete".into(),
-        Outcome::Died(died) => format!("died ({})", died.rule),
-        Outcome::Unstartable(reason) => format!("unstartable ({reason})"),
+        Outcome::Settled { completed: true } => MemberOutcome::Settled,
+        Outcome::Settled { completed: false } => MemberOutcome::Incomplete,
+        Outcome::Died(died) => MemberOutcome::Died(died.rule.clone()),
+        Outcome::Unstartable(reason) => MemberOutcome::Unstartable(reason.clone()),
     }
 }
 
@@ -744,28 +810,42 @@ mod tests {
         assert!(later > id, "{later} did not sort after {id}");
     }
 
-    /// The record spells each outcome the way `history` shows it.
+    /// Each outcome has one spelling in the record, and it round-trips — an
+    /// existing reader of `record.json` parses exactly what it always did.
     #[test]
-    fn each_outcome_has_one_spelling_in_the_record() {
-        assert_eq!(describe(&Outcome::Settled { completed: true }), "settled");
-        assert_eq!(
-            describe(&Outcome::Settled { completed: false }),
-            "incomplete"
-        );
-        assert_eq!(
-            describe(&Outcome::Died(crate::event::MemberDied {
-                rule: "activity".into(),
-                exit_code: None,
-                disposition: crate::event::Disposition::Signaled,
-                stderr_tail: String::new(),
-                truncated: false,
-            })),
-            "died (activity)"
-        );
-        assert_eq!(
-            describe(&Outcome::Unstartable("no such".into())),
-            "unstartable (no such)"
-        );
+    fn each_outcome_has_one_spelling_that_round_trips() {
+        let cases = [
+            (describe(&Outcome::Settled { completed: true }), "settled"),
+            (
+                describe(&Outcome::Settled { completed: false }),
+                "incomplete",
+            ),
+            (
+                describe(&Outcome::Died(crate::event::MemberDied {
+                    rule: "activity".into(),
+                    exit_code: None,
+                    disposition: crate::event::Disposition::Signaled,
+                    stderr_tail: String::new(),
+                    truncated: false,
+                })),
+                "died (activity)",
+            ),
+            (
+                describe(&Outcome::Unstartable("no such".into())),
+                "unstartable (no such)",
+            ),
+        ];
+        for (outcome, expected) in cases {
+            let rendered = serde_json::to_value(&outcome).expect("a record value");
+            assert_eq!(rendered, Value::from(expected));
+            assert_eq!(
+                serde_json::from_value::<MemberOutcome>(rendered).expect("round-trips"),
+                outcome
+            );
+        }
+        // A record from a build that spelled an outcome differently is a record
+        // this one cannot read, and says so rather than guessing.
+        assert!(serde_json::from_value::<MemberOutcome>(Value::from("vanished")).is_err());
         assert_eq!(refusal_exit(), EXIT_INVALID_CONFIG);
     }
 }

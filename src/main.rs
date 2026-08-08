@@ -61,8 +61,8 @@ fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Err
     match command {
         Command::Run(args) => run_graph(args, env),
         Command::Validate(args) => validate(&args, env),
-        Command::Trigger(args) => signal(&args, env, "trigger"),
-        Command::ResetTimer(args) => signal(&args, env, "reset"),
+        Command::Trigger(args) => signal(&args, env, Signal::Trigger),
+        Command::ResetTimer(args) => signal(&args, env, Signal::Reset),
         Command::Cancel(args) => cancel(&args, env),
         Command::History(args) => show_history(&args, env),
         Command::Health => {
@@ -236,8 +236,31 @@ fn shipped_aware(reference: Option<&config::ConfigRef>) -> Option<config::Config
         .cloned()
 }
 
+/// The two out-of-band signals the contract gives an operator.
+///
+/// A closed set, because the run watches for a file named after one: a third
+/// spelling would be a file nothing ever reads, and the command that wrote it
+/// would still have reported success.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Signal {
+    /// Fire a scheduled member now.
+    Trigger,
+    /// Restart a resettable schedule's clock.
+    Reset,
+}
+
+impl Signal {
+    /// The suffix the run watches for.
+    const fn as_str(self) -> &'static str {
+        match self {
+            Signal::Trigger => "trigger",
+            Signal::Reset => "reset",
+        }
+    }
+}
+
 /// `oneagentgraph trigger` / `reset-timer`: leave the run a signal to pick up.
-fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: &str) -> Result<i32, Error> {
+fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: Signal) -> Result<i32, Error> {
     let record = history::show(&state_dir(env), &args.run)?;
     let dir = PathBuf::from(&record.events_path)
         .parent()
@@ -259,10 +282,10 @@ fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: &str) -> Resu
     }
     std::fs::create_dir_all(&dir)
         .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
-    let path = dir.join(format!("{}.{kind}", args.member));
-    std::fs::write(&path, kind)
+    let path = dir.join(format!("{}.{}", args.member, kind.as_str()));
+    std::fs::write(&path, kind.as_str())
         .map_err(|err| Error::InvalidConfig(format!("cannot write {}: {err}", path.display())))?;
-    println!("{}: {} {}", args.run, args.member, kind);
+    println!("{}: {} {}", args.run, args.member, kind.as_str());
     Ok(EXIT_SUCCESS)
 }
 
@@ -353,8 +376,12 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
     std::fs::create_dir_all(&dir)
         .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
     let verdict = smoke::run(&oneharness_bin(env), &dir)?;
-    for (identity, reason) in &verdict.fell_through {
-        println!("smoke: fell through {identity} ({reason}); the chain handed the turn on");
+    for candidate in &verdict.fell_through {
+        println!(
+            "smoke: fell through {} ({}); the chain handed the turn on",
+            candidate.identity,
+            candidate.reason.as_str()
+        );
     }
     println!("smoke: passed via {}", verdict.ran);
     Ok(EXIT_SUCCESS)

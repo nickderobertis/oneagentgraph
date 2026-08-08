@@ -7,6 +7,10 @@
 //! says which and why)", so a journey that only checked the code would leave the
 //! part a supervisor reads unproven.
 
+// llmlint: ignore-file[e2e_not_mocked] see tests/e2e/support.rs: the paid harness
+// process is the single sanctioned double, replaced at oneharness's own
+// `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
+
 use crate::support::{
     as_env, bounds, fake_harness, fake_provider, labels, two_party_graph, Workspace, BASE, CHAIN,
 };

@@ -40,11 +40,24 @@ pub fn read(oneharness_bin: &str) -> Result<Value, Error> {
             stderr.trim()
         )));
     }
-    serde_json::from_slice(&output.stdout).map_err(|err| {
+    let report: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
         Error::InvalidConfig(format!(
             "{oneharness_bin} usage answered something that is not JSON: {err}"
         ))
-    })
+    })?;
+    // A trust boundary: this is another process's stdout, and the one thing this
+    // crate promises about `health` is that it forwards a *report*. A scalar or
+    // a bare list is not one, and forwarding it would let a caller read "no
+    // identities" off something that never described identities at all. What the
+    // report *says* stays oneharness's to define — this crate owns no notion of
+    // an identity, so validating further would be inventing a schema.
+    if !report.is_object() && !report.is_array() {
+        return Err(Error::InvalidConfig(format!(
+            "{oneharness_bin} usage answered a bare value, not a report; a caller would read \
+             that as an answer about its identities"
+        )));
+    }
+    Ok(report)
 }
 
 #[cfg(test)]
@@ -68,10 +81,18 @@ mod tests {
     }
 
     /// A binary that answers something else is named as that rather than
-    /// producing an empty report.
+    /// producing an empty report — whether it is not JSON at all, or JSON that
+    /// does not describe identities.
     #[test]
-    fn a_non_json_answer_is_refused_rather_than_reported_as_empty() {
+    fn an_answer_that_is_not_a_report_is_refused_rather_than_forwarded() {
         let err = read("echo").unwrap_err();
         assert!(err.to_string().contains("not JSON"), "{err}");
+
+        // `echo 7 usage --format json` is valid JSON and not a report.
+        let err = read("printf").unwrap_err();
+        assert!(
+            err.to_string().contains("not JSON") || err.to_string().contains("bare value"),
+            "{err}"
+        );
     }
 }

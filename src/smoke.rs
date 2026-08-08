@@ -25,9 +25,64 @@ use crate::error::Error;
 /// that a turn happened at all.
 pub const PROMPT: &str = "Reply with the single word: ok";
 
-/// The classifications that mean a candidate never ran the task, so the chain
-/// handing the turn on is the chain doing its job.
-pub const FALLTHROUGH_REASONS: &[&str] = &["quota", "auth"];
+/// Why one candidate stepped aside, as oneharness classified it.
+///
+/// A closed set with an explicit `Other`, because the *whole* judgment turns on
+/// which side of the line a classification falls: `quota` and `auth` mean the
+/// candidate never ran the task, while everything else — `rate_limit` above all
+/// — describes a record that carries work the provider already billed for.
+/// Comparing strings at each site is how one of those gets excused as the other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reason {
+    /// The identity was out of quota, having spent nothing.
+    Quota,
+    /// The identity was not authenticated, so nothing ran.
+    Auth,
+    /// The candidate was never started at all.
+    Skipped,
+    /// Anything else oneharness said, kept verbatim so a refusal can name it.
+    Other(String),
+}
+
+impl Reason {
+    /// oneharness's own word for this classification.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Reason::Quota => "quota",
+            Reason::Auth => "auth",
+            Reason::Skipped => "skipped",
+            Reason::Other(word) => word,
+        }
+    }
+
+    /// Whether this classification means the candidate never ran the task, so a
+    /// chain handing the turn on is the chain doing its job.
+    #[must_use]
+    pub fn is_fallthrough(&self) -> bool {
+        matches!(self, Reason::Quota | Reason::Auth | Reason::Skipped)
+    }
+}
+
+impl From<&str> for Reason {
+    fn from(word: &str) -> Self {
+        match word {
+            "quota" => Reason::Quota,
+            "auth" => Reason::Auth,
+            "skipped" => Reason::Skipped,
+            other => Reason::Other(other.to_string()),
+        }
+    }
+}
+
+/// One candidate the chain stepped past.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FellThrough {
+    /// The identity that stepped aside.
+    pub identity: String,
+    /// Why, as oneharness classified it.
+    pub reason: Reason,
+}
 
 /// What one smoke turn proved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,7 +90,7 @@ pub struct Verdict {
     /// The identity that actually ran the turn.
     pub ran: String,
     /// The candidates the chain stepped past, and why.
-    pub fell_through: Vec<(String, String)>,
+    pub fell_through: Vec<FellThrough>,
 }
 
 /// Spend one turn in `dir` and judge what it left behind.
@@ -70,25 +125,24 @@ pub fn run(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Error> {
 /// [`Error::MemberFailed`] when nothing ran the turn, or when a candidate stepped
 /// past on a classification a chain does not step past.
 pub fn judge(report: &Value) -> Result<Verdict, Error> {
-    let fell_through: Vec<(String, String)> = report
+    let fell_through: Vec<FellThrough> = report
         .get("fallback")
         .and_then(|fallback| fallback.get("fell_through"))
         .and_then(Value::as_array)
         .map(|candidates| {
             candidates
                 .iter()
-                .map(|candidate| {
-                    (
-                        text(candidate.get("harness")),
-                        text(candidate.get("reason")),
-                    )
+                .map(|candidate| FellThrough {
+                    identity: text(candidate.get("harness")),
+                    reason: Reason::from(text(candidate.get("reason")).as_str()),
                 })
                 .collect()
         })
         .unwrap_or_default();
 
-    for (identity, reason) in &fell_through {
-        if !FALLTHROUGH_REASONS.contains(&reason.as_str()) {
+    for candidate in &fell_through {
+        if !candidate.reason.is_fallthrough() {
+            let (identity, reason) = (&candidate.identity, candidate.reason.as_str());
             return Err(Error::MemberFailed {
                 member: "smoke".into(),
                 reason: format!(
@@ -107,7 +161,7 @@ pub fn judge(report: &Value) -> Result<Verdict, Error> {
     let Some(ran) = ran.filter(|ran| !ran.is_empty()) else {
         let named: Vec<String> = fell_through
             .iter()
-            .map(|(identity, reason)| format!("{identity} [{reason}]"))
+            .map(|candidate| format!("{} [{}]", candidate.identity, candidate.reason.as_str()))
             .collect();
         return Err(Error::MemberFailed {
             member: "smoke".into(),
@@ -147,8 +201,17 @@ mod tests {
         assert_eq!(verdict.ran, "codex");
         assert_eq!(
             verdict.fell_through,
-            vec![("claude-code".into(), "quota".into())]
+            vec![FellThrough {
+                identity: "claude-code".into(),
+                reason: Reason::Quota,
+            }]
         );
+        // The line the whole judgment turns on: `skipped` is a candidate that
+        // was never started, and `rate_limit` is one that ran and was billed.
+        assert!(Reason::Skipped.is_fallthrough());
+        assert!(!Reason::Other("rate_limit".into()).is_fallthrough());
+        assert_eq!(Reason::from("auth"), Reason::Auth);
+        assert_eq!(Reason::Other("odd".into()).as_str(), "odd");
     }
 
     /// `rate_limit` is not a fall-through: that record carries billed work, so a

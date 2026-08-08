@@ -52,25 +52,21 @@ members:
 ```
 
 `run` streams one envelope per line. Exit `0` means every member settled, `1`
-that one failed or died, `2` that the config is invalid.
+that one failed or died, `2` that the config is invalid. The full surface — the
+event envelope, the graph schema, every command, the event kinds, and the
+liveness rules — is [`docs/contract.md`].
 
 **oneagentgraph owns no harness, model, or fallback logic.** oneharness keeps
 owning identity chains, fallback, model pins, and quota classification; onejudge
 keeps owning the two-party conversation. This composes them.
 
-The full surface — the shared event envelope, the graph schema, every CLI
-command, the event kinds, and the liveness rules — is [`docs/contract.md`].
-
 ## Develop
 
 ```bash
-just bootstrap   # from a clean clone
+just bootstrap   # from a clean clone; installs the onejudge and oneharness CLIs
 just check       # the deterministic gate: format, clippy, tests, coverage, docs
 just gate        # check + the LLM-judge tier; the pre-push bar
 ```
-
-[`AGENTS.md`](AGENTS.md) is the durable instruction layer for anyone — human or
-agent — working here.
 
 ## Licence
 

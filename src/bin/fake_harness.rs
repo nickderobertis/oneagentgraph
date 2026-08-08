@@ -43,6 +43,8 @@
 //! Keep it deterministic and dependency-free beyond what the crate already
 //! carries: it is spawned as a subprocess, many times per journey.
 
+// This binary's whole product IS its stdout and stderr: it stands in for a
+// harness CLI, and a harness CLI answers on those two streams.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::io::Write as _;

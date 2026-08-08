@@ -81,11 +81,11 @@ code=0
 out="$(oneagentgraph run no-such-graph.yaml 2>/dev/null)" || code=$?
 if [ "$code" -ne 2 ]; then
   fail "'run' on a missing graph exited $code, not 2" \
-    "the contract assigns exit 2 to an invalid config; a caller branches on it"
+    "reinstall this version and re-run; if it still does, the published artifact is not the revision CI gated — re-cut the release"
 fi
 if [ -n "$out" ]; then
   fail "'run' wrote to stdout while refusing a missing graph" \
-    "a caller reads stdout as the event stream; a refusal must leave it empty"
+    "reinstall this version and re-run; if it still does, revert the change that made a refusal write to stdout"
 fi
 
 # `validate` is the one verb that needs nothing else installed, so it is what
@@ -96,13 +96,13 @@ printf 'version: 1\nname: smoke\nmembers:\n  a:\n    kind: oneharness\n    oneha
 printf 'run_mode = "fallback"\nharnesses = ["claude-code"]\n' > "$work/h.toml"
 oneagentgraph validate "$work/graph.yaml" >/dev/null || fail \
   "'validate' refused a graph it should read" \
-  "the installed binary cannot resolve a graph's own refs"
+  "run 'oneagentgraph validate <your graph>' locally to see the refusal, then reinstall — an install that cannot read a graph is truncated or from the wrong revision"
 
 code=0
 oneagentgraph validate "$work/nowhere.yaml" >/dev/null 2>&1 || code=$?
 if [ "$code" -ne 2 ]; then
   fail "'validate' on a missing graph exited $code, not 2" \
-    "the contract assigns exit 2 to an invalid config"
+    "reinstall this version and re-run 'oneagentgraph validate <a missing path>'; a code other than 2 means this artifact predates the contract's exit codes"
 fi
 
 echo "$label: surface smoke test passed${expect_version:+ for $expect_version}"
