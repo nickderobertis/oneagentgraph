@@ -199,6 +199,20 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
             graph.name
         )));
     }
+    for key in graph.env.keys() {
+        // An `env:` key is exported to every member process, and the platform —
+        // not this crate — decides what a variable may be called. An empty name,
+        // or one carrying `=` or a NUL, is not a variable at all: it is refused
+        // by the spawn, silently dropped, or splits into something nobody wrote.
+        // Refusing here is what makes it `validate`'s answer rather than a
+        // confusing failure once every member is already launching.
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(Error::InvalidConfig(format!(
+                "env key {key:?}: an environment variable name cannot be empty or contain '=' or \
+                 a NUL, and this one is exported to every member"
+            )));
+        }
+    }
     for (name, member) in &graph.members {
         // A member's name becomes a *path component* — its scratch directory,
         // and the file `trigger` and `reset-timer` leave for it — so a name

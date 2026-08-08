@@ -26,8 +26,9 @@ cargo install --git https://github.com/nickderobertis/oneagentgraph --locked
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every [release], with `sha256` checksums.
 
-`run` and `smoke` drive the [onejudge] and [oneharness] CLIs, so both have to be
-on `PATH`; `validate`, `history`, and `persona` need neither. `ONEAGENTGRAPH_ONEJUDGE_BIN`
+`run` drives the [onejudge] and [oneharness] CLIs, and `smoke` and `health` drive
+[oneharness], so those have to be on `PATH`; `validate`, `history`, `persona`,
+`trigger`, `reset-timer`, and `cancel` need neither. `ONEAGENTGRAPH_ONEJUDGE_BIN`
 and `ONEAGENTGRAPH_ONEHARNESS_BIN` name a pinned install instead.
 
 ## What it does

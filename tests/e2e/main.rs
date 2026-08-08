@@ -12,7 +12,7 @@
 //! where the accumulated failure knowledge of this system lives — each is named
 //! after the thing that once broke.
 
-// llmlint: ignore-file[tests_mirror_real_usage] one test in this file is not a
+// llmlint: ignore-file[e2e_not_mocked, tests_mirror_real_usage] one test in this file is not a
 // journey and could not be: `the_published_smoke_checks_the_same_commands_the
 // _contract_documents` compares two committed artifacts — the contract document
 // and `scripts/smoke-published.sh` — because the script is what checks an

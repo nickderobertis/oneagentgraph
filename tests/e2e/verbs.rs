@@ -868,6 +868,49 @@ fn a_record_naming_a_stream_elsewhere_does_not_move_where_a_signal_is_written() 
     );
 }
 
+/// The README tells a reader which verbs need `onejudge` and `oneharness` on
+/// `PATH` and which need neither. This is that sentence, executed.
+///
+/// A prose prerequisite is the kind that rots quietly: nothing fails when a verb
+/// quietly grows a dependency, until someone follows the README onto a machine
+/// that has only what it told them to install. So every verb the README says
+/// needs neither CLI is run here with both pointed at a path that does not
+/// exist, and has to work anyway.
+#[test]
+fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
+    let workspace = Workspace::new();
+    workspace.run_task("complete-now: recorded").expect_code(0);
+    let id = run_id(&workspace.state()).expect("a run");
+
+    let absent = workspace.at("no-such-binary").display().to_string();
+    let without = [
+        ("ONEAGENTGRAPH_ONEJUDGE_BIN", absent.as_str()),
+        ("ONEAGENTGRAPH_ONEHARNESS_BIN", absent.as_str()),
+    ];
+    for args in [
+        vec!["validate", "./graph.yaml"],
+        vec!["history"],
+        vec!["history", id.as_str()],
+        // `persona validate` takes a path, per the contract; scaffolding one is
+        // the other half of what the README says needs no CLI.
+        vec!["persona", "new", "solo"],
+        vec!["persona", "validate", "solo.yaml"],
+        vec!["trigger", id.as_str(), "worker"],
+        vec!["reset-timer", id.as_str(), "worker"],
+        vec!["cancel", id.as_str()],
+    ] {
+        let run = workspace.run_with(&args, &without);
+        assert_eq!(
+            run.code,
+            0,
+            "`{}` needs a CLI the README says it does not:\n{}\n{}",
+            args.join(" "),
+            run.stdout,
+            run.stderr
+        );
+    }
+}
+
 /// The one run a state directory holds, once one has recorded itself.
 fn run_id(state: &std::path::Path) -> Option<String> {
     std::fs::read_dir(state)

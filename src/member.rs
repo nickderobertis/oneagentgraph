@@ -308,7 +308,7 @@ fn supervise(
         let tail = Arc::clone(&tail);
         std::thread::spawn(move || {
             for line in readable(BufReader::new(stderr)) {
-                let mut kept = tail.lock().expect("stderr tail");
+                let mut kept = held(&tail);
                 kept.push_str(&line);
                 kept.push('\n');
                 if kept.len() > STDERR_KEEP_BYTES {
@@ -372,7 +372,7 @@ fn supervise(
 
     let _ = reader.join();
     let _ = stderr_reader.join();
-    let settled = report.lock().expect("report").take();
+    let settled = held(&report).take();
 
     match status {
         Ok(status) => settle(emitter, kind, status, settled, &tail),
@@ -437,11 +437,25 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
             // it can settle on, which is the failure already spelled below
             // rather than a settle on a document with no fields in it.
             if let Some(document) = value.get("report").filter(|value| value.is_object()) {
-                *report.lock().expect("report") = Some(document.clone());
+                *held(report) = Some(document.clone());
             }
         }
         _ => {}
     }
+}
+
+/// What a member's shared state holds, whether or not a reader thread died
+/// holding it.
+///
+/// These mutexes guard a member's stderr tail and its report, and the threads
+/// sharing them are this file's own readers. A poisoned lock means one of those
+/// panicked — and the evidence behind the lock is exactly what a supervisor
+/// needs at that moment to say what became of the member. Panicking here in turn
+/// would take the whole run down over a member that merely failed, and lose the
+/// stderr tail that says why.
+fn held<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Every line a child stream yields, past the ones that are not text.
@@ -585,7 +599,7 @@ fn died(
     status: std::process::ExitStatus,
     tail: &Arc<Mutex<String>>,
 ) -> Outcome {
-    let (stderr_tail, truncated) = bound_text(tail.lock().expect("stderr tail").trim());
+    let (stderr_tail, truncated) = bound_text(held(tail).trim());
     let payload = MemberDied {
         rule: rule.as_str().to_string(),
         exit_code: status.code(),
@@ -610,7 +624,7 @@ fn kill_and_report(
     let status = child.wait().ok();
     let _ = reader.join();
     let _ = stderr_reader.join();
-    let (stderr_tail, truncated) = bound_text(tail.lock().expect("stderr tail").trim());
+    let (stderr_tail, truncated) = bound_text(held(tail).trim());
     let payload = MemberDied {
         rule: rule.as_str().to_string(),
         exit_code: status.and_then(|status| status.code()),
@@ -736,7 +750,7 @@ mod tests {
             ingest(line, &recorder, &mut turn, &report);
         }
         assert_eq!(turn, 0, "a line the reader cannot model started a turn");
-        assert!(report.lock().expect("report").is_none());
+        assert!(held(&report).is_none());
 
         ingest(
             "{\"type\":\"result\",\"report\":{\"usage\":{}}}",
@@ -744,7 +758,7 @@ mod tests {
             &mut turn,
             &report,
         );
-        assert!(report.lock().expect("report").is_some());
+        assert!(held(&report).is_some());
     }
 
     /// A `member-died` payload reaches the wire as the four sibling fields the
