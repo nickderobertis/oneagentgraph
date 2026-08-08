@@ -266,6 +266,7 @@ fn onejudge(
         resolver,
     )?;
     let map = effective.as_object_mut().expect("merge returns a mapping");
+    anchor_skill(map, base.base_dir.as_deref());
     map.insert("provider".into(), provider);
     map.insert("session".into(), Value::String(context.session.to_string()));
     if let Some(cap) = member.max_turns {
@@ -304,6 +305,43 @@ fn onejudge(
         env: Vec::new(),
         refs: resolver.inventory(),
     })
+}
+
+/// Anchor a base config's own `skill:` to the directory its author wrote it in.
+///
+/// onejudge resolves a config-file `skill:` against *that config's* directory,
+/// and the config it is handed is the merged copy this module writes into the
+/// member's scratch — a directory the author never saw. So a relative skill has
+/// to be made absolute here, where the base's own directory is still known, or
+/// it resolves under the scratch and the member dies having found no `SKILL.md`.
+///
+/// A base fetched over https has no directory for a relative path to mean
+/// anything against, so its skill is left exactly as written: onejudge refuses it
+/// by name, which is a better answer than a path this crate invented.
+fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&Path>) {
+    let Some(base_dir) = base_dir else {
+        return;
+    };
+    let Some(named) = config.get("skill").and_then(Value::as_str) else {
+        return;
+    };
+    let path = Path::new(named);
+    if !path.is_relative() {
+        return;
+    }
+    // Absolute, not merely joined: a graph named by a relative path has a
+    // relative `base_dir` too, and a relative skill would then be resolved a
+    // second time — against the scratch the merged copy sits in. This runs
+    // before any member starts, in the directory the operator's own paths were
+    // written against, so this process's own is the right one to anchor to.
+    // Purely lexical: nothing is read, so a skill that is not there is still
+    // onejudge's refusal to make, by the name the author wrote.
+    let joined = base_dir.join(path);
+    let anchored = std::path::absolute(&joined).unwrap_or(joined);
+    config.insert(
+        "skill".into(),
+        Value::String(anchored.display().to_string()),
+    );
 }
 
 /// The onejudge `provider` block for a two-party member.

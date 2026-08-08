@@ -190,6 +190,44 @@ fn a_single_sided_member_that_crashes_carries_its_process_s_own_facts() {
     );
 }
 
+/// A base config that names its own **skill directory** loads it from where its
+/// author wrote it — a path relative to that config, not to the copy this crate
+/// generates.
+///
+/// onejudge resolves a config-file `skill:` against *that config's* directory,
+/// and the config it is now handed is the merged copy written into the member's
+/// scratch, a directory the author never saw. Left alone, `skills/greeter`
+/// resolved under the scratch and the member died having found no `SKILL.md`.
+/// The skill's body arriving as the harness's instructions is the proof it was
+/// found, and finding it is the whole of what naming one does.
+#[test]
+fn a_base_config_that_names_a_skill_directory_loads_it_from_where_it_was_written() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "skills/greeter/SKILL.md",
+        "---\nname: greeter\ndescription: a greeter\n---\nGreet the user warmly.\n",
+    );
+    // Relative, as an author writes it: against the base config's own directory,
+    // which is this workspace.
+    workspace.write(
+        "base.yaml",
+        &format!("{}skill: skills/greeter\n", crate::support::BASE),
+    );
+    let prompts = workspace.at("prompts.txt");
+    workspace
+        .run_task(&format!(
+            "fake:complete-now: skill body fake:record-prompt={}",
+            prompts.display()
+        ))
+        .expect_code(0);
+    assert!(
+        std::fs::read_to_string(&prompts)
+            .expect("the harness recorded its prompt")
+            .contains("Greet the user warmly."),
+        "the skill the base config named never reached the harness"
+    );
+}
+
 /// A graph carrying an `env` value the platform cannot represent is refused by
 /// `validate`, before anything is started.
 ///

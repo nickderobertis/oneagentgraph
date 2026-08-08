@@ -308,15 +308,17 @@ fn spent_nothing(report: &Value) -> bool {
             // would come to disagree with the chain it is judging, on the one
             // decision that can pay for the same question twice.
             //
-            // Absent accounting is not proof of anything, and neither is
-            // accounting this build cannot read: both count as spent.
-            let free = match result.get("usage") {
-                None | Some(Value::Null) => false,
-                Some(usage) => {
+            // Absent accounting is deliberately *not* work, which is oneharness's
+            // own reading of it too: a plain-text harness reports none at all, and
+            // a candidate that published nothing is exactly the launch worth
+            // trying again. What stops a relaunch is a classification, above.
+            let free = result
+                .get("usage")
+                .filter(|usage| !usage.is_null())
+                .is_none_or(|usage| {
                     serde_json::from_value::<oneharness_core::domain::signals::Usage>(usage.clone())
-                        .is_ok_and(|usage| !usage.reports_billed_work())
-                }
-            };
+                        .map_or(true, |usage| !usage.reports_billed_work())
+                });
             unclassified && free
         })
 }
