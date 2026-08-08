@@ -31,9 +31,7 @@
 //! directory is ever pinned and a live run's scratch is free for the taking.
 //!
 //! Windows has none of the four POSIX facilities the rules were written on, so
-//! each is answered by the equivalent that preserves the same safety property —
-//! see [`platform`] for the mapping, and the module doc there for the two places
-//! the guarantee is *not* identical:
+//! each is answered by the equivalent that preserves the same safety property:
 //!
 //! | rule | POSIX | Windows |
 //! | --- | --- | --- |
@@ -41,6 +39,20 @@
 //! | start token | `/proc/<pid>/stat`, `libproc` | `GetProcessTimes` creation time |
 //! | tree membership | an environment stamp fixed at `exec` | a job object every child joins |
 //! | teardown | `SIGTERM`, grace, `SIGKILL` | `TerminateJobObject` |
+//!
+//! The first two are the same guarantee by another name. The other two are the
+//! two places the guarantee is *not* identical, and a consumer supervising on
+//! Windows should know which:
+//!
+//! * **There is no signal to decline.** `SIGTERM`-then-`SIGKILL` is an ask
+//!   followed by a compulsion, and Windows has only the compulsion. What a
+//!   member loses is the chance to shut itself down cleanly first; what a caller
+//!   of [`reap`] is promised — nothing stamped for this scratch is still running
+//!   when it returns — is unchanged.
+//! * **A group is created by its launcher**, not fixed at `exec`. So a scratch
+//!   nobody launched into has no group to find, and [`stamped_for`] reports
+//!   nothing rather than guessing — the direction that retains a directory
+//!   rather than killing something still using it.
 //!
 //! On a platform that is neither the ownership claim degrades to the `flock`
 //! alone plus the directory's own existence, and reaping to the child this
