@@ -27,7 +27,7 @@
 
 use std::path::Path;
 
-use crate::support::{as_env, fake_harness, labels, until, Workspace};
+use crate::support::{as_env, fake_harness, labels, two_party_graph, until, Workspace};
 
 /// A member that publishes nothing is condemned by the activity watchdog, and
 /// the death says which rule fired and what the process left behind.
@@ -426,6 +426,72 @@ fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
         output.status.code().is_some(),
         "the cancelled run never exited"
     );
+}
+
+/// A descendant that refuses `SIGTERM` is stopped anyway: the reap asks once,
+/// waits out its grace period, and kills whatever is still there.
+///
+/// Ported from `test_oneharness_timeout_e2e.py`, whose subject is a process tree
+/// that outlives the CLI that returned. Asking is what a process is free to
+/// decline, and every other reap journey here uses a double that goes quietly —
+/// so the escalation past `SIGTERM`, which is the half that actually guarantees
+/// the tree is gone, is only reachable through one that does not.
+#[cfg(unix)]
+#[test]
+fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
+    let workspace = Workspace::new();
+    // Through the graph's own `env:`, because that is the path a value takes to
+    // the member process — and the turn refusing the signal is that process.
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        "  FAKE_HARNESS_IGNORE_TERM: \"1\"\n",
+    ));
+    let release = workspace.at("release");
+    let started = workspace.at("turn-started");
+    let state = workspace.state();
+
+    let mut member = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &format!(
+                "complete-now: fake:record-prompt={} fake:hold={}",
+                started.display(),
+                release.display()
+            ),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    // The *turn* has to be live, not merely the run: onejudge and oneharness are
+    // stamped within a moment of launch and both go quietly, so a reap timed
+    // against them never meets the process that refuses. The double records its
+    // prompt on its way to the barrier, which is the only signal that says the
+    // signal-refusing process itself exists.
+    until("the TERM-refusing turn to be parked", || started.exists());
+    let scratch = member_scratch(&state).expect("a member scratch");
+    assert!(
+        !release.exists(),
+        "the barrier was released before the reap, so nothing was holding"
+    );
+
+    let run_id = run_id(&state);
+    workspace.run(&["cancel", &run_id, "--kill"]).expect_code(0);
+
+    // Nothing here can have shut itself down on the first signal: the turn
+    // holding this tree open declined it, so an empty stamp is the `SIGKILL`
+    // after the grace period and nothing else.
+    until("the TERM-refusing processes to be gone", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+
+    // And the run itself returns rather than waiting on a member it just reaped.
+    std::fs::write(&release, "go").ok();
+    let status = member.wait().expect("the run exits");
+    assert!(status.code().is_some(), "the cancelled run never exited");
 }
 
 /// A finished run leaves nothing of its own running: the reap on the way out is

@@ -42,6 +42,7 @@
 //! | `FAKE_HARNESS_CRASH=<code>` | exit that code having published nothing |
 //! | `FAKE_HARNESS_ATTEMPT_LOG=<path>` | append a line per launch, so a journey can count starts |
 //! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
+//! | `FAKE_HARNESS_IGNORE_TERM=1` | refuse `SIGTERM`, so only a `SIGKILL` stops this turn |
 //!
 //! Keep it deterministic and dependency-free beyond what the crate already
 //! carries: it is spawned as a subprocess, many times per journey.
@@ -120,6 +121,10 @@ fn main() -> std::process::ExitCode {
     // The argv is where a model reaches a harness, so it is where a journey can
     // see that the side it was written on is the side that got it.
     record(&prompt, "record-argv", &argv.join(" "));
+
+    // Before anything that could block: a turn asked to refuse `SIGTERM` has to
+    // be refusing it by the time a journey can reach it.
+    ignore_term();
 
     // Before every refusal branch, because what a journey counts here is
     // *launches*: a smoke that relaunches a failed start is asserting on the
@@ -313,6 +318,28 @@ fn named_path(named: &str, source: &str) -> Option<std::path::PathBuf> {
     }
     Some(path)
 }
+
+/// Refuse `SIGTERM` when a journey asked this turn to, so that only a `SIGKILL`
+/// can stop it.
+///
+/// This is the descendant a reap has to survive: asking politely is what a
+/// process is free to decline, and a sweeper that only ever asks leaves the
+/// declining ones running. The escalation past it is what this makes reachable.
+#[cfg(unix)]
+fn ignore_term() {
+    if std::env::var("FAKE_HARNESS_IGNORE_TERM").is_ok_and(|value| value == "1") {
+        // SAFETY: setting `SIGTERM` to `SIG_IGN` installs a disposition rather
+        // than a handler, so no code runs in signal context and there is no
+        // async-signal-safety obligation to meet.
+        unsafe {
+            libc::signal(libc::SIGTERM, libc::SIG_IGN);
+        }
+    }
+}
+
+/// Nothing to refuse: this platform's reap does not signal at all.
+#[cfg(not(unix))]
+fn ignore_term() {}
 
 /// Record this launch, and fail it when a journey asked for the first `n` to
 /// fail before the turn.
