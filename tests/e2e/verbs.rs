@@ -121,14 +121,16 @@ fn validate_refuses_a_graph_that_could_never_run() {
     }
 }
 
-/// A graph, or a ref inside one, may be an `https` URL. A host that cannot be
-/// reached is a refusal naming the URL — not a run that started against a
-/// document nobody read.
+/// A graph, or a ref inside one, may be an `https` URL — and a host that cannot
+/// be reached is a refusal naming the URL, not a run that started against a
+/// document nobody read. Cleartext is refused before a byte leaves.
 ///
 /// The URL is under `.invalid`, which by RFC 6761 resolves nowhere, so this
-/// journey drives the real fetch path without leaving the machine.
+/// journey drives the real fetch path without leaving the machine. The half
+/// where a ref *is* fetched needs a real origin to answer, and lives in
+/// `remote.rs` next to the TLS it rides on.
 #[test]
-fn an_https_ref_is_fetched_and_an_unreachable_one_is_refused_by_url() {
+fn an_unreachable_https_ref_and_a_cleartext_one_are_both_refused_by_url() {
     let workspace = Workspace::new();
     let unreachable = "https://oneagentgraph.invalid/graph.yaml";
 

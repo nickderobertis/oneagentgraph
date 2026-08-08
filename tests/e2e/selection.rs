@@ -209,13 +209,17 @@ fn each_side_runs_the_config_it_was_given() {
 
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A chain whose first candidate refuses on `auth` hands the turn to the next
-/// identity, and the run reports each step past as a `fallback-advanced`.
+/// A chain whose candidates all refuse on `auth` reports *every* step past as a
+/// `fallback-advanced`, and then fails rather than settling.
+///
+/// The chain that reaches a working identity is the next journey down; this is
+/// the other end of the same rule, and the end that once reported a member as
+/// settled having run no turn at all.
 ///
 /// Ported from `test_a_zero_work_subscription_429_hands_the_turn_to_the_next_identity`
 /// and `test_agent_config_falls_back_to_codex_after_claude_auth_rejection`.
 #[test]
-fn a_refused_candidate_hands_the_turn_on_and_the_stream_says_so() {
+fn a_chain_that_refuses_every_candidate_reports_each_one_and_fails() {
     let workspace = Workspace::new();
     workspace.write("oneharness.toml", FALLBACK_CHAIN);
     workspace.graph(&format!(

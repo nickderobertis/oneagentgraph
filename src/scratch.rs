@@ -162,6 +162,18 @@ pub fn reclaimable(path: &Path) -> Result<(), String> {
             path.display()
         ));
     };
+    // Acquiring the lock is only evidence where the kernel backs it. Where it
+    // does not, taking it says nothing about who else is working here — and
+    // `Owned::claim` is granted for exactly that reason, so reading its success
+    // as "nobody holds this" would let a sweep delete a live run's scratch. The
+    // two questions want opposite answers from the same missing facility: a
+    // claim proceeds, a sweep does not.
+    if !LOCK_PROVES_OWNERSHIP {
+        return Err(format!(
+            "{} cannot be proven unused on this platform, so it is retained",
+            path.display()
+        ));
+    }
     if !try_lock_exclusive(&lock) {
         return Err(format!("{} is still locked by its owner", path.display()));
     }
@@ -476,6 +488,10 @@ mod platform {
         unsafe { libc::kill(identity.pid, sig) == 0 }
     }
 
+    /// An `flock` here is the kernel's own answer to "is anything still using
+    /// this?", so acquiring one is evidence a sweeper may act on.
+    pub const LOCK_PROVES_OWNERSHIP: bool = true;
+
     /// `SIGTERM`, then `SIGKILL` for whatever ignored it.
     pub const TERM: i32 = libc::SIGTERM;
     /// The signal nothing survives.
@@ -551,6 +567,12 @@ mod platform {
         false
     }
 
+    /// Taking the lock here proves nothing: [`try_lock_exclusive`] always
+    /// grants it, so a sweeper reading that as "nobody holds this" would
+    /// reclaim a directory a live run is working in. Ownership degrades to the
+    /// directory's own existence, and a sweeper is told to keep it.
+    pub const LOCK_PROVES_OWNERSHIP: bool = false;
+
     /// Placeholder signal numbers; nothing reaches [`signal`] on this platform.
     pub const TERM: i32 = 15;
     /// Placeholder signal numbers; nothing reaches [`signal`] on this platform.
@@ -558,7 +580,7 @@ mod platform {
 }
 
 pub use platform::{is_live, own_identity, stamped_for};
-use platform::{signal, try_lock_exclusive, KILL, TERM};
+use platform::{signal, try_lock_exclusive, KILL, LOCK_PROVES_OWNERSHIP, TERM};
 
 /// How long a proven descendant is given to shut itself down before it is
 /// killed. Short, because everything here has already been asked to stop.
@@ -607,7 +629,14 @@ mod tests {
         let owned = Owned::claim(&path).expect("claim");
         assert_eq!(owned.path(), path);
         let retained = reclaimable(&path).unwrap_err();
+        assert!(retained.contains(&path.display().to_string()), "{retained}");
+        // Retained on every platform, for reasons that are not the same one: a
+        // kernel lock is proof a sweeper can act on, and a platform without one
+        // has none to offer — so it keeps the directory rather than guessing.
+        #[cfg(unix)]
         assert!(retained.contains("still locked by its owner"), "{retained}");
+        #[cfg(not(unix))]
+        assert!(retained.contains("cannot be proven unused"), "{retained}");
         drop(owned);
         assert!(!path.exists(), "a released claim left its scratch behind");
     }
