@@ -30,7 +30,7 @@
 
 use std::path::Path;
 
-use crate::support::{as_env, fake_harness, labels, until, Workspace};
+use crate::support::{as_env, bounds, fake_harness, labels, until, Workspace};
 // The one Unix-only journey's own helper: on a platform without `SIGTERM` it
 // compiles away, and an import left behind is a `-D warnings` build failure
 // rather than dead weight.
@@ -193,6 +193,66 @@ fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
         died[0]["payload"]["disposition"],
         serde_json::json!("signaled")
     );
+}
+
+/// A member the **activity watchdog** condemns takes its descendants with it.
+///
+/// The `member-died` event above is the supervisor's *decision*; this is the
+/// outcome an operator is actually promised. A member is `onejudge` with
+/// `oneharness` under it and the paid provider under that, and condemning the
+/// one this supervisor holds leaves the other two running — still billing
+/// whoever owns the subscription, with nothing left watching them.
+#[test]
+fn a_member_the_activity_watchdog_condemns_leaves_no_descendant_running() {
+    // The default two-party member — `onejudge`, with `oneharness` under it and
+    // the doubled provider under that — which is the deepest tree this suite can
+    // condemn, and the shape the guarantee is written about.
+    //
+    // The stall bound is wide where the journey above sets it to 2s, and the
+    // difference is the point: that one asserts on the *event*, which needs only
+    // the member, while this one asserts on the *tree*, which has to have
+    // launched. Three real CLIs starting at once with the rest of this suite
+    // took longer than two seconds to reach the third, so a bound near it
+    // condemned a member that had not started a descendant yet and left nothing
+    // to watch die.
+    a_condemned_member_leaves_no_descendant_running(None, "activity", "60", "15");
+}
+
+/// The same guarantee for the **heartbeat** rule, which condemns on its own
+/// terms and through its own branch of the supervisor.
+///
+/// Two rules, two `kill_and_report` call sites: a teardown wired into one and
+/// not the other is a real regression, and one journey cannot see it.
+///
+/// A **single-sided** member here rather than the two-party default, and that is
+/// forced by the rule rather than chosen. The heartbeat deadline is only
+/// reachable below the supervisor's refresh cadence, so this rule always fires
+/// at the first refresh — half a second after the member starts — and a tree
+/// that does not exist by then is not a tree this journey can watch die. The
+/// two-party chain is three real CLIs deep and never made it; `kind: oneharness`
+/// is one shallower, is a member kind the contract ships, and does.
+#[test]
+fn a_member_the_heartbeat_rule_condemns_leaves_no_descendant_running() {
+    a_condemned_member_leaves_no_descendant_running(
+        Some(&single_sided_graph()),
+        "heartbeat",
+        "0.05",
+        "600",
+    );
+}
+
+/// The shallowest real member this crate builds: one agent, no judge, so the
+/// doubled provider is the member's own child rather than its grandchild.
+fn single_sided_graph() -> String {
+    format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  worker:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        fake = fake_harness(),
+    )
 }
 
 /// A bound nobody meant refuses the run rather than supervising under it — and
@@ -728,6 +788,105 @@ fn the_documented_defaults_are_what_a_run_supervises_under() {
     assert_eq!(HEARTBEAT_TIMEOUT_ENV, "ONEAGENTGRAPH_HEARTBEAT_TIMEOUT");
     assert_eq!(STALL_TIMEOUT_ENV, "ONEAGENTGRAPH_STALL_TIMEOUT");
     assert!(!fake_harness().is_empty());
+}
+
+/// How long a reaped descendant is watched for a tick it should no longer be
+/// writing.
+///
+/// Thirty times the double's own 50ms cadence, so a descendant that survived has
+/// had every chance to say so — the assertion below is an *absence*, and a
+/// window near the cadence would read a slow host as a successful teardown.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// How long may be spent *reaching* a live descendant before the journey gives
+/// up and says it never saw one.
+///
+/// A budget rather than a count, because the two rules below cost very different
+/// amounts per attempt — a stall bound is waited out and a heartbeat one fires
+/// in half a second — and what should be shared is the patience, not the number.
+const REACH_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Condemn a member by `rule` and hold that its descendant stopped running.
+///
+/// The witness is the descendant itself. Neither of the obvious alternatives
+/// works here: a pid is not reachable from outside the run, and this crate's own
+/// `stamped_for` is *the facility under test* — on the platform this journey is
+/// newest on it answered "nothing is running" whether or not anything was, so an
+/// assertion resting on it would have passed against a leak. So the doubled
+/// harness appends to a file for as long as it is alive, and a file that has
+/// stopped growing once the run returns is a tree that is gone.
+///
+/// The retry is how the *precondition* is reached, not tolerance for a flaky
+/// assertion. A condemnation is a race against process startup by construction:
+/// the rule fires on a clock that starts when the member does, and the tree this
+/// watches has to exist by then. An attempt where it did not is an attempt that
+/// never reached the state under test, so it is retried rather than passed —
+/// quietly passing on one is exactly the vacuous green this journey exists to
+/// avoid, and running out of budget says so instead of going green.
+fn a_condemned_member_leaves_no_descendant_running(
+    graph: Option<&str>,
+    rule: &str,
+    heartbeat: &str,
+    stall: &str,
+) {
+    let give_up_at = std::time::Instant::now() + REACH_BUDGET;
+    for attempt in 1.. {
+        let workspace = Workspace::new();
+        if let Some(document) = graph {
+            workspace.graph(document);
+        }
+        let ticks = workspace.at("descendant.ticks");
+        let env = bounds(heartbeat, stall);
+        let run = workspace.run_with(
+            &[
+                "run",
+                "./graph.yaml",
+                "--task",
+                &format!("fake:hang fake:tick={}", ticks.display()),
+                "--dir",
+                &workspace.dir().display().to_string(),
+            ],
+            &as_env(&env),
+        );
+        run.expect_code(1);
+
+        let died = run.of_kind("member-died");
+        assert_eq!(died.len(), 1, "{:?}", run.kinds());
+        assert_eq!(
+            died[0]["payload"]["rule"],
+            serde_json::json!(rule),
+            "a {rule} bound condemned by another rule: {}",
+            died[0]["payload"]
+        );
+
+        // Nothing to hold against the teardown: the descendant never launched
+        // inside the window this rule condemns in, so this run is not evidence.
+        let ticked = ticks_written(&ticks);
+        if ticked == 0 {
+            assert!(
+                std::time::Instant::now() < give_up_at,
+                "no descendant was live when the {rule} rule fired, across {attempt} runs — this \
+                 journey asserts on a tree that was running, and never saw one"
+            );
+            continue;
+        }
+
+        std::thread::sleep(SETTLE);
+        assert_eq!(
+            ticks_written(&ticks),
+            ticked,
+            "attempt {attempt}: the {rule} rule condemned the member and reported it, but its \
+             descendant is still running — the provider under a condemned member keeps billing \
+             with nothing left watching it\n--- stdout ---\n{}",
+            run.stdout
+        );
+        return;
+    }
+}
+
+/// How much the descendant has written so far, or nothing when it never wrote.
+fn ticks_written(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
 /// The first `owner.lock` under a state directory, once a run has claimed one.

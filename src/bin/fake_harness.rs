@@ -34,6 +34,7 @@
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:hang` | never answer at all, for the watchdogs |
+//! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
 //! | `fake:record-env=<path>` | append this process's selection-shaped environment |
 //! | `fake:record-argv=<path>` | append the argv this side was spawned with |
@@ -200,9 +201,7 @@ fn main() -> std::process::ExitCode {
 
     if steers(&prompt, "hang") {
         // Never answer. The heartbeat and activity watchdogs are what ends this.
-        loop {
-            std::thread::sleep(std::time::Duration::from_secs(3600));
-        }
+        return hang(sentinel_path(&prompt, "tick").as_deref());
     }
     if let Some(path) = sentinel_path(&prompt, "hold") {
         while !path.exists() {
@@ -225,6 +224,48 @@ fn main() -> std::process::ExitCode {
         "total_cost_usd": 0.002,
     }));
     exit(0)
+}
+
+/// How often a hanging turn proves it is still alive.
+const TICK_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long it keeps doing so before giving up and exiting.
+///
+/// Bounded rather than endless, and far longer than any journey looks for: a
+/// turn that reaches this bound is one nothing reaped, and a leak guard that
+/// outlived the run which caused it would go on writing on a CI host until the
+/// host went away.
+const TICK_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Never answer, and — when a journey asked for it — leave a tick behind for as
+/// long as this process is alive.
+///
+/// This is how a journey watches a *tree* die rather than a process. A
+/// supervisor condemning a member says so in `member-died`, but the event is the
+/// decision, not the outcome: what an operator is promised is that the
+/// `oneharness` and paid provider underneath are no longer running. This process
+/// is that descendant, and asking the platform which processes are still alive
+/// is asking the very facility under test — so the descendant answers for
+/// itself. The file grows while it lives and stops the instant it does not.
+fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
+    let Some(tick) = tick else {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3600));
+        }
+    };
+    let deadline = std::time::Instant::now() + TICK_FOR;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(tick)
+        {
+            let _ = writeln!(file, "tick");
+        }
+        std::thread::sleep(TICK_EVERY);
+    }
+    eprintln!("fake-harness: a ticking turn outlived its bound, so nothing ever reaped it");
+    exit(1)
 }
 
 /// What this side answers, decided by which side onejudge is asking.
