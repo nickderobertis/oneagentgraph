@@ -284,9 +284,8 @@ fn detach_prints_where_to_watch_the_run_it_left_behind() {
 #[test]
 fn history_lists_runs_and_shows_one_record() {
     let workspace = Workspace::new();
-    workspace
-        .run_task("complete-now: recorded once")
-        .expect_code(0);
+    let ran = workspace.run_task("complete-now: recorded once");
+    ran.expect_code(0);
 
     let listed = workspace.run(&["history"]);
     listed.expect_code(0);
@@ -309,6 +308,22 @@ fn history_lists_runs_and_shows_one_record() {
     let missing = workspace.run(&["history", "show", "no-such-run"]);
     missing.expect_code(2);
     assert!(missing.stderr.contains("no-such-run"), "{}", missing.stderr);
+
+    // llmlint: ignore-block[tests_mirror_real_usage] `history::events` is a
+    // public library API the contract gives no verb of its own, so the library
+    // call *is* the interface a consumer reaches for — the same reason the
+    // liveness journeys read `oneagentgraph::scratch` directly. What makes this
+    // realistic is the store: a real run persisted it a moment ago through the
+    // CLI, and the answer is compared against what that run printed.
+    let persisted = oneagentgraph::history::events(&workspace.state(), &run_id)
+        .expect("the run's own stream reads back");
+    assert_eq!(
+        persisted, ran.stdout,
+        "the persisted stream is not the one the run printed"
+    );
+    let absent = oneagentgraph::history::events(&workspace.state(), "no-such-run").unwrap_err();
+    assert!(absent.to_string().contains("no-such-run"), "{absent}");
+    // llmlint: ignore-end[tests_mirror_real_usage]
 }
 
 /// The refusals the surface owes a caller who typed something that cannot work:

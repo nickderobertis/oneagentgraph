@@ -59,6 +59,30 @@ fn the_package_carries_no_symlink_a_registry_would_reject() {
     );
 }
 
+/// The package carries this crate's own files and nothing else.
+///
+/// `include` takes gitignore-style patterns, where one with no separator in it
+/// matches at *any* depth — so a bare `README.md` and `LICENSE` swept in every
+/// vendored copy under `node_modules`, shipping 154 files of somebody else's
+/// package, and their licences, to crates.io. The presence check above cannot
+/// see that: every file it names was there too.
+#[test]
+fn the_package_carries_nothing_from_outside_the_crate() {
+    let listed = package_list();
+    let roots = ["src/", "tests/", "personas/", "docs/"];
+    for packaged in &listed {
+        let inside_a_root = roots.iter().any(|root| packaged.starts_with(root));
+        // The manifest, the lockfile, and the two documents cargo adds itself.
+        let at_the_top = !packaged.contains('/');
+        assert!(
+            inside_a_root || at_the_top,
+            "`cargo package` would ship {packaged}, which is not this crate's to \
+             ship — anchor the `include` pattern that swept it in.\npackaged:\n{}",
+            listed.join("\n")
+        );
+    }
+}
+
 /// Everything `cargo package` would put in the archive.
 fn package_list() -> Vec<String> {
     // `--allow-dirty` because this runs from a work tree, and `--list` neither
@@ -77,5 +101,9 @@ fn package_list() -> Vec<String> {
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
+        // An archive entry is always `/`-separated, but `--list` prints it with
+        // the host's separator — so on Windows every path here arrives with
+        // backslashes and matches nothing this file names.
+        .map(|line| line.replace('\\', "/"))
         .collect()
 }

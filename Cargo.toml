@@ -30,9 +30,15 @@ include = [
   # `docs/contract.md` below.
   "tests/golden/*.json",
   "personas/**/*.yaml",
-  "Cargo.toml",
-  "README.md",
-  "LICENSE",
+  # Anchored with a leading `/`, every one of them. These are gitignore-style
+  # patterns: one with no separator in it matches at *any* depth, so a bare
+  # `README.md` and `LICENSE` matched every vendored copy under `node_modules`
+  # and shipped 154 files of somebody else's package — and their licences — to
+  # crates.io. `/docs/contract.md` already carried the slash for this reason;
+  # the rest did not.
+  "/Cargo.toml",
+  "/README.md",
+  "/LICENSE",
   "/docs/contract.md",
 ]
 
