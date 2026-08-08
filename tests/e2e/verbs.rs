@@ -457,6 +457,27 @@ fn health_reads_oneharness_data_and_names_a_missing_binary() {
     );
     babbled.expect_code(2);
     assert!(babbled.stderr.contains("not JSON"), "{}", babbled.stderr);
+
+    // JSON that parses but describes nothing is the harder half: `7` and
+    // `"none"` are valid documents, and forwarding one would let a caller read
+    // it as an answer about its identities.
+    for (name, script) in [
+        ("scalar.sh", "#!/bin/sh\necho 7\n"),
+        ("string.sh", "#!/bin/sh\necho '\"none\"'\n"),
+    ] {
+        let bare = workspace.write(name, script);
+        executable(&bare);
+        let answered = workspace.run_with(
+            &["health"],
+            &[("ONEAGENTGRAPH_ONEHARNESS_BIN", &bare.display().to_string())],
+        );
+        answered.expect_code(2);
+        assert!(
+            answered.stderr.contains("a bare value, not a report"),
+            "{name}: {}",
+            answered.stderr
+        );
+    }
 }
 
 /// `smoke` spends one turn through the real chain and names the identity that
@@ -865,6 +886,81 @@ fn a_record_naming_a_stream_elsewhere_does_not_move_where_a_signal_is_written() 
         !elsewhere.join("signals").exists(),
         "trigger wrote through the record's events_path and escaped the run store: {}",
         elsewhere.display()
+    );
+}
+
+/// `reset-timer` is accepted for any member, but only a schedule that declared
+/// itself `resettable` restarts its clock.
+///
+/// The signal is left either way — an operator cannot know from outside which
+/// schedules opted in, and refusing at the CLI would make the answer depend on a
+/// record the caller cannot see. What differs is the run's response: a
+/// non-resettable schedule keeps counting, and says nothing it did not do.
+#[test]
+fn reset_timer_leaves_a_non_resettable_schedule_counting() {
+    let workspace = Workspace::new();
+    workspace.graph(&format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {{every: 3600, resettable: false}}\n",
+        ),
+        fake = fake_harness(),
+    ));
+    let state = workspace.state();
+    let handle = {
+        let dir = workspace.path().to_path_buf();
+        let state = state.clone();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+                .args([
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    "complete-now: unresettable",
+                    "--dir",
+                    &dir.join("work").display().to_string(),
+                ])
+                .current_dir(&dir)
+                .env("ONEAGENTGRAPH_STATE_DIR", &state)
+                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
+                .env(
+                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                    crate::support::oneharness_bin(),
+                )
+                .env_remove("ONEHARNESS_HARNESSES")
+                .output()
+                .expect("the run finishes")
+        })
+    };
+
+    until("the run to record itself", || run_id(&state).is_some());
+    let id = run_id(&state).expect("a run");
+    let events = state.join(&id).join("events.jsonl");
+    until("the first settle", || {
+        std::fs::read_to_string(&events).is_ok_and(|s| s.contains("member-settled"))
+    });
+
+    workspace
+        .run(&["reset-timer", &id, "reporter"])
+        .expect_code(0);
+
+    // A trigger after it, so the run is proven to have read the signal
+    // directory past the reset rather than merely not reached it yet.
+    workspace.run(&["trigger", &id, "reporter"]).expect_code(0);
+    until("the scheduled member to fire", || {
+        std::fs::read_to_string(&events).is_ok_and(|s| s.contains("cron-fired"))
+    });
+
+    workspace.run(&["cancel", &id]).expect_code(0);
+    handle.join().expect("the run thread");
+
+    let stream = std::fs::read_to_string(&events).expect("the stream");
+    assert!(
+        !stream.contains("cron-reset"),
+        "a schedule that is not resettable reported restarting its clock: {stream}"
     );
 }
 

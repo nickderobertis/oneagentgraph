@@ -409,6 +409,58 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     ]);
     refused.expect_code(2);
     assert!(refused.stderr.contains("no ghost"), "{}", refused.stderr);
+
+    // A `--set` value arrives as text, but the field it lands on has a type in
+    // the graph document. Overriding a number with a quoted string would change
+    // the document's shape rather than its value, and the schema would then
+    // refuse a graph the caller thought they had only retuned. So the graph here
+    // spells the two typed fields out, which the default one leaves unset.
+    workspace.graph(&format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    max_turns: 4\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n      stream: true\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        fake = fake_harness(),
+    ));
+    let numeric = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "complete-now: retuned",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--set",
+        "members.worker.max_turns=3",
+    ]);
+    numeric.expect_code(0);
+
+    for (assignment, expected) in [
+        ("members.worker.max_turns=soon", "not a number"),
+        ("members.worker.agent.stream=maybe", "not a boolean"),
+    ] {
+        let mistyped = workspace.run(&[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "complete-now: never",
+            "--dir",
+            &workspace.dir().display().to_string(),
+            "--set",
+            assignment,
+        ]);
+        mistyped.expect_code(2);
+        assert!(
+            mistyped.stderr.contains(expected),
+            "{assignment}: {}",
+            mistyped.stderr
+        );
+    }
 }
 
 /// `--task-file` is the other way in, and naming both is a refusal rather than a
