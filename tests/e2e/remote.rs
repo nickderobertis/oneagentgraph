@@ -61,7 +61,7 @@ fn a_base_config_named_by_url_is_fetched_over_tls_and_recorded_by_digest() {
             "./graph.yaml",
             "--task",
             &format!(
-                "complete-now: served over tls fake:record-prompt={}",
+                "fake:complete-now: served over tls fake:record-prompt={}",
                 prompts.display()
             ),
             "--dir",
@@ -130,7 +130,7 @@ fn a_certificate_from_an_untrusted_authority_refuses_the_ref() {
             "run",
             "./graph.yaml",
             "--task",
-            "complete-now: never gets here",
+            "fake:complete-now: never gets here",
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -228,7 +228,7 @@ fn a_named_bundle_with_no_certificate_in_it_is_refused() {
             "run",
             "./graph.yaml",
             "--task",
-            "complete-now: never gets here",
+            "fake:complete-now: never gets here",
             "--dir",
             &workspace.dir().display().to_string(),
         ],

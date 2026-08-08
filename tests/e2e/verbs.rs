@@ -169,14 +169,14 @@ fn an_unreachable_https_ref_and_a_cleartext_one_are_both_refused_by_url() {
 #[test]
 fn text_output_renders_the_same_events_as_json() {
     let workspace = Workspace::new();
-    let json = workspace.run_task("complete-now: render me");
+    let json = workspace.run_task("fake:complete-now: render me");
     json.expect_code(0);
 
     let text = workspace.run(&[
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: render me",
+        "fake:complete-now: render me",
         "--dir",
         &workspace.dir().display().to_string(),
         "--output",
@@ -219,7 +219,7 @@ fn detach_prints_where_to_watch_the_run_it_left_behind() {
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: detached",
+        "fake:complete-now: detached",
         "--dir",
         &workspace.dir().display().to_string(),
         "--detach",
@@ -247,7 +247,7 @@ fn detach_prints_where_to_watch_the_run_it_left_behind() {
     // Every flag the run was given is forwarded to the process that actually
     // runs it: a detached run under a different task, label, or override would
     // otherwise be a different run from the one the caller asked for.
-    let task_file = workspace.write("task.md", "complete-now: detached from a file\n");
+    let task_file = workspace.write("task.md", "fake:complete-now: detached from a file\n");
     let forwarded = workspace.run(&[
         "run",
         "./graph.yaml",
@@ -284,7 +284,7 @@ fn detach_prints_where_to_watch_the_run_it_left_behind() {
 #[test]
 fn history_lists_runs_and_shows_one_record() {
     let workspace = Workspace::new();
-    let ran = workspace.run_task("complete-now: recorded once");
+    let ran = workspace.run_task("fake:complete-now: recorded once");
     ran.expect_code(0);
 
     let listed = workspace.run(&["history"]);
@@ -381,7 +381,9 @@ fn every_verb_refuses_what_cannot_work_by_name() {
 #[test]
 fn history_narrows_to_one_run_and_cancel_stops_the_whole_run() {
     let workspace = Workspace::new();
-    workspace.run_task("complete-now: one run").expect_code(0);
+    workspace
+        .run_task("fake:complete-now: one run")
+        .expect_code(0);
     let id = run_id(&workspace.state()).expect("a run");
 
     let narrowed = workspace.run(&["history", &id]);
@@ -591,7 +593,7 @@ impl Load {
                         "./graph.yaml",
                         "--task",
                         &format!(
-                            "complete-now: hold this dispatch live while the smoke runs \
+                            "fake:complete-now: hold this dispatch live while the smoke runs \
                              fake:record-prompt={} fake:hold={}",
                             ready.display(),
                             release.display()
@@ -952,7 +954,7 @@ fn a_shipped_persona_is_reachable_by_name() {
         &two_party_graph(&fake_harness(), "").replace("persona: engineer", "persona: reviewer"),
     );
     let run = workspace.run_task(&format!(
-        "complete-now: shipped fake:record-prompt={}",
+        "fake:complete-now: shipped fake:record-prompt={}",
         record.display()
     ));
     run.expect_code(0);
@@ -995,7 +997,7 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
                     "run",
                     "./graph.yaml",
                     "--task",
-                    "complete-now: scheduled",
+                    "fake:complete-now: scheduled",
                     "--dir",
                     &dir.join("work").display().to_string(),
                 ])
@@ -1048,7 +1050,9 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
 #[test]
 fn a_signal_for_an_unknown_member_is_refused_by_name() {
     let workspace = Workspace::new();
-    workspace.run_task("complete-now: signalled").expect_code(0);
+    workspace
+        .run_task("fake:complete-now: signalled")
+        .expect_code(0);
     let id = run_id(&workspace.state()).expect("a run");
 
     let refused = workspace.run(&["trigger", &id, "ghost"]);
@@ -1137,7 +1141,7 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
                     "run",
                     "./graph.yaml",
                     "--task",
-                    "complete-now: in flight",
+                    "fake:complete-now: in flight",
                     "--dir",
                     &dir.join("work").display().to_string(),
                 ])
@@ -1207,7 +1211,7 @@ fn detach_refuses_a_graph_it_cannot_read_before_it_launches_anything() {
         "run",
         "./no-such-graph.yaml",
         "--task",
-        "complete-now: doomed",
+        "fake:complete-now: doomed",
         "--dir",
         &workspace.dir().display().to_string(),
         "--detach",
@@ -1255,7 +1259,7 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: never gets here",
+        "fake:complete-now: never gets here",
         "--dir",
         &workspace.dir().display().to_string(),
         "--detach",
@@ -1312,7 +1316,7 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: never gets here",
+        "fake:complete-now: never gets here",
         "--dir",
         &workspace.dir().display().to_string(),
         "--set",
@@ -1362,7 +1366,7 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
                     "run",
                     "./graph.yaml",
                     "--task",
-                    "complete-now: unresettable",
+                    "fake:complete-now: unresettable",
                     "--dir",
                     &dir.join("work").display().to_string(),
                 ])
@@ -1418,7 +1422,9 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
 #[test]
 fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
     let workspace = Workspace::new();
-    workspace.run_task("complete-now: recorded").expect_code(0);
+    workspace
+        .run_task("fake:complete-now: recorded")
+        .expect_code(0);
     let id = run_id(&workspace.state()).expect("a run");
 
     let absent = workspace.at("no-such-binary").display().to_string();

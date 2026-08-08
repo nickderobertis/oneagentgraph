@@ -21,6 +21,17 @@ use serde_json::{json, Value};
 /// The score a numeric judgement answers when the request names no usable bound.
 const DEFAULT_MAX_SCORE: u64 = 5;
 
+/// Whether the task carries `sentinel`.
+///
+/// The same `fake:` prefix the harness double documents, for the same reason and
+/// on the same text: what arrives here is a rendered user message, persona
+/// included, so an unprefixed word matches prose nobody meant it to. Both doubles
+/// read one steering protocol; `src/bin/fake_harness.rs` is where it is written
+/// down.
+fn steers(task: &str, sentinel: &str) -> bool {
+    task.contains(&format!("fake:{sentinel}"))
+}
+
 fn main() -> std::process::ExitCode {
     let mut raw = String::new();
     if std::io::stdin().read_to_string(&mut raw).is_err() {
@@ -47,7 +58,7 @@ fn main() -> std::process::ExitCode {
         // The unified per-turn supervisor: it decides completion, or supplies the
         // next simulated-user message.
         Some("supervisor") => {
-            let complete = !task.contains("should-fail") && turns >= 1;
+            let complete = !steers(&task, "should-fail") && turns >= 1;
             if complete {
                 json!({"completion": true, "reason": "fake supervisor verified completion"})
             } else {
@@ -57,7 +68,7 @@ fn main() -> std::process::ExitCode {
         }
         Some("user") => json!({"message": "verify it before you call it done", "stop": false}),
         Some("judge") if request.get("kind").and_then(Value::as_str) == Some("boolean") => {
-            json!({"value": !task.contains("should-fail"), "reason": "fake judge verdict"})
+            json!({"value": !steers(&task, "should-fail"), "reason": "fake judge verdict"})
         }
         // A numeric verdict has to be a number, and `max` is the *request's* —
         // another process's JSON. Reflecting it unread would answer a string or a

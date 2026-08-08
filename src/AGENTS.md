@@ -58,7 +58,10 @@ version as soon as one ships.
 in the prompt it is given, and that prompt is the whole rendered system prompt —
 persona included. Every marker therefore carries a `fake:` prefix, because `hang`
 is a substring of `change`, and a persona telling an agent to state a change's
-blast radius once parked every turn of the suite.
+blast radius once parked every turn of the suite. Both doubles ask through one
+`steers` function that applies the prefix, so a marker added later cannot arrive
+bare — which is how `complete-now` and `should-fail` stayed unprefixed for a
+while after the rule was written.
 
 **`writeln!` reaches a writer as two calls.** The body, then the newline. Any
 writer that treats one call as one line — the text renderer did — emits a blank

@@ -85,8 +85,11 @@ fn version_reports_the_crate_version() {
         .stdout(predicate::str::contains(env!("CARGO_PKG_VERSION")));
 }
 
+/// The help surface, not the flags' behaviour: each of these is driven for real
+/// by the journeys in `dispatch.rs`, `verbs.rs`, and `liveness.rs`. What is left
+/// unproven by those is that `run --help` still *tells* a caller they exist.
 #[test]
-fn run_accepts_every_documented_flag() {
+fn run_help_lists_every_documented_flag() {
     oneagentgraph()
         .args(["run", "--help"])
         .assert()

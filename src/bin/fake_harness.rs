@@ -25,12 +25,13 @@
 //! prompt is the whole rendered system prompt, persona included, so a bare word
 //! matches prose nobody meant it to. `hang` is a substring of `change`, which is
 //! how a persona telling an agent to state a change's blast radius silently
-//! parked every turn of the suite.
+//! parked every turn of the suite. [`steers`] is the only way this file asks the
+//! question, so the prefix is applied by construction rather than remembered.
 //!
 //! | sentinel / variable | what this turn does |
 //! | --- | --- |
-//! | `complete-now` | the agent finishes on its first turn |
-//! | `should-fail` | the agent never finishes, so the run hits its turn cap |
+//! | `fake:complete-now` | the agent finishes on its first turn |
+//! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
@@ -92,6 +93,15 @@ impl Refusal {
 /// A prompt is the whole rendered system prompt plus the task, so an unprefixed
 /// word matches prose. This one appears in no persona and no report.
 const MARK: &str = "fake:";
+
+/// Whether `prompt` carries `sentinel`, which is asked only ever through here.
+///
+/// One function rather than a `contains` per site, so the prefix is applied by
+/// construction: a sentinel added later cannot arrive unprefixed by being read
+/// the way the two dispositions below once were.
+fn steers(prompt: &str, sentinel: &str) -> bool {
+    prompt.contains(&format!("{MARK}{sentinel}"))
+}
 
 fn main() -> std::process::ExitCode {
     // `args_os`/`vars_os` rather than the Unicode-only iterators: both panic on
@@ -188,7 +198,7 @@ fn main() -> std::process::ExitCode {
         None => {}
     }
 
-    if prompt.contains(&format!("{MARK}hang")) {
+    if steers(&prompt, "hang") {
         // Never answer. The heartbeat and activity watchdogs are what ends this.
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -227,7 +237,7 @@ fn answer(prompt: &str) -> String {
         // completed response carries a `reason` and *no* `message`, because
         // there is no next turn for a message to be. A continuing one carries
         // both.
-        if prompt.contains("should-fail") {
+        if steers(prompt, "should-fail") {
             return json!({
                 "completion": false,
                 "message": "verify it before you call it done",
@@ -243,7 +253,7 @@ fn answer(prompt: &str) -> String {
     }
     if prompt.contains("Criterion:") {
         return json!({
-            "value": !prompt.contains("should-fail"),
+            "value": !steers(prompt, "should-fail"),
             "reason": "fake judge verdict",
         })
         .to_string();
@@ -251,7 +261,7 @@ fn answer(prompt: &str) -> String {
     if prompt.contains("Assessment request:") {
         return "None".into();
     }
-    if prompt.contains("complete-now") {
+    if steers(prompt, "complete-now") {
         "done".into()
     } else {
         "working on it".into()

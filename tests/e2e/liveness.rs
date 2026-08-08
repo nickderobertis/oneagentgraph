@@ -90,7 +90,7 @@ fn a_provider_failure_carries_its_exit_code_and_stderr_tail() {
             "run",
             "./graph.yaml",
             "--task",
-            "complete-now: the provider dies",
+            "fake:complete-now: the provider dies",
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -132,7 +132,7 @@ fn a_live_member_publishes_a_heartbeat_while_its_turn_runs() {
             "run",
             "./graph.yaml",
             "--task",
-            &format!("complete-now: fake:hold={}", release.display()),
+            &format!("fake:complete-now: fake:hold={}", release.display()),
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -209,7 +209,7 @@ fn an_unusable_liveness_bound_refuses_the_run_by_name() {
                 "run",
                 "./graph.yaml",
                 "--task",
-                "complete-now: never gets here",
+                "fake:complete-now: never gets here",
                 "--dir",
                 &workspace.dir().display().to_string(),
             ],
@@ -250,7 +250,7 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
                     "run",
                     "./graph.yaml",
                     "--task",
-                    &format!("complete-now: fake:hold={}", release.display()),
+                    &format!("fake:complete-now: fake:hold={}", release.display()),
                     "--dir",
                     &workspace_dir.join("work").display().to_string(),
                 ])
@@ -326,7 +326,7 @@ fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
                     "run",
                     "./graph.yaml",
                     "--task",
-                    &format!("complete-now: fake:hold={}", release.display()),
+                    &format!("fake:complete-now: fake:hold={}", release.display()),
                     "--dir",
                     &workspace_dir.join("work").display().to_string(),
                 ])
@@ -399,7 +399,7 @@ fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
                     "run",
                     "./graph.yaml",
                     "--task",
-                    &format!("complete-now: fake:hold={}", release.display()),
+                    &format!("fake:complete-now: fake:hold={}", release.display()),
                     "--dir",
                     &workspace_dir.join("work").display().to_string(),
                 ])
@@ -475,7 +475,7 @@ fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
             "./graph.yaml",
             "--task",
             &format!(
-                "complete-now: fake:record-prompt={} fake:hold={}",
+                "fake:complete-now: fake:record-prompt={} fake:hold={}",
                 started.display(),
                 release.display()
             ),
@@ -520,7 +520,7 @@ fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
 fn a_finished_run_leaves_nothing_stamped_for_it() {
     let workspace = Workspace::new();
     workspace
-        .run_task("complete-now: leave nothing behind")
+        .run_task("fake:complete-now: leave nothing behind")
         .expect_code(0);
     let scratch = member_scratch(&workspace.state()).expect("a member scratch");
     assert!(

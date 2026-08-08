@@ -59,7 +59,7 @@ fn a_model_reaches_only_the_side_it_was_written_on() {
     let argv = workspace.at("argv.txt");
     workspace
         .run_task(&format!(
-            "complete-now: per-side model fake:record-argv={}",
+            "fake:complete-now: per-side model fake:record-argv={}",
             argv.display()
         ))
         .expect_code(0);
@@ -110,7 +110,7 @@ fn a_model_on_a_chain_of_two_families_refuses_before_anything_starts() {
         "    agent:\n      oneharness_config: ./oneharness.toml\n",
         "    agent:\n      oneharness_config: ./oneharness.toml\n      model: claude-opus-5\n",
     ));
-    let run = workspace.run_task("complete-now: never gets here");
+    let run = workspace.run_task("fake:complete-now: never gets here");
     run.expect_code(2);
     assert!(run.stderr.contains("claude-code, codex"), "{}", run.stderr);
     assert!(run.stderr.contains("one harness family"), "{}", run.stderr);
@@ -144,7 +144,7 @@ fn the_model_value_itself_is_forwarded_unchecked() {
     let argv = workspace.at("argv.txt");
     workspace
         .run_task(&format!(
-            "complete-now: unchecked model fake:record-argv={}",
+            "fake:complete-now: unchecked model fake:record-argv={}",
             argv.display()
         ))
         .expect_code(0);
@@ -187,7 +187,7 @@ fn each_side_runs_the_config_it_was_given() {
             "./graph.yaml",
             "--task",
             &format!(
-                "complete-now: selection fake:record-env={}",
+                "fake:complete-now: selection fake:record-env={}",
                 record.display()
             ),
             "--dir",
@@ -244,7 +244,7 @@ fn a_chain_that_refuses_every_candidate_reports_each_one_and_fails() {
     // Both candidates refuse, because one `FAKE_HARNESS_REFUSAL` reaches both —
     // which is the chain that reached nothing, and it must fail rather than
     // report a settled member.
-    let run = workspace.run_task("complete-now: everything refuses");
+    let run = workspace.run_task("fake:complete-now: everything refuses");
     run.expect_code(1);
 
     // oneharness records *every* candidate it stepped past, including on a chain
@@ -305,7 +305,7 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
         refusing = refusing.display(),
         fake = fake_harness(),
     ));
-    let run = workspace.run_task("complete-now: fall through to the next identity");
+    let run = workspace.run_task("fake:complete-now: fall through to the next identity");
     run.expect_code(0);
 
     let advanced = run.of_kind("fallback-advanced");

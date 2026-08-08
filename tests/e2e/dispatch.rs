@@ -21,7 +21,7 @@ use crate::support::{fake_harness, fake_provider, labels, two_party_graph, Works
 #[test]
 fn a_member_completes_through_the_real_supervisor_loop() {
     let workspace = Workspace::new();
-    let run = workspace.run_task("complete-now: write the thing");
+    let run = workspace.run_task("fake:complete-now: write the thing");
     run.expect_code(0);
 
     let kinds = run.kinds();
@@ -55,6 +55,26 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert!(settled[0]["payload"]["verdict"].is_array());
 }
 
+/// A task that *talks about* the double's sentinels is steered by none of them.
+///
+/// This is the incident the `fake:` prefix exists for, made a test rather than a
+/// comment: what the double matches on is the whole rendered prompt, persona and
+/// task included, so a bare `hang` inside `change` once parked every turn of the
+/// suite. Left unprefixed, `should-fail` here would make the supervisor refuse to
+/// complete and this run would exit 1 at its turn cap; `hang` would park it until
+/// a watchdog fired. Both words are in the prose, and neither is a sentinel.
+#[test]
+fn a_task_whose_prose_contains_a_bare_sentinel_is_not_steered_by_it() {
+    let workspace = Workspace::new();
+    let run = workspace
+        .run_task("fake:complete-now: say whether a should-fail case can hang a change review");
+    run.expect_code(0);
+
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    assert_eq!(settled[0]["payload"]["completed"], serde_json::json!(true));
+}
+
 /// A member that never reaches its bar settles incomplete, and the run exits 1
 /// with the stream saying which member and why.
 ///
@@ -63,7 +83,7 @@ fn a_member_completes_through_the_real_supervisor_loop() {
 #[test]
 fn a_member_that_never_completes_exits_one_and_the_stream_says_which() {
     let workspace = Workspace::new();
-    let run = workspace.run_task("should-fail: never reach the bar");
+    let run = workspace.run_task("fake:should-fail: never reach the bar");
     run.expect_code(1);
 
     let settled = run.of_kind("member-settled");
@@ -88,7 +108,7 @@ fn every_event_carries_the_labels_a_consumer_joins_on() {
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: label me",
+        "fake:complete-now: label me",
         "--dir",
         &workspace.dir().display().to_string(),
         "--label",
@@ -153,7 +173,7 @@ fn every_event_carries_the_labels_a_consumer_joins_on() {
 #[test]
 fn seq_is_monotonic_with_no_gaps() {
     let workspace = Workspace::new();
-    let run = workspace.run_task("complete-now: number me");
+    let run = workspace.run_task("fake:complete-now: number me");
     run.expect_code(0);
 
     let events = run.events();
@@ -186,7 +206,7 @@ fn the_exact_task_reaches_the_agent_side() {
     let workspace = Workspace::new();
     let record = workspace.at("prompts.txt");
     let task = format!(
-        "complete-now: $(touch /tmp/pwned) `id` \"quoted\" 'single' | & ; \\ \
+        "fake:complete-now: $(touch /tmp/pwned) `id` \"quoted\" 'single' | & ; \\ \
          fake:record-prompt={}",
         record.display()
     );
@@ -224,7 +244,7 @@ fn the_base_preamble_and_the_persona_role_both_reach_the_agent() {
 
     let record = workspace.at("prompts.txt");
     let run = workspace.run_task(&format!(
-        "complete-now: merged fake:record-prompt={}",
+        "fake:complete-now: merged fake:record-prompt={}",
         record.display()
     ));
     run.expect_code(0);
@@ -262,7 +282,10 @@ fn the_graphs_env_reaches_the_member_process_expanded() {
             "run",
             "./graph.yaml",
             "--task",
-            &format!("complete-now: env fake:record-env={}", record.display()),
+            &format!(
+                "fake:complete-now: env fake:record-env={}",
+                record.display()
+            ),
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -290,7 +313,7 @@ fn the_members_mode_reaches_the_harness_process() {
         .graph(&two_party_graph(&fake_harness(), "").replace("mode: bypass", "mode: read-only"));
     workspace
         .run_task(&format!(
-            "complete-now: mode fake:record-env={}",
+            "fake:complete-now: mode fake:record-env={}",
             record.display()
         ))
         .expect_code(0);
@@ -346,7 +369,7 @@ fn a_command_judge_supervises_through_the_split_provider() {
             "assessment: \"Name the follow-up work this run left out of scope.\"\n",
         ),
     );
-    let run = workspace.run_task("complete-now: judged by a command");
+    let run = workspace.run_task("fake:complete-now: judged by a command");
     run.expect_code(0);
     assert_eq!(
         run.of_kind("member-settled")[0]["payload"]["completed"],
@@ -355,7 +378,7 @@ fn a_command_judge_supervises_through_the_split_provider() {
 
     // And the other half of the same supervisor: a member that never reaches its
     // bar is asked for another turn until the cap, then settles incomplete.
-    let incomplete = workspace.run_task("should-fail: judged by a command");
+    let incomplete = workspace.run_task("fake:should-fail: judged by a command");
     incomplete.expect_code(1);
     assert_eq!(
         incomplete.of_kind("member-settled")[0]["payload"]["completed"],
@@ -405,7 +428,7 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
             &two_party_graph(&fake_harness(), "")
                 .replace("persona: engineer", &format!("persona: {reference}")),
         );
-        let run = workspace.run_task("complete-now: never gets here");
+        let run = workspace.run_task("fake:complete-now: never gets here");
         run.expect_code(2);
         assert!(run.stderr.contains(expected), "{reference}: {}", run.stderr);
     }
@@ -417,7 +440,7 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
 fn an_incomplete_base_config_refuses_the_run() {
     let workspace = Workspace::new();
     workspace.write("base.yaml", "provider:\n  kind: oneharness\n");
-    let run = workspace.run_task("complete-now: incomplete base");
+    let run = workspace.run_task("fake:complete-now: incomplete base");
     run.expect_code(2);
     assert!(run.stderr.contains("user.done_when"), "{}", run.stderr);
 }
@@ -433,7 +456,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: overridden",
+        "fake:complete-now: overridden",
         "--dir",
         &workspace.dir().display().to_string(),
         "--set",
@@ -445,7 +468,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: never",
+        "fake:complete-now: never",
         "--dir",
         &workspace.dir().display().to_string(),
         "--set",
@@ -476,7 +499,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
         "run",
         "./graph.yaml",
         "--task",
-        "complete-now: retuned",
+        "fake:complete-now: retuned",
         "--dir",
         &workspace.dir().display().to_string(),
         "--set",
@@ -492,7 +515,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
             "run",
             "./graph.yaml",
             "--task",
-            "complete-now: never",
+            "fake:complete-now: never",
             "--dir",
             &workspace.dir().display().to_string(),
             "--set",
@@ -512,7 +535,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
 #[test]
 fn the_task_arrives_by_file_and_naming_both_ways_refuses() {
     let workspace = Workspace::new();
-    let task = workspace.write("task.md", "complete-now: from a file\n");
+    let task = workspace.write("task.md", "fake:complete-now: from a file\n");
     let run = workspace.run(&[
         "run",
         "./graph.yaml",
@@ -551,7 +574,7 @@ fn a_dependant_member_starts_only_after_its_dependency_settles() {
         ),
         fake = fake_harness(),
     ));
-    let run = workspace.run_task("complete-now: ordered");
+    let run = workspace.run_task("fake:complete-now: ordered");
     run.expect_code(0);
 
     let events = run.events();
@@ -575,7 +598,7 @@ fn a_dependant_member_starts_only_after_its_dependency_settles() {
 fn an_unreadable_ref_refuses_with_the_path_it_could_not_read() {
     let workspace = Workspace::new();
     workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", "./nowhere.yaml"));
-    let run = workspace.run_task("complete-now: unreadable");
+    let run = workspace.run_task("fake:complete-now: unreadable");
     run.expect_code(2);
     assert!(run.stderr.contains("nowhere.yaml"), "{}", run.stderr);
 }
@@ -590,7 +613,7 @@ fn a_member_that_cannot_start_is_a_death_the_stream_names() {
             "run",
             "./graph.yaml",
             "--task",
-            "complete-now: unstartable",
+            "fake:complete-now: unstartable",
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -617,7 +640,9 @@ fn a_member_that_cannot_start_is_a_death_the_stream_names() {
 #[test]
 fn every_config_a_run_read_is_recorded_content_addressed() {
     let workspace = Workspace::new();
-    workspace.run_task("complete-now: recorded").expect_code(0);
+    workspace
+        .run_task("fake:complete-now: recorded")
+        .expect_code(0);
 
     let record = workspace.record();
     let refs = record["refs"].as_array().expect("refs").clone();
@@ -663,7 +688,7 @@ fn a_single_sided_member_runs_one_agent_with_no_judge() {
         ),
         fake = fake_harness(),
     ));
-    let run = workspace.run_task("complete-now: single sided");
+    let run = workspace.run_task("fake:complete-now: single sided");
     run.expect_code(0);
     assert_eq!(
         labels(&run.of_kind("member-settled")[0])["member"],
