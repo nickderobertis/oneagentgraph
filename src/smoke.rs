@@ -13,6 +13,14 @@
 //! the provider already billed for. Holding every candidate to the bar instead
 //! of the last one is what failed this smoke for weeks of healthy launches while
 //! one subscription's quota was gone and the next served every turn.
+//!
+//! **Two signals, not one.** The report is judged, *and* oneharness's exit status
+//! is required to be success — because the report alone cannot express the case
+//! above. A candidate billed for work it did not finish is recorded as the
+//! identity that `ran`, with an empty `fell_through`, so its report is
+//! indistinguishable from a healthy launch; only the non-zero exit says
+//! otherwise. Reading the report and not the status reported a spent, failed turn
+//! as a pass, which is the same class of error in the opposite direction.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] the harness *identity* on a
 // `FellThrough` and a `Verdict` stays a `String` on purpose: `docs/contract.md` is
@@ -123,6 +131,33 @@ pub fn run(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Error> {
             String::from_utf8_lossy(&output.stderr).trim()
         ))
     })?;
+    // oneharness's own exit status, before the report is judged at all. The
+    // report is not enough on its own: a candidate that was *billed* and failed
+    // — a rate limit after work, the case this module refuses to excuse — is
+    // recorded as the identity that `ran`, with an empty `fell_through`, so the
+    // report reads exactly like a healthy launch. Measured against oneharness
+    // 0.6.7: that run exits 1 while a plain success and a fall-through to a
+    // working identity both exit 0, so the status is the one signal that
+    // separates them, and ignoring it reported a spent, failed turn as a pass.
+    if !output.status.success() {
+        let ran = report
+            .get("fallback")
+            .and_then(|fallback| fallback.get("ran"))
+            .and_then(Value::as_str)
+            .unwrap_or("no candidate");
+        return Err(Error::MemberFailed {
+            member: "smoke".into(),
+            reason: format!(
+                "{oneharness_bin} exited {} having run {ran}: the turn was attempted and did not \
+                 succeed, so this launch path is not proven — {}",
+                output
+                    .status
+                    .code()
+                    .map_or_else(|| "on a signal".to_string(), |code| code.to_string()),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
     judge(&report)
 }
 

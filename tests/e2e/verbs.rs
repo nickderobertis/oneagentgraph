@@ -536,6 +536,41 @@ fn smoke_spends_one_turn_and_names_the_identity_that_ran_it() {
     );
 }
 
+/// A turn that was spent and failed is not a proven launch path, even though the
+/// report reads like one.
+///
+/// This is the `rate_limit` half of the rule the module exists for: a candidate
+/// billed for work it did not complete is recorded by oneharness as the identity
+/// that *ran*, with nothing in `fell_through` — so the report alone is
+/// indistinguishable from a healthy launch. oneharness's exit status is the only
+/// thing that separates them, and `smoke` reported "passed" until it read one.
+#[test]
+fn smoke_refuses_a_turn_that_was_spent_and_failed() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+
+    let run = workspace.run_with(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[
+            ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+            ("FAKE_HARNESS_REFUSAL", "rate_limit"),
+        ],
+    );
+    run.expect_code(1);
+    assert!(
+        run.stderr.contains("did not succeed"),
+        "a spent, failed turn was not refused: {}",
+        run.stderr
+    );
+    assert!(
+        !run.stdout.contains("passed"),
+        "a spent, failed turn was reported as a pass: {}",
+        run.stdout
+    );
+}
+
 /// A candidate that never ran the turn is the chain doing its job: `smoke` names
 /// it on its own line, above the verdict, and still passes.
 ///
