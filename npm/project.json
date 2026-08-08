@@ -14,6 +14,7 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/.github/workflows/release.yml",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/Cargo.lock",

@@ -9,6 +9,12 @@
 //! `null`/`[]`, that reading is encoded here. Where it neither states a default
 //! nor marks a field optional, the field is required.
 
+// llmlint: ignore-file[invalid_states_unrepresentable] `mode` is stringly typed because
+// the approval modes belong to onejudge and `docs/contract.md` names exactly one of them
+// (`bypass`). An enum here would either invent the rest — the interface-only stage forbids
+// adding a public item the contract does not name — or reject a mode onejudge accepts.
+// Narrow it when the contract enumerates them.
+
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -48,6 +54,7 @@ pub enum Member {
 
 /// A `kind: onejudge` member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OnejudgeMember {
     /// The onejudge base config, by path or URL.
     pub base_config: ConfigRef,
@@ -70,6 +77,7 @@ pub struct OnejudgeMember {
 
 /// A `kind: oneharness` member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OneharnessMember {
     /// The oneharness config, by path or URL.
     pub oneharness_config: ConfigRef,

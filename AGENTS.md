@@ -35,22 +35,12 @@ Adding a contract type without extending that test leaves the doc unproven.
 
 ### Interface-only, for now
 
-This repo is deliberately at an **interface-only** stage: public types, enums,
-error types, serde config-schema structs, and the clap CLI argument surfaces
-compile and are proven by the contract tests — and nothing implements them.
-
-Rules while that holds:
-
-- No method bodies beyond derives, trivial field constructors, and serde
-  `default` helpers.
-- Every CLI subcommand parses per the contract and then refuses loudly with
-  `NOT IMPLEMENTED` on stderr and **exit code 3**. That code is scaffolding for
-  this stage; the contract's own codes are `0` success, `1` a member failed or
-  died, `2` invalid config.
-- Add no public item `docs/contract.md` does not name. A helpful-looking
-  convenience method is interface drift.
-
-The implementation lands as its own change; delete this subsection with it.
+The crate is deliberately at an **interface-only** stage: the contract's types
+and CLI surface compile and are proven, and nothing implements them. Every
+command parses and then refuses with `NOT IMPLEMENTED` and **exit code 3**, so a
+caller wired in early fails visibly instead of reading an empty stream as a graph
+that settled. Anything published in this state — a wheel, an npm package, a crate
+— makes that promise and no other; `scripts/smoke-published.sh` asserts it.
 
 ## Stack and composition
 
@@ -121,10 +111,13 @@ title *is* the release-driving commit and is linted against Conventional Commits
 as a required check. PRs follow `.github/pull_request_template.md` (terse
 **What** / **Why**).
 
-Branch protection on `main` requires every gating check — `gate`, `pr-title`,
-and `llmlint` — with linear history, no force-pushes, and admins able to
-override. Re-apply it with the create-repo skill's
-`setup_github_governance.py gate pr-title llmlint`.
+Branch protection on `main` requires **every** gating job in `ci.yml`, each
+matrix leg by its rendered name, with linear history, no force-pushes, and admins
+able to override. Apply it with the create-repo skill's
+`setup_github_governance.py`, passing every context, and **re-apply it whenever a
+job or a matrix is added or renamed** — GitHub holds the required set, nothing
+reconciles it against the workflow, and a leg nobody required is advisory, which
+auto-merge lands straight past.
 
 **Releases are fully automated; the only human action is merging a PR.**
 `release-plz` is the single version driver: it opens a release PR, and merging it

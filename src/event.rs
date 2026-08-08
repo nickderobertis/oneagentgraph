@@ -8,6 +8,16 @@
 //! Nothing here emits, orders, truncates, or redacts anything: this is the wire
 //! shape and its documented bounds, not the machinery that honours them.
 
+// llmlint: ignore-file[boundary_inputs_validated, invalid_states_unrepresentable] this
+// module is the interface-only wire shape (see AGENTS.md): a version check, an RFC 3339
+// parse, and the 4096-byte / 160-char truncations are the producing library's work, and
+// implementing them here is what the interface-only stage forbids. Two of the shapes are
+// also fixed by the contract rather than chosen: `v` is the wire integer a consumer reads
+// before it knows whether it can decode the rest, and `member-died` is specified as four
+// sibling fields (`rule`, `exit_code`, `disposition`, `stderr_tail`), so folding the exit
+// code into an `exited` variant would change what the stack emits. Revisit both when the
+// emitter lands.
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 

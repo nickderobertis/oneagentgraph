@@ -608,6 +608,32 @@ fn a_graph_with_an_unknown_field_is_rejected() {
 }
 
 #[test]
+fn a_member_of_either_kind_rejects_an_unknown_field() {
+    // A misspelled member field is the boundary failure a graph author actually
+    // hits, and it is inside an internally-tagged enum variant — where a
+    // `deny_unknown_fields` that quietly did nothing would leave the typo
+    // silently dropped and the member running with a default. Both variants are
+    // driven: they carry the attribute independently, so one can regress while
+    // the other holds.
+    let graph = fenced_block("yaml");
+    for (kind, from, to, typo) in [
+        ("onejudge", "    mode: bypass", "    moed: bypass", "moed"),
+        ("oneharness", "    deps: []", "    dpes: []", "dpes"),
+    ] {
+        let yaml = graph.replace(from, to);
+        assert_ne!(yaml, graph, "the contract no longer shows `{from}`");
+
+        let error = serde_norway::from_str::<GraphConfig>(&yaml).expect_err(&format!(
+            "a `{kind}` member's unknown field must not be silently dropped"
+        ));
+        assert!(
+            error.to_string().contains(typo),
+            "the error should name the offending `{kind}` field, got: {error}"
+        );
+    }
+}
+
+#[test]
 fn the_documented_command_provider_judge_parses() {
     let documented = backticked()
         .into_iter()

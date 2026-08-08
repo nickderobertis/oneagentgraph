@@ -36,7 +36,6 @@
       "Bash(just lint-llm)",
       "Bash(just lint-llm-diff)",
       "Bash(just lint-llm-validate)",
-      "Bash(just run:*)",
       "Bash(llmlint doctor)",
       "Bash(llmlint history)",
       "Bash(llmlint --version)",
