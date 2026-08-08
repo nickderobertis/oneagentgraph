@@ -212,12 +212,18 @@ impl RunId {
     }
 
     /// Whether `raw` is the shape [`RunId::mint`] produces, and nothing else.
+    ///
+    /// Exactly that alphabet: `mint` lowercases the graph's name and joins it to
+    /// two decimal numbers with hyphens, so lowercase ASCII, digits, and `-` is
+    /// the whole of it. Accepting more than `mint` emits would make this a check
+    /// on what a path component may safely contain rather than on what a run id
+    /// *is*, and the two stop agreeing the moment either moves.
     #[must_use]
     pub fn is_run_id(raw: &str) -> bool {
         !raw.is_empty()
             && raw
                 .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     }
 
     /// One run id, parsed.
@@ -229,8 +235,8 @@ impl RunId {
     pub fn parse(raw: &str) -> Result<Self, Error> {
         if !Self::is_run_id(raw) {
             return Err(Error::InvalidConfig(format!(
-                "{raw:?} is not a run id: a run id is lowercase letters, digits, hyphens, and \
-                 underscores, and this one would name a path outside the run store"
+                "{raw:?} is not a run id: a run id is lowercase letters, digits, and hyphens, and \
+                 this one would name a path outside the run store"
             )));
         }
         Ok(Self(raw.to_string()))
@@ -967,7 +973,9 @@ mod tests {
         // traversal in this field is refused rather than joined onto the state
         // directory by whichever verb reads it back.
         assert_eq!(RunId::parse(id.as_str()).expect("a run id"), id);
-        for hostile in ["../../etc", "a/b", "", "has space"] {
+        // The alphabet is exactly what `mint` emits — nothing it never produces
+        // is a run id, however harmless it would be in a path.
+        for hostile in ["../../etc", "a/b", "", "has space", "Node-Scope-1-1", "r_1"] {
             let err = RunId::parse(hostile).unwrap_err();
             assert!(err.to_string().contains("is not a run id"), "{err}");
         }

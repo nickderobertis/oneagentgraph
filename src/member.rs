@@ -429,7 +429,12 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
             );
         }
         Some("result") => {
-            if let Some(document) = value.get("report") {
+            // Only a report *document* counts. Everything downstream reads this
+            // as a mapping — the verdict, the usage, the fallback chain — and a
+            // `result` carrying anything else is a member that produced nothing
+            // it can settle on, which is the failure already spelled below
+            // rather than a settle on a document with no fields in it.
+            if let Some(document) = value.get("report").filter(|value| value.is_object()) {
                 *report.lock().expect("report") = Some(document.clone());
             }
         }
@@ -694,6 +699,13 @@ mod tests {
             "{\"type\":\"event\",\"event\":7}",
             "{\"type\":\"event\",\"event\":{\"kind\":\"tool_call\"}}",
             "{\"type\":\"event\",\"event\":{\"name\":\"bash\"}}",
+            // A `result` whose report is not a document. Everything downstream
+            // reads it as a mapping, so accepting one would settle the member on
+            // a report with no fields rather than failing for the absence.
+            "{\"type\":\"result\",\"report\":\"done\"}",
+            "{\"type\":\"result\",\"report\":7}",
+            "{\"type\":\"result\",\"report\":null}",
+            "{\"type\":\"result\",\"report\":[]}",
         ] {
             ingest(line, &recorder, &mut turn, &report);
         }
