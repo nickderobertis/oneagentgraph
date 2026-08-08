@@ -136,6 +136,18 @@ fn seq_is_monotonic_with_no_gaps() {
     }
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
+// file the doubled harness wrote recording the prompt, environment, or argv it was
+// given, and that is the observation point *because* it is the subject: what
+// arrived at the far end of the invocation this crate builds. Nothing a user reads
+// carries it — the stream reports that a member settled, not what the harness was
+// asked, and a run that delivered a mangled task or spent the wrong subscription
+// exits 0 with a stream identical to a correct one. Asserting only on the stream
+// would leave the whole delivery path unproven, which is the path these journeys
+// were ported to cover; ai-orchestrator's originals record at the same point for
+// the same reason. The recorder is the single sanctioned double, and every
+// assertion about behaviour — exit codes, event kinds, the run record — is still
+// made through the CLI.
 /// The task reaches the agent side exactly as it was given — including the
 /// metacharacters a shell would have eaten.
 ///
@@ -265,6 +277,8 @@ fn the_members_mode_reaches_the_harness_process() {
         );
     }
 }
+
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A command judge runs the whole member through onejudge's `split` provider:
 /// the agent side stays on the real harness path, the supervisor is the command.

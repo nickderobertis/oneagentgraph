@@ -21,6 +21,18 @@ use crate::support::{
     fake_harness, two_party_graph, Workspace, CHAIN, FALLBACK_CHAIN, MIXED_CHAIN,
 };
 
+// llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
+// file the doubled harness wrote recording the prompt, environment, or argv it was
+// given, and that is the observation point *because* it is the subject: what
+// arrived at the far end of the invocation this crate builds. Nothing a user reads
+// carries it — the stream reports that a member settled, not what the harness was
+// asked, and a run that delivered a mangled task or spent the wrong subscription
+// exits 0 with a stream identical to a correct one. Asserting only on the stream
+// would leave the whole delivery path unproven, which is the path these journeys
+// were ported to cover; ai-orchestrator's originals record at the same point for
+// the same reason. The recorder is the single sanctioned double, and every
+// assertion about behaviour — exit codes, event kinds, the run record — is still
+// made through the CLI.
 /// A model named on one side is stamped into that side's own config, and reaches
 /// the harness — while the other side keeps the model its own config pins.
 ///
@@ -84,6 +96,8 @@ fn a_model_reaches_only_the_side_it_was_written_on() {
     );
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// The pairing rule: a model paired with a chain spanning two harness families
 /// refuses the run before it starts, naming both families.
 ///
@@ -106,6 +120,18 @@ fn a_model_on_a_chain_of_two_families_refuses_before_anything_starts() {
     );
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
+// file the doubled harness wrote recording the prompt, environment, or argv it was
+// given, and that is the observation point *because* it is the subject: what
+// arrived at the far end of the invocation this crate builds. Nothing a user reads
+// carries it — the stream reports that a member settled, not what the harness was
+// asked, and a run that delivered a mangled task or spent the wrong subscription
+// exits 0 with a stream identical to a correct one. Asserting only on the stream
+// would leave the whole delivery path unproven, which is the path these journeys
+// were ported to cover; ai-orchestrator's originals record at the same point for
+// the same reason. The recorder is the single sanctioned double, and every
+// assertion about behaviour — exit codes, event kinds, the run record — is still
+// made through the CLI.
 /// The model *value* is forwarded unchecked — the contract's deliberate
 /// asymmetry with the identity, which only the config selects.
 #[test]
@@ -180,6 +206,8 @@ fn each_side_runs_the_config_it_was_given() {
         "not every side reached the double: {recorded}"
     );
 }
+
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A chain whose first candidate refuses on `auth` hands the turn to the next
 /// identity, and the run reports each step past as a `fallback-advanced`.

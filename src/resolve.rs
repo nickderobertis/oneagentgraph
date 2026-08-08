@@ -161,6 +161,20 @@ pub fn local_path(reference: &ConfigRef, base_dir: Option<&Path>) -> PathBuf {
     }
 }
 
+// llmlint: ignore-block[changed_behavior_has_e2e] the reachable-remote paths below
+// cannot be driven end to end on this gate's terms, and the alternatives are worse
+// than the gap. `just check` is offline and credential-free by AGENTS.md, so the
+// remote would have to be a local server; this module refuses cleartext on
+// purpose, so that server needs a certificate the fetch trusts; and `ureq` is
+// built here with `rustls` + `webpki-roots` — compiled-in Mozilla roots, with no
+// `rustls-native-certs` in the tree and so no `SSL_CERT_FILE` to point at a local
+// CA. Reaching these lines would mean either relaxing the https rule or moving
+// production TLS onto the system trust store to make a test possible. What *can*
+// be driven is: `an_https_ref_is_fetched_and_an_unreachable_one_is_refused_by_url`
+// runs the whole path through the compiled binary against an RFC 6761 `.invalid`
+// host and against a cleartext URL, and `ingest` is split from the request
+// precisely so its bound, its UTF-8 check, and its digest are exercised against
+// readers this crate hands over rather than whatever a network answered.
 /// Fetch one remote ref over `https`.
 fn fetch(reference: &ConfigRef) -> Result<Resolved, Error> {
     let url = reference.0.trim();
@@ -200,6 +214,8 @@ fn ingest(url: &str, body: impl std::io::Read) -> Result<Resolved, Error> {
         base_dir: None,
     })
 }
+
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The content-addressed record of one document.
 fn record(origin: &str, content: &str) -> ResolvedRef {
