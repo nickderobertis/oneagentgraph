@@ -25,6 +25,7 @@ categories = ["command-line-utilities", "development-tools"]
 include = [
   "src/**/*.rs",
   "tests/**/*.rs",
+  "personas/**/*.yaml",
   "Cargo.toml",
   "README.md",
   "LICENSE",
@@ -35,9 +36,29 @@ include = [
 name = "oneagentgraph"
 path = "src/main.rs"
 
+# The deterministic doubles the e2e suite drives as real subprocesses: one stands
+# in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, the
+# other speaks onejudge's `CommandProvider` JSON-lines protocol. Both are behind
+# `fake-provider` so a published `cargo install oneagentgraph` never builds them.
+[[bin]]
+name = "oneagentgraph-fake-harness"
+path = "src/bin/fake_harness.rs"
+required-features = ["fake-provider"]
+
+[[bin]]
+name = "oneagentgraph-fake-provider"
+path = "src/bin/fake_provider.rs"
+required-features = ["fake-provider"]
+
 [lib]
 name = "oneagentgraph"
 path = "src/lib.rs"
+
+[features]
+# Test-only doubles for the two seams the suite is allowed to fake. Non-default,
+# so they are never in a consumer's build; `just check` and the coverage run
+# enable them because the e2e journeys spawn them.
+fake-provider = []
 
 [dependencies]
 clap = { version = "4.6", features = ["derive"] }
@@ -50,10 +71,26 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # deprecated serde_yaml; `cargo deny` is what keeps that choice honest.
 serde_norway = "0.9"
 thiserror = "2"
+# A remote ref is recorded content-addressed, so replay never depends on the URL
+# staying stable — that record is a SHA-256 of the exact bytes fetched.
+sha2 = "0.10"
+# Fetching those remote refs. `rustls` rather than a system TLS stack so the
+# fetch behaves the same on every CI leg the matrix runs.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# A side's `model` override is stamped into that side's resolved oneharness
+# config; `toml_edit` keeps the rest of the operator's file — comments included —
+# byte-identical, so the copy in the run record still reads as what they wrote.
+toml_edit = "0.23"
+# Scratch ownership is an `owner.lock` flock plus a pid-with-start-token, and
+# reaping a member's descendants is a signal to a proven process group. All four
+# are kernel facilities with no safe-Rust equivalent in std.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+tempfile = "3"
 
 [[test]]
 name = "e2e"

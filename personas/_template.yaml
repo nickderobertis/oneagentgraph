@@ -1,0 +1,29 @@
+# Persona template. `oneagentgraph persona new <name>` copies this to <name>.yaml.
+#
+# A persona is a DELTA over the onejudge base config a member names as its
+# `base_config` — put only what makes this role different here. Everything else
+# (provider wiring, session, the shared agent preamble, the default turn cap) is
+# inherited from that base when the member launches.
+#
+# Contract (enforced by `oneagentgraph persona validate`):
+#   REQUIRED  agent.instructions   the role, appended after the base preamble
+#   REQUIRED  user.persona         how the supervisor reviews this kind of work
+#   optional  agent.name           the role label stamped on this member's events
+#   optional  user.done_when       role-specific completion bar (else base default)
+#   optional  user.max_turns       role-specific turn cap (else base default)
+#   optional  evals                extra transcript checks for this role
+# No other top-level keys — the task comes from `--task`, shared settings from
+# the base.
+
+agent:
+  name: role-name
+  instructions: |
+    What this worker specializes in and how it should approach its task. Be
+    specific about the role; the shared quality bar belongs in the base config.
+
+user:
+  persona: |
+    The supervisor's stance for reviewing this role's work — what to push on, and
+    what "not done yet" looks like for this kind of task.
+  # done_when: "override the base completion bar if this role needs a stricter one"
+  # max_turns: 12

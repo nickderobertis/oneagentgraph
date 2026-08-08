@@ -8,18 +8,19 @@
 //! Nothing here emits, orders, truncates, or redacts anything: this is the wire
 //! shape and its documented bounds, not the machinery that honours them.
 
-// llmlint: ignore-file[boundary_inputs_validated, invalid_states_unrepresentable] this
-// module is the interface-only wire shape (see AGENTS.md): a version check, an RFC 3339
-// parse, and the 4096-byte / 160-char truncations are the producing library's work, and
-// implementing them here is what the interface-only stage forbids. Two of the shapes are
-// also fixed by the contract rather than chosen: `v` is the wire integer a consumer reads
+// llmlint: ignore-file[invalid_states_unrepresentable] two of the shapes below are fixed
+// by `docs/contract.md` rather than chosen: `v` is the wire integer a consumer reads
 // before it knows whether it can decode the rest, and `member-died` is specified as four
 // sibling fields (`rule`, `exit_code`, `disposition`, `stderr_tail`), so folding the exit
-// code into an `exited` variant would change what the stack emits. Revisit both when the
-// emitter lands.
+// code into an `exited` variant would change what this stack emits.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+
+use crate::clock::now_rfc3339;
 
 /// The envelope version this crate produces and understands.
 pub const ENVELOPE_VERSION: u8 = 1;
@@ -233,4 +234,276 @@ pub enum Disposition {
 /// written as `false`, so a payload that was never near its bound stays quiet.
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+/// Bound one payload text field to [`MAX_PAYLOAD_TEXT_BYTES`], reporting whether
+/// it had to be cut.
+///
+/// The cut lands on a character boundary, and it takes the **tail**: what names a
+/// failure is the last of a harness's output, not its startup chatter. A caller
+/// that wants the head says so by trimming before it gets here.
+#[must_use]
+pub fn bound_text(text: &str) -> (String, bool) {
+    if text.len() <= MAX_PAYLOAD_TEXT_BYTES {
+        return (text.to_string(), false);
+    }
+    let mut start = text.len() - MAX_PAYLOAD_TEXT_BYTES;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    (text[start..].to_string(), true)
+}
+
+/// Bound one [`TurnActivity::detail`] to [`MAX_ACTIVITY_DETAIL_CHARS`],
+/// reporting whether it had to be cut.
+///
+/// Characters, not bytes — the contract says "160-char detail", and a tool
+/// summary is prose a person reads.
+#[must_use]
+pub fn bound_detail(detail: &str) -> (String, bool) {
+    let collapsed: String = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= MAX_ACTIVITY_DETAIL_CHARS {
+        return (collapsed, false);
+    }
+    (
+        collapsed.chars().take(MAX_ACTIVITY_DETAIL_CHARS).collect(),
+        true,
+    )
+}
+
+/// Stamps and numbers this process's events, and writes them where the run said.
+///
+/// One emitter per producing process, because `seq` is "monotonic per `stream`"
+/// and `stream` is "a unique id per producing process" — the two are the same
+/// fact, so they are the same object. It is cheap to clone and safe to share
+/// across the reader threads a graph runs one per member: the counter is atomic
+/// and the sink is behind one lock, so a line is written whole.
+#[derive(Clone)]
+pub struct Emitter {
+    stream: String,
+    seq: Arc<AtomicU64>,
+    sink: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
+    labels: Labels,
+}
+
+impl std::fmt::Debug for Emitter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Emitter")
+            .field("stream", &self.stream)
+            .field("seq", &self.seq.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
+impl Emitter {
+    /// An emitter for `stream`, writing to `sink`.
+    #[must_use]
+    pub fn new(stream: impl Into<String>, sink: Box<dyn std::io::Write + Send>) -> Self {
+        Self {
+            stream: stream.into(),
+            seq: Arc::new(AtomicU64::new(0)),
+            sink: Arc::new(Mutex::new(sink)),
+            labels: Labels::default(),
+        }
+    }
+
+    /// The same emitter with `labels` stamped on everything it writes next.
+    ///
+    /// Enrichers never rewrite: a label already on the derived emitter stays, so
+    /// a member's own `member`/`persona` cannot be overwritten by a graph-level
+    /// stamp added later.
+    #[must_use]
+    pub fn with_labels(&self, labels: Labels) -> Self {
+        let mut merged = labels;
+        merged.run_id = merged.run_id.or_else(|| self.labels.run_id.clone());
+        merged.round = merged.round.or(self.labels.round);
+        merged.node = merged.node.or_else(|| self.labels.node.clone());
+        merged.step = merged.step.or_else(|| self.labels.step.clone());
+        merged.member = merged.member.or_else(|| self.labels.member.clone());
+        merged.persona = merged.persona.or_else(|| self.labels.persona.clone());
+        for (key, value) in &self.labels.extra {
+            merged
+                .extra
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+        Self {
+            stream: self.stream.clone(),
+            seq: Arc::clone(&self.seq),
+            sink: Arc::clone(&self.sink),
+            labels: merged,
+        }
+    }
+
+    /// The stream id every envelope this emitter writes carries.
+    #[must_use]
+    pub fn stream(&self) -> &str {
+        &self.stream
+    }
+
+    /// Write one event, returning the envelope as it was written.
+    ///
+    /// A sink that cannot be written to is not a run failure — the events are
+    /// also on disk — so the write is best-effort and the envelope is still
+    /// returned to whatever else the run does with it.
+    pub fn emit(&self, kind: EventKind, payload: Map<String, Value>) -> Envelope {
+        self.emit_with(kind, payload, Vec::new())
+    }
+
+    /// [`Emitter::emit`], with artifacts attached.
+    pub fn emit_with(
+        &self,
+        kind: EventKind,
+        payload: Map<String, Value>,
+        artifacts: Vec<Artifact>,
+    ) -> Envelope {
+        let envelope = Envelope {
+            v: ENVELOPE_VERSION,
+            ts: now_rfc3339(),
+            stream: self.stream.clone(),
+            seq: self.seq.fetch_add(1, Ordering::SeqCst),
+            source: Source::Agentgraph,
+            kind,
+            labels: self.labels.clone(),
+            payload,
+            artifacts,
+        };
+        if let Ok(mut sink) = self.sink.lock() {
+            let line = serde_json::to_string(&envelope).unwrap_or_default();
+            let _ = writeln!(sink, "{line}");
+            let _ = sink.flush();
+        }
+        envelope
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A shared sink a test can read back, standing in for stdout or the run's
+    /// events file.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("recorder").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn lines(recorder: &Recorder) -> Vec<Envelope> {
+        let raw = recorder.0.lock().expect("recorder").clone();
+        String::from_utf8(raw)
+            .expect("utf-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("envelope"))
+            .collect()
+    }
+
+    /// `seq` is monotonic per stream, and it stays so across the derived
+    /// emitters a graph hands to its members — they are one producing process.
+    #[test]
+    fn seq_is_monotonic_across_every_derived_emitter() {
+        let recorder = Recorder::default();
+        let emitter = Emitter::new("run-1", Box::new(recorder.clone()));
+        let member = emitter.with_labels(Labels {
+            member: Some("worker".into()),
+            ..Labels::default()
+        });
+        emitter.emit(EventKind::GraphStarted, Map::new());
+        member.emit(EventKind::MemberStarted, Map::new());
+        emitter.emit(EventKind::GraphSettled, Map::new());
+
+        let written = lines(&recorder);
+        assert_eq!(
+            written.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert!(written
+            .iter()
+            .all(|e| e.stream == "run-1" && e.v == ENVELOPE_VERSION));
+        assert_eq!(written[1].labels.member.as_deref(), Some("worker"));
+        assert_eq!(written[0].labels.member, None);
+        assert_eq!(emitter.stream(), "run-1");
+    }
+
+    /// An enricher never rewrites: a member's own label survives a later stamp,
+    /// and a graph-level label reaches a member that did not set one.
+    #[test]
+    fn labels_are_stamped_but_never_rewritten() {
+        let recorder = Recorder::default();
+        let base = Emitter::new("s", Box::new(recorder.clone())).with_labels(Labels {
+            run_id: Some("R".into()),
+            member: Some("graph".into()),
+            extra: [("tier".to_string(), Value::from("gate"))]
+                .into_iter()
+                .collect(),
+            ..Labels::default()
+        });
+        let member = base.with_labels(Labels {
+            member: Some("worker".into()),
+            round: Some(2),
+            extra: [("tier".to_string(), Value::from("member"))]
+                .into_iter()
+                .collect(),
+            ..Labels::default()
+        });
+        member.emit(EventKind::MemberStarted, Map::new());
+        let written = lines(&recorder);
+        assert_eq!(written[0].labels.run_id.as_deref(), Some("R"));
+        assert_eq!(written[0].labels.member.as_deref(), Some("worker"));
+        assert_eq!(written[0].labels.round, Some(2));
+        assert_eq!(written[0].labels.extra["tier"], Value::from("member"));
+    }
+
+    /// Text fields are bounded at the documented byte count, keeping the tail and
+    /// never splitting a character.
+    #[test]
+    fn payload_text_is_bounded_at_its_documented_size() {
+        let (short, cut) = bound_text("brief");
+        assert_eq!((short.as_str(), cut), ("brief", false));
+
+        let long = format!("{}TAIL", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        let (bounded, cut) = bound_text(&long);
+        assert!(cut);
+        assert!(bounded.len() <= MAX_PAYLOAD_TEXT_BYTES);
+        assert!(bounded.ends_with("TAIL"));
+        assert!(bounded.chars().all(|c| c == 'é' || c.is_ascii_uppercase()));
+    }
+
+    /// A tool summary is bounded in characters and collapsed to one line, so a
+    /// multi-line command cannot break the rendering it lands in.
+    #[test]
+    fn an_activity_detail_is_collapsed_and_bounded_in_characters() {
+        let (detail, cut) = bound_detail("just   check\n  --all");
+        assert_eq!((detail.as_str(), cut), ("just check --all", false));
+
+        let (detail, cut) = bound_detail(&"é".repeat(MAX_ACTIVITY_DETAIL_CHARS + 10));
+        assert!(cut);
+        assert_eq!(detail.chars().count(), MAX_ACTIVITY_DETAIL_CHARS);
+    }
+
+    /// An emitter whose sink is gone still numbers and returns its events: the
+    /// stream is a view, and the run does not fail because nobody is reading.
+    #[test]
+    fn a_broken_sink_does_not_stop_the_run() {
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("gone"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::Error::other("gone"))
+            }
+        }
+        let emitter = Emitter::new("s", Box::new(Broken));
+        assert_eq!(emitter.emit(EventKind::GraphStarted, Map::new()).seq, 0);
+        assert_eq!(emitter.emit(EventKind::GraphSettled, Map::new()).seq, 1);
+        assert!(format!("{emitter:?}").contains("seq: 2"));
+    }
 }
