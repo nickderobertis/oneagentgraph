@@ -7,9 +7,6 @@
 //! `onejudge` drives the conversation and real `oneharness` selects the identity
 //! in between.
 
-// Journeys are modules, and each reaches for a different part of this support
-// surface; an unused-here helper is used two files over, so `dead_code` would
-// fire on the shared vocabulary rather than on anything unused.
 // llmlint: ignore-file[e2e_not_mocked] the paid model turn is the one genuinely
 // external thing a gate cannot run for free, and this is the seam it is replaced
 // at: oneharness's own documented `ONEHARNESS_BIN_<ID>` binary override. Real

@@ -431,26 +431,33 @@ mod tests {
     #[test]
     fn a_live_recorded_identity_pins_the_directory() {
         let root = tempfile::tempdir().expect("tempdir");
-        let path = root.path().join("recorded-live");
-        std::fs::create_dir_all(&path).expect("mkdir");
         let own = own_identity();
-        std::fs::write(
-            path.join(OWNER_LOCK_FILE),
-            format!("{} {}\n", own.pid, own.start_token),
-        )
-        .expect("write");
-        let retained = reclaimable(&path).unwrap_err();
+
+        // Each case gets its own directory rather than rewriting one lock file
+        // in place. `flock` is held by an *open file description*, and rewriting
+        // a file this process has already opened and closed makes the second
+        // acquisition depend on the first's close having been observed — which
+        // is a race the test would lose occasionally and the code never runs.
+        let recorded = |name: &str, record: &str| {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(&path).expect("mkdir");
+            std::fs::write(path.join(OWNER_LOCK_FILE), record).expect("write");
+            path
+        };
+
+        let live = recorded("live", &format!("{} {}\n", own.pid, own.start_token));
+        let retained = reclaimable(&live).unwrap_err();
         assert!(retained.contains("still that process"), "{retained}");
 
         // The same pid with a start token nobody holds is a recycled number, and
         // recycling is exactly what the token exists to see through.
-        std::fs::write(path.join(OWNER_LOCK_FILE), format!("{} 1\n", own.pid)).expect("write");
-        assert_eq!(reclaimable(&path), Ok(()));
+        let recycled = recorded("recycled", &format!("{} 1\n", own.pid));
+        assert_eq!(reclaimable(&recycled), Ok(()));
 
         // An unparseable record proves nothing about a live process, so the lock
         // is the only proof left — and it is free.
-        std::fs::write(path.join(OWNER_LOCK_FILE), "not a record\n").expect("write");
-        assert_eq!(reclaimable(&path), Ok(()));
+        let torn = recorded("torn", "not a record\n");
+        assert_eq!(reclaimable(&torn), Ok(()));
     }
 
     /// A scratch that cannot be created, or whose lock cannot be opened, is a

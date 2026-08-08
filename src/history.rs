@@ -32,13 +32,34 @@ pub fn list(state_dir: &Path) -> Vec<Record> {
     records
 }
 
+/// Whether `run_id` is one this crate could have minted.
+///
+/// A run id arrives on the argv and becomes a *path component*, so a value
+/// carrying a separator or a parent reference would read a record — and, through
+/// `cancel`, write a signal — outside the state directory entirely. Run ids are
+/// minted by [`crate::run::new_run_id`] from a slug, a timestamp, and a pid, so
+/// this is the shape of one and nothing else.
+#[must_use]
+pub fn is_run_id(run_id: &str) -> bool {
+    !run_id.is_empty()
+        && run_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// One run's record.
 ///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when there is no such run, or its record cannot be
-/// read.
+/// [`Error::InvalidConfig`] when the id is not one this crate mints, when there
+/// is no such run, or when its record cannot be read.
 pub fn show(state_dir: &Path, run_id: &str) -> Result<Record, Error> {
+    if !is_run_id(run_id) {
+        return Err(Error::InvalidConfig(format!(
+            "{run_id:?} is not a run id: a run id is lowercase letters, digits, hyphens, and \
+             underscores, and this one would name a path outside the run store"
+        )));
+    }
     read(&state_dir.join(run_id)).map_err(|err| {
         Error::InvalidConfig(format!(
             "no run {run_id:?} under {}: {err}",

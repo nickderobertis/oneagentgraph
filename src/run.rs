@@ -215,13 +215,31 @@ pub fn parse_label(raw: &str) -> Result<(String, String), Error> {
     let (key, value) = raw
         .split_once('=')
         .ok_or_else(|| Error::InvalidConfig(format!("--label {raw:?}: expected k=v")))?;
-    if key.is_empty() {
+    // The key lands in an envelope's flattened `labels`, beside the reserved
+    // ones. A key that is not an identifier would produce an envelope a consumer
+    // cannot address by field, and one that *is* a reserved key would look like
+    // the run's own stamp while carrying whatever an operator typed — the
+    // contract's "enrichers never rewrite" read from the wrong direction.
+    if key.is_empty()
+        || !key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
         return Err(Error::InvalidConfig(format!(
-            "--label {raw:?}: the key before `=` is empty"
+            "--label {raw:?}: a label key is letters, digits, underscores, and dots"
+        )));
+    }
+    if RESERVED_LABELS.contains(&key) {
+        return Err(Error::InvalidConfig(format!(
+            "--label {raw:?}: {key:?} is a reserved label this run stamps itself; pick another \
+             name so a consumer can tell the two apart"
         )));
     }
     Ok((key.to_string(), value.to_string()))
 }
+
+/// The label keys `docs/contract.md` reserves, which a run stamps itself.
+const RESERVED_LABELS: &[&str] = &["run_id", "member", "persona"];
 
 /// Apply the run's `--set` overrides to a parsed graph document.
 ///
@@ -774,10 +792,24 @@ mod tests {
             .contains("path before `=` is empty"));
         assert_eq!(parse_set("a.b=c").unwrap(), ("a.b".into(), "c".into()));
         assert!(parse_label("bare").unwrap_err().to_string().contains("k=v"));
-        assert!(parse_label("=v")
-            .unwrap_err()
-            .to_string()
-            .contains("key before `=` is empty"));
+        for bad in ["=v", "a b=v", "a-b=v"] {
+            assert!(
+                parse_label(bad)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("letters, digits, underscores, and dots"),
+                "{bad}"
+            );
+        }
+        // A run stamps `run_id`, `member`, and `persona` itself, so an operator
+        // naming one would produce an envelope a consumer cannot tell apart.
+        for reserved in RESERVED_LABELS {
+            let err = parse_label(&format!("{reserved}=mine")).unwrap_err();
+            assert!(
+                err.to_string().contains("reserved label"),
+                "{reserved}: {err}"
+            );
+        }
         assert_eq!(
             parse_label("tier=gate").unwrap(),
             ("tier".into(), "gate".into())

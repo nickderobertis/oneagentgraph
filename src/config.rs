@@ -159,6 +159,18 @@ fn default_stream() -> bool {
 /// The schema version this crate reads.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Whether `name` is one a member may have.
+///
+/// A member's name is a path component in the run's own directory, so this is
+/// the shape of one that stays there.
+#[must_use]
+pub fn is_member_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
 /// Everything about a graph that can be checked without launching it.
 ///
 /// The schema itself is checked by serde — `deny_unknown_fields` is the trust
@@ -188,6 +200,17 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
         )));
     }
     for (name, member) in &graph.members {
+        // A member's name becomes a *path component* — its scratch directory,
+        // and the file `trigger` and `reset-timer` leave for it — so a name
+        // carrying a separator or a parent reference would put a member's
+        // generated configs, and an operator's signal, outside the run's own
+        // directory.
+        if !is_member_name(name) {
+            return Err(Error::InvalidConfig(format!(
+                "member name {name:?}: use letters, digits, hyphens, and underscores — a name \
+                 is a directory this run creates and a signal file an operator writes"
+            )));
+        }
         match member {
             Member::Onejudge(member) => {
                 if member.mode.trim().is_empty() {
@@ -243,6 +266,28 @@ mod tests {
         assert!(validate(&parse(ONE_MEMBER)).is_ok());
         let err = validate(&parse(&ONE_MEMBER.replace("version: 1", "version: 2"))).unwrap_err();
         assert!(err.to_string().contains("it reads version 1"), "{err}");
+    }
+
+    /// A member's name is a directory this run creates and a signal file an
+    /// operator writes, so a name that would leave the run's own directory is
+    /// refused before either exists.
+    #[test]
+    fn a_member_name_that_would_leave_the_run_directory_is_refused() {
+        for escape in ["../elsewhere", "a/b", "a\\b", "a b"] {
+            let document = format!(
+                concat!(
+                    "version: 1\nname: g\nmembers:\n",
+                    "  \"{escape}\":\n",
+                    "    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n",
+                ),
+                escape = escape,
+            );
+            let err = validate(&parse(&document)).unwrap_err();
+            assert!(err.to_string().contains("member name"), "{escape:?}: {err}");
+        }
+        assert!(is_member_name("worker_2-a"));
+        assert!(!is_member_name(""));
     }
 
     /// The shapes that are legal YAML but not a runnable graph.
