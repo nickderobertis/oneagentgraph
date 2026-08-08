@@ -39,12 +39,16 @@ fn a_base_config_named_by_url_is_fetched_over_tls_and_recorded_by_digest() {
     let url = origin.url("/base.yaml");
     workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", &url));
 
+    let prompts = workspace.at("prompts.txt");
     let run = workspace.run_with(
         &[
             "run",
             "./graph.yaml",
             "--task",
-            "complete-now: served over tls",
+            &format!(
+                "complete-now: served over tls fake:record-prompt={}",
+                prompts.display()
+            ),
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -71,8 +75,15 @@ fn a_base_config_named_by_url_is_fetched_over_tls_and_recorded_by_digest() {
         serde_json::json!(SERVED_BASE.len() as u64)
     );
 
-    // And it was really this document that ran, not a local file of the same
-    // name: its own marker reached the agent.
+    // And it was really the *served* document that ran, not a local file of the
+    // same name: the marker only this body carries reached the agent. Without
+    // this, a graph that silently fell back to `./base.yaml` would still settle
+    // and still record a digest, and the journey would pass.
+    let delivered = std::fs::read_to_string(&prompts).expect("the agent recorded its prompt");
+    assert!(
+        delivered.contains("Served marker: this base arrived over https."),
+        "the fetched base did not reach the agent: {delivered}"
+    );
     assert!(
         !run.of_kind("member-settled").is_empty(),
         "{:?}",

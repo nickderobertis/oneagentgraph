@@ -80,19 +80,18 @@ mod tests {
         assert!(err.to_string().contains("refused the probe"), "{err}");
     }
 
-    /// A binary that answers something else is named as that rather than
-    /// producing an empty report — whether it is not JSON at all, or JSON that
-    /// does not describe identities.
+    /// A binary that answers something that is not JSON is named as that rather
+    /// than producing an empty report.
+    ///
+    /// The other half — JSON that parses but describes no identities — needs
+    /// stdout this test cannot choose, since `read` fixes the argv. It is driven
+    /// through the CLI in `tests/e2e/verbs.rs`, against a binary that really
+    /// answers `7`.
     #[test]
-    fn an_answer_that_is_not_a_report_is_refused_rather_than_forwarded() {
+    fn an_answer_that_is_not_json_is_refused_rather_than_forwarded() {
+        // `read` appends `usage --format json`, so `echo` answers that back as
+        // prose: something on stdout that is not JSON at all.
         let err = read("echo").unwrap_err();
         assert!(err.to_string().contains("not JSON"), "{err}");
-
-        // `echo 7 usage --format json` is valid JSON and not a report.
-        let err = read("printf").unwrap_err();
-        assert!(
-            err.to_string().contains("not JSON") || err.to_string().contains("bare value"),
-            "{err}"
-        );
     }
 }
