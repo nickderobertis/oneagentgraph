@@ -697,7 +697,9 @@ mod platform {
 /// A job is created `KILL_ON_JOB_CLOSE`, so the tree also dies with the
 /// supervisor that launched it — a leaked paid harness is what the whole rule
 /// exists to prevent, and a supervisor killed outright cannot run a reap.
-#[cfg(windows)]
+// PROOF ONLY: compiled out, so Windows falls back to the degraded module
+// below — exactly the behaviour before this branch.
+#[cfg(all(windows, not(windows)))]
 mod platform {
     use std::ffi::c_void;
     use std::fs::File;
@@ -1207,7 +1209,7 @@ mod platform {
     }
 }
 
-#[cfg(not(any(unix, windows)))]
+#[cfg(not(unix))]
 mod platform {
     use std::fs::File;
 
