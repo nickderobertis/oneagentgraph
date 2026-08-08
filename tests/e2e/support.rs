@@ -259,27 +259,82 @@ pub fn fake_provider() -> String {
 /// asserted present rather than skipped: a journey that quietly did not run the
 /// real CLI proves nothing, and a suite that reports itself green on that basis
 /// is worse than one that fails.
+///
+/// The streamed-provider contract is what every journey here rides on, so it is
+/// what resolution selects for — see [`required`].
 pub fn onejudge_bin() -> String {
-    required("ONEAGENTGRAPH_TEST_ONEJUDGE", "onejudge")
+    required(
+        "ONEAGENTGRAPH_TEST_ONEJUDGE",
+        "onejudge",
+        "the streamed-provider contract (`run --stream`)",
+        |program| {
+            Command::new(program)
+                .args(["run", "--help"])
+                .output()
+                .is_ok_and(|help| String::from_utf8_lossy(&help.stdout).contains("--stream"))
+        },
+    )
 }
 
 /// The real `oneharness` this suite drives, on the same terms.
+///
+/// Probed for nothing beyond running, because that is all these journeys have
+/// established they need: they reach oneharness through its own long-standing
+/// `ONEHARNESS_BIN_<ID>` override. `just`'s `oneharness-version` pin governs
+/// what provisioning *installs*; asserting it here too would be a second copy
+/// of that number, free to drift from the one that matters.
 pub fn oneharness_bin() -> String {
-    required("ONEAGENTGRAPH_TEST_ONEHARNESS", "oneharness")
+    required(
+        "ONEAGENTGRAPH_TEST_ONEHARNESS",
+        "oneharness",
+        "a working binary",
+        |program| Command::new(program).arg("--version").output().is_ok(),
+    )
 }
 
-/// One required external CLI, from `variable` or from `PATH`.
-fn required(variable: &str, program: &str) -> String {
+/// One required external CLI: the pin, else the first candidate that carries the
+/// contract this suite drives.
+///
+/// Resolution selects on *capability*, not on the name alone, because the name
+/// alone is what the failure this guards against already satisfies. An older CLI
+/// earlier on `PATH` than the one `just bootstrap` installs runs fine and
+/// answers `--version` — it just rejects the flags every journey depends on, so
+/// a name-only check hands the suite a binary that fails one layer down as a
+/// bare `expected exit 0`. `docs/onejudge-integration.md` in ai-orchestrator
+/// records this same shadowing as a live-dispatch outage; here it is a diagnosis
+/// the suite makes for you, naming the missing contract and how to get it.
+fn required(variable: &str, program: &str, contract: &str, carries: fn(&str) -> bool) -> String {
     if let Ok(pinned) = std::env::var(variable) {
+        assert!(
+            carries(&pinned),
+            "{variable} points at `{pinned}`, which does not carry {contract}. The e2e suite \
+             drives the real CLI as a subprocess — point it at an install that does, or unset it \
+             and run `just bootstrap`."
+        );
         return pinned;
     }
-    let found = Command::new(program).arg("--version").output();
-    assert!(
-        found.is_ok(),
-        "`{program}` is not on PATH. The e2e suite drives the real CLI as a subprocess — run \
-         `just bootstrap`, or set {variable} to a pinned install."
+    for candidate in [program.to_string(), cargo_bin(program)] {
+        if carries(&candidate) {
+            return candidate;
+        }
+    }
+    panic!(
+        "no `{program}` carrying {contract} was found on PATH or in the cargo bin directory. The \
+         e2e suite drives the real CLI as a subprocess — run `just bootstrap`, or set {variable} \
+         to an install that carries it. A `{program}` that merely runs is not enough: an older \
+         one earlier on PATH shadows the pinned install `just bootstrap` writes."
     );
-    program.to_string()
+}
+
+/// Where `just bootstrap` installs a pinned CLI, which `PATH` need not reach
+/// first.
+fn cargo_bin(program: &str) -> String {
+    let home = std::env::var("CARGO_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".cargo")
+        });
+    home.join("bin").join(program).display().to_string()
 }
 
 /// The environment a journey uses to shorten the liveness bounds it is testing.

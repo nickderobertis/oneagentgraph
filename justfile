@@ -60,16 +60,25 @@ _crate-bootstrap:
 # version-checked rather than merely present: a stale `oneharness` on PATH is the
 # failure mode `docs/onejudge-integration.md` records, where a run dies on a
 # confusing broken pipe because the binary rejects flags the caller relies on.
+# Both probes check the cargo bin directory as well as `PATH`, and so does the
+# e2e suite's own resolution (tests/e2e/support.rs). Checking `PATH` alone leaves
+# bootstrap unable to satisfy itself: where an older CLI precedes the cargo bin
+# directory, the probe keeps failing on the shadow no matter how many times the
+# install below writes the pin behind it.
 # Install the pinned `onejudge` CLI. Quiet when already at the pin.
 _ensure-onejudge:
-    @command -v onejudge >/dev/null 2>&1 && onejudge run --help 2>/dev/null | grep -q -- --stream \
-      || cargo install --locked --git https://github.com/nickderobertis/onejudge \
-           --rev {{onejudge-rev}} --features cli onejudge
+    @for candidate in onejudge "${CARGO_HOME:-$HOME/.cargo}/bin/onejudge"; do \
+       if "$candidate" run --help 2>/dev/null | grep -q -- --stream; then exit 0; fi; \
+     done; \
+     cargo install --locked --git https://github.com/nickderobertis/onejudge \
+       --rev {{onejudge-rev}} --features cli onejudge
 
 # Install the pinned `oneharness` CLI. Quiet when already at the pin.
 _ensure-oneharness:
-    @[ "$(oneharness --version 2>/dev/null)" = "oneharness {{oneharness-version}}" ] \
-      || cargo install --locked oneharness --version {{oneharness-version}}
+    @for candidate in oneharness "${CARGO_HOME:-$HOME/.cargo}/bin/oneharness"; do \
+       if [ "$("$candidate" --version 2>/dev/null)" = "oneharness {{oneharness-version}}" ]; then exit 0; fi; \
+     done; \
+     cargo install --locked oneharness --version {{oneharness-version}}
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
