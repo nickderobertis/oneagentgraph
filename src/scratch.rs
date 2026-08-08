@@ -1047,11 +1047,8 @@ mod platform {
         let mut found = Vec::new();
         let mut walking = vec![(root.to_path_buf(), 0usize)];
         while let Some((dir, depth)) = walking.pop() {
-            let expected = job_name(&dir);
-            if std::fs::read_to_string(dir.join(OWNER_JOB_FILE))
-                .is_ok_and(|recorded| recorded.trim() == expected)
-            {
-                let name = wide(&expected);
+            if let Ok(recorded) = std::fs::read_to_string(dir.join(OWNER_JOB_FILE)) {
+                let name = wide(recorded.trim());
                 // SAFETY: `name` is a live, null-terminated wide string for the
                 // duration of the call; failure is reported with a null handle.
                 let job = unsafe {
