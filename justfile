@@ -199,6 +199,22 @@ msrv:
     @RUSTFLAGS="-D warnings" cargo +{{msrv-version}} check --locked --all-targets --quiet \
       || { echo "the {{msrv-version}} floor no longer builds — install that toolchain, or raise rust-version in Cargo.toml (and clippy.toml)" >&2; exit 1; }
 
+# `src/scratch.rs` carries this crate's one large `cfg(windows)` body — the job
+# objects the liveness rules rest on there — and a Linux or macOS `check` never
+# compiles a line of it. The first thing that does is `cross (windows-latest)`, a
+# required check a whole CI round-trip away, so this is the same lint against the
+# same code without the wait. Outside `check` for the reason `msrv` is: it needs
+# a target and a cross compiler a clean clone does not have. The gnu target
+# rather than msvc because `cargo clippy` only has to *check*, and gnu is the one
+# a Linux host can provision.
+# Type-check and lint the Windows-only code on this host.
+lint-windows:
+    @rustup target list --installed | grep -qx x86_64-pc-windows-gnu \
+      || { echo "the Windows target is missing — run 'rustup target add x86_64-pc-windows-gnu'" >&2; exit 1; }
+    @command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 \
+      || { echo "no cross compiler for the Windows target — install mingw-w64 (a dependency's build script needs one)" >&2; exit 1; }
+    @cargo clippy --target x86_64-pc-windows-gnu --all-targets --all-features --locked -- -D warnings
+
 # Ensures `just`, verifies the rest, then runs setup-llmlint. Runs automatically
 # via the Claude Code SessionStart hook; this is the manual entry point.
 # Provision the dev toolchain for a session. Idempotent, no-ops in CI.

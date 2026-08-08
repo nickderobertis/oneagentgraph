@@ -13,13 +13,15 @@
 //! is killed, a sweep racing a live run, and processes left behind by a member
 //! whose parent is already gone.
 
-// llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; two
+// llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; three
 // journeys here are platform-gated because their *subject* is a facility only
 // that platform has, not because the rule is weaker elsewhere: a descendant
 // declining `SIGTERM` is POSIX-only, since Windows has no signal to decline, and
-// the forged `owner.job` is Windows-only, since that record exists only where a
-// job object stands in for the environment stamp. `src/scratch.rs` documents
-// both mappings. Every other journey runs on all three platforms. They also read
+// the forged `owner.job` and the killed launcher are Windows-only, since both
+// rest on the job object that stands in there for the environment stamp.
+// `src/scratch.rs` documents every one of those mappings, including which
+// direction each differs in. Every other journey runs on all three platforms.
+// They also read
 // `oneagentgraph::scratch` directly, because scratch ownership is a liveness rule
 // the contract gives no CLI verb of its own — the sweep a future operator runs is
 // this same library call, so this is the interface, not a reach past one. Where a
@@ -581,6 +583,55 @@ fn a_finished_run_leaves_nothing_stamped_for_it() {
         oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty(),
         "a finished run left processes carrying its stamp"
     );
+}
+
+/// A run killed outright still takes its member's tree with it.
+///
+/// Every other teardown here runs *through* this binary: a watchdog condemns a
+/// member, or a `cancel` reaps one. This is the case where none of that can
+/// happen — the supervisor is gone before it can do anything — and it is the one
+/// that costs money, because a paid harness nobody is watching keeps billing.
+///
+/// Windows-only, and a strengthening rather than a rule POSIX also holds: a job
+/// object is created `KILL_ON_JOB_CLOSE`, so the kernel ends the tree when the
+/// last handle to it goes, and a killed process's handles go with it. There is
+/// no POSIX equivalent — a `SIGKILL`ed launcher cannot reap, and its descendants
+/// are reparented and left running — so asserting this on Unix would assert a
+/// guarantee `src/scratch.rs` does not claim there.
+#[cfg(windows)]
+#[test]
+fn a_run_killed_outright_does_not_leak_its_member_s_tree() {
+    let workspace = Workspace::new();
+    let state = workspace.state();
+
+    // Nothing releases this member and no bound is shortened, so the only thing
+    // that can end its tree is the run process going away.
+    let mut run = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:hang until this run is killed under it",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    until("the member's own scratch to be stamped", || {
+        member_scratch(&state).is_some_and(|scratch| {
+            !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+        })
+    });
+    let scratch = member_scratch(&state).expect("a member scratch");
+
+    // Killed, not cancelled: no signal file, no reap, no chance to clean up.
+    run.kill().expect("the run is killed");
+    run.wait().expect("the killed run is reaped");
+
+    until("the member's tree to die with its supervisor", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
 }
 
 /// A forged `owner.job` cannot aim a reap at somebody else's process tree, and

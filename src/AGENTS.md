@@ -52,6 +52,13 @@ live at the top of the `justfile`. `onejudge` is a **git pin** because its
 streamed-provider contract is merged but unreleased — move it to a published
 version as soon as one ships.
 
+**`scratch` is the one module a Linux `check` never compiles all of.** Its
+`cfg(windows)` half is the whole liveness layer again in job objects, and the
+first thing that reads a line of it is `cross (windows-latest)` — a required
+check a CI round-trip away. `just lint-windows` runs the same clippy against it
+here; it asks for a target and a cross compiler `just bootstrap` deliberately
+does not install, and says which when either is missing.
+
 ## Two things that bite
 
 **A sentinel in a prompt matches prose.** The fake harness is steered by markers

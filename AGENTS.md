@@ -57,24 +57,15 @@ one NDJSON stream.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-`deps-check` and `msrv` sit outside both because one needs a network advisory
-database and the other a second toolchain; CI runs them as their own jobs.
+`deps-check`, `msrv`, and `lint-windows` sit outside both because each needs
+something a clean clone does not have — a network advisory database, a second
+toolchain, a cross compiler; CI covers all three as jobs of their own.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
 over projects by hand in a recipe, and declare a cross-project dependency in the
 consuming `project.json` — an undeclared one silently drops that project out of
 `nx affected`, so a pull request runs a gate that never touched it.
-
-`src/scratch.rs` is the one file with a large `cfg(windows)` body, and `just
-check` on Linux never compiles it — the first thing that reads it is
-`cross (windows-latest)`, a required check and a whole CI round-trip away. To
-type-check and lint it locally instead: `rustup target add
-x86_64-pc-windows-gnu`, install `mingw-w64` (`ring`'s build script needs a
-cross `cc`), then `cargo clippy --target x86_64-pc-windows-gnu --all-targets
---all-features -- -D warnings`. Deliberately not a recipe or a pinned target:
-it provisions a toolchain and a system package that only this one file needs,
-and the gate that actually decides is the Windows leg.
 
 ## Invariants (non-negotiable)
 
