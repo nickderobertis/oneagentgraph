@@ -461,7 +461,17 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
             candidate.reason.as_str()
         );
     }
-    println!("smoke: passed via {}", verdict.ran);
+    // The retry is reported rather than smoothed over: a host that needed two
+    // starts to record one turn is healthy now and worth knowing about, and the
+    // operator is the only one who can act on it.
+    if verdict.attempts > 1 {
+        println!(
+            "smoke: passed via {} after {} attempts",
+            verdict.ran, verdict.attempts
+        );
+    } else {
+        println!("smoke: passed via {}", verdict.ran);
+    }
     Ok(EXIT_SUCCESS)
 }
 

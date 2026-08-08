@@ -149,6 +149,26 @@ impl Workspace {
 
     /// Run the binary with these arguments, and this extra environment.
     pub fn run_with(&self, args: &[&str], env: &[(&str, &str)]) -> Run {
+        let output = self.command(args, env).output().expect("the binary runs");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// Start the binary and leave it running, for a journey that needs to
+    /// observe a run *while* something else happens.
+    pub fn spawn_with(&self, args: &[&str], env: &[(&str, &str)]) -> std::process::Child {
+        self.command(args, env)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the binary starts")
+    }
+
+    /// The binary, armed with this workspace's directories and environment.
+    fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_oneagentgraph"));
         command
             .args(args)
@@ -167,12 +187,7 @@ impl Workspace {
         for (key, value) in env {
             command.env(key, value);
         }
-        let output = command.output().expect("the binary runs");
-        Run {
-            code: output.status.code().unwrap_or(-1),
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        }
+        command
     }
 
     /// Run the binary with these arguments.

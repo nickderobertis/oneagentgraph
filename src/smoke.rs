@@ -21,6 +21,24 @@
 //! indistinguishable from a healthy launch; only the non-zero exit says
 //! otherwise. Reading the report and not the status reported a spent, failed turn
 //! as a pass, which is the same class of error in the opposite direction.
+//!
+//! **The launch is retried; the turn is not.** A smoke proves a launch *path*,
+//! and the launch is the half a merely busy host can break while the path is
+//! perfectly fine — a saturated machine refuses to start the provider, and
+//! reporting that as an outage sends an operator hunting a subscription that was
+//! never down. So a failed launch is tried up to [`LAUNCH_ATTEMPTS`] times, with
+//! a widening pause so the host can drain rather than being asked the same
+//! question three times at once.
+//!
+//! What bounds that retry is the one thing a smoke must never do: pay twice.
+//! An attempt is relaunched only when its own report *proves* it spent nothing —
+//! every candidate recording no tokens, no cost, and no failure classification.
+//! Measured against oneharness 0.6.6, a provider that exits without publishing
+//! and one that was rate-limited after billed work are both `status: "nonzero"`
+//! with the same exit code, and the accounting is the only thing that separates
+//! them. Anything short of that proof — a report that will not parse, a turn that
+//! was spent and failed, a chain that reached nothing — settles the smoke where
+//! it stands.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] the harness *identity* on a
 // `FellThrough` and a `Verdict` stays a `String` on purpose: `docs/contract.md` is
@@ -40,6 +58,19 @@ use crate::error::Error;
 /// The prompt one smoke turn spends. Short on purpose: what is being proven is
 /// that a turn happened at all.
 pub const PROMPT: &str = "Reply with the single word: ok";
+
+/// How many times the paid turn may be launched before the smoke gives up.
+///
+/// Only a launch that provably spent nothing is ever relaunched, so this is a
+/// bound on wasted starts rather than on money.
+pub const LAUNCH_ATTEMPTS: u32 = 3;
+
+/// The pause before a retry, multiplied by the attempt just spent.
+///
+/// A saturated host needs time to drain more than it needs to be asked again
+/// immediately; retrying without a pause is the same load that caused the
+/// refusal, arriving sooner.
+const RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Why one candidate stepped aside, as oneharness classified it.
 ///
@@ -107,6 +138,12 @@ pub struct Verdict {
     pub ran: String,
     /// The candidates the chain stepped past, and why.
     pub fell_through: Vec<FellThrough>,
+    /// How many launches it took to record one turn.
+    ///
+    /// Reported rather than smoothed over: a host that needed two starts is
+    /// healthy *now* and worth knowing about, and the operator is the only one
+    /// who can act on it.
+    pub attempts: u32,
 }
 
 /// Spend one turn in `dir` and judge what it left behind.
@@ -118,18 +155,93 @@ pub struct Verdict {
 /// [`Error::InvalidConfig`] when oneharness could not be run or did not answer a
 /// report.
 pub fn run(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Error> {
+    launch(oneharness_bin, dir, RETRY_BACKOFF)
+}
+
+/// [`run`], with the pause between attempts named so a test does not wait it out.
+fn launch(
+    oneharness_bin: &str,
+    dir: &Path,
+    backoff: std::time::Duration,
+) -> Result<Verdict, Error> {
+    // Every attempt but the last: a launch that provably spent nothing gets
+    // another start, and anything else settles the smoke where it stands.
+    for attempt in 1..LAUNCH_ATTEMPTS {
+        match once(oneharness_bin, dir) {
+            Ok(verdict) => {
+                return Ok(Verdict {
+                    attempts: attempt,
+                    ..verdict
+                })
+            }
+            Err(refusal) if refusal.spent_nothing => std::thread::sleep(backoff * attempt),
+            Err(refusal) => return Err(refusal.error),
+        }
+    }
+    // The last attempt answers for the smoke whichever way it goes, and a
+    // launch path that failed every time is named as one rather than as a turn.
+    match once(oneharness_bin, dir) {
+        Ok(verdict) => Ok(Verdict {
+            attempts: LAUNCH_ATTEMPTS,
+            ..verdict
+        }),
+        Err(refusal) if refusal.spent_nothing => Err(after_attempts(refusal.error)),
+        Err(refusal) => Err(refusal.error),
+    }
+}
+
+/// One launch that did not produce a verdict.
+struct Refusal {
+    /// What the operator is told, carrying the exit code this failure exits on.
+    error: Error,
+    /// Whether this attempt's own report proves it spent nothing, so relaunching
+    /// bills nothing. Absence of proof is not proof: this is `false` unless the
+    /// accounting says so.
+    spent_nothing: bool,
+}
+
+/// The same refusal, saying how many launches reached it.
+///
+/// The exit code is the one the refusal already carried: how many times a smoke
+/// tried does not change what kind of failure it hit.
+fn after_attempts(error: Error) -> Error {
+    let note = format!(
+        " (after {LAUNCH_ATTEMPTS} attempts, none of which spent anything): rerun \
+         `oneagentgraph smoke` on an idle host to tell a saturated one from a launch path that \
+         does not work"
+    );
+    match error {
+        Error::InvalidConfig(reason) => Error::InvalidConfig(reason + &note),
+        Error::MemberFailed { member, reason } => Error::MemberFailed {
+            member,
+            reason: reason + &note,
+        },
+    }
+}
+
+/// Spend one turn in `dir`, once.
+fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
     let output = Command::new(oneharness_bin)
         .args(["run", "--cwd"])
         .arg(dir)
         .args(["--compact", "--prompt", PROMPT])
         .current_dir(dir)
         .output()
-        .map_err(|err| Error::InvalidConfig(format!("cannot run {oneharness_bin}: {err}")))?;
-    let report: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
-        Error::InvalidConfig(format!(
+        .map_err(|err| Refusal {
+            error: Error::InvalidConfig(format!("cannot run {oneharness_bin}: {err}")),
+            // A process that never started billed nothing, so a host that could
+            // not fork one deserves another go — but a binary that is not there
+            // will not appear, and retrying it only delays saying so.
+            spent_nothing: err.kind() != std::io::ErrorKind::NotFound,
+        })?;
+    let report: Value = serde_json::from_slice(&output.stdout).map_err(|err| Refusal {
+        error: Error::InvalidConfig(format!(
             "{oneharness_bin} answered no report ({err}): {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        ))
+        )),
+        // A report that will not parse says nothing about what was spent, and
+        // relaunching on a guess is how a smoke pays twice.
+        spent_nothing: false,
     })?;
     // oneharness's own exit status, before the report is judged at all. The
     // report is not enough on its own: a candidate that was *billed* and failed
@@ -145,20 +257,59 @@ pub fn run(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Error> {
             .and_then(|fallback| fallback.get("ran"))
             .and_then(Value::as_str)
             .unwrap_or("no candidate");
-        return Err(Error::MemberFailed {
-            member: "smoke".into(),
-            reason: format!(
-                "{oneharness_bin} exited {} having run {ran}: the turn was attempted and did not \
-                 succeed, so this launch path is not proven — {}",
-                output
-                    .status
-                    .code()
-                    .map_or_else(|| "on a signal".to_string(), |code| code.to_string()),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
+        return Err(Refusal {
+            error: Error::MemberFailed {
+                member: MEMBER.into(),
+                reason: format!(
+                    "{oneharness_bin} exited {} having run {ran}: the turn was attempted and did \
+                     not succeed, so this launch path is not proven — {}",
+                    output
+                        .status
+                        .code()
+                        .map_or_else(|| "on a signal".to_string(), |code| code.to_string()),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            },
+            // The one place the two shapes are told apart. Both exit non-zero
+            // with the same code; only the accounting says whether this was a
+            // provider that never got going or one that was charged for work it
+            // did not finish.
+            spent_nothing: spent_nothing(&report),
         });
     }
-    judge(&report)
+    judge_report(&report).map_err(|reason| Refusal {
+        error: failed(reason),
+        // The chain answered, so whatever it says is the launch path's outcome:
+        // an exhausted subscription is not a busy host, and asking it twice more
+        // exhausts it twice more.
+        spent_nothing: false,
+    })
+}
+
+/// Whether this report proves the attempt spent nothing.
+///
+/// The bar is proof, not the absence of contrary evidence: a report with no
+/// results at all, or a candidate oneharness gave any failure classification,
+/// leaves open that a provider was charged — and a smoke that guesses wrong here
+/// pays for the same question twice.
+fn spent_nothing(report: &Value) -> bool {
+    let Some(results) = report.get("results").and_then(Value::as_array) else {
+        return false;
+    };
+    !results.is_empty()
+        && results.iter().all(|result| {
+            result.get("failure_kind").is_none_or(Value::is_null)
+                && result
+                    .get("usage")
+                    .and_then(Value::as_object)
+                    .is_none_or(|usage| {
+                        // Tokens and cost alike: any positive number is work
+                        // somebody is billed for.
+                        usage
+                            .values()
+                            .all(|value| value.as_f64().unwrap_or(0.0) <= 0.0)
+                    })
+        })
 }
 
 /// Judge one oneharness report, without spending anything.
@@ -168,6 +319,23 @@ pub fn run(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Error> {
 /// [`Error::MemberFailed`] when nothing ran the turn, or when a candidate stepped
 /// past on a classification a chain does not step past.
 pub fn judge(report: &Value) -> Result<Verdict, Error> {
+    judge_report(report).map_err(failed)
+}
+
+/// The name every smoke failure is reported under: a smoke is a one-member run.
+const MEMBER: &str = "smoke";
+
+/// One smoke refusal, as the error it exits on.
+fn failed(reason: String) -> Error {
+    Error::MemberFailed {
+        member: MEMBER.into(),
+        reason,
+    }
+}
+
+/// [`judge`], answering with the reason alone so a caller can decide what kind
+/// of failure it is.
+fn judge_report(report: &Value) -> Result<Verdict, String> {
     let fell_through: Vec<FellThrough> = report
         .get("fallback")
         .and_then(|fallback| fallback.get("fell_through"))
@@ -186,13 +354,10 @@ pub fn judge(report: &Value) -> Result<Verdict, Error> {
     for candidate in &fell_through {
         if !candidate.reason.is_fallthrough() {
             let (identity, reason) = (&candidate.identity, candidate.reason.as_str());
-            return Err(Error::MemberFailed {
-                member: "smoke".into(),
-                reason: format!(
-                    "{identity} stepped aside as {reason:?}, which is not a classification a chain \
-                     steps past — that record carries work the provider already billed for"
-                ),
-            });
+            return Err(format!(
+                "{identity} stepped aside as {reason:?}, which is not a classification a chain \
+                 steps past — that record carries work the provider already billed for"
+            ));
         }
     }
 
@@ -206,16 +371,18 @@ pub fn judge(report: &Value) -> Result<Verdict, Error> {
             .iter()
             .map(|candidate| format!("{} [{}]", candidate.identity, candidate.reason.as_str()))
             .collect();
-        return Err(Error::MemberFailed {
-            member: "smoke".into(),
-            reason: if named.is_empty() {
-                "no candidate ran the turn, and the chain recorded none".into()
-            } else {
-                format!("no candidate ran the turn: {}", named.join(", "))
-            },
+        return Err(if named.is_empty() {
+            "no candidate ran the turn, and the chain recorded none".into()
+        } else {
+            format!("no candidate ran the turn: {}", named.join(", "))
         });
     };
-    Ok(Verdict { ran, fell_through })
+    // One launch until a caller that made several says otherwise.
+    Ok(Verdict {
+        ran,
+        fell_through,
+        attempts: 1,
+    })
 }
 
 /// One report field as a string, whatever it was.
@@ -249,6 +416,7 @@ mod tests {
                 reason: Reason::Quota,
             }]
         );
+        assert_eq!(verdict.attempts, 1, "one launch recorded one turn");
         // The line the whole judgment turns on: `skipped` is a candidate that
         // was never started, and `rate_limit` is one that ran and was billed.
         assert!(Reason::Skipped.is_fallthrough());
@@ -303,13 +471,80 @@ mod tests {
         assert!(err.to_string().contains("unidentified"), "{err}");
     }
 
+    /// The line the retry turns on, against the two report shapes a real
+    /// oneharness 0.6.6 produces for them. Both exit non-zero with the same
+    /// code; only the accounting separates a provider that never got going from
+    /// one that was charged for work it did not finish.
+    #[test]
+    fn only_a_launch_that_spent_nothing_is_worth_relaunching() {
+        let crashed = json!({"results": [{
+            "harness": "claude-code", "status": "nonzero", "exit_code": 1,
+            "usage": {"input_tokens": Value::Null, "output_tokens": Value::Null,
+                      "cache_read_tokens": Value::Null, "cache_write_tokens": Value::Null,
+                      "cost_usd": Value::Null},
+            "failure_kind": Value::Null,
+            "stderr": "fake-harness: exiting 1 having published nothing\n"}]});
+        assert!(spent_nothing(&crashed), "a provider that published nothing");
+
+        let billed = json!({"results": [{
+            "harness": "claude-code", "status": "nonzero", "exit_code": 1,
+            "usage": {"input_tokens": 900, "output_tokens": 120, "cost_usd": 0.42},
+            "failure_kind": "rate_limit"}]});
+        assert!(!spent_nothing(&billed), "a turn the provider billed for");
+
+        // Proof, not the absence of contrary evidence: a report that records no
+        // results at all leaves open that something was charged.
+        assert!(!spent_nothing(&json!({"results": []})));
+        assert!(!spent_nothing(&json!({})));
+        // A classification alone is enough to stop a relaunch, with no usage at
+        // all — oneharness naming a failure kind means it knows something this
+        // module does not.
+        assert!(!spent_nothing(
+            &json!({"results": [{"failure_kind": "quota"}]})
+        ));
+        // And one spent candidate condemns the attempt even beside a clean one.
+        assert!(!spent_nothing(&json!({"results": [
+            {"usage": {"input_tokens": 0}},
+            {"usage": {"input_tokens": 12}}]})));
+    }
+
+    /// Every launch failing having spent nothing is a launch path, not a turn:
+    /// the refusal says how many starts reached it and keeps its own exit code.
+    #[test]
+    fn a_launch_path_that_never_starts_is_named_with_its_attempts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory in place of a binary: the spawn fails with something other
+        // than `NotFound`, which is the retryable shape a saturated host makes.
+        let err = launch(
+            &dir.path().display().to_string(),
+            dir.path(),
+            std::time::Duration::ZERO,
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains(&format!("after {LAUNCH_ATTEMPTS} attempts")),
+            "{message}"
+        );
+        assert!(message.contains("rerun `oneagentgraph smoke`"), "{message}");
+        // The exit code the refusal already carried: how many times a smoke
+        // tried does not change what kind of failure it hit.
+        assert!(matches!(err, Error::InvalidConfig(_)), "{err:?}");
+    }
+
     /// A binary that is not there is named rather than reported as a failed turn.
     #[test]
     fn a_missing_oneharness_is_named() {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = run("oneharness-that-is-not-installed", dir.path()).unwrap_err();
         assert!(err.to_string().contains("cannot run"), "{err}");
+        // Said once, not three times over two seconds of backoff: a binary that
+        // is not there will not appear, so retrying only delays the diagnosis.
+        assert!(!err.to_string().contains("attempts"), "{err}");
         let err = run("echo", dir.path()).unwrap_err();
         assert!(err.to_string().contains("answered no report"), "{err}");
+        // Unparseable output says nothing about what was spent, and relaunching
+        // on a guess is how a smoke pays twice.
+        assert!(!err.to_string().contains("attempts"), "{err}");
     }
 }

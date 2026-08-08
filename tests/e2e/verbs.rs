@@ -536,6 +536,204 @@ fn smoke_spends_one_turn_and_names_the_identity_that_ran_it() {
     );
 }
 
+/// Real `oneagentgraph run` dispatches, every one of them held live inside its
+/// agent for as long as a journey needs.
+///
+/// The load is *generated* rather than asserted on: what it exists to do is put
+/// the host under the same contention the failure happened under, so the smoke
+/// running beside it is running the way it ran when it lied.
+struct Load {
+    /// Held, not read: dropping these removes the directories the members are
+    /// working in, so they have to outlive the load.
+    _workspaces: Vec<Workspace>,
+    members: Vec<std::process::Child>,
+    /// The file every held agent is waiting on.
+    release: std::path::PathBuf,
+}
+
+impl Load {
+    /// Start `count` dispatches and wait until every one is inside its agent.
+    fn start(count: usize, release: &std::path::Path) -> Self {
+        let workspaces: Vec<Workspace> = (0..count).map(|_| Workspace::new()).collect();
+        let ready: Vec<std::path::PathBuf> = workspaces
+            .iter()
+            .map(|workspace| workspace.at("in-flight"))
+            .collect();
+        let members = workspaces
+            .iter()
+            .zip(&ready)
+            .map(|(workspace, ready)| {
+                workspace.spawn_with(
+                    &[
+                        "run",
+                        "./graph.yaml",
+                        "--task",
+                        &format!(
+                            "complete-now: hold this dispatch live while the smoke runs \
+                             fake:record-prompt={} fake:hold={}",
+                            ready.display(),
+                            release.display()
+                        ),
+                        "--dir",
+                        &workspace.dir().display().to_string(),
+                    ],
+                    &[("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness())],
+                )
+            })
+            .collect();
+        // Started is not enough: the load has to be *inside* its agents, which
+        // is where it holds the host, and the double records its prompt on the
+        // way to the barrier.
+        until(
+            "the concurrent dispatches to all reach their agents",
+            || ready.iter().all(|path| path.exists()),
+        );
+        Self {
+            _workspaces: workspaces,
+            members,
+            release: release.to_path_buf(),
+        }
+    }
+
+    /// How many dispatches are still running.
+    fn alive(&mut self) -> usize {
+        let mut alive = 0;
+        for member in &mut self.members {
+            if member
+                .try_wait()
+                .expect("a member's status is readable")
+                .is_none()
+            {
+                alive += 1;
+            }
+        }
+        alive
+    }
+}
+
+impl Drop for Load {
+    /// Release the held agents and wait for them, whichever way the journey
+    /// went: a panicking assertion must not leave real dispatches behind.
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.release, "go");
+        // Waited for before the workspaces they are working in are removed,
+        // which is why this runs here rather than being left to field drop.
+        for member in &mut self.members {
+            let _ = member.wait();
+        }
+    }
+}
+
+/// A launch that failed under load is a busy host, not an outage: the smoke
+/// starts the turn again and passes, saying how many starts it took.
+///
+/// Ported from `test_smoke_survives_a_harness_that_refuses_a_launch_under_a_live_load`.
+/// The failure it carries cost a publication that had already passed its gate:
+/// the smoke reported the selected harness "ran but did not succeed" while a full
+/// e2e run was in flight spawning real subprocesses, and passed standalone
+/// immediately before and after. The stated cause — a harness outage — was not
+/// the real one.
+#[test]
+fn smoke_survives_a_launch_that_failed_under_a_live_load() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+    let attempts = workspace.at("harness-attempts");
+
+    let mut load = Load::start(3, &workspace.at("release"));
+    assert_eq!(load.alive(), 3, "the load never got going");
+
+    let run = workspace.run_with(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[
+            ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+            ("FAKE_HARNESS_ATTEMPT_LOG", &attempts.display().to_string()),
+            ("FAKE_HARNESS_UNAVAILABLE_ATTEMPTS", "1"),
+        ],
+    );
+
+    // Live for the whole smoke, not merely started before it.
+    assert_eq!(
+        load.alive(),
+        3,
+        "the concurrent dispatches did not outlive the smoke"
+    );
+    run.expect_code(0);
+    assert!(
+        run.stdout.contains("smoke: passed via claude-code"),
+        "{}",
+        run.stdout
+    );
+    // The retry is reported rather than smoothed over: the operator is the only
+    // one who can act on a host that needed two launches to record one turn.
+    assert!(run.stdout.contains("after 2 attempts"), "{}", run.stdout);
+    assert_eq!(
+        std::fs::read_to_string(&attempts)
+            .expect("an attempt log")
+            .lines()
+            .count(),
+        2,
+        "the smoke did not launch exactly twice"
+    );
+}
+
+/// Tolerating a transient failure must not tolerate a broken launch path: when
+/// every start fails, the smoke fails and says how many it made.
+///
+/// Ported from `test_smoke_still_fails_when_every_launch_under_load_fails`. The
+/// retry is the dangerous half of the previous journey — a smoke that retried
+/// its way past a launch path that genuinely does not work would report a
+/// publication as safe on a host that cannot run a turn at all.
+#[test]
+fn smoke_still_fails_when_every_launch_under_load_fails() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+    let attempts = workspace.at("harness-attempts");
+
+    let mut load = Load::start(2, &workspace.at("release"));
+
+    let run = workspace.run_with(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[
+            ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+            ("FAKE_HARNESS_ATTEMPT_LOG", &attempts.display().to_string()),
+            // More refusals than the smoke has attempts, so every one fails.
+            ("FAKE_HARNESS_UNAVAILABLE_ATTEMPTS", "9"),
+        ],
+    );
+
+    assert_eq!(
+        load.alive(),
+        2,
+        "the concurrent dispatches did not outlive the smoke"
+    );
+    run.expect_code(1);
+    assert!(run.stderr.contains("after 3 attempts"), "{}", run.stderr);
+    assert!(
+        run.stderr.contains("rerun `oneagentgraph smoke`"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stdout.contains("passed"),
+        "a launch path that never worked was reported as a pass: {}",
+        run.stdout
+    );
+    // Bounded: a smoke that kept retrying would spend a host's whole capacity
+    // on a question already answered.
+    assert_eq!(
+        std::fs::read_to_string(&attempts)
+            .expect("an attempt log")
+            .lines()
+            .count(),
+        3,
+        "the smoke did not stop at its attempt bound"
+    );
+}
+
 /// A turn that was spent and failed is not a proven launch path, even though the
 /// report reads like one.
 ///
@@ -574,7 +772,6 @@ fn smoke_refuses_a_turn_that_was_spent_and_failed() {
 /// A candidate that never ran the turn is the chain doing its job: `smoke` names
 /// it on its own line, above the verdict, and still passes.
 ///
-/// Ported from `test_smoke_survives_a_harness_that_refuses_a_launch_under_a_live_load`.
 /// The `rate_limit` half of the same rule — a record carrying work the provider
 /// already billed for, which a chain does **not** step past — is judged by
 /// `smoke::judge` against a real report shape rather than here, because

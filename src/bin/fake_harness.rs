@@ -40,6 +40,8 @@
 //! | `FAKE_HARNESS_REFUSAL=auth` | an unauthenticated refusal, on stderr alone |
 //! | `FAKE_HARNESS_REFUSAL=rate_limit` | the refusal a chain does **not** step past |
 //! | `FAKE_HARNESS_CRASH=<code>` | exit that code having published nothing |
+//! | `FAKE_HARNESS_ATTEMPT_LOG=<path>` | append a line per launch, so a journey can count starts |
+//! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
 //!
 //! Keep it deterministic and dependency-free beyond what the crate already
 //! carries: it is spawned as a subprocess, many times per journey.
@@ -118,6 +120,13 @@ fn main() -> std::process::ExitCode {
     // The argv is where a model reaches a harness, so it is where a journey can
     // see that the side it was written on is the side that got it.
     record(&prompt, "record-argv", &argv.join(" "));
+
+    // Before every refusal branch, because what a journey counts here is
+    // *launches*: a smoke that relaunches a failed start is asserting on the
+    // attempts that failed as much as on the one that worked.
+    if let Some(exit_code) = unavailable_launch() {
+        return exit_code;
+    }
 
     // These two variables are how a journey steers this double, and a value it
     // cannot read is a journey asserting against a turn it never configured —
@@ -280,7 +289,16 @@ fn selection_environment() -> String {
 /// waits forever.
 fn sentinel_path(prompt: &str, key: &str) -> Option<std::path::PathBuf> {
     let named = sentinel(prompt, &format!("{MARK}{key}="))?;
-    let path = std::path::PathBuf::from(&named);
+    named_path(&named, &format!("{MARK}{key}"))
+}
+
+/// One path this process was handed, once it is one it will act on.
+///
+/// The same bar wherever the path came from — a prompt sentinel or a variable —
+/// because both reach this process from somewhere else: absolute, no parent
+/// reference, and a directory that already exists.
+fn named_path(named: &str, source: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(named);
     let usable = path.is_absolute()
         && !path
             .components()
@@ -288,12 +306,62 @@ fn sentinel_path(prompt: &str, key: &str) -> Option<std::path::PathBuf> {
         && path.parent().is_some_and(std::path::Path::is_dir);
     if !usable {
         eprintln!(
-            "fake-harness: {MARK}{key} must name an absolute path in an existing directory, got \
+            "fake-harness: {source} must name an absolute path in an existing directory, got \
              {named:?}"
         );
         return None;
     }
     Some(path)
+}
+
+/// Record this launch, and fail it when a journey asked for the first `n` to
+/// fail before the turn.
+///
+/// This is the shape a saturated host makes: the provider starts and exits
+/// having published nothing, so oneharness records a non-zero result with no
+/// tokens and no cost against it — which is exactly what tells a launch that
+/// spent nothing apart from a turn somebody was billed for.
+fn unavailable_launch() -> Option<std::process::ExitCode> {
+    let launches = record_launch();
+    let requested = std::env::var("FAKE_HARNESS_UNAVAILABLE_ATTEMPTS").unwrap_or_default();
+    if requested.is_empty() {
+        return None;
+    }
+    let Ok(unavailable) = requested.parse::<usize>() else {
+        eprintln!(
+            "fake-harness: FAKE_HARNESS_UNAVAILABLE_ATTEMPTS must be a count of launches, got \
+             {requested:?}"
+        );
+        return Some(exit(2));
+    };
+    // Counting is what the refusal is decided on, so a journey that asked for
+    // one without a log is asserting against a turn it never configured.
+    let Some(launches) = launches else {
+        eprintln!(
+            "fake-harness: FAKE_HARNESS_UNAVAILABLE_ATTEMPTS needs a usable \
+             FAKE_HARNESS_ATTEMPT_LOG to count launches against"
+        );
+        return Some(exit(2));
+    };
+    if launches > unavailable {
+        return None;
+    }
+    eprintln!("fake-harness: the provider started and then failed (launch {launches})");
+    Some(exit(1))
+}
+
+/// Append this launch to the log a journey named, and answer which launch it is.
+fn record_launch() -> Option<usize> {
+    let named = std::env::var("FAKE_HARNESS_ATTEMPT_LOG").ok()?;
+    let path = named_path(&named, "FAKE_HARNESS_ATTEMPT_LOG")?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    writeln!(file, "launch").ok()?;
+    drop(file);
+    Some(std::fs::read_to_string(&path).ok()?.lines().count())
 }
 
 /// Append one line to the path a sentinel named, when it named a usable one.
