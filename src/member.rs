@@ -1,0 +1,606 @@
+//! Running one member, and turning what it publishes into envelopes.
+//!
+//! A member is one child process — `onejudge run --format json --stream` for a
+//! two-party member, `oneharness run --stream` for a single-sided one. Both
+//! speak the same two NDJSON envelopes on stdout (onejudge's
+//! `docs/streaming.md`):
+//!
+//! ```text
+//! {"type":"event","turn":1,"event":{"kind":"tool_call","name":"bash",…}}
+//! {"type":"result","report":{…}}
+//! ```
+//!
+//! so one reader covers both, and the `turn` a two-party member adds is the only
+//! difference. Each `event` line becomes a [`EventKind::TurnActivity`]; the first
+//! of a turn is preceded by a [`EventKind::TurnStarted`]; the terminal `result`
+//! line becomes a [`EventKind::TurnCompleted`] and a
+//! [`EventKind::MemberSettled`].
+//!
+//! Two watchdogs run alongside, both ported from ai-orchestrator with their
+//! defaults and their environment overrides intact:
+//!
+//! * The **heartbeat** is refreshed by this supervisor every
+//!   [`HEARTBEAT_INTERVAL`] while the child is alive. Its deadline is therefore
+//!   not a latency budget — it is the margin by which a *live* member may be
+//!   starved of CPU before it is declared dead. This crate runs many members at
+//!   once, and a threshold near the write cadence reaps healthy ones under
+//!   exactly the load it creates.
+//! * The **activity watchdog** is the slow-stall backstop: a member that
+//!   published nothing for [`crate::liveness::DEFAULT_STALL_TIMEOUT`] is not
+//!   working, whatever its process tree looks like.
+//!
+//! Either firing is a [`EventKind::MemberDied`], carrying the `rule` that fired,
+//! the child's `exit_code` and `disposition`, and a bounded `stderr_tail` — the
+//! four fields the contract names, because provider throttling, quota
+//! exhaustion, an OOM kill, and a genuine crash otherwise all reach a supervisor
+//! as the same dead process.
+
+use std::collections::BTreeMap;
+use std::io::{BufRead as _, BufReader};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use serde_json::{Map, Value};
+
+use crate::event::{bound_detail, bound_text, Disposition, Emitter, EventKind, Labels, MemberDied};
+use crate::invoke::Invocation;
+use crate::liveness::{
+    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
+};
+use crate::scratch::SCRATCH_ENV;
+
+/// How often this supervisor refreshes a live member's heartbeat.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// How much of a dead member's stderr is kept as evidence, before the payload's
+/// own [`crate::event::MAX_PAYLOAD_TEXT_BYTES`] bound is applied to the tail.
+const STDERR_KEEP_BYTES: usize = 64 * 1024;
+
+/// What became of one member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Outcome {
+    /// The member settled. `completed` is onejudge's own verdict: exit 0 means
+    /// it drove the task to completion, exit 1 that it did not.
+    Settled {
+        /// Whether the member reached its completion bar.
+        completed: bool,
+    },
+    /// The member died. The payload says which rule fired and what the process
+    /// left behind.
+    Died(MemberDied),
+    /// The member could not be started at all.
+    Unstartable(String),
+}
+
+impl Outcome {
+    /// Whether this outcome lets the graph exit `0`.
+    #[must_use]
+    pub fn is_success(&self) -> bool {
+        matches!(self, Outcome::Settled { completed: true })
+    }
+}
+
+/// The liveness bounds one run supervises its members under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bounds {
+    /// How long a member may go without a heartbeat before it is declared dead.
+    pub heartbeat: Duration,
+    /// How long a member may publish nothing before the activity watchdog fires.
+    pub stall: Duration,
+}
+
+impl Default for Bounds {
+    fn default() -> Self {
+        Self {
+            heartbeat: DEFAULT_HEARTBEAT_TIMEOUT,
+            stall: DEFAULT_STALL_TIMEOUT,
+        }
+    }
+}
+
+impl Bounds {
+    /// The bounds `env` asks for, falling back to the contract's defaults.
+    ///
+    /// # Errors
+    ///
+    /// The variable's name and the value it carried, when that value is not a
+    /// positive number of seconds. A member supervised under a bound nobody meant
+    /// is worse than a run that refuses to start.
+    pub fn from_env(env: &BTreeMap<String, String>) -> Result<Self, String> {
+        Ok(Self {
+            heartbeat: seconds(env, HEARTBEAT_TIMEOUT_ENV, DEFAULT_HEARTBEAT_TIMEOUT)?,
+            stall: seconds(env, STALL_TIMEOUT_ENV, DEFAULT_STALL_TIMEOUT)?,
+        })
+    }
+}
+
+/// One duration read out of the environment.
+fn seconds(
+    env: &BTreeMap<String, String>,
+    name: &str,
+    fallback: Duration,
+) -> Result<Duration, String> {
+    let Some(raw) = env.get(name) else {
+        return Ok(fallback);
+    };
+    match raw.parse::<f64>() {
+        Ok(value) if value.is_finite() && value > 0.0 => Ok(Duration::from_secs_f64(value)),
+        _ => Err(format!(
+            "{name} must be a positive number of seconds, got {raw:?}"
+        )),
+    }
+}
+
+/// Run one member to its end, publishing every envelope it produces.
+///
+/// `emitter` is already labelled for this member. `env` is the whole environment
+/// the child is launched with, over the inherited one.
+#[must_use]
+pub fn run(
+    invocation: &Invocation,
+    emitter: &Emitter,
+    env: &BTreeMap<String, String>,
+    bounds: Bounds,
+    scratch: &Path,
+) -> Outcome {
+    emitter.emit(
+        EventKind::MemberStarted,
+        payload([
+            ("program", Value::String(invocation.program.clone())),
+            (
+                "args",
+                Value::Array(invocation.args.iter().cloned().map(Value::String).collect()),
+            ),
+            ("cwd", Value::String(invocation.cwd.display().to_string())),
+        ]),
+    );
+
+    let mut command = Command::new(&invocation.program);
+    command
+        .args(&invocation.args)
+        .current_dir(&invocation.cwd)
+        .envs(env)
+        .envs(invocation.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .env(SCRATCH_ENV, scratch.display().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = match command.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let reason = format!("cannot start {}: {err}", invocation.program);
+            emitter.emit(
+                EventKind::MemberDied,
+                died_payload(&MemberDied {
+                    rule: "unstartable".into(),
+                    exit_code: None,
+                    disposition: Disposition::Exited,
+                    stderr_tail: reason.clone(),
+                    truncated: false,
+                }),
+            );
+            return Outcome::Unstartable(reason);
+        }
+    };
+    supervise(child, emitter, bounds, scratch)
+}
+
+/// Supervise a spawned member: read what it publishes, watch it live, and settle.
+fn supervise(mut child: Child, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+
+    let activity = Arc::new(AtomicU64::new(0));
+    let report: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+    let tail = Arc::new(Mutex::new(String::new()));
+    let started = Instant::now();
+
+    let reader = {
+        let (emitter, activity, report) =
+            (emitter.clone(), Arc::clone(&activity), Arc::clone(&report));
+        std::thread::spawn(move || {
+            let mut turn = 0u64;
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                activity.store(elapsed_millis(started), Ordering::SeqCst);
+                ingest(&line, &emitter, &mut turn, &report);
+            }
+        })
+    };
+    let stderr_reader = {
+        let tail = Arc::clone(&tail);
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let mut kept = tail.lock().expect("stderr tail");
+                kept.push_str(&line);
+                kept.push('\n');
+                if kept.len() > STDERR_KEEP_BYTES {
+                    let cut = kept.len() - STDERR_KEEP_BYTES;
+                    let cut = (cut..kept.len())
+                        .find(|at| kept.is_char_boundary(*at))
+                        .unwrap_or(0);
+                    *kept = kept[cut..].to_string();
+                }
+            }
+        })
+    };
+
+    let heartbeat_file = scratch.join("member.heartbeat");
+    let mut last_heartbeat = Instant::now();
+    // The heartbeat is *refreshed* every [`HEARTBEAT_INTERVAL`], because that
+    // cadence is what makes the deadline a starvation margin rather than a
+    // latency budget. It is *published* far more rarely: a consumer watching a
+    // 600-second turn wants to know the member is alive, not to read two
+    // envelopes a second, and a stream that is mostly heartbeats buries the
+    // events it exists to carry. A quarter of the deadline is frequent enough
+    // that a reader notices the silence before the watchdog does.
+    let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
+    let mut published = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {}
+            Err(err) => break Err(format!("cannot wait for the member: {err}")),
+        }
+        std::thread::sleep(HEARTBEAT_INTERVAL);
+        let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
+        let now = Instant::now();
+        if now.duration_since(last_heartbeat) > bounds.heartbeat {
+            return kill_and_report(
+                &mut child,
+                emitter,
+                "heartbeat",
+                &tail,
+                reader,
+                stderr_reader,
+            );
+        }
+        last_heartbeat = now;
+        if now.duration_since(published) >= publish_every {
+            published = now;
+            emitter.emit(EventKind::MemberHeartbeat, payload([]));
+        }
+        let quiet = elapsed_millis(started).saturating_sub(activity.load(Ordering::SeqCst));
+        if Duration::from_millis(quiet) > bounds.stall {
+            return kill_and_report(
+                &mut child,
+                emitter,
+                "activity",
+                &tail,
+                reader,
+                stderr_reader,
+            );
+        }
+    };
+
+    let _ = reader.join();
+    let _ = stderr_reader.join();
+    let settled = report.lock().expect("report").take();
+
+    match status {
+        Ok(status) => settle(emitter, status, settled, &tail),
+        Err(reason) => Outcome::Unstartable(reason),
+    }
+}
+
+/// Milliseconds since the member started, as the watchdogs count them.
+fn elapsed_millis(since: Instant) -> u64 {
+    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Turn one published line into envelopes.
+fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Option<Value>>>) {
+    let Ok(value) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    match value.get("type").and_then(Value::as_str) {
+        Some("event") => {
+            let observed = value.get("turn").and_then(Value::as_u64).unwrap_or(1);
+            if observed != *turn {
+                *turn = observed;
+                emitter.emit(
+                    EventKind::TurnStarted,
+                    payload([("turn", Value::from(observed))]),
+                );
+            }
+            let event = value.get("event").cloned().unwrap_or(Value::Null);
+            let (detail, truncated) = bound_detail(&summarize(&event));
+            emitter.emit(
+                EventKind::TurnActivity,
+                payload([
+                    (
+                        "kind",
+                        Value::String(
+                            event
+                                .get("kind")
+                                .and_then(Value::as_str)
+                                .unwrap_or("tool_call")
+                                .into(),
+                        ),
+                    ),
+                    (
+                        "name",
+                        Value::String(
+                            event
+                                .get("name")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .into(),
+                        ),
+                    ),
+                    ("detail", Value::String(detail)),
+                    ("truncated", Value::Bool(truncated)),
+                ]),
+            );
+        }
+        Some("result") => {
+            if let Some(document) = value.get("report") {
+                *report.lock().expect("report") = Some(document.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// One tool event as the contract's bounded summary: what it acted on.
+fn summarize(event: &Value) -> String {
+    match event.get("input") {
+        Some(Value::Object(fields)) => fields
+            .values()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(" "),
+        Some(Value::String(text)) => text.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Settle a member that exited on its own.
+fn settle(
+    emitter: &Emitter,
+    status: std::process::ExitStatus,
+    report: Option<Value>,
+    tail: &Arc<Mutex<String>>,
+) -> Outcome {
+    // A signalled member never chose to stop, whatever it managed to publish
+    // first — that is a death, and the disposition is what distinguishes it from
+    // an exit status the member itself returned.
+    if disposition(status) == Disposition::Signaled {
+        return died(emitter, "signalled", status, tail);
+    }
+    let code = status.code().unwrap_or(-1);
+    // onejudge's own contract: `0` completed, `1` incomplete, `2` a bad config or
+    // a provider failure. Only the last is a death — the first two are the
+    // member's own verdict on the task.
+    if code >= 2 || report.is_none() {
+        return died(emitter, "provider-failure", status, tail);
+    }
+    for advance in fallback_advances(report.as_ref()) {
+        emitter.emit(EventKind::FallbackAdvanced, advance);
+    }
+    let completed = code == 0;
+    let document = report.unwrap_or(Value::Null);
+    let bytes = serde_json::to_string(&document)
+        .map(|text| text.len())
+        .unwrap_or(0) as u64;
+    emitter.emit_with(
+        EventKind::TurnCompleted,
+        payload([(
+            "usage",
+            document.get("usage").cloned().unwrap_or(Value::Null),
+        )]),
+        Vec::new(),
+    );
+    emitter.emit_with(
+        EventKind::MemberSettled,
+        payload([
+            ("completed", Value::Bool(completed)),
+            (
+                "verdict",
+                document
+                    .get("verdicts")
+                    .cloned()
+                    .unwrap_or(Value::Array(Vec::new())),
+            ),
+            (
+                "completion_reason",
+                document
+                    .get("completion_reason")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            ),
+        ]),
+        vec![crate::event::Artifact {
+            id: format!("report-{}", emitter.stream()),
+            kind: "report".into(),
+            bytes,
+        }],
+    );
+    Outcome::Settled { completed }
+}
+
+/// Every candidate a fallback chain stepped past, as the contract's event.
+///
+/// A two-party member's report carries no chain of its own, so this is the
+/// single-sided shape: oneharness's own `fallback.fell_through`, which names the
+/// identity and its classified reason.
+fn fallback_advances(report: Option<&Value>) -> Vec<Map<String, Value>> {
+    report
+        .and_then(|report| report.get("fallback"))
+        .and_then(|fallback| fallback.get("fell_through"))
+        .and_then(Value::as_array)
+        .map(|candidates| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    payload([
+                        (
+                            "identity",
+                            candidate.get("harness").cloned().unwrap_or(Value::Null),
+                        ),
+                        (
+                            "reason",
+                            candidate.get("reason").cloned().unwrap_or(Value::Null),
+                        ),
+                    ])
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Report a member that died, and say which rule found it.
+fn died(
+    emitter: &Emitter,
+    rule: &str,
+    status: std::process::ExitStatus,
+    tail: &Arc<Mutex<String>>,
+) -> Outcome {
+    let (stderr_tail, truncated) = bound_text(tail.lock().expect("stderr tail").trim());
+    let payload = MemberDied {
+        rule: rule.to_string(),
+        exit_code: status.code(),
+        disposition: disposition(status),
+        stderr_tail,
+        truncated,
+    };
+    emitter.emit(EventKind::MemberDied, died_payload(&payload));
+    Outcome::Died(payload)
+}
+
+/// Kill a member a watchdog condemned, then report it.
+fn kill_and_report(
+    child: &mut Child,
+    emitter: &Emitter,
+    rule: &str,
+    tail: &Arc<Mutex<String>>,
+    reader: std::thread::JoinHandle<()>,
+    stderr_reader: std::thread::JoinHandle<()>,
+) -> Outcome {
+    let _ = child.kill();
+    let status = child.wait().ok();
+    let _ = reader.join();
+    let _ = stderr_reader.join();
+    let (stderr_tail, truncated) = bound_text(tail.lock().expect("stderr tail").trim());
+    let payload = MemberDied {
+        rule: rule.to_string(),
+        exit_code: status.and_then(|status| status.code()),
+        disposition: status.map_or(Disposition::Signaled, disposition),
+        stderr_tail,
+        truncated,
+    };
+    emitter.emit(EventKind::MemberDied, died_payload(&payload));
+    Outcome::Died(payload)
+}
+
+/// How a process ended.
+fn disposition(status: std::process::ExitStatus) -> Disposition {
+    if status.code().is_some() {
+        Disposition::Exited
+    } else {
+        Disposition::Signaled
+    }
+}
+
+/// A `member-died` payload as the wire carries it.
+fn died_payload(died: &MemberDied) -> Map<String, Value> {
+    match serde_json::to_value(died) {
+        Ok(Value::Object(map)) => map,
+        _ => Map::new(),
+    }
+}
+
+/// One payload, spelled as the field list it is.
+fn payload<const N: usize>(fields: [(&str, Value); N]) -> Map<String, Value> {
+    fields
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value))
+        .collect()
+}
+
+/// The labels a member's own emitter carries.
+#[must_use]
+pub fn labels(run_id: &str, member: &str, persona: Option<&str>) -> Labels {
+    Labels {
+        run_id: Some(run_id.to_string()),
+        member: Some(member.to_string()),
+        persona: persona.map(str::to_string),
+        ..Labels::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect()
+    }
+
+    /// The contract's own defaults, and the two variables that move them.
+    #[test]
+    fn the_bounds_are_the_contract_s_defaults_until_the_environment_moves_them() {
+        assert_eq!(Bounds::from_env(&env(&[])), Ok(Bounds::default()));
+        assert_eq!(Bounds::default().heartbeat, Duration::from_secs(60));
+        assert_eq!(Bounds::default().stall, Duration::from_secs(600));
+
+        let moved = Bounds::from_env(&env(&[
+            (HEARTBEAT_TIMEOUT_ENV, "1.5"),
+            (STALL_TIMEOUT_ENV, "30"),
+        ]))
+        .expect("both parse");
+        assert_eq!(moved.heartbeat, Duration::from_millis(1500));
+        assert_eq!(moved.stall, Duration::from_secs(30));
+    }
+
+    /// A bound nobody meant refuses the run rather than supervising under it.
+    #[test]
+    fn an_unusable_bound_is_refused_by_name() {
+        for bad in ["0", "-1", "nan", "inf", "soon"] {
+            let err = Bounds::from_env(&env(&[(STALL_TIMEOUT_ENV, bad)])).unwrap_err();
+            assert!(err.starts_with(STALL_TIMEOUT_ENV), "{bad}: {err}");
+            assert!(err.contains("positive number of seconds"), "{bad}: {err}");
+        }
+    }
+
+    /// A tool event's summary is what it acted on, whatever shape the input took.
+    #[test]
+    fn a_tool_event_summarizes_what_it_acted_on() {
+        let event = serde_json::json!({"kind": "tool_call", "name": "bash",
+                                       "input": {"command": "just check", "n": 3}});
+        assert_eq!(summarize(&event), "just check");
+        assert_eq!(summarize(&serde_json::json!({"input": "raw"})), "raw");
+        assert_eq!(summarize(&serde_json::json!({})), "");
+    }
+
+    /// Only oneharness's own classification becomes a `fallback-advanced`; a
+    /// report with no chain produces none rather than an invented one.
+    #[test]
+    fn fallback_advances_come_from_the_chain_s_own_record() {
+        let report = serde_json::json!({
+            "fallback": {"ran": "codex", "fell_through": [{"harness": "claude-code", "reason": "auth"}]}
+        });
+        let advances = fallback_advances(Some(&report));
+        assert_eq!(advances.len(), 1);
+        assert_eq!(advances[0]["identity"], Value::from("claude-code"));
+        assert_eq!(advances[0]["reason"], Value::from("auth"));
+
+        assert!(fallback_advances(None).is_empty());
+        assert!(fallback_advances(Some(&serde_json::json!({}))).is_empty());
+    }
+
+    /// Only a completed settle is a success; a death and an unstartable member
+    /// are both the graph's exit `1`.
+    #[test]
+    fn only_a_completed_settle_is_a_success() {
+        assert!(Outcome::Settled { completed: true }.is_success());
+        assert!(!Outcome::Settled { completed: false }.is_success());
+        assert!(!Outcome::Unstartable("no".into()).is_success());
+    }
+}

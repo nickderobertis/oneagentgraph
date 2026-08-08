@@ -155,3 +155,151 @@ pub struct Schedule {
 fn default_stream() -> bool {
     true
 }
+
+/// The schema version this crate reads.
+pub const SCHEMA_VERSION: u32 = 1;
+
+/// Everything about a graph that can be checked without launching it.
+///
+/// The schema itself is checked by serde — `deny_unknown_fields` is the trust
+/// boundary, so a typo fails loudly rather than being dropped. What is left is
+/// what serde cannot say: the version this crate reads, and the shapes that are
+/// legal YAML but not a runnable graph.
+///
+/// # Errors
+///
+/// [`crate::error::Error::InvalidConfig`] naming what is wrong, in the terms the
+/// graph's author wrote it.
+pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
+    use crate::error::Error;
+    if graph.version != SCHEMA_VERSION {
+        return Err(Error::InvalidConfig(format!(
+            "version {} is not a graph schema this build reads; it reads version {SCHEMA_VERSION}",
+            graph.version
+        )));
+    }
+    if graph.name.trim().is_empty() {
+        return Err(Error::InvalidConfig("a graph needs a name".into()));
+    }
+    if graph.members.is_empty() {
+        return Err(Error::InvalidConfig(format!(
+            "graph {:?} has no members, so there is nothing for it to run",
+            graph.name
+        )));
+    }
+    for (name, member) in &graph.members {
+        match member {
+            Member::Onejudge(member) => {
+                if member.mode.trim().is_empty() {
+                    return Err(Error::InvalidConfig(format!(
+                        "member {name:?}: `mode` is the approval posture every member runs \
+                         under, and an empty one names none"
+                    )));
+                }
+                if member.max_turns == Some(0) {
+                    return Err(Error::InvalidConfig(format!(
+                        "member {name:?}: `max_turns` of 0 lets the member take no turn at all"
+                    )));
+                }
+                if let JudgeSide::Command(command) = &member.judge {
+                    if command.command.is_empty() {
+                        return Err(Error::InvalidConfig(format!(
+                            "member {name:?}: a command judge needs a command to run"
+                        )));
+                    }
+                }
+            }
+            Member::Oneharness(member) => {
+                if let Some(schedule) = member.schedule {
+                    if schedule.every == 0 {
+                        return Err(Error::InvalidConfig(format!(
+                            "member {name:?}: a schedule of every 0 seconds never stops firing"
+                        )));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(document: &str) -> GraphConfig {
+        serde_norway::from_str(document).expect("a graph")
+    }
+
+    const ONE_MEMBER: &str = concat!(
+        "version: 1\nname: g\nmembers:\n",
+        "  build:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+    );
+
+    /// A graph this build can read passes; one from another schema version says
+    /// which version it is, rather than failing on whichever field moved.
+    #[test]
+    fn a_graph_of_another_version_is_refused_by_version() {
+        assert!(validate(&parse(ONE_MEMBER)).is_ok());
+        let err = validate(&parse(&ONE_MEMBER.replace("version: 1", "version: 2"))).unwrap_err();
+        assert!(err.to_string().contains("it reads version 1"), "{err}");
+    }
+
+    /// The shapes that are legal YAML but not a runnable graph.
+    #[test]
+    fn a_graph_that_could_never_run_is_refused_with_the_reason() {
+        for (document, expected) in [
+            (
+                "version: 1\nname: ' '\nmembers: {}\n",
+                "a graph needs a name",
+            ),
+            ("version: 1\nname: g\nmembers: {}\n", "has no members"),
+            (
+                concat!(
+                    "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n    schedule: {every: 0}\n",
+                ),
+                "never stops firing",
+            ),
+        ] {
+            let err = validate(&parse(document)).unwrap_err();
+            assert!(err.to_string().contains(expected), "{document}: {err}");
+        }
+    }
+
+    /// A two-party member's own refusals: no posture, no turn, no judge command.
+    #[test]
+    fn a_two_party_member_that_could_never_run_is_refused() {
+        let base = concat!(
+            "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+            "    base_config: ./b.yaml\n    mode: bypass\n",
+            "    agent: {oneharness_config: ./a.toml}\n",
+            "    judge: {oneharness_config: ./j.toml}\n",
+        );
+        assert!(validate(&parse(base)).is_ok());
+        for (document, expected) in [
+            (base.replace("mode: bypass", "mode: ' '"), "names none"),
+            (format!("{base}    max_turns: 0\n"), "no turn at all"),
+            (
+                base.replace(
+                    "judge: {oneharness_config: ./j.toml}",
+                    "judge: {command: []}",
+                ),
+                "needs a command to run",
+            ),
+        ] {
+            let err = validate(&parse(&document)).unwrap_err();
+            assert!(err.to_string().contains(expected), "{document}: {err}");
+        }
+    }
+
+    /// The contract's own default: a side streams unless a graph turns it off.
+    #[test]
+    fn an_agent_side_streams_unless_it_is_turned_off() {
+        let side: AgentSide = serde_norway::from_str("oneharness_config: ./a.toml\n").unwrap();
+        assert!(side.stream);
+        let quiet: AgentSide =
+            serde_norway::from_str("oneharness_config: ./a.toml\nstream: false\n").unwrap();
+        assert!(!quiet.stream);
+    }
+}

@@ -184,10 +184,24 @@ mod platform {
     use super::ProcessIdentity;
 
     /// Take a non-blocking exclusive `flock`, reporting whether it was granted.
+    ///
+    /// `flock` is an interruptible call, so a signal delivered while it runs
+    /// answers `EINTR` — "ask again", not "somebody else holds this". Reporting
+    /// that as contention is how a busy host makes a free directory look owned,
+    /// and this crate is one that runs many processes at once. Only a real
+    /// refusal is a refusal.
     pub fn try_lock_exclusive(file: &File) -> bool {
-        // SAFETY: `flock` takes a file descriptor this process owns for the
-        // lifetime of the borrow, and reports failure through its return value.
-        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+        loop {
+            // SAFETY: `flock` takes a file descriptor this process owns for the
+            // lifetime of the borrow, and reports failure through its return
+            // value.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return true;
+            }
+            if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+                return false;
+            }
+        }
     }
 
     /// This process's own identity.

@@ -1,44 +1,507 @@
 //! The `oneagentgraph` binary.
 //!
-//! At the interface-only stage this parses the full command surface from
-//! `docs/contract.md` and then refuses: no graph runs, and no subcommand does
-//! its work. The refusal is loud and carries its own exit code so a caller that
-//! wired this in early fails visibly rather than reading an empty event stream
-//! as a graph that settled.
+//! Every verb `docs/contract.md` lists, and the three exit codes it assigns: `0`
+//! every member settled successfully, `1` a member failed or died, `2` invalid
+//! config. Nothing here does the work — each verb parses its arguments, resolves
+//! where the run state lives, and hands off to the library.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::Parser;
-use oneagentgraph::cli::{Cli, Command};
+use oneagentgraph::cli::{
+    CancelArgs, Cli, Command, HistoryArgs, HistoryCommand, MemberArgs, OutputFormat, PersonaArgs,
+    PersonaCommand, RunArgs, SmokeArgs, ValidateArgs,
+};
+use oneagentgraph::config::GraphConfig;
+use oneagentgraph::error::{Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_SUCCESS};
+use oneagentgraph::persona::{Persona, PERSONA_TEMPLATE};
+use oneagentgraph::render::Text;
+use oneagentgraph::resolve::Resolver;
+use oneagentgraph::{config, health, history, run, smoke};
 
-/// The interface-only refusal, kept distinct from every code the contract
-/// assigns: `0` success, `1` a member failed or died, `2` invalid config. It
-/// goes away with the implementation.
-const EXIT_NOT_IMPLEMENTED: i32 = 3;
+/// Where run state lives unless the environment says otherwise.
+const STATE_DIR_ENV: &str = "ONEAGENTGRAPH_STATE_DIR";
 
-fn main() {
+/// The `onejudge` binary a run drives, overridable so a test — or a host with a
+/// pinned install — can name its own.
+const ONEJUDGE_BIN_ENV: &str = "ONEAGENTGRAPH_ONEJUDGE_BIN";
+
+/// The `oneharness` binary, on the same terms.
+const ONEHARNESS_BIN_ENV: &str = "ONEAGENTGRAPH_ONEHARNESS_BIN";
+
+fn main() -> ExitCode {
     let cli = Cli::parse();
-    let command = name_of(&cli.command);
-    eprintln!(
-        "oneagentgraph: NOT IMPLEMENTED — `{command}` parses per docs/contract.md, \
-         but this build implements none of it."
-    );
-    eprintln!(
-        "ACTION: use a release that implements the contract; \
-         `oneagentgraph --help` shows the surface this one agrees to."
-    );
-    std::process::exit(EXIT_NOT_IMPLEMENTED);
+    let env: BTreeMap<String, String> = std::env::vars().collect();
+    match dispatch(cli.command, &env) {
+        Ok(code) => ExitCode::from(u8::try_from(code).unwrap_or(1)),
+        Err(err) => {
+            eprintln!("oneagentgraph: {err}");
+            ExitCode::from(u8::try_from(exit_for(&err)).unwrap_or(1))
+        }
+    }
 }
 
-/// The subcommand's name as a user typed it, for the refusal above.
-fn name_of(command: &Command) -> &'static str {
-    match command {
-        Command::Run(_) => "run",
-        Command::Validate(_) => "validate",
-        Command::Trigger(_) => "trigger",
-        Command::ResetTimer(_) => "reset-timer",
-        Command::Cancel(_) => "cancel",
-        Command::History(_) => "history",
-        Command::Health => "health",
-        Command::Smoke(_) => "smoke",
-        Command::Persona(_) => "persona",
+/// The exit code one failure carries.
+fn exit_for(err: &Error) -> i32 {
+    match err {
+        Error::InvalidConfig(_) => EXIT_INVALID_CONFIG,
+        Error::MemberFailed { .. } => EXIT_MEMBER_FAILED,
+        // `Error` is `#[non_exhaustive]`, so a variant added later still exits
+        // with a code rather than failing to compile this dispatch — and it
+        // exits `1`, the contract's "a member failed or died", because a failure
+        // this build cannot name is not one it can call an invalid config.
+        _ => EXIT_MEMBER_FAILED,
     }
+}
+
+/// Run one command, returning the code it exits with.
+fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    match command {
+        Command::Run(args) => run_graph(args, env),
+        Command::Validate(args) => validate(&args, env),
+        Command::Trigger(args) => signal(&args, env, "trigger"),
+        Command::ResetTimer(args) => signal(&args, env, "reset"),
+        Command::Cancel(args) => cancel(&args, env),
+        Command::History(args) => show_history(&args, env),
+        Command::Health => {
+            let report = health::read(&oneharness_bin(env))?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).unwrap_or_default()
+            );
+            Ok(EXIT_SUCCESS)
+        }
+        Command::Smoke(args) => run_smoke(&args, env),
+        Command::Persona(args) => persona(&args),
+    }
+}
+
+/// `oneagentgraph run`.
+fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let task = match (&args.task, &args.task_file) {
+        (Some(_), Some(_)) => {
+            return Err(Error::InvalidConfig(
+                "--task and --task-file both name the task; give exactly one".into(),
+            ))
+        }
+        (Some(text), None) => Some(text.clone()),
+        (None, Some(path)) => Some(std::fs::read_to_string(path).map_err(|err| {
+            Error::InvalidConfig(format!("cannot read --task-file {}: {err}", path.display()))
+        })?),
+        (None, None) => None,
+    };
+    let request = run::Request {
+        graph: args.graph.clone(),
+        task,
+        dir: args.dir.clone().unwrap_or_else(|| PathBuf::from(".")),
+        labels: args
+            .label
+            .iter()
+            .map(|raw| run::parse_label(raw))
+            .collect::<Result<Vec<_>, _>>()?,
+        overrides: args
+            .set
+            .iter()
+            .map(|raw| run::parse_set(raw))
+            .collect::<Result<Vec<_>, _>>()?,
+        state_dir: state_dir(env),
+        onejudge_bin: onejudge_bin(env),
+        oneharness_bin: oneharness_bin(env),
+    };
+    if args.detach {
+        return detach(&args, env);
+    }
+    let sink: Box<dyn std::io::Write + Send> = match args.output {
+        OutputFormat::Json => Box::new(std::io::stdout()),
+        OutputFormat::Text => Box::new(Text::new(std::io::stdout())),
+    };
+    run::run(&request, sink, env)
+}
+
+/// `oneagentgraph run --detach`: relaunch this same binary without `--detach`,
+/// print `{run_id, events_path, pid}`, and exit 0.
+///
+/// The child is the run; this process only reports where to watch it. It is
+/// spawned with its stream discarded rather than inherited, because the caller
+/// has been handed a path to the same events and a terminal that closes must not
+/// take the run with it.
+fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let state = state_dir(env);
+    let before: Vec<String> = history::list(&state)
+        .into_iter()
+        .map(|r| r.run_id)
+        .collect();
+    let executable = std::env::current_exe()
+        .map_err(|err| Error::InvalidConfig(format!("cannot find this binary: {err}")))?;
+    let mut command = std::process::Command::new(executable);
+    command.arg("run").arg(&args.graph);
+    if let Some(task) = &args.task {
+        command.args(["--task", task]);
+    }
+    if let Some(path) = &args.task_file {
+        command.arg("--task-file").arg(path);
+    }
+    if let Some(dir) = &args.dir {
+        command.arg("--dir").arg(dir);
+    }
+    for label in &args.label {
+        command.args(["--label", label]);
+    }
+    for set in &args.set {
+        command.args(["--set", set]);
+    }
+    let child = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|err| Error::InvalidConfig(format!("cannot detach: {err}")))?;
+
+    // The run id is the child's to mint, so it is read back from the state
+    // directory rather than guessed here — a guess would be a second source for
+    // an identifier the record already owns.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Some(record) = history::list(&state)
+            .into_iter()
+            .find(|record| !before.contains(&record.run_id))
+        {
+            println!(
+                "{}",
+                serde_json::to_string(&run::Started {
+                    run_id: record.run_id,
+                    events_path: record.events_path,
+                    pid: child.id(),
+                })
+                .unwrap_or_default()
+            );
+            return Ok(EXIT_SUCCESS);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    Err(Error::InvalidConfig(
+        "the detached run did not record itself; check the graph with `oneagentgraph validate`"
+            .into(),
+    ))
+}
+
+/// `oneagentgraph validate`.
+fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let mut resolver = Resolver::new();
+    let reference = config::ConfigRef(args.graph.clone());
+    let document = resolver.resolve(&reference, None)?.clone();
+    let graph: GraphConfig = serde_norway::from_str(&document.content)
+        .map_err(|err| Error::InvalidConfig(format!("{}: {err}", args.graph)))?;
+    config::validate(&graph)?;
+    run::ready_order(&graph)?;
+    // Every ref the graph names is read, so a validation that passes means the
+    // graph could be launched — not merely that it parses.
+    for member in graph.members.values() {
+        for reference in member_refs(member) {
+            resolver.resolve(&reference, document.base_dir.as_deref())?;
+        }
+    }
+    let _ = env;
+    println!("{}: {} member(s) OK", graph.name, graph.members.len());
+    Ok(EXIT_SUCCESS)
+}
+
+/// Every config ref one member names.
+fn member_refs(member: &config::Member) -> Vec<config::ConfigRef> {
+    let mut refs = Vec::new();
+    match member {
+        config::Member::Onejudge(member) => {
+            refs.push(member.base_config.clone());
+            refs.push(member.agent.oneharness_config.clone());
+            if let config::JudgeSide::Harness(judge) = &member.judge {
+                refs.push(judge.oneharness_config.clone());
+            }
+            refs.extend(shipped_aware(member.persona.as_ref()));
+        }
+        config::Member::Oneharness(member) => {
+            refs.push(member.oneharness_config.clone());
+            refs.extend(shipped_aware(member.persona.as_ref()));
+        }
+    }
+    refs
+}
+
+/// A persona ref, unless it names one this crate ships — those are compiled in
+/// and have nothing to resolve.
+fn shipped_aware(reference: Option<&config::ConfigRef>) -> Option<config::ConfigRef> {
+    reference
+        .filter(|reference| oneagentgraph::persona::shipped(&reference.0).is_none())
+        .cloned()
+}
+
+/// `oneagentgraph trigger` / `reset-timer`: leave the run a signal to pick up.
+fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: &str) -> Result<i32, Error> {
+    let record = history::show(&state_dir(env), &args.run)?;
+    let dir = PathBuf::from(&record.events_path)
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+        .join(run::SIGNAL_DIR);
+    if !record.members.is_empty() && !record.members.contains_key(&args.member) {
+        return Err(Error::InvalidConfig(format!(
+            "run {:?} has no member {:?}; it has {}",
+            args.run,
+            args.member,
+            record
+                .members
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
+    let path = dir.join(format!("{}.{kind}", args.member));
+    std::fs::write(&path, kind)
+        .map_err(|err| Error::InvalidConfig(format!("cannot write {}: {err}", path.display())))?;
+    println!("{}: {} {}", args.run, args.member, kind);
+    Ok(EXIT_SUCCESS)
+}
+
+use std::path::Path;
+
+/// `oneagentgraph cancel`.
+fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let state = state_dir(env);
+    let record = history::show(&state, &args.run)?;
+    let root = state.join(&record.run_id);
+    std::fs::create_dir_all(root.join(run::SIGNAL_DIR))
+        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", root.display())))?;
+    std::fs::write(root.join(run::SIGNAL_DIR).join("stop"), "stop")
+        .map_err(|err| Error::InvalidConfig(format!("cannot signal run {:?}: {err}", args.run)))?;
+    let reaped = if args.kill {
+        // Only a proven process is signalled: every live process still carrying
+        // this run's scratch stamp, and nothing derived from a remembered number.
+        match &args.member {
+            Some(member) => oneagentgraph::scratch::reap(&root.join("members").join(member)),
+            None => oneagentgraph::scratch::reap(&root),
+        }
+    } else {
+        0
+    };
+    println!(
+        "{}: cancelled{}{}",
+        args.run,
+        args.member
+            .as_ref()
+            .map(|m| format!(" member {m}"))
+            .unwrap_or_default(),
+        if args.kill {
+            format!(", {reaped} process(es) signalled")
+        } else {
+            String::new()
+        }
+    );
+    Ok(EXIT_SUCCESS)
+}
+
+/// `oneagentgraph history`.
+fn show_history(args: &HistoryArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let state = state_dir(env);
+    match &args.command {
+        Some(HistoryCommand::Show { id }) => {
+            let record = history::show(&state, id)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&record).unwrap_or_default()
+            );
+        }
+        None => {
+            let records = history::list(&state);
+            let selected: Vec<_> = match &args.run {
+                Some(run) => records.into_iter().filter(|r| &r.run_id == run).collect(),
+                None => records,
+            };
+            for record in &selected {
+                println!(
+                    "{}\t{}\t{}",
+                    record.run_id,
+                    record
+                        .exit_code
+                        .map_or_else(|| "running".into(), |code| code.to_string()),
+                    record.name
+                );
+            }
+            if selected.is_empty() {
+                if let Some(run) = &args.run {
+                    return Err(Error::InvalidConfig(format!("no run {run:?}")));
+                }
+            }
+        }
+    }
+    Ok(EXIT_SUCCESS)
+}
+
+/// `oneagentgraph smoke`.
+fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let scratch;
+    let dir = match &args.dir {
+        Some(dir) => dir.clone(),
+        None => {
+            scratch = tempdir(env)?;
+            scratch.clone()
+        }
+    };
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
+    let verdict = smoke::run(&oneharness_bin(env), &dir)?;
+    for (identity, reason) in &verdict.fell_through {
+        println!("smoke: fell through {identity} ({reason}); the chain handed the turn on");
+    }
+    println!("smoke: passed via {}", verdict.ran);
+    Ok(EXIT_SUCCESS)
+}
+
+/// A throwaway directory for a smoke that named none.
+fn tempdir(env: &BTreeMap<String, String>) -> Result<PathBuf, Error> {
+    let base = env
+        .get("TMPDIR")
+        .map_or_else(std::env::temp_dir, PathBuf::from);
+    let dir = base.join(format!("oneagentgraph-smoke-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
+    Ok(dir)
+}
+
+/// `oneagentgraph persona`.
+fn persona(args: &PersonaArgs) -> Result<i32, Error> {
+    match &args.command {
+        PersonaCommand::New { name } => {
+            if !oneagentgraph::persona::is_persona_name(name) {
+                return Err(Error::InvalidConfig(format!(
+                    "invalid persona name {name:?}: use slash-separated segments of lowercase \
+                     letters, digits, and hyphens"
+                )));
+            }
+            let path = PathBuf::from(format!("{name}.yaml"));
+            if path.exists() {
+                return Err(Error::InvalidConfig(format!(
+                    "{} already exists",
+                    path.display()
+                )));
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|err| {
+                    Error::InvalidConfig(format!("cannot create {}: {err}", parent.display()))
+                })?;
+            }
+            std::fs::write(&path, PERSONA_TEMPLATE).map_err(|err| {
+                Error::InvalidConfig(format!("cannot write {}: {err}", path.display()))
+            })?;
+            println!(
+                "Created {} — fill in agent.instructions and user.persona, then run \
+                 `oneagentgraph persona validate {}`.",
+                path.display(),
+                path.display()
+            );
+            Ok(EXIT_SUCCESS)
+        }
+        PersonaCommand::Validate { path } => {
+            let mut failures = 0;
+            for file in personas_under(path)? {
+                let document = std::fs::read_to_string(&file).map_err(|err| {
+                    Error::InvalidConfig(format!("cannot read {}: {err}", file.display()))
+                })?;
+                let name = file.display().to_string();
+                match Persona::parse(&document, &name) {
+                    Ok(persona) => {
+                        let errors = persona.validate();
+                        for error in &errors {
+                            eprintln!("{name}: {error}");
+                        }
+                        failures += usize::from(!errors.is_empty());
+                    }
+                    Err(err) => {
+                        eprintln!("{err}");
+                        failures += 1;
+                    }
+                }
+            }
+            if failures > 0 {
+                return Err(Error::InvalidConfig(format!(
+                    "{failures} persona(s) invalid"
+                )));
+            }
+            println!("{}: OK", path.display());
+            Ok(EXIT_SUCCESS)
+        }
+    }
+}
+
+/// Every persona a `validate` argument names: one file, or every `.yaml` under a
+/// directory, skipping the `_`-prefixed template a catalog scaffolds from.
+fn personas_under(path: &Path) -> Result<Vec<PathBuf>, Error> {
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if !path.is_dir() {
+        return Err(Error::InvalidConfig(format!(
+            "no persona at {}",
+            path.display()
+        )));
+    }
+    let mut found = Vec::new();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir)
+            .map_err(|err| Error::InvalidConfig(format!("cannot read {}: {err}", dir.display())))?;
+        for entry in entries.flatten() {
+            let entry = entry.path();
+            let name = entry
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
+            if name.starts_with('_') {
+                continue;
+            }
+            if entry.is_dir() {
+                stack.push(entry);
+            } else if entry.extension().and_then(|e| e.to_str()) == Some("yaml") {
+                found.push(entry);
+            }
+        }
+    }
+    found.sort();
+    if found.is_empty() {
+        return Err(Error::InvalidConfig(format!(
+            "no personas under {}",
+            path.display()
+        )));
+    }
+    Ok(found)
+}
+
+/// Where run state lives.
+fn state_dir(env: &BTreeMap<String, String>) -> PathBuf {
+    env.get(STATE_DIR_ENV).map_or_else(
+        || {
+            env.get("HOME")
+                .map_or_else(std::env::temp_dir, PathBuf::from)
+                .join(".local/state/oneagentgraph/runs")
+        },
+        PathBuf::from,
+    )
+}
+
+/// The `onejudge` binary a run drives.
+fn onejudge_bin(env: &BTreeMap<String, String>) -> String {
+    env.get(ONEJUDGE_BIN_ENV)
+        .cloned()
+        .unwrap_or_else(|| "onejudge".into())
+}
+
+/// The `oneharness` binary a run drives.
+fn oneharness_bin(env: &BTreeMap<String, String>) -> String {
+    env.get(ONEHARNESS_BIN_ENV)
+        .cloned()
+        .unwrap_or_else(|| "oneharness".into())
 }
