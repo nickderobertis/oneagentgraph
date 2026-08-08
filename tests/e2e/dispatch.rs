@@ -108,7 +108,35 @@ fn every_event_carries_the_labels_a_consumer_joins_on() {
         assert_eq!(stamped["node"], "service", "{event}");
         assert_eq!(event["v"], serde_json::json!(1));
         assert_eq!(event["source"], serde_json::json!("agentgraph"));
+
+        // `ts` is the first key of the documented merge order `(ts, stream,
+        // seq)`, so its *shape* is load-bearing for a consumer joining two
+        // producers: RFC 3339, millisecond, UTC — which is also what makes the
+        // strings sort in time order. Asserted on the stream a consumer reads
+        // rather than on the struct, because the wire is where it has to hold.
+        let ts = event["ts"].as_str().unwrap_or_default();
+        assert_eq!(ts.len(), 24, "not a millisecond RFC 3339 stamp: {event}");
+        assert!(ts.ends_with('Z'), "a stamp that is not UTC: {event}");
+        let (date, rest) = ts.split_at(10);
+        assert!(
+            date.split('-').count() == 3 && rest.starts_with('T'),
+            "not an RFC 3339 date-time: {event}"
+        );
+        let millis = &ts[20..23];
+        assert!(
+            millis.chars().all(|digit| digit.is_ascii_digit()),
+            "millisecond precision is not three digits: {event}"
+        );
     }
+    // And they sort in the order they were emitted, which is the property the
+    // merge order rests on.
+    let stamps: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["ts"].as_str())
+        .collect();
+    let mut ordered = stamps.clone();
+    ordered.sort_unstable();
+    assert_eq!(stamps, ordered, "the stamps do not sort in emission order");
     let member_events: Vec<_> = events
         .iter()
         .filter(|event| labels(event).contains_key("member"))

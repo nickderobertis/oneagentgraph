@@ -883,7 +883,14 @@ fn persona_validate_walks_a_catalog_and_names_the_failing_file() {
     workspace.write("catalog/nested/bad.yaml", "agent:\n  instructions: role\n");
     let run = workspace.run(&["persona", "validate", "catalog"]);
     run.expect_code(2);
-    assert!(run.stderr.contains("nested/bad.yaml"), "{}", run.stderr);
+    // Joined rather than written with a `/`, because the qualified name is what
+    // is under test and one of the three platforms qualifies it with a `\`.
+    let nested = std::path::Path::new("nested").join("bad.yaml");
+    assert!(
+        run.stderr.contains(&nested.display().to_string()),
+        "{}",
+        run.stderr
+    );
     assert!(
         run.stderr.contains("user.persona is required"),
         "{}",

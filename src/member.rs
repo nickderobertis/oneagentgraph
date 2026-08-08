@@ -626,6 +626,14 @@ fn kill_and_report(
     reader: std::thread::JoinHandle<()>,
     stderr_reader: std::thread::JoinHandle<()>,
 ) -> Outcome {
+    // Whether the member was still running when the watchdog reached it, asked
+    // *before* the kill because the exit status afterwards cannot answer it.
+    // Windows has no signal disposition at all, so a process this supervisor
+    // terminated reports an ordinary exit code there; and on either platform a
+    // member that finished a moment before the kill landed reports one too. What
+    // `member-died` is for is which of those happened, so it is recorded rather
+    // than inferred from a status that spells both the same way.
+    let settled_first = child.try_wait().ok().flatten();
     let _ = child.kill();
     let status = child.wait().ok();
     let _ = reader.join();
@@ -634,7 +642,7 @@ fn kill_and_report(
     let payload = MemberDied {
         rule: rule.as_str().to_string(),
         exit_code: status.and_then(|status| status.code()),
-        disposition: status.map_or(Disposition::Signaled, disposition),
+        disposition: settled_first.map_or(Disposition::Signaled, disposition),
         stderr_tail,
         truncated,
     };
