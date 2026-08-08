@@ -573,6 +573,13 @@ fn settle(
 /// A two-party member's report carries no chain of its own, so this is the
 /// single-sided shape: oneharness's own `fallback.fell_through`, which names the
 /// identity and its classified reason.
+/// The same trust boundary as the stream reader above: this document is a child
+/// process's stdout, and the contract's payload is an identity and a classified
+/// reason — both text a consumer displays and joins on. A candidate carrying
+/// something else for either is one this build cannot read, and publishing it
+/// with a `null` identity would report a chain as having stepped past a harness
+/// nobody can name. It is dropped instead, exactly as an unreadable tool event
+/// is, and the candidates around it still publish.
 fn fallback_advances(report: Option<&Value>) -> Vec<Map<String, Value>> {
     report
         .and_then(|report| report.get("fallback"))
@@ -581,17 +588,13 @@ fn fallback_advances(report: Option<&Value>) -> Vec<Map<String, Value>> {
         .map(|candidates| {
             candidates
                 .iter()
-                .map(|candidate| {
-                    payload([
-                        (
-                            "identity",
-                            candidate.get("harness").cloned().unwrap_or(Value::Null),
-                        ),
-                        (
-                            "reason",
-                            candidate.get("reason").cloned().unwrap_or(Value::Null),
-                        ),
-                    ])
+                .filter_map(|candidate| {
+                    let identity = candidate.get("harness").and_then(Value::as_str)?;
+                    let reason = candidate.get("reason").and_then(Value::as_str)?;
+                    Some(payload([
+                        ("identity", Value::from(identity)),
+                        ("reason", Value::from(reason)),
+                    ]))
                 })
                 .collect()
         })
@@ -810,6 +813,29 @@ mod tests {
 
         assert!(fallback_advances(None).is_empty());
         assert!(fallback_advances(Some(&serde_json::json!({}))).is_empty());
+    }
+
+    /// A candidate this build cannot name is dropped rather than published with a
+    /// hole in it, and it does not take the readable candidates beside it down.
+    ///
+    /// The document is another process's stdout, so every shape here is one a
+    /// future oneharness could emit: a missing field, and a field that is JSON but
+    /// not the text the contract says a consumer displays.
+    #[test]
+    fn a_fallback_candidate_that_is_not_two_strings_is_not_published() {
+        let report = serde_json::json!({
+            "fallback": {"fell_through": [
+                {"reason": "auth"},
+                {"harness": "codex"},
+                {"harness": 7, "reason": "quota"},
+                {"harness": "codex", "reason": {"code": 429}},
+                {"harness": "claude-code", "reason": "quota"},
+            ]}
+        });
+        let advances = fallback_advances(Some(&report));
+        assert_eq!(advances.len(), 1, "{advances:?}");
+        assert_eq!(advances[0]["identity"], Value::from("claude-code"));
+        assert_eq!(advances[0]["reason"], Value::from("quota"));
     }
 
     /// The two programs' exit codes are read by their own contracts. `onejudge`
