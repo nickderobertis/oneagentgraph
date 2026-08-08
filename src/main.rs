@@ -188,6 +188,13 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
 }
 
 /// `oneagentgraph validate`.
+///
+/// Everything `run` does short of launching: the graph parses, its schema holds,
+/// its `deps` can be satisfied, and **every member's invocation is built** — so a
+/// persona that does not satisfy the delta contract, a base that merges to an
+/// incomplete config, and a model paired with a chain of two harness families are
+/// all found here rather than after a paid turn has been spent on the members
+/// that did start.
 fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     let mut resolver = Resolver::new();
     let reference = config::ConfigRef(args.graph.clone());
@@ -196,44 +203,30 @@ fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, 
         .map_err(|err| Error::InvalidConfig(format!("{}: {err}", args.graph)))?;
     config::validate(&graph)?;
     run::ready_order(&graph)?;
-    // Every ref the graph names is read, so a validation that passes means the
-    // graph could be launched — not merely that it parses.
-    for member in graph.members.values() {
-        for reference in member_refs(member) {
-            resolver.resolve(&reference, document.base_dir.as_deref())?;
-        }
+
+    // The generated configs go to a directory that is thrown away: what is being
+    // checked is that they *can* be generated, not what they say. A stand-in task
+    // stands in for the one `run` would be given, because a graph is not invalid
+    // for lacking prose nobody has typed yet.
+    let scratch = tempdir(env)?;
+    for (name, member) in &graph.members {
+        let member_scratch = scratch.join(name);
+        let context = oneagentgraph::invoke::Context {
+            dir: Path::new("."),
+            scratch: &member_scratch,
+            graph_dir: document.base_dir.as_deref(),
+            task: Some("validate: no task is run"),
+            session: "validate",
+            onejudge_bin: &onejudge_bin(env),
+            oneharness_bin: &oneharness_bin(env),
+        };
+        oneagentgraph::invoke::build(member, &context, &mut resolver)
+            .map_err(|err| Error::InvalidConfig(format!("member {name:?}: {err}")))?;
     }
-    let _ = env;
+    let _ = std::fs::remove_dir_all(&scratch);
+
     println!("{}: {} member(s) OK", graph.name, graph.members.len());
     Ok(EXIT_SUCCESS)
-}
-
-/// Every config ref one member names.
-fn member_refs(member: &config::Member) -> Vec<config::ConfigRef> {
-    let mut refs = Vec::new();
-    match member {
-        config::Member::Onejudge(member) => {
-            refs.push(member.base_config.clone());
-            refs.push(member.agent.oneharness_config.clone());
-            if let config::JudgeSide::Harness(judge) = &member.judge {
-                refs.push(judge.oneharness_config.clone());
-            }
-            refs.extend(shipped_aware(member.persona.as_ref()));
-        }
-        config::Member::Oneharness(member) => {
-            refs.push(member.oneharness_config.clone());
-            refs.extend(shipped_aware(member.persona.as_ref()));
-        }
-    }
-    refs
-}
-
-/// A persona ref, unless it names one this crate ships — those are compiled in
-/// and have nothing to resolve.
-fn shipped_aware(reference: Option<&config::ConfigRef>) -> Option<config::ConfigRef> {
-    reference
-        .filter(|reference| oneagentgraph::persona::shipped(&reference.0).is_none())
-        .cloned()
 }
 
 /// The two out-of-band signals the contract gives an operator.
@@ -387,7 +380,8 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
     Ok(EXIT_SUCCESS)
 }
 
-/// A throwaway directory for a smoke that named none.
+/// A throwaway directory for a command that needs one: a smoke that named none,
+/// or the generated configs `validate` builds and discards.
 fn tempdir(env: &BTreeMap<String, String>) -> Result<PathBuf, Error> {
     let base = env
         .get("TMPDIR")

@@ -52,13 +52,14 @@ members:
 ```
 
 `run` streams one envelope per line. Exit `0` means every member settled, `1`
-that one failed or died, `2` that the config is invalid. The full surface — the
-event envelope, the graph schema, every command, the event kinds, and the
-liveness rules — is [`docs/contract.md`].
+that one failed or died, `2` that the config is invalid.
 
 **oneagentgraph owns no harness, model, or fallback logic.** oneharness keeps
 owning identity chains, fallback, model pins, and quota classification; onejudge
 keeps owning the two-party conversation. This composes them.
+
+`docs/contract.md` is the full surface: the event envelope, the graph schema,
+every command, the event kinds, and the liveness rules.
 
 ## Develop
 
@@ -75,4 +76,3 @@ MIT. See [LICENSE](LICENSE).
 [oneharness]: https://github.com/nickderobertis/oneharness
 [onejudge]: https://pypi.org/project/onejudge/
 [release]: https://github.com/nickderobertis/oneagentgraph/releases
-[`docs/contract.md`]: docs/contract.md

@@ -93,6 +93,47 @@ fn validate_refuses_a_graph_that_could_never_run() {
     }
 }
 
+/// A graph, or a ref inside one, may be an `https` URL. A host that cannot be
+/// reached is a refusal naming the URL — not a run that started against a
+/// document nobody read.
+///
+/// The URL is under `.invalid`, which by RFC 6761 resolves nowhere, so this
+/// journey drives the real fetch path without leaving the machine.
+#[test]
+fn an_https_ref_is_fetched_and_an_unreachable_one_is_refused_by_url() {
+    let workspace = Workspace::new();
+    let unreachable = "https://oneagentgraph.invalid/graph.yaml";
+
+    let graph = workspace.run(&["validate", unreachable]);
+    graph.expect_code(2);
+    assert!(graph.stderr.contains(unreachable), "{}", graph.stderr);
+    assert!(graph.stderr.contains("cannot fetch"), "{}", graph.stderr);
+
+    // And the same for a ref *inside* a graph this build can read, so the
+    // refusal is the fetch rather than the graph.
+    workspace.graph(
+        &two_party_graph(&fake_harness(), "")
+            .replace("./base.yaml", "https://oneagentgraph.invalid/base.yaml"),
+    );
+    let inner = workspace.run(&["validate", "./graph.yaml"]);
+    inner.expect_code(2);
+    assert!(
+        inner.stderr.contains("oneagentgraph.invalid/base.yaml"),
+        "{}",
+        inner.stderr
+    );
+
+    // `http` is refused before a byte leaves: a config fetched in the clear is
+    // one an intermediary chooses.
+    let cleartext = workspace.run(&["validate", "http://oneagentgraph.invalid/graph.yaml"]);
+    cleartext.expect_code(2);
+    assert!(
+        cleartext.stderr.contains("must use https"),
+        "{}",
+        cleartext.stderr
+    );
+}
+
 /// `--output text` is a deterministic rendering of the same events — same count,
 /// same order, no separate content.
 #[test]

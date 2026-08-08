@@ -94,9 +94,10 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 printf 'version: 1\nname: smoke\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./h.toml\n' > "$work/graph.yaml"
 printf 'run_mode = "fallback"\nharnesses = ["claude-code"]\n' > "$work/h.toml"
-oneagentgraph validate "$work/graph.yaml" >/dev/null || fail \
-  "'validate' refused a graph it should read" \
-  "run 'oneagentgraph validate <your graph>' locally to see the refusal, then reinstall — an install that cannot read a graph is truncated or from the wrong revision"
+if ! why="$(oneagentgraph validate "$work/graph.yaml" 2>&1 >/dev/null)"; then
+  fail "'validate' refused a graph it should read: $why" \
+    "fix what that refusal names, or reinstall — an install that cannot read a graph is truncated or from the wrong revision"
+fi
 
 code=0
 oneagentgraph validate "$work/nowhere.yaml" >/dev/null 2>&1 || code=$?

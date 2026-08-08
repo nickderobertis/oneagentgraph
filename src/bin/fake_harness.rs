@@ -79,17 +79,25 @@ fn main() -> std::process::ExitCode {
     record(&prompt, "record-prompt", &prompt);
     record(&prompt, "record-env", &selection_environment());
 
-    if let Some(code) = std::env::var("FAKE_HARNESS_CRASH")
-        .ok()
-        .and_then(|c| c.parse().ok())
-    {
+    // These two variables are how a journey steers this double, and a value it
+    // cannot read is a journey asserting against a turn it never configured —
+    // which passes for the wrong reason. Refuse loudly instead.
+    if let Ok(requested) = std::env::var("FAKE_HARNESS_CRASH") {
+        let Ok(code) = requested.parse::<i32>() else {
+            eprintln!("fake-harness: FAKE_HARNESS_CRASH must be an exit code, got {requested:?}");
+            return exit(2);
+        };
         eprintln!("fake-harness: exiting {code} having published nothing");
         return exit(code);
     }
-    match std::env::var("FAKE_HARNESS_REFUSAL")
-        .unwrap_or_default()
-        .as_str()
-    {
+    let refusal = std::env::var("FAKE_HARNESS_REFUSAL").unwrap_or_default();
+    if !matches!(refusal.as_str(), "" | "auth" | "quota" | "rate_limit") {
+        eprintln!(
+            "fake-harness: FAKE_HARNESS_REFUSAL must be auth, quota, or rate_limit, got {refusal:?}"
+        );
+        return exit(2);
+    }
+    match refusal.as_str() {
         // An unauthenticated identity never gets far enough to answer: it fails
         // before the turn and says so on stderr alone. oneharness classifies
         // that as `auth`, which is a classification a chain steps past.

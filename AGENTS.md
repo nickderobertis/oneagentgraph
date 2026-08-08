@@ -33,8 +33,9 @@ proposal to the planner who owns that contract, never a unilateral edit.
 and drives them through the public types, so the doc and the types cannot drift.
 Adding a contract type without extending that test leaves the doc unproven.
 
-The contract is implemented. How each part of it is, and the seams that are easy
-to get wrong, live in `src/AGENTS.md` beside the code they govern.
+The contract is implemented: `run` resolves a graph, builds every member's
+invocation before launching anything, and merges what the members publish into
+one NDJSON stream.
 
 ## Stack and composition
 
@@ -74,8 +75,9 @@ consuming `project.json` — an undeclared one silently drops that project out o
   the real package around the real binary. An in-process `main()` call is not an
   e2e, and every journey it covers runs inside `just check` rather than behind
   `#[ignore]`.
-- **One seam may be faked, and only one:** the paid harness process. Everything
-  else in a journey is real. `src/AGENTS.md` says how.
+- **One seam may be faked, and only one:** the paid harness process, at
+  oneharness's own `ONEHARNESS_BIN_<ID>` binary override. Everything else in a
+  journey — this binary, `onejudge`, `oneharness` — is a real subprocess.
 - **Validate external input at its trust boundary.** Graph configs and event
   envelopes are external input: the schema structs reject unknown fields, so a
   typo fails loudly instead of being silently dropped.
@@ -91,6 +93,9 @@ title becomes the squash subject and the PR body the squash message, so the PR
 title *is* the release-driving commit and is linted against Conventional Commits
 as a required check. PRs follow `.github/pull_request_template.md` (terse
 **What** / **Why**).
+
+`.github/CODEOWNERS` routes review, and each nested `AGENTS.md` owns the rules
+for the tree it sits in; this file keeps only what is true repo-wide.
 
 Branch protection on `main` requires **every** gating job in `ci.yml`, each
 matrix leg by its rendered name, with linear history, no force-pushes, and admins
