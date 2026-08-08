@@ -176,15 +176,82 @@ pub fn local_path(reference: &ConfigRef, base_dir: Option<&Path>) -> PathBuf {
 ///
 /// The scheme check in [`fetch`] is what this does *not* soften: the store says
 /// which certificates are believed, never whether a certificate is required.
-fn agent() -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .tls_config(
-            ureq::tls::TlsConfig::builder()
-                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-                .build(),
-        )
+///
+/// `SSL_CERT_FILE` / `SSL_CERT_DIR` are read here rather than left to the
+/// verifier, because only one platform reads them on its own. The OpenSSL-shaped
+/// stores behind Linux's verifier honour both; Darwin's Security framework
+/// honours neither, so a bundle named there was silently ignored and the
+/// documented way to trust an internal CA worked on one leg of the matrix and
+/// not the other. Reading them once, here, is what makes that sentence true
+/// everywhere.
+fn agent() -> Result<ureq::Agent, Error> {
+    let roots = match named_bundle()? {
+        Some(certificates) => ureq::tls::RootCerts::Specific(std::sync::Arc::new(certificates)),
+        None => ureq::tls::RootCerts::PlatformVerifier,
+    };
+    Ok(ureq::Agent::config_builder()
+        .tls_config(ureq::tls::TlsConfig::builder().root_certs(roots).build())
         .build()
-        .new_agent()
+        .new_agent())
+}
+
+/// The trust anchors `SSL_CERT_FILE` / `SSL_CERT_DIR` name, when either does.
+///
+/// # Errors
+///
+/// A variable that is set but yields no certificate is a refusal, not a reason
+/// to carry on with the platform's own store: an operator who named a bundle
+/// asked for *that* trust set, and quietly believing a different one is how a
+/// machine ends up trusting anchors nobody chose.
+fn named_bundle() -> Result<Option<Vec<ureq::tls::Certificate<'static>>>, Error> {
+    let file = std::env::var_os("SSL_CERT_FILE");
+    let dir = std::env::var_os("SSL_CERT_DIR");
+    if file.is_none() && dir.is_none() {
+        return Ok(None);
+    }
+
+    let mut named: Vec<PathBuf> = file.map(PathBuf::from).into_iter().collect();
+    if let Some(dir) = dir {
+        // Sorted, so a bundle assembled from a directory is the same bundle on
+        // every host rather than whatever order the filesystem answers in.
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .map_err(|err| {
+                Error::InvalidConfig(format!(
+                    "cannot read SSL_CERT_DIR {}: {err}",
+                    PathBuf::from(&dir).display()
+                ))
+            })?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect();
+        entries.sort();
+        named.extend(entries);
+    }
+
+    let mut certificates = Vec::new();
+    for path in &named {
+        let pem = std::fs::read(path).map_err(|err| {
+            Error::InvalidConfig(format!("cannot read {}: {err}", path.display()))
+        })?;
+        for item in ureq::tls::parse_pem(&pem).flatten() {
+            if let ureq::tls::PemItem::Certificate(certificate) = item {
+                certificates.push(certificate);
+            }
+        }
+    }
+    if certificates.is_empty() {
+        return Err(Error::InvalidConfig(format!(
+            "SSL_CERT_FILE/SSL_CERT_DIR named {} but no certificate could be read from it, so \
+             there is nothing to trust",
+            named
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    Ok(Some(certificates))
 }
 
 /// Fetch one remote ref over `https`.
@@ -196,7 +263,7 @@ fn fetch(reference: &ConfigRef) -> Result<Resolved, Error> {
              intermediary chooses"
         )));
     }
-    let mut response = agent()
+    let mut response = agent()?
         .get(url)
         .call()
         .map_err(|err| Error::InvalidConfig(format!("cannot fetch {url}: {err}")))?;

@@ -11,6 +11,13 @@
 //! the unreachable-host refusal are held next door in `verbs.rs`, which needs no
 //! origin to prove them.
 
+// llmlint: ignore-file[e2e_not_mocked] see tests/e2e/support.rs: the paid harness
+// process is the single sanctioned double, replaced at oneharness's own
+// `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
+// The subject of this file is the transport in front of them — a real TLS socket
+// to a real origin — and the turn behind it still has to run for a resolved
+// document to reach an agent at all.
+
 use crate::origin::{Origin, Trust};
 use crate::support::{fake_harness, two_party_graph, Workspace};
 
@@ -136,6 +143,57 @@ fn a_certificate_from_an_untrusted_authority_refuses_the_ref() {
         run.stdout.is_empty(),
         "a refusal must not read as an event stream: {}",
         run.stdout
+    );
+}
+
+/// A named bundle that carries no certificate is a refusal, not a quiet fall
+/// back to the platform's own store.
+///
+/// An operator who names a bundle asked for *that* trust set. Carrying on with a
+/// different one is how a machine ends up believing anchors nobody chose — and
+/// it would read as success, because the platform store very likely does trust
+/// the host being fetched from.
+#[test]
+fn a_named_bundle_with_no_certificate_in_it_is_refused() {
+    let workspace = Workspace::new();
+    let origin = Origin::start(
+        vec![("/base.yaml".to_string(), SERVED_BASE.as_bytes().to_vec())],
+        Trust::Trusted,
+    );
+    let url = origin.url("/base.yaml");
+    workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", &url));
+    let empty = workspace.write("not-a-bundle.pem", "no certificate lives here\n");
+    // Both variables, because both contribute: a host with `SSL_CERT_DIR`
+    // already set — which is most of them — would otherwise supply the whole
+    // system store beside the file under test, and there would be nothing empty
+    // about the bundle.
+    let nowhere = workspace.at("no-certificates-here");
+    std::fs::create_dir_all(&nowhere).expect("an empty certificate directory");
+
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "complete-now: never gets here",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[
+            ("SSL_CERT_FILE", &empty.display().to_string()),
+            ("SSL_CERT_DIR", &nowhere.display().to_string()),
+        ],
+    );
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains("no certificate could be read"),
+        "the refusal did not name the unusable bundle: {}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("not-a-bundle.pem"),
+        "the refusal did not name the file: {}",
+        run.stderr
     );
 }
 
