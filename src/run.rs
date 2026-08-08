@@ -756,10 +756,18 @@ fn cron(
     let own_stop = signals.join(format!("{name}.stop"));
     let trigger = signals.join(format!("{name}.trigger"));
     let reset = signals.join(format!("{name}.reset"));
+    let stopped = || stop.exists() || own_stop.exists();
     let mut last = first;
     let mut due = Instant::now() + Duration::from_secs(schedule.every);
-    while !stop.exists() && !own_stop.exists() {
+    while !stopped() {
         std::thread::sleep(TICK);
+        // Again, after the sleep: a cancel that landed while this member slept
+        // has to beat a trigger that landed beside it. Read only at the top, a
+        // `cancel` and a `trigger` arriving inside the same tick let the trigger
+        // win, and the member spent a paid turn *after* an operator stopped it.
+        if stopped() {
+            break;
+        }
         if schedule.resettable && reset.exists() {
             let _ = std::fs::remove_file(&reset);
             due = Instant::now() + Duration::from_secs(schedule.every);

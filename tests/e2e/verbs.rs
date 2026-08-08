@@ -1085,6 +1085,137 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
     assert!(fired >= 1, "the trigger never fired the member: {stream}");
 }
 
+/// `cancel RUN MEMBER`, with no `--kill`, stops **that member alone** and leaves
+/// the rest of the run running.
+///
+/// The pair with the whole-run cancels in `tests/e2e/liveness.rs` is the point,
+/// and this is the half neither of those reaches. Both of those name `--kill`,
+/// which reaps a process tree — an escalation. This is the *ask*: a member-scoped
+/// stop signal the run picks up on its own, with nothing signalled and nothing
+/// killed. A cancel that quietly stopped every member would pass every other
+/// journey here and lose an operator the whole point of naming one.
+#[test]
+fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
+    let workspace = Workspace::new();
+    workspace.graph(&format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n",
+            "  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {{every: 3600, resettable: true}}\n",
+            "  auditor:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {{every: 3600, resettable: true}}\n",
+        ),
+        fake = fake_harness(),
+    ));
+    let state = workspace.state();
+    let handle = {
+        let dir = workspace.path().to_path_buf();
+        let state = state.clone();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+                .args([
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    "fake:complete-now: scheduled",
+                    "--dir",
+                    &dir.join("work").display().to_string(),
+                ])
+                .current_dir(&dir)
+                .env("ONEAGENTGRAPH_STATE_DIR", &state)
+                .env(
+                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                    crate::support::oneharness_bin(),
+                )
+                .env_remove("ONEHARNESS_HARNESSES")
+                .output()
+                .expect("the run finishes")
+        })
+    };
+
+    until("the run to record itself", || run_id(&state).is_some());
+    let id = run_id(&state).expect("a run");
+    let events = state.join(&id).join("events.jsonl");
+    let fired_by = |member: &str| {
+        let stream = std::fs::read_to_string(&events).unwrap_or_default();
+        stream
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| {
+                event["kind"] == serde_json::json!("cron-fired")
+                    && crate::support::labels(event)
+                        .get("member")
+                        .map(String::as_str)
+                        == Some(member)
+            })
+            .count()
+    };
+    // Both members have to have started before one of them can be told to stop:
+    // a signal written before its loop exists would be read as a stop it never
+    // saw, and the assertion below would pass on a member that never ran.
+    until("both members to settle their first run", || {
+        let stream = std::fs::read_to_string(&events).unwrap_or_default();
+        ["reporter", "auditor"].iter().all(|member| {
+            stream
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|event| {
+                    event["kind"] == serde_json::json!("member-settled")
+                        && crate::support::labels(&event)
+                            .get("member")
+                            .map(String::as_str)
+                            == Some(*member)
+                })
+        })
+    });
+
+    let cancelled = workspace.run(&["cancel", &id, "reporter"]);
+    cancelled.expect_code(0);
+    assert!(
+        cancelled.stdout.contains("reporter"),
+        "a member-scoped cancel did not name the member: {}",
+        cancelled.stdout
+    );
+    // Nothing was reaped: this is the ask, not the kill.
+    assert!(
+        !cancelled.stdout.contains("signalled"),
+        "a cancel with no --kill reaped a process tree: {}",
+        cancelled.stdout
+    );
+
+    let stopped = fired_by("reporter");
+    // Two full firings of the *other* member after the cancel. Both loops tick on
+    // the same cadence in the same process, so by the second one reporter has had
+    // many ticks in which it would have consumed the trigger below had its loop
+    // still been running — which is what makes "it never fired again" an
+    // assertion rather than a race won.
+    for round in 1..=2 {
+        let before = fired_by("auditor");
+        workspace.run(&["trigger", &id, "reporter"]).expect_code(0);
+        workspace.run(&["trigger", &id, "auditor"]).expect_code(0);
+        until("the surviving member to fire", || {
+            fired_by("auditor") > before
+        });
+        assert_eq!(
+            fired_by("reporter"),
+            stopped,
+            "round {round}: the cancelled member fired again"
+        );
+    }
+
+    // And the run is still the run: the whole-run cancel is what ends it.
+    workspace.run(&["cancel", &id]).expect_code(0);
+    let output = handle.join().expect("the run thread");
+    assert!(
+        output.status.code().is_some(),
+        "the cancelled run never exited"
+    );
+}
+
 /// `trigger` and `reset-timer` name a member the run does not have rather than
 /// leaving a signal nothing will ever read.
 #[test]
