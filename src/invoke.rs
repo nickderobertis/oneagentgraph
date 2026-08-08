@@ -106,12 +106,15 @@ pub enum Launch {
     /// onejudge's own run driver, over the config written into the member's
     /// scratch, driven in this process.
     Library(Box<JudgeLaunch>),
-    /// A child process: the program and its arguments.
+    /// A child process: the program, its arguments, and the directory it runs
+    /// in.
     Process {
         /// The program to run.
         program: String,
         /// Its arguments.
         args: Vec<String>,
+        /// The child's working directory.
+        cwd: PathBuf,
     },
 }
 
@@ -125,7 +128,9 @@ pub struct JudgeLaunch {
     /// The task prose this member drives to completion.
     pub task: String,
     /// The directory the harness works in, named to oneharness rather than
-    /// entered — see this module's own documentation.
+    /// entered — see this module's own documentation. It is deliberately *not*
+    /// a working directory: this process has one of those and shares it with
+    /// every other member.
     pub worktree: PathBuf,
 }
 
@@ -135,12 +140,10 @@ pub struct Invocation {
     /// Which program's contract this member settles under, because the two read
     /// their outcomes differently.
     pub kind: crate::member::Kind,
-    /// What starting it means.
+    /// What starting it means, and where — a child process's working directory
+    /// and an in-process member's worktree are different things, so each rides
+    /// the variant it belongs to rather than one field claiming to be both.
     pub launch: Launch,
-    /// The directory the member is anchored to. For a `kind: onejudge` member
-    /// this is its own scratch directory, because that is what pins the agent
-    /// side's oneharness config.
-    pub cwd: PathBuf,
     /// The persona label to stamp on this member's events, when it has one.
     pub persona: Option<String>,
     /// What this member adds to the process environment of a child it starts,
@@ -210,8 +213,8 @@ pub fn build(
                 launch: Launch::Process {
                     program: context.oneharness_bin.to_string(),
                     args,
+                    cwd: context.scratch.to_path_buf(),
                 },
-                cwd: context.scratch.to_path_buf(),
                 persona: persona_label,
                 env: Vec::new(),
                 refs: resolver.inventory(),
@@ -294,7 +297,6 @@ fn onejudge(
             // directory the harness will run in.
             worktree: context.scratch.to_path_buf(),
         })),
-        cwd: context.scratch.to_path_buf(),
         persona: label,
         // Nothing: this member starts no child process of its own, so it has no
         // environment to add to. Its `mode` and its ownership stamp are in the

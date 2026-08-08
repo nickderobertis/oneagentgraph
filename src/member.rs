@@ -241,21 +241,32 @@ pub fn run(
 ) -> Outcome {
     match &invocation.launch {
         Launch::Library(judge) => crate::judge::run(judge, emitter, bounds, scratch),
-        Launch::Process { program, args } => {
-            spawned(invocation, program, args, emitter, env, bounds, scratch)
-        }
+        Launch::Process { program, args, cwd } => spawned(
+            invocation.kind,
+            program,
+            args,
+            cwd,
+            &invocation.env,
+            emitter,
+            env,
+            bounds,
+            scratch,
+        ),
     }
 }
 
 /// Run a member that is a child process of its own.
-// Seven values, none derivable from another: the member, the two halves of its
-// argv, where its events go, its environment and bounds, and its scratch.
+// Nine values, none derivable from another: which contract it settles under,
+// the three parts of the command, what this member adds to the environment,
+// where its events go, the graph's environment and bounds, and its scratch.
 // Bundling them into a struct would name the same values twice.
 #[allow(clippy::too_many_arguments)]
 fn spawned(
-    invocation: &Invocation,
+    kind: Kind,
     program: &str,
     args: &[String],
+    cwd: &Path,
+    member_env: &[(String, String)],
     emitter: &Emitter,
     env: &BTreeMap<String, String>,
     bounds: Bounds,
@@ -270,14 +281,14 @@ fn spawned(
                 "args",
                 Value::Array(args.iter().cloned().map(Value::String).collect()),
             ),
-            ("cwd", Value::String(invocation.cwd.display().to_string())),
+            ("cwd", Value::String(cwd.display().to_string())),
         ]),
     );
 
     let mut command = Command::new(program);
     command
         .args(args)
-        .current_dir(&invocation.cwd)
+        .current_dir(cwd)
         // Dropping it from `env` is not enough: a child *inherits* this
         // process's environment, and `envs` only adds to it. So the one variable
         // that beats the per-side config a graph named has to be unset here, on
@@ -285,7 +296,7 @@ fn spawned(
         // block asked for it. See `invoke::PROCESS_WIDE_HARNESS_ENV`.
         .env_remove(crate::invoke::PROCESS_WIDE_HARNESS_ENV)
         .envs(env)
-        .envs(invocation.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(member_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .env(SCRATCH_ENV, scratch.display().to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -302,7 +313,7 @@ fn spawned(
             return Outcome::Unstartable(reason);
         }
     };
-    supervise(child, invocation.kind, emitter, bounds, scratch)
+    supervise(child, kind, emitter, bounds, scratch)
 }
 
 /// The death of a member that could not be started at all.

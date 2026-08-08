@@ -560,6 +560,47 @@ fn smoke_spends_one_turn_and_names_the_identity_that_ran_it() {
     );
 }
 
+/// A launch whose provider crashed having spent nothing is relaunched, and a
+/// smoke that never got one going says how many starts reached that answer.
+///
+/// This is the accounting decision read end to end. A crashed provider's report
+/// carries oneharness's own `usage` with every counter empty and no failure
+/// classification, and `smoke` asks *oneharness's own* predicate whether that is
+/// billed work — the same one its quota classifier and its fallback chain share.
+/// Answering yes would refuse to retry a host that merely stumbled; answering no
+/// on a report that says nothing at all would pay for the same question twice.
+#[test]
+fn a_smoke_whose_provider_spent_nothing_is_relaunched_and_says_how_often() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+    let attempts = workspace.at("harness-attempts");
+
+    let run = workspace.run_with(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[
+            ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+            ("FAKE_HARNESS_ATTEMPT_LOG", &attempts.display().to_string()),
+            ("FAKE_HARNESS_CRASH", "1"),
+        ],
+    );
+    run.expect_code(1);
+    assert!(
+        run.stderr.contains("after 3 attempts"),
+        "a smoke that spent nothing did not report its attempts: {}",
+        run.stderr
+    );
+    assert_eq!(
+        std::fs::read_to_string(&attempts)
+            .expect("the harness recorded its launches")
+            .lines()
+            .count(),
+        3,
+        "a launch that provably spent nothing was not relaunched"
+    );
+}
+
 /// Real `oneagentgraph run` dispatches, every one of them held live inside its
 /// agent for as long as a journey needs.
 ///

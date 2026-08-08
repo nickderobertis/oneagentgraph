@@ -60,10 +60,14 @@ fn a_member_completes_through_the_real_supervisor_loop() {
         "the member named no effective config: {payload}"
     );
     assert!(
-        payload["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()),
+        payload["worktree"]
+            .as_str()
+            .is_some_and(|worktree| !worktree.is_empty()),
         "the member named no worktree: {payload}"
     );
-    for absent in ["program", "args"] {
+    // Not `cwd`: a member driven in this process has no working directory of its
+    // own, and claiming one would name a thing that is not true.
+    for absent in ["program", "args", "cwd"] {
         assert!(
             payload.get(absent).is_none(),
             "a member nothing was spawned for reported {absent}: {payload}"
@@ -113,7 +117,111 @@ fn a_single_sided_member_reports_the_process_it_spawned() {
             .is_some_and(|args| args.iter().any(|arg| arg == "run")),
         "the member named no argv: {payload}"
     );
+    assert!(
+        payload["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()),
+        "the child named no working directory: {payload}"
+    );
     assert!(payload.get("engine").is_none(), "{payload}");
+
+    // And this member stores its report where the settle says it is, the same as
+    // a two-party one: the artifact the contract promises has something behind
+    // its id to fetch whichever kind of member produced it.
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    let path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!path.is_empty(), "the settle named no stored report");
+    assert_eq!(
+        settled[0]["artifacts"][0]["bytes"].as_u64().unwrap_or(0),
+        std::fs::metadata(&path).expect("the stored report").len(),
+        "the artifact's size is not the size of what was stored"
+    );
+}
+
+/// A single-sided member whose harness exits without publishing a report dies as
+/// a provider failure — and, because this member really *was* a process, its
+/// death carries the three facts one leaves behind alongside the typed cause.
+///
+/// The pair with the two-party provider failure in `tests/e2e/liveness.rs` is the
+/// point: one member kind has an exit status and a stderr tail and the other does
+/// not, and `member-died` has to say which it is rather than reporting a process
+/// that never existed.
+#[test]
+fn a_single_sided_member_that_crashes_carries_its_process_s_own_facts() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: the provider dies",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[("FAKE_HARNESS_CRASH", "1")],
+    );
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let payload = &died[0]["payload"];
+    assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
+    // A process's own disposition, not a provider classification: an exit status
+    // is what a process failure *is*, and inventing a category from one would be
+    // this crate guessing at something oneharness already owns.
+    assert_eq!(payload["cause"], serde_json::json!("exited"));
+    assert_eq!(payload["disposition"], serde_json::json!("exited"));
+    assert!(
+        payload["exit_code"].as_i64().is_some(),
+        "a child that exited reported no code: {payload}"
+    );
+    let tail = payload["stderr_tail"].as_str().unwrap_or_default();
+    assert!(!tail.is_empty(), "a death with no evidence: {payload}");
+    assert_eq!(
+        payload["detail"], payload["stderr_tail"],
+        "the detail every member carries must be this one's evidence too"
+    );
+    assert!(
+        tail.len() <= 4096,
+        "the stderr tail outgrew its documented bound"
+    );
+}
+
+/// A graph carrying an `env` value the platform cannot represent is refused by
+/// `validate`, before anything is started.
+///
+/// The block reaches *this* process's environment now, because a two-party member
+/// inherits it from here rather than being handed one — and `set_var` answers a
+/// value it cannot represent by panicking. A graph is a document somebody wrote,
+/// so it gets exit 2 and a sentence, not a crash.
+#[test]
+fn a_graph_env_value_the_platform_cannot_represent_is_refused() {
+    let workspace = Workspace::new();
+    workspace.graph(concat!(
+        "version: 1\nname: node-scope\n",
+        "env:\n  ONEAGENTGRAPH_TEST_MARKER: \"has\\0nul\"\n",
+        "members:\n  reporter:\n    kind: oneharness\n",
+        "    oneharness_config: ./oneharness.toml\n",
+    ));
+    let validated = workspace.run(&["validate", "./graph.yaml"]);
+    validated.expect_code(2);
+    assert!(
+        validated.stderr.contains("exported to every member"),
+        "{}",
+        validated.stderr
+    );
+
+    // And a run refuses it on the same terms rather than starting members under
+    // a block it cannot apply.
+    let run = workspace.run_task("fake:complete-now: never gets here");
+    run.expect_code(2);
+    assert!(
+        run.stdout.is_empty(),
+        "a refusal must not read as an event stream"
+    );
 }
 
 /// A task that *talks about* the double's sentinels is steered by none of them.

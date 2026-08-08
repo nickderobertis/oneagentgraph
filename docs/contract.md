@@ -90,7 +90,7 @@ oneagentgraph persona new NAME | persona validate PATH
 
 `run` streams envelopes to stdout. Exit 0 = every member settled successfully; 1 = a member failed or died (the stream says which and why); 2 = invalid config. `--detach` prints `{run_id, events_path, pid}` and exits 0.
 
-Event kinds: `graph-started`, `member-started` (`runner: library|process`, plus what that runner is: the `engine` and `config` of an in-process member, the `program` and `args` of a child one), `turn-started`, `turn-activity` (bounded tool summary: kind, name, 160-char detail), `turn-completed` (usage: tokens in/out, cache r/w, cost, duration), `member-heartbeat`, `fallback-advanced` (identity, classified reason), `member-died`, `cron-fired`, `cron-reset`, `member-settled` (full onejudge report as artifact, verdict inline), `graph-settled`.
+Event kinds: `graph-started`, `member-started` (`runner: library|process`, plus what that runner is: the `engine`, `config`, and `worktree` of an in-process member — which has no working directory of its own — and the `program`, `args`, and `cwd` of a child one), `turn-started`, `turn-activity` (bounded tool summary: kind, name, 160-char detail), `turn-completed` (usage: tokens in/out, cache r/w, cost, duration), `member-heartbeat`, `fallback-advanced` (identity, classified reason), `member-died`, `cron-fired`, `cron-reset`, `member-settled` (full onejudge report as artifact, verdict inline, and the `report_path` that artifact is stored at), `graph-settled`.
 
 `member-died` describes an in-process failure honestly, and a member that *died* stays distinct from one that *failed its task* — the latter is a `member-settled` with `completed: false`, never this event. Its payload:
 

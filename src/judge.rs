@@ -88,7 +88,12 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             ("runner", Value::String("library".into())),
             ("engine", Value::String("onejudge".into())),
             ("config", Value::String(launch.config.display().to_string())),
-            ("cwd", Value::String(launch.worktree.display().to_string())),
+            // `worktree`, not `cwd`: this member has no working directory of its
+            // own, and naming one would claim a thing that is not true.
+            (
+                "worktree",
+                Value::String(launch.worktree.display().to_string()),
+            ),
         ]),
     );
 
