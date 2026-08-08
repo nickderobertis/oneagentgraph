@@ -23,7 +23,13 @@ streamed run driver. `oneharness run` is still a child process — its library
 surface prints its report to the process's stdout and returns only an exit code,
 and this process's stdout is the merged stream — and so are the agent harness and
 a `judge: {command: [...]}` provider. That hop collapses when oneharness grows a
-non-printing run entrypoint or an event-sink parameter.
+non-printing run entrypoint or an event-sink parameter. `health` is the same
+story one command over: `oneharness-core` probes one *named* identity, and
+enumerating a config's identities is the `oneharness` CLI's own, so `health`
+still runs `oneharness usage --format json` rather than rebuilding that
+enumeration here — which is the harness logic the paragraph above forbids. It
+collapses when oneharness-core grows an entrypoint that builds a whole
+`UsageReport` from a resolved config.
 
 Ships as a Rust library plus the `oneagentgraph` binary, distributed on
 crates.io, PyPI (`oneagentgraph-cli`), and npm (`oneagentgraph-cli`).

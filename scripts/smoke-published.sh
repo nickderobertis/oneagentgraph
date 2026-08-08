@@ -17,9 +17,9 @@
 # reports its version, prints the documented command list, refuses a graph it
 # cannot read with the contract's exit 2, and never reports a graph it did not
 # run as settled. Running one is deliberately out of scope — that needs the
-# `onejudge` and `oneharness` CLIs and a paid harness, which this script exists
-# to stay free of. The e2e suite drives those for real; this proves the artifact
-# that ships is the one the suite tested.
+# `oneharness` CLI and a paid harness, which this script exists to stay free of.
+# The e2e suite drives those for real; this proves the artifact that ships is the
+# one the suite tested.
 set -euo pipefail
 
 expect_version=""
