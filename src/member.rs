@@ -1,8 +1,12 @@
 //! Running one member, and turning what it publishes into envelopes.
 //!
-//! A member is one child process — `onejudge run --format json --stream` for a
-//! two-party member, `oneharness run --stream` for a single-sided one. Both
-//! speak the same two NDJSON envelopes on stdout (onejudge's
+//! A **single-sided** member is one child process, `oneharness run --stream`, and
+//! this module is the whole of running it. A **two-party** member is onejudge's
+//! own run driver called in this process; [`crate::judge`] runs that one, and
+//! shares the settle, the death, and the two watchdogs below so both kinds reach
+//! the stream as the same events.
+//!
+//! A child member speaks two NDJSON envelopes on stdout (onejudge's
 //! `docs/streaming.md`):
 //!
 //! ```text
@@ -10,17 +14,15 @@
 //! {"type":"result","report":{…}}
 //! ```
 //!
-//! so one reader covers both, and the `turn` a two-party member adds is the only
-//! difference. Each `event` line becomes a [`EventKind::TurnActivity`]; the first
-//! of a turn is preceded by a [`EventKind::TurnStarted`]; the terminal `result`
-//! line becomes a [`EventKind::TurnCompleted`] and a
-//! [`EventKind::MemberSettled`].
+//! Each `event` line becomes a [`EventKind::TurnActivity`]; the first of a turn
+//! is preceded by a [`EventKind::TurnStarted`]; the terminal `result` line
+//! becomes a [`EventKind::TurnCompleted`] and a [`EventKind::MemberSettled`].
 //!
 //! Two watchdogs run alongside, both ported from ai-orchestrator with their
 //! defaults and their environment overrides intact:
 //!
 //! * The **heartbeat** is refreshed by this supervisor every
-//!   [`HEARTBEAT_INTERVAL`] while the child is alive. Its deadline is therefore
+//!   [`HEARTBEAT_INTERVAL`] while the member is alive. Its deadline is therefore
 //!   not a latency budget — it is the margin by which a *live* member may be
 //!   starved of CPU before it is declared dead. This crate runs many members at
 //!   once, and a threshold near the write cadence reaps healthy ones under
@@ -30,10 +32,11 @@
 //!   working, whatever its process tree looks like.
 //!
 //! Either firing is a [`EventKind::MemberDied`], carrying the `rule` that fired,
-//! the child's `exit_code` and `disposition`, and a bounded `stderr_tail` — the
-//! four fields the contract names, because provider throttling, quota
-//! exhaustion, an OOM kill, and a genuine crash otherwise all reach a supervisor
-//! as the same dead process.
+//! the classified `cause`, and a bounded `detail` — plus, for a member that was a
+//! child process, that process's `exit_code`, `disposition`, and `stderr_tail`.
+//! The classification is the point: provider throttling, quota exhaustion, an OOM
+//! kill, and a genuine crash otherwise all reach a supervisor as the same dead
+//! member.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
@@ -45,8 +48,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
-use crate::event::{bound_detail, bound_text, Disposition, Emitter, EventKind, Labels, MemberDied};
-use crate::invoke::Invocation;
+use crate::event::{
+    bound_detail, bound_text, Cause, Disposition, Emitter, EventKind, Labels, MemberDied,
+};
+use crate::invoke::{Invocation, Launch};
 use crate::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
 };
@@ -234,21 +239,44 @@ pub fn run(
     bounds: Bounds,
     scratch: &Path,
 ) -> Outcome {
+    match &invocation.launch {
+        Launch::Library(judge) => crate::judge::run(judge, emitter, bounds, scratch),
+        Launch::Process { program, args } => {
+            spawned(invocation, program, args, emitter, env, bounds, scratch)
+        }
+    }
+}
+
+/// Run a member that is a child process of its own.
+// Seven values, none derivable from another: the member, the two halves of its
+// argv, where its events go, its environment and bounds, and its scratch.
+// Bundling them into a struct would name the same values twice.
+#[allow(clippy::too_many_arguments)]
+fn spawned(
+    invocation: &Invocation,
+    program: &str,
+    args: &[String],
+    emitter: &Emitter,
+    env: &BTreeMap<String, String>,
+    bounds: Bounds,
+    scratch: &Path,
+) -> Outcome {
     emitter.emit(
         EventKind::MemberStarted,
         payload([
-            ("program", Value::String(invocation.program.clone())),
+            ("runner", Value::String("process".into())),
+            ("program", Value::String(program.to_string())),
             (
                 "args",
-                Value::Array(invocation.args.iter().cloned().map(Value::String).collect()),
+                Value::Array(args.iter().cloned().map(Value::String).collect()),
             ),
             ("cwd", Value::String(invocation.cwd.display().to_string())),
         ]),
     );
 
-    let mut command = Command::new(&invocation.program);
+    let mut command = Command::new(program);
     command
-        .args(&invocation.args)
+        .args(args)
         .current_dir(&invocation.cwd)
         // Dropping it from `env` is not enough: a child *inherits* this
         // process's environment, and `envs` only adds to it. So the one variable
@@ -266,21 +294,29 @@ pub fn run(
     let child = match command.spawn() {
         Ok(child) => child,
         Err(err) => {
-            let reason = format!("cannot start {}: {err}", invocation.program);
-            emitter.emit(
-                EventKind::MemberDied,
-                died_payload(&MemberDied {
-                    rule: Rule::Unstartable.as_str().into(),
-                    exit_code: None,
-                    disposition: Disposition::Exited,
-                    stderr_tail: reason.clone(),
-                    truncated: false,
-                }),
-            );
+            let reason = format!("cannot start {program}: {err}");
+            // No process ever existed, so it has no exit code, no disposition, and
+            // no standard error — only the reason it could not be started, which is
+            // exactly what `spawn` classifies.
+            emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
         }
     };
     supervise(child, invocation.kind, emitter, bounds, scratch)
+}
+
+/// The death of a member that could not be started at all.
+pub(crate) fn unstartable(reason: &str) -> MemberDied {
+    let (detail, truncated) = bound_text(reason);
+    MemberDied {
+        rule: Rule::Unstartable.as_str().into(),
+        cause: Cause::Spawn,
+        detail,
+        truncated,
+        exit_code: None,
+        disposition: None,
+        stderr_tail: None,
+    }
 }
 
 /// Supervise a spawned member: read what it publishes, watch it live, and settle.
@@ -381,7 +417,7 @@ fn supervise(
     let settled = held(&report).take();
 
     match status {
-        Ok(status) => settle(emitter, kind, status, settled, &tail),
+        Ok(status) => settle(emitter, kind, status, settled, &tail, scratch),
         Err(reason) => Outcome::Unstartable(reason),
     }
 }
@@ -425,7 +461,7 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
                     payload([("turn", Value::from(observed))]),
                 );
             }
-            let (detail, truncated) = bound_detail(&summarize(event));
+            let (detail, truncated) = bound_detail(&summarize(event.get("input")));
             emitter.emit(
                 EventKind::TurnActivity,
                 payload([
@@ -484,9 +520,15 @@ fn readable(stream: impl BufRead) -> impl Iterator<Item = String> {
     })
 }
 
-/// One tool event as the contract's bounded summary: what it acted on.
-fn summarize(event: &Value) -> String {
-    match event.get("input") {
+/// One tool event's structured input as the contract's bounded summary: what it
+/// acted on.
+///
+/// Takes the input itself rather than the event around it, because the two kinds
+/// of member reach it differently — a child's event is a JSON document this crate
+/// parsed, and an in-process one is a typed `ToolEvent` whose `input` is already
+/// in hand — and the summary must be the same either way.
+pub(crate) fn summarize(input: Option<&Value>) -> String {
+    match input {
         Some(Value::Object(fields)) => fields
             .values()
             .filter_map(Value::as_str)
@@ -504,6 +546,7 @@ fn settle(
     status: std::process::ExitStatus,
     report: Option<Value>,
     tail: &Arc<Mutex<String>>,
+    scratch: &Path,
 ) -> Outcome {
     // A signalled member never chose to stop, whatever it managed to publish
     // first — that is a death, and the disposition is what distinguishes it from
@@ -523,11 +566,36 @@ fn settle(
     if report.is_none() || !kind.settled(code) {
         return died(emitter, Rule::ProviderFailure, status, tail);
     }
-    let completed = code == 0;
-    let document = report.unwrap_or(Value::Null);
-    let bytes = serde_json::to_string(&document)
-        .map(|text| text.len())
-        .unwrap_or(0) as u64;
+    settle_report(emitter, &report.unwrap_or(Value::Null), code == 0, scratch)
+}
+
+/// The file a member's full report is stored as, which its `member-settled`
+/// artifact names.
+pub const REPORT_FILE: &str = "report.json";
+
+/// Publish one member's settle, whichever kind of member produced the report.
+///
+/// The two kinds reach this with the same document — a child's terminal `result`
+/// line, or onejudge's own `Report` serialized — so the payload a consumer reads
+/// does not depend on how the member was run.
+///
+/// The report is *stored* here, in the member's own scratch, and its path is on
+/// the payload. The contract has always called it "an artifact, referenced by id,
+/// fetched via that library's CLI", and until it was written down there was
+/// nothing behind the id to fetch: a `bytes` count of a document that had already
+/// been dropped.
+pub(crate) fn settle_report(
+    emitter: &Emitter,
+    document: &Value,
+    completed: bool,
+    scratch: &Path,
+) -> Outcome {
+    let rendered = serde_json::to_string(document).unwrap_or_default();
+    let path = scratch.join(REPORT_FILE);
+    // Best-effort: a member that settled is settled, and losing the stored copy
+    // of its report is not a reason to report it as anything else. The payload
+    // says where it went either way, which is what an operator needs to look.
+    let stored = std::fs::write(&path, &rendered).is_ok();
     emitter.emit_with(
         EventKind::TurnCompleted,
         payload([(
@@ -554,11 +622,19 @@ fn settle(
                     .cloned()
                     .unwrap_or(Value::Null),
             ),
+            (
+                "report_path",
+                if stored {
+                    Value::String(path.display().to_string())
+                } else {
+                    Value::Null
+                },
+            ),
         ]),
         vec![crate::event::Artifact {
             id: format!("report-{}", emitter.stream()),
             kind: "report".into(),
-            bytes,
+            bytes: rendered.len() as u64,
         }],
     );
     if completed {
@@ -588,13 +664,22 @@ fn fallback_advances(report: Option<&Value>) -> Vec<Map<String, Value>> {
         .map(|candidates| {
             candidates
                 .iter()
+                // Read into oneharness's **own** declaration of a fallen-through
+                // candidate rather than into two `get`s by field name, so the
+                // shape this crate expects is the shape oneharness publishes.
+                // Per candidate, not per chain: a document that fails to parse
+                // as a whole would take the readable candidates beside it down.
                 .filter_map(|candidate| {
-                    let identity = candidate.get("harness").and_then(Value::as_str)?;
-                    let reason = candidate.get("reason").and_then(Value::as_str)?;
-                    Some(payload([
-                        ("identity", Value::from(identity)),
-                        ("reason", Value::from(reason)),
-                    ]))
+                    serde_json::from_value::<oneharness_core::domain::report::FallThrough>(
+                        candidate.clone(),
+                    )
+                    .ok()
+                })
+                .map(|candidate| {
+                    payload([
+                        ("identity", Value::String(candidate.harness)),
+                        ("reason", Value::String(candidate.reason)),
+                    ])
                 })
                 .collect()
         })
@@ -608,16 +693,33 @@ fn died(
     status: std::process::ExitStatus,
     tail: &Arc<Mutex<String>>,
 ) -> Outcome {
-    let (stderr_tail, truncated) = bound_text(held(tail).trim());
-    let payload = MemberDied {
-        rule: rule.as_str().to_string(),
-        exit_code: status.code(),
-        disposition: disposition(status),
-        stderr_tail,
-        truncated,
-    };
+    let payload = process_died(rule, status.code(), disposition(status), &held(tail));
     emitter.emit(EventKind::MemberDied, died_payload(&payload));
     Outcome::Died(Death { rule, payload })
+}
+
+/// The death of a member that was a child process.
+///
+/// `cause` is that process's own disposition, because an exit status and a signal
+/// are what a process failure *is*: the classified provider kinds belong to a
+/// member whose engine returned a typed error, and inventing one from an exit
+/// code would be this crate guessing at a classification oneharness already owns.
+fn process_died(
+    rule: Rule,
+    exit_code: Option<i32>,
+    disposition: Disposition,
+    tail: &str,
+) -> MemberDied {
+    let (detail, truncated) = bound_text(tail.trim());
+    MemberDied {
+        rule: rule.as_str().to_string(),
+        cause: Cause::from(disposition),
+        detail: detail.clone(),
+        truncated,
+        exit_code,
+        disposition: Some(disposition),
+        stderr_tail: Some(detail),
+    }
 }
 
 /// Kill a member a watchdog condemned, then report it.
@@ -641,14 +743,12 @@ fn kill_and_report(
     let status = child.wait().ok();
     let _ = reader.join();
     let _ = stderr_reader.join();
-    let (stderr_tail, truncated) = bound_text(held(tail).trim());
-    let payload = MemberDied {
-        rule: rule.as_str().to_string(),
-        exit_code: status.and_then(|status| status.code()),
-        disposition: settled_first.map_or(Disposition::Signaled, disposition),
-        stderr_tail,
-        truncated,
-    };
+    let payload = process_died(
+        rule,
+        status.and_then(|status| status.code()),
+        settled_first.map_or(Disposition::Signaled, disposition),
+        &held(tail),
+    );
     emitter.emit(EventKind::MemberDied, died_payload(&payload));
     Outcome::Died(Death { rule, payload })
 }
@@ -663,7 +763,7 @@ fn disposition(status: std::process::ExitStatus) -> Disposition {
 }
 
 /// A `member-died` payload as the wire carries it.
-fn died_payload(died: &MemberDied) -> Map<String, Value> {
+pub(crate) fn died_payload(died: &MemberDied) -> Map<String, Value> {
     match serde_json::to_value(died) {
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
@@ -671,7 +771,7 @@ fn died_payload(died: &MemberDied) -> Map<String, Value> {
 }
 
 /// One payload, spelled as the field list it is.
-fn payload<const N: usize>(fields: [(&str, Value); N]) -> Map<String, Value> {
+pub(crate) fn payload<const N: usize>(fields: [(&str, Value); N]) -> Map<String, Value> {
     fields
         .into_iter()
         .map(|(key, value)| (key.to_string(), value))
@@ -731,9 +831,10 @@ mod tests {
     fn a_tool_event_summarizes_what_it_acted_on() {
         let event = serde_json::json!({"kind": "tool_call", "name": "bash",
                                        "input": {"command": "just check", "n": 3}});
-        assert_eq!(summarize(&event), "just check");
-        assert_eq!(summarize(&serde_json::json!({"input": "raw"})), "raw");
-        assert_eq!(summarize(&serde_json::json!({})), "");
+        assert_eq!(summarize(event.get("input")), "just check");
+        assert_eq!(summarize(Some(&serde_json::json!("raw"))), "raw");
+        assert_eq!(summarize(Some(&serde_json::json!(7))), "");
+        assert_eq!(summarize(None), "");
     }
 
     /// A published line this crate cannot model is skipped rather than crashing
@@ -778,18 +879,19 @@ mod tests {
         assert!(held(&report).is_some());
     }
 
-    /// A `member-died` payload reaches the wire as the four sibling fields the
-    /// contract names, with the truncation flag omitted when nothing was cut.
+    /// A child member's death reaches the wire as every field the contract names
+    /// for one, with the truncation flag omitted when nothing was cut.
     #[test]
-    fn a_death_reaches_the_wire_as_its_four_documented_fields() {
-        let payload = died_payload(&MemberDied {
-            rule: "activity".into(),
-            exit_code: Some(1),
-            disposition: Disposition::Exited,
-            stderr_tail: "harness failed (quota)".into(),
-            truncated: false,
-        });
+    fn a_child_member_s_death_reaches_the_wire_as_its_documented_fields() {
+        let payload = died_payload(&process_died(
+            Rule::Activity,
+            Some(1),
+            Disposition::Exited,
+            "  harness failed (quota)\n",
+        ));
         assert_eq!(payload["rule"], Value::from("activity"));
+        assert_eq!(payload["cause"], Value::from("exited"));
+        assert_eq!(payload["detail"], Value::from("harness failed (quota)"));
         assert_eq!(payload["exit_code"], Value::from(1));
         assert_eq!(payload["disposition"], Value::from("exited"));
         assert_eq!(
@@ -797,6 +899,32 @@ mod tests {
             Value::from("harness failed (quota)")
         );
         assert!(!payload.contains_key("truncated"));
+
+        // A signalled one classifies as that, so a consumer branches on `cause`
+        // whichever kind of member produced the death.
+        let signalled = died_payload(&process_died(
+            Rule::Signalled,
+            None,
+            Disposition::Signaled,
+            "",
+        ));
+        assert_eq!(signalled["cause"], Value::from("signaled"));
+        assert!(!signalled.contains_key("exit_code"));
+    }
+
+    /// A member that never started has none of a process's three facts — there
+    /// was no process — and says so as `spawn`, with the reason as its detail.
+    #[test]
+    fn a_member_that_never_started_carries_a_typed_cause_and_no_process_facts() {
+        let payload = died_payload(&unstartable("cannot start oneharness: No such file"));
+        assert_eq!(payload["rule"], Value::from("unstartable"));
+        assert_eq!(payload["cause"], Value::from("spawn"));
+        assert!(payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("No such file")));
+        for absent in ["exit_code", "disposition", "stderr_tail"] {
+            assert!(!payload.contains_key(absent), "{absent}: {payload:?}");
+        }
     }
 
     /// Only oneharness's own classification becomes a `fallback-advanced`; a

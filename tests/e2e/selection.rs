@@ -329,3 +329,104 @@ fn make_executable(path: &std::path::Path) {
     #[cfg(not(unix))]
     let _ = path;
 }
+
+/// A **two-party** member reports the candidates each side stepped past, with
+/// the side and the turn it happened on.
+///
+/// This is what the library conversion made reportable at all. onejudge's report
+/// carries no fallback chain of its own, so while that hop was a subprocess a
+/// two-party member published no `fallback-advanced` whatever its chains did —
+/// an operator had to go and read a harness's history to learn which
+/// subscription had refused. In-process, the per-invocation telemetry answers,
+/// and it answers per side, which is the distinction that matters when only one
+/// of the two is out of quota.
+#[cfg(unix)]
+#[test]
+fn a_two_party_member_reports_which_side_stepped_past_which_identity() {
+    let workspace = Workspace::new();
+    // Both sides run the same two-identity chain, so both have somewhere to fall
+    // to — and the identity they land on is `claude-code`, because that is the
+    // shape the doubled harness speaks. A conversation is parsed on both sides,
+    // so a journey that landed either of them on a harness whose output the
+    // double does not produce would be testing the double, not the chain.
+    const REFUSING_FIRST: &str =
+        "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n";
+    workspace.write("oneharness.toml", REFUSING_FIRST);
+    workspace.write("oneharness.judge.toml", REFUSING_FIRST);
+    let refusing = workspace.write(
+        "refusing.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=quota exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&refusing);
+    workspace.graph(&format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n",
+            "  ONEHARNESS_BIN_CODEX: {refusing}\n",
+            "  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        refusing = refusing.display(),
+        fake = fake_harness(),
+    ));
+    let run = workspace.run_task("fake:complete-now: both sides fall through");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert!(
+        !advanced.is_empty(),
+        "a two-party member reported no step past: {:?}",
+        run.kinds()
+    );
+    for event in &advanced {
+        assert_eq!(event["payload"]["identity"], serde_json::json!("codex"));
+        assert_eq!(event["payload"]["reason"], serde_json::json!("quota"));
+        let role = event["payload"]["role"].as_str().unwrap_or_default();
+        assert!(["agent", "judge"].contains(&role), "{event}");
+        assert!(
+            event["payload"]["turn"].as_u64().unwrap_or(0) >= 1,
+            "a step past that names no turn: {event}"
+        );
+    }
+    // Both sides of the conversation ran the refusing identity first, so both
+    // are attributed — the whole point of carrying the side.
+    let roles: std::collections::BTreeSet<&str> = advanced
+        .iter()
+        .filter_map(|event| event["payload"]["role"].as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        ["agent", "judge"].into_iter().collect(),
+        "only one side's chain was attributed: {advanced:?}"
+    );
+
+    // And the member still settled on the identity that could run, with its full
+    // report stored where the settle says it is — the artifact the contract
+    // promises, now with something behind the id to fetch.
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    let path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!path.is_empty(), "the settle named no stored report");
+    let stored: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the stored report"))
+            .expect("the stored report is JSON");
+    assert_eq!(
+        stored["verdicts"], settled[0]["payload"]["verdict"],
+        "the inline verdict and the stored report disagree"
+    );
+    assert_eq!(
+        settled[0]["artifacts"][0]["bytes"].as_u64().unwrap_or(0),
+        std::fs::metadata(&path).expect("the stored report").len(),
+        "the artifact's size is not the size of what was stored"
+    );
+}

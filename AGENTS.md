@@ -7,16 +7,23 @@ Terse on purpose: this file is always-loaded context.
 
 ## What this is
 
-`oneagentgraph` composes agents into a **graph**, constructs onejudge/oneharness
-invocations for each member, and merges their outputs into **one NDJSON event
-stream**. It is the reusable multi-agent layer extracted from `ai-orchestrator`:
-one config file and one CLI call, usable outside that repo's opinionated
-workflow.
+`oneagentgraph` composes agents into a **graph**, prepares each member's launch,
+and merges their outputs into **one NDJSON event stream**. It is the reusable
+multi-agent layer extracted from `ai-orchestrator`: one config file and one CLI
+call, usable outside that repo's opinionated workflow.
 
 It owns **no** harness/model/fallback logic. The graph YAML names an oneharness
 config file per role/side; oneharness keeps owning identity chains, fallback,
 model pins, and quota classification, and onejudge keeps owning the two-party
 conversation. Do not grow harness selection here.
+
+**onejudge is a library dependency, not a CLI.** A two-party member is driven
+in-process, on a thread of this process, through onejudge's own config, plan, and
+streamed run driver. `oneharness run` is still a child process — its library
+surface prints its report to the process's stdout and returns only an exit code,
+and this process's stdout is the merged stream — and so are the agent harness and
+a `judge: {command: [...]}` provider. `docs/contract.md` records that split and
+what would have to change upstream to collapse it further.
 
 Ships as a Rust library plus the `oneagentgraph` binary, distributed on
 crates.io, PyPI (`oneagentgraph-cli`), and npm (`oneagentgraph-cli`).
@@ -44,6 +51,12 @@ one NDJSON stream.
   YAML/JSON/TOML config)
 - **References composed:** base.md, shapes/cli.md, languages/rust.md,
   intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, monorepo.md
+- **Cross-repo dependencies:** `oneharness-core` is a published version.
+  `onejudge` is a **git rev** — a temporary bridge, because `run_plan_streaming`
+  landed after 0.3.4 and nothing newer is released; without it a member's events
+  arrive only when a turn ends, which starves the activity watchdog. A git
+  dependency also blocks `cargo publish`, so **a onejudge release is a release
+  blocker for this crate**. Move it to a version the moment one ships.
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so
@@ -77,7 +90,8 @@ consuming `project.json` — an undeclared one silently drops that project out o
   `#[ignore]`.
 - **One seam may be faked, and only one:** the paid harness process, at
   oneharness's own `ONEHARNESS_BIN_<ID>` binary override. Everything else in a
-  journey — this binary, `onejudge`, `oneharness` — is a real subprocess.
+  journey is real — this binary and `oneharness` as subprocesses, and the real
+  onejudge engine linked into the binary under test.
 - **Validate external input at its trust boundary.** Graph configs and event
   envelopes are external input: the schema structs reject unknown fields, so a
   typo fails loudly instead of being silently dropped.

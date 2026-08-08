@@ -298,17 +298,26 @@ fn spent_nothing(report: &Value) -> bool {
     };
     !results.is_empty()
         && results.iter().all(|result| {
-            result.get("failure_kind").is_none_or(Value::is_null)
-                && result
-                    .get("usage")
-                    .and_then(Value::as_object)
-                    .is_none_or(|usage| {
-                        // Tokens and cost alike: any positive number is work
-                        // somebody is billed for.
-                        usage
-                            .values()
-                            .all(|value| value.as_f64().unwrap_or(0.0) <= 0.0)
-                    })
+            // Any classification at all stops a relaunch: oneharness naming a
+            // failure kind means it knows something this module does not.
+            let unclassified = result.get("failure_kind").is_none_or(Value::is_null);
+            // The accounting is read into oneharness's **own** `Usage`, and
+            // judged by oneharness's **own** predicate for whether a provider
+            // billed real work — the same one its quota classifier and its
+            // fallback chain share. Restating that rule here is how this module
+            // would come to disagree with the chain it is judging, on the one
+            // decision that can pay for the same question twice.
+            //
+            // Absent accounting is not proof of anything, and neither is
+            // accounting this build cannot read: both count as spent.
+            let free = match result.get("usage") {
+                None | Some(Value::Null) => false,
+                Some(usage) => {
+                    serde_json::from_value::<oneharness_core::domain::signals::Usage>(usage.clone())
+                        .is_ok_and(|usage| !usage.reports_billed_work())
+                }
+            };
+            unclassified && free
         })
 }
 

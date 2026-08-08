@@ -1,6 +1,6 @@
-//! `oneagentgraph` composes agents into a graph, constructs onejudge/oneharness
-//! invocations for each member, and merges their outputs into one NDJSON event
-//! stream.
+//! `oneagentgraph` composes agents into a graph, drives onejudge in-process for
+//! each two-party member and `oneharness run` for each single-sided one, and
+//! merges their outputs into one NDJSON event stream.
 //!
 //! Every public item below is the surface named by
 //! [`docs/contract.md`](../../../docs/contract.md) — the approved contract,
@@ -11,8 +11,8 @@
 //! oneharness config per role and side; oneharness owns identity chains,
 //! fallback, model pins, and quota classification, and onejudge owns the
 //! two-party conversation. What lives here is the composition: resolving a
-//! graph, constructing each member's invocation, supervising it, and merging
-//! every member's output into one NDJSON event stream.
+//! graph, preparing each member's launch, supervising it, and merging every
+//! member's output into one NDJSON event stream.
 
 #![warn(missing_docs)]
 
@@ -25,6 +25,7 @@ pub mod event;
 pub mod health;
 pub mod history;
 pub mod invoke;
+pub mod judge;
 pub mod liveness;
 pub mod member;
 pub mod persona;

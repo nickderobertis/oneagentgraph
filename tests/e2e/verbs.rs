@@ -1003,7 +1003,6 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
                 ])
                 .current_dir(&dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -1147,7 +1146,6 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
                 ])
                 .current_dir(&dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -1372,7 +1370,6 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
                 ])
                 .current_dir(&dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -1428,10 +1425,7 @@ fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
     let id = run_id(&workspace.state()).expect("a run");
 
     let absent = workspace.at("no-such-binary").display().to_string();
-    let without = [
-        ("ONEAGENTGRAPH_ONEJUDGE_BIN", absent.as_str()),
-        ("ONEAGENTGRAPH_ONEHARNESS_BIN", absent.as_str()),
-    ];
+    let without = [("ONEAGENTGRAPH_ONEHARNESS_BIN", absent.as_str())];
     for args in [
         vec!["validate", "./graph.yaml"],
         vec!["history"],

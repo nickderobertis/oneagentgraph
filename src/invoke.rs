@@ -1,27 +1,42 @@
-//! Constructing one member's invocation.
+//! Preparing one member for launch.
 //!
-//! This is the whole of what `docs/contract.md` means by "constructs
-//! onejudge/oneharness invocations": a member's refs are resolved, its persona is
-//! merged onto its base, each side's oneharness config is written into the run's
-//! own directory, and the argv is assembled. Nothing here selects a harness, a
-//! model chain, or a fallback order — those live in the oneharness config files
-//! a graph names, and this module only ever *carries* them.
+//! This is the whole of what `docs/contract.md` means by "prepares each member's
+//! launch": a member's refs are resolved, its persona is merged onto its base,
+//! each side's oneharness config is written into the run's own directory, and
+//! what actually starts the member is assembled — a onejudge plan this
+//! process drives itself for a two-party member, an argv for the single-sided
+//! one. Nothing here selects a harness, a model chain, or a fallback order —
+//! those live in the oneharness config files a graph names, and this module only
+//! ever *carries* them.
 //!
-//! # How each side is pinned without a wrapper
+//! # How each side is pinned, in a process shared with every other member
 //!
 //! onejudge routes both conversation sides through one `provider.bin`. The judge
 //! side is given `oneharness run --config <judge_config>`; the agent side is
 //! given none, and relies on oneharness discovering `oneharness.toml` upward from
-//! its own working directory. So the agent side is pinned by *placing* its
-//! resolved config at `<member scratch>/oneharness.toml` and running `onejudge`
-//! from there. The harness itself still works in the graph's `--dir`, because
-//! onejudge passes that through as `oneharness run --cwd`.
+//! **the directory the harness will run in** — `oneharness run --cwd`, which
+//! onejudge takes from the conversation's own worktree. So the agent side is
+//! pinned by *placing* its resolved config at `<member scratch>/oneharness.toml`
+//! and naming that same directory as the worktree.
 //!
-//! That is why a `model` override is stamped **into the resolved config** rather
-//! than exported as `ONEHARNESS_MODEL`: a config's per-harness `model` beats that
-//! variable, so exporting it would be a setting that silently loses. Stamping the
-//! per-harness sections is also exactly what the contract's pairing rule makes
-//! safe — a chain of one harness family has one set of sections to stamp.
+//! Naming it, rather than changing directory into it: a process has one working
+//! directory and this one runs every member of the graph at once, so a member
+//! that pinned its side by `cd`-ing would pin its siblings too. Everything
+//! per-member is therefore carried *in the files this module writes*, never in
+//! process-wide state — which is also why the two settings below are stamped into
+//! a side's resolved config rather than exported:
+//!
+//! * A `model` override, because a config's per-harness `model` beats
+//!   `ONEHARNESS_MODEL`, so exporting it would be a setting that silently loses.
+//!   Stamping the per-harness sections is what the contract's pairing rule makes
+//!   safe — a chain of one harness family has one set of sections to stamp.
+//! * The member's `mode` and its [`crate::scratch::SCRATCH_ENV`] ownership stamp,
+//!   because both are *per-member* values that would otherwise have to be
+//!   exported from a process shared with every other member. oneharness's config
+//!   carries both — `mode` at the top level, and `[env]` as the environment every
+//!   harness process it starts is given — so the stamp reaches the harness the
+//!   same way it always did: fixed at `exec`, on a process no walk from this one
+//!   would find once its parent is gone.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -49,9 +64,14 @@ pub const ONEJUDGE_CONFIG_FILE: &str = "onejudge.yaml";
 /// onejudge's own config schema has no approval mode — it rejects the key
 /// outright — because the mode is a harness posture, and oneharness is what maps
 /// it to each harness's native mechanism. oneharness reads it from this variable,
-/// which beats both sides' config files, so one graph-level `mode` reaches the
-/// agent side and the judge side alike without either resolved config being
-/// rewritten behind its author's back.
+/// which beats both sides' config files, so one member's `mode` reaches the agent
+/// side and the judge side alike.
+///
+/// It is exported only for a **single-sided** member, which is still a child
+/// process of its own and so has an environment of its own. A two-party member is
+/// driven in this process, shared with every other member, so its `mode` is
+/// stamped into each side's resolved config instead — see this module's own
+/// documentation.
 pub const MODE_ENV: &str = "ONEHARNESS_MODE";
 
 /// oneharness's process-wide identity selection — the one variable that *beats*
@@ -70,23 +90,62 @@ pub const MODE_ENV: &str = "ONEHARNESS_MODE";
 /// applied afterwards and wins.
 pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
 
-/// One member's invocation, ready to spawn.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// How one member is started.
+///
+/// The contract's two member kinds are two different things to start, and this is
+/// the one place that difference lives. A `kind: onejudge` member is a onejudge
+/// run driven **through onejudge's library, in this process** — there is no
+/// `onejudge` binary in the chain, and so no argv, no exit status, and no stderr
+/// for it. A `kind: oneharness` member is still `oneharness run`, a child process
+/// of its own, because oneharness's library surface writes its report to the
+/// *process's* stdout and returns an exit code: an in-process call could neither
+/// take the report back nor be given an event sink, and this process's stdout is
+/// the merged stream. See `docs/contract.md`.
+#[derive(Debug, Clone)]
+pub enum Launch {
+    /// onejudge's own run driver, over the config written into the member's
+    /// scratch, driven in this process.
+    Library(Box<JudgeLaunch>),
+    /// A child process: the program and its arguments.
+    Process {
+        /// The program to run.
+        program: String,
+        /// Its arguments.
+        args: Vec<String>,
+    },
+}
+
+/// Everything driving one two-party member in this process needs.
+#[derive(Debug, Clone)]
+pub struct JudgeLaunch {
+    /// The effective onejudge config written into the member's scratch. Kept as
+    /// a path rather than a parsed plan because it is also the run's evidence:
+    /// an operator reads this file to see exactly what the member ran.
+    pub config: PathBuf,
+    /// The task prose this member drives to completion.
+    pub task: String,
+    /// The directory the harness works in, named to oneharness rather than
+    /// entered — see this module's own documentation.
+    pub worktree: PathBuf,
+}
+
+/// One member, ready to start.
+#[derive(Debug, Clone)]
 pub struct Invocation {
-    /// Which program this is, because the two read their exit codes differently.
+    /// Which program's contract this member settles under, because the two read
+    /// their outcomes differently.
     pub kind: crate::member::Kind,
-    /// The program to run.
-    pub program: String,
-    /// Its arguments.
-    pub args: Vec<String>,
-    /// The directory to run it from. For a `kind: onejudge` member this is the
-    /// member's own scratch directory, because that is what pins the agent side's
-    /// oneharness config; the harness still works in the graph's `--dir`.
+    /// What starting it means.
+    pub launch: Launch,
+    /// The directory the member is anchored to. For a `kind: onejudge` member
+    /// this is its own scratch directory, because that is what pins the agent
+    /// side's oneharness config.
     pub cwd: PathBuf,
     /// The persona label to stamp on this member's events, when it has one.
     pub persona: Option<String>,
-    /// What this member's invocation adds to the process environment, over and
-    /// above the graph's own `env` block.
+    /// What this member adds to the process environment of a child it starts,
+    /// over and above the graph's own `env` block. Empty for a member with no
+    /// child process of its own.
     pub env: Vec<(String, String)>,
     /// Every config ref this member read, content-addressed for the run record.
     pub refs: Vec<ResolvedRef>,
@@ -105,8 +164,6 @@ pub struct Context<'a> {
     pub task: Option<&'a str>,
     /// The session name threaded across this member's turns.
     pub session: &'a str,
-    /// The `onejudge` binary to run.
-    pub onejudge_bin: &'a str,
     /// The `oneharness` binary onejudge shells out to, and that a single-sided
     /// member runs directly.
     pub oneharness_bin: &'a str,
@@ -130,7 +187,7 @@ pub fn build(
             let (config, persona_label) = harness_side(
                 &member.oneharness_config,
                 member.persona.as_ref(),
-                None,
+                Side::default(),
                 context,
                 resolver,
             )?;
@@ -150,8 +207,10 @@ pub fn build(
             args.retain(|arg| !arg.is_empty());
             Ok(Invocation {
                 kind: crate::member::Kind::Oneharness,
-                program: context.oneharness_bin.to_string(),
-                args,
+                launch: Launch::Process {
+                    program: context.oneharness_bin.to_string(),
+                    args,
+                },
                 cwd: context.scratch.to_path_buf(),
                 persona: persona_label,
                 env: Vec::new(),
@@ -181,17 +240,28 @@ fn onejudge(
         )));
     }
 
+    let side = Side {
+        model: member.agent.model.as_deref(),
+        mode: Some(member.mode.as_str()),
+        scratch: Some(context.scratch),
+    };
     let (agent_config, _) = harness_side(
         &member.agent.oneharness_config,
         None,
-        member.agent.model.as_deref(),
+        side,
         context,
         resolver,
     )?;
     let agent_path = context.scratch.join(AGENT_CONFIG_FILE);
     write(&agent_path, &agent_config)?;
 
-    let provider = provider_block(&member.judge, &member.agent, context, resolver)?;
+    let provider = provider_block(
+        &member.judge,
+        &member.agent,
+        Some(member.mode.as_str()),
+        context,
+        resolver,
+    )?;
     let map = effective.as_object_mut().expect("merge returns a mapping");
     map.insert("provider".into(), provider);
     map.insert("session".into(), Value::String(context.session.to_string()));
@@ -216,19 +286,20 @@ fn onejudge(
 
     Ok(Invocation {
         kind: crate::member::Kind::Onejudge,
-        program: context.onejudge_bin.to_string(),
-        args: vec![
-            "run".to_string(),
-            config_path.display().to_string(),
-            "--format".to_string(),
-            "json".to_string(),
-            "--stream".to_string(),
-            "--task".to_string(),
-            prose,
-        ],
+        launch: Launch::Library(Box::new(JudgeLaunch {
+            config: config_path,
+            task: prose,
+            // The member's own scratch, because that is where its `oneharness.toml`
+            // was placed and oneharness discovers a project config upward from the
+            // directory the harness will run in.
+            worktree: context.scratch.to_path_buf(),
+        })),
         cwd: context.scratch.to_path_buf(),
         persona: label,
-        env: vec![(MODE_ENV.to_string(), member.mode.clone())],
+        // Nothing: this member starts no child process of its own, so it has no
+        // environment to add to. Its `mode` and its ownership stamp are in the
+        // resolved configs written above.
+        env: Vec::new(),
         refs: resolver.inventory(),
     })
 }
@@ -241,6 +312,7 @@ fn onejudge(
 fn provider_block(
     judge: &JudgeSide,
     agent: &AgentSide,
+    mode: Option<&str>,
     context: &Context<'_>,
     resolver: &mut Resolver,
 ) -> Result<Value, Error> {
@@ -249,7 +321,11 @@ fn provider_block(
             let (config, _) = harness_side(
                 &harness.oneharness_config,
                 None,
-                harness.model.as_deref(),
+                Side {
+                    model: harness.model.as_deref(),
+                    mode,
+                    scratch: Some(context.scratch),
+                },
                 context,
                 resolver,
             )?;
@@ -281,13 +357,31 @@ fn provider_block(
     }
 }
 
-/// Resolve one side's oneharness config, stamping a model override into it.
+/// What one conversation side's resolved config carries beyond what its author
+/// wrote.
+///
+/// Every field is a value that is *this member's*, not the config file's, and
+/// that therefore cannot be exported: the process this crate now drives onejudge
+/// in is shared with every other member of the graph.
+#[derive(Debug, Clone, Copy, Default)]
+struct Side<'a> {
+    /// A `model` override to pair with the config's chain.
+    model: Option<&'a str>,
+    /// The member's approval mode.
+    mode: Option<&'a str>,
+    /// The member's scratch directory, stamped as the ownership evidence every
+    /// harness process this side starts carries.
+    scratch: Option<&'a Path>,
+}
+
+/// Resolve one side's oneharness config, stamping this member's own values into
+/// it.
 ///
 /// Returns the config text and, when a persona was named, its label.
 fn harness_side(
     config: &ConfigRef,
     persona_ref: Option<&ConfigRef>,
-    model: Option<&str>,
+    side: Side<'_>,
     context: &Context<'_>,
     resolver: &mut Resolver,
 ) -> Result<(String, Option<String>), Error> {
@@ -296,10 +390,48 @@ fn harness_side(
         Some(_) => load_persona(persona_ref, context, resolver)?.1,
         None => None,
     };
-    let Some(model) = model else {
-        return Ok((text, label));
+    Ok((stamp_side(&text, &config.0, side)?, label))
+}
+
+/// Stamp one side's own values into its resolved config.
+///
+/// The rest of the operator's file — comments included — stays byte-identical,
+/// and a side with nothing to stamp is returned untouched.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when the config is not TOML, or when a `model` breaks
+/// the pairing rule — see [`stamp_model`].
+fn stamp_side(config: &str, origin: &str, side: Side<'_>) -> Result<String, Error> {
+    let stamped = match side.model {
+        Some(model) => stamp_model(config, origin, model)?,
+        None => config.to_string(),
     };
-    Ok((stamp_model(&text, &config.0, model)?, label))
+    if side.mode.is_none() && side.scratch.is_none() {
+        return Ok(stamped);
+    }
+    let mut document: DocumentMut = stamped
+        .parse()
+        .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
+    if let Some(mode) = side.mode {
+        document["mode"] = toml_edit::value(mode);
+    }
+    if let Some(scratch) = side.scratch {
+        // oneharness's `[env]` is the environment it gives every harness process
+        // it starts, which is where this stamp has to land: the kernel fixes an
+        // environment at `exec`, so it is evidence a descendant cannot shed and
+        // one that still answers for its member after its parent is gone.
+        let env = document
+            .entry("env")
+            .or_insert(Item::Table(toml_edit::Table::new()));
+        let table = env.as_table_mut().ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "{origin}: `env` must be a table of environment values"
+            ))
+        })?;
+        table[crate::scratch::SCRATCH_ENV] = toml_edit::value(scratch.display().to_string());
+    }
+    Ok(document.to_string())
 }
 
 /// Load a member's persona, from the shipped catalog or a ref.
@@ -533,7 +665,6 @@ mod tests {
             graph_dir: Some(dir),
             task: Some("do the thing"),
             session: "s",
-            onejudge_bin: "onejudge",
             oneharness_bin: "oneharness",
         }
     }
@@ -557,17 +688,44 @@ mod tests {
         )
         .expect("built");
         assert_eq!(invocation.kind, crate::member::Kind::Onejudge);
-        assert_eq!(
-            invocation.env,
-            vec![(MODE_ENV.to_string(), "bypass".to_string())]
-        );
+        // Nothing exported: this member is driven in a process it shares with
+        // every other one, so its own values are in its own files.
+        assert!(invocation.env.is_empty(), "{:?}", invocation.env);
         let effective =
             std::fs::read_to_string(scratch.join(ONEJUDGE_CONFIG_FILE)).expect("config");
         assert!(effective.contains("max_turns: 9"), "{effective}");
         assert!(effective.contains("system_prompt"), "{effective}");
+        // Both sides carry the member's mode and its ownership stamp, which is
+        // what replaces exporting them.
+        for side in [AGENT_CONFIG_FILE, JUDGE_CONFIG_FILE] {
+            let config = std::fs::read_to_string(scratch.join(side)).expect(side);
+            assert!(config.contains("mode = \"bypass\""), "{side}: {config}");
+            assert!(
+                config.contains(&format!(
+                    "{} = \"{}\"",
+                    crate::scratch::SCRATCH_ENV,
+                    scratch.display()
+                )),
+                "{side}: {config}"
+            );
+            // And the operator's own file is otherwise untouched.
+            assert!(
+                config.starts_with("# an operator's own comment\n"),
+                "{config}"
+            );
+        }
         // The member's own task beats the run's, because a member that carries
         // one is asking for that task rather than the graph's.
-        assert!(invocation.args.contains(&"do the thing".to_string()));
+        assert_eq!(judge_launch(&invocation).task, "do the thing");
+        assert_eq!(judge_launch(&invocation).worktree, scratch);
+    }
+
+    /// The two-party launch of `invocation`, or a panic naming what it was.
+    fn judge_launch(invocation: &Invocation) -> &JudgeLaunch {
+        match &invocation.launch {
+            Launch::Library(launch) => launch,
+            other => panic!("expected a library launch, got {other:?}"),
+        }
     }
 
     /// A member with its own `task` uses it, and one with a persona file takes
@@ -594,7 +752,7 @@ mod tests {
             &mut Resolver::new(),
         )
         .expect("built");
-        assert!(invocation.args.contains(&"its own task".to_string()));
+        assert_eq!(judge_launch(&invocation).task, "its own task");
         assert_eq!(invocation.persona.as_deref(), Some("lead"));
     }
 
@@ -637,6 +795,7 @@ mod tests {
         let block = provider_block(
             &judge,
             &agent,
+            Some("bypass"),
             &context(dir.path(), &scratch),
             &mut Resolver::new(),
         )
@@ -654,11 +813,49 @@ mod tests {
         let err = provider_block(
             &empty,
             &agent,
+            Some("bypass"),
             &context(dir.path(), &scratch),
             &mut Resolver::new(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("needs a command to run"), "{err}");
+    }
+
+    /// A side with nothing of its own to carry is handed back untouched, and one
+    /// whose config cannot hold the stamp says which key is wrong.
+    ///
+    /// The second half is what makes the refusal *pre-launch*: a member whose
+    /// `mode` or ownership stamp could not be written would otherwise run with
+    /// neither, and the run would only find out when a cancel reached nothing.
+    #[test]
+    fn a_side_with_nothing_to_carry_is_untouched_and_one_that_cannot_hold_it_says_so() {
+        assert_eq!(
+            stamp_side(ONE_FAMILY, "oneharness.toml", Side::default()).expect("untouched"),
+            ONE_FAMILY,
+            "a side with nothing to stamp must not be rewritten at all"
+        );
+
+        let err = stamp_side(
+            "harnesses = [\"codex\"]\nenv = 3\n",
+            "c.toml",
+            Side {
+                scratch: Some(Path::new("/state/run/members/worker")),
+                ..Side::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("`env` must be a table"), "{err}");
+
+        let err = stamp_side(
+            "not = toml = here\n",
+            "c.toml",
+            Side {
+                mode: Some("bypass"),
+                ..Side::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid TOML"), "{err}");
     }
 
     /// A config whose `harness` key is not a table of sections cannot take a

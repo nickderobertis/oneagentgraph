@@ -10,9 +10,9 @@
 
 // llmlint: ignore-file[invalid_states_unrepresentable] two of the shapes below are fixed
 // by `docs/contract.md` rather than chosen: `v` is the wire integer a consumer reads
-// before it knows whether it can decode the rest, and `member-died` is specified as four
-// sibling fields (`rule`, `exit_code`, `disposition`, `stderr_tail`), so folding the exit
-// code into an `exited` variant would change what this stack emits.
+// before it knows whether it can decode the rest, and `member-died` is specified as
+// sibling fields (`rule`, `cause`, `detail`, and the three a child process adds), so
+// folding the exit code into an `exited` variant would change what this stack emits.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -199,25 +199,70 @@ pub struct FallbackAdvanced {
     pub identity: String,
     /// oneharness's classification of why it could not run.
     pub reason: String,
+    /// Which side of a two-party conversation the chain belonged to. Absent for
+    /// a single-sided member, which has one side and so nothing to distinguish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+    /// The turn the chain advanced on, for the same reason: a two-party member
+    /// runs one chain per side per turn, and an operator restoring a
+    /// subscription needs to know which of them refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn: Option<u64>,
+}
+
+/// Which side of a two-party conversation an event came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// The side that does the work.
+    Agent,
+    /// The side that supervises it.
+    Judge,
+}
+
+impl From<onejudge::TelemetryRole> for Role {
+    fn from(role: onejudge::TelemetryRole) -> Self {
+        match role {
+            onejudge::TelemetryRole::Agent => Role::Agent,
+            onejudge::TelemetryRole::Judge => Role::Judge,
+        }
+    }
 }
 
 /// The payload of an [`EventKind::MemberDied`] event.
+///
+/// The first three fields answer for every member. The last three are a *child
+/// process's* facts, and a two-party member no longer has them: `docs/contract.md`
+/// runs onejudge through its library, in this process, so there is no exit status
+/// to read and no stderr to tail. What that member has instead is a typed error,
+/// which is what [`cause`](Self::cause) and [`detail`](Self::detail) carry — for
+/// both kinds, so a consumer branches on one field rather than on which shape
+/// arrived.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MemberDied {
     /// The liveness rule that fired.
     pub rule: String,
-    /// The process's exit code, when it exited rather than being signalled.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    /// How the process ended.
-    pub disposition: Disposition,
-    /// The tail of the process's standard error, bounded by
-    /// [`MAX_PAYLOAD_TEXT_BYTES`].
-    pub stderr_tail: String,
-    /// Whether a text field above was cut to its documented bound.
+    /// What killed the member, classified.
+    pub cause: Cause,
+    /// What that cause said, bounded by [`MAX_PAYLOAD_TEXT_BYTES`]: the engine's
+    /// own error for an in-process member, the tail of standard error for a child
+    /// process.
+    pub detail: String,
+    /// Whether [`detail`](Self::detail) was cut to its documented bound.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
+    /// The process's exit code, when the member *was* a process and it exited
+    /// rather than being signalled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// How the process ended; absent for a member this process ran in-library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disposition: Option<Disposition>,
+    /// The tail of the process's standard error; absent for a member this process
+    /// ran in-library, which has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stderr_tail: Option<String>,
 }
 
 /// How a member's process ended.
@@ -228,6 +273,98 @@ pub enum Disposition {
     Exited,
     /// The process was terminated by a signal.
     Signaled,
+}
+
+/// The classified cause of a [`MemberDied`].
+///
+/// A closed set, for the same reason [`crate::member::Rule`] is one: this is what
+/// a supervisor branches on, and a cause spelled two ways is a branch that
+/// silently stops matching. The ten classified kinds are onejudge's own
+/// `ProviderErrorKind` — which is in turn oneharness's normalized `failure_kind` —
+/// mapped **totally**, so a category added upstream is a compile error here rather
+/// than a new bare string on the wire. The last three are the causes that exist
+/// only outside that taxonomy: a child process's two dispositions, and an engine
+/// failure that named no kind at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Cause {
+    /// Credentials were missing or rejected.
+    Auth,
+    /// The provider rate-limited the call.
+    RateLimit,
+    /// The harness did not recognize the requested model.
+    ModelNotFound,
+    /// The account's quota or billing limit is exhausted.
+    Quota,
+    /// A transient server-side overload.
+    Overloaded,
+    /// The call exceeded its deadline.
+    Timeout,
+    /// The turn was torn down because it was cancelled.
+    Cancelled,
+    /// The provider process could not be started.
+    Spawn,
+    /// The provider ran but violated its protocol.
+    Protocol,
+    /// A classified failure with no more specific category.
+    Other,
+    /// The member's own process exited with a status of its own.
+    Exited,
+    /// The member's own process was terminated by a signal.
+    Signaled,
+    /// The member failed without any classification at all.
+    Unclassified,
+}
+
+impl Cause {
+    /// This cause's spelling on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Cause::Auth => "auth",
+            Cause::RateLimit => "rate_limit",
+            Cause::ModelNotFound => "model_not_found",
+            Cause::Quota => "quota",
+            Cause::Overloaded => "overloaded",
+            Cause::Timeout => "timeout",
+            Cause::Cancelled => "cancelled",
+            Cause::Spawn => "spawn",
+            Cause::Protocol => "protocol",
+            Cause::Other => "other",
+            Cause::Exited => "exited",
+            Cause::Signaled => "signaled",
+            Cause::Unclassified => "unclassified",
+        }
+    }
+}
+
+impl From<Disposition> for Cause {
+    fn from(disposition: Disposition) -> Self {
+        match disposition {
+            Disposition::Exited => Cause::Exited,
+            Disposition::Signaled => Cause::Signaled,
+        }
+    }
+}
+
+impl From<onejudge::ProviderErrorKind> for Cause {
+    /// Total, so a category onejudge adds later fails this build instead of
+    /// reaching the wire as an unhandled string.
+    fn from(kind: onejudge::ProviderErrorKind) -> Self {
+        use onejudge::ProviderErrorKind as Kind;
+        match kind {
+            Kind::Auth => Cause::Auth,
+            Kind::RateLimit => Cause::RateLimit,
+            Kind::ModelNotFound => Cause::ModelNotFound,
+            Kind::Quota => Cause::Quota,
+            Kind::Overloaded => Cause::Overloaded,
+            Kind::Timeout => Cause::Timeout,
+            Kind::Cancelled => Cause::Cancelled,
+            Kind::Spawn => Cause::Spawn,
+            Kind::Protocol => Cause::Protocol,
+            Kind::Other => Cause::Other,
+        }
+    }
 }
 
 /// `skip_serializing_if` helper: an unset truncation flag is omitted rather than
@@ -498,6 +635,37 @@ mod tests {
         let (detail, cut) = bound_detail(&"é".repeat(MAX_ACTIVITY_DETAIL_CHARS + 10));
         assert!(cut);
         assert_eq!(detail.chars().count(), MAX_ACTIVITY_DETAIL_CHARS);
+    }
+
+    /// Every kind onejudge classifies a provider failure as has a cause of its
+    /// own here, and each keeps onejudge's own spelling.
+    ///
+    /// The spelling is the point: `cause` is what a supervisor branches on, and
+    /// oneharness names the same categories in its `failure_kind`, so a consumer
+    /// joining one against the other must not have to translate. This walks
+    /// onejudge's own `classify`, so a kind renamed upstream fails here.
+    #[test]
+    fn every_provider_error_kind_maps_to_a_cause_with_the_same_name() {
+        for name in [
+            "auth",
+            "rate_limit",
+            "model_not_found",
+            "quota",
+            "overloaded",
+            "timeout",
+            "cancelled",
+            "spawn",
+            "protocol",
+            "other",
+        ] {
+            let kind = onejudge::ProviderErrorKind::classify(name);
+            assert_eq!(kind.as_str(), name, "onejudge renamed {name:?}");
+            assert_eq!(Cause::from(kind).as_str(), name);
+        }
+        // The three causes that exist outside that taxonomy.
+        assert_eq!(Cause::from(Disposition::Exited), Cause::Exited);
+        assert_eq!(Cause::from(Disposition::Signaled), Cause::Signaled);
+        assert_eq!(Cause::Unclassified.as_str(), "unclassified");
     }
 
     /// An emitter whose sink is gone still numbers and returns its events: the

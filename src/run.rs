@@ -198,8 +198,6 @@ pub struct Request {
     pub overrides: Vec<Override>,
     /// Where run state lives.
     pub state_dir: PathBuf,
-    /// The `onejudge` binary.
-    pub onejudge_bin: String,
     /// The `oneharness` binary.
     pub oneharness_bin: String,
 }
@@ -542,6 +540,7 @@ pub fn run(
         member_env.insert(key.clone(), expand(value, env));
     }
     let bounds = Bounds::from_env(&member_env).map_err(Error::InvalidConfig)?;
+    export(&graph.env, env);
 
     let file = std::fs::File::create(&events_path).map_err(|err| {
         Error::InvalidConfig(format!("cannot create {}: {err}", events_path.display()))
@@ -592,7 +591,6 @@ pub fn run(
             graph_dir: graph_document.base_dir.as_deref(),
             task: request.task.as_deref(),
             session: &format!("{run_id}-{name}"),
-            onejudge_bin: &request.onejudge_bin,
             oneharness_bin: &request.oneharness_bin,
         };
         invocations.insert(
@@ -791,6 +789,30 @@ fn describe(outcome: &Outcome) -> MemberOutcome {
         Outcome::Incomplete => MemberOutcome::Incomplete,
         Outcome::Died(died) => MemberOutcome::Died(died.rule),
         Outcome::Unstartable(reason) => MemberOutcome::Unstartable(reason.clone()),
+    }
+}
+
+/// Put the graph's `env` block into **this process's** environment.
+///
+/// The contract says a graph's `env` is "exported to every member process", and a
+/// two-party member no longer *is* a process: it runs here, and the
+/// `oneharness run` it starts inherits this environment. So the block has to be
+/// on this process for that member to receive what the contract promises it —
+/// `ONEHARNESS_BIN_<ID>`, a proxy, a credential path.
+///
+/// Once, here, before the first member thread starts, and never again: an
+/// environment is process-wide, so a per-member write would race every sibling's
+/// spawn. That is exactly why nothing per-member is exported at all — a member's
+/// `mode` and its scratch stamp are stamped into the files `crate::invoke` writes
+/// instead. A graph's block is safe to export because it is one block for the
+/// whole graph, decided before anything runs.
+///
+/// `PROCESS_WIDE_HARNESS_ENV` is removed first for the reason that constant
+/// gives, and re-added when the graph's own block asks for it.
+fn export(block: &BTreeMap<String, String>, env: &BTreeMap<String, String>) {
+    std::env::remove_var(invoke::PROCESS_WIDE_HARNESS_ENV);
+    for (key, value) in block {
+        std::env::set_var(key, expand(value, env));
     }
 }
 
@@ -1048,10 +1070,12 @@ mod tests {
                     rule: crate::member::Rule::Activity,
                     payload: crate::event::MemberDied {
                         rule: "activity".into(),
-                        exit_code: None,
-                        disposition: crate::event::Disposition::Signaled,
-                        stderr_tail: String::new(),
+                        cause: crate::event::Cause::Cancelled,
+                        detail: String::new(),
                         truncated: false,
+                        exit_code: None,
+                        disposition: None,
+                        stderr_tail: None,
                     },
                 })),
                 "died (activity)",

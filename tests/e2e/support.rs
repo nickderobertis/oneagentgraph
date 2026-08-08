@@ -4,16 +4,16 @@
 //! against it, and reads back the NDJSON it produced. The only thing standing in
 //! for something real is the paid harness process, replaced at oneharness's own
 //! `ONEHARNESS_BIN_<ID>` seam by the crate's own `test-doubles` stand-in — real
-//! `onejudge` drives the conversation and real `oneharness` selects the identity
-//! in between.
+//! `onejudge` drives the conversation, now as a library inside the binary under
+//! test, and real `oneharness` selects the identity in between.
 
 // llmlint: ignore-file[e2e_not_mocked] the paid model turn is the one genuinely
 // external thing a gate cannot run for free, and this is the seam it is replaced
 // at: oneharness's own documented `ONEHARNESS_BIN_<ID>` binary override. Real
-// `oneagentgraph` builds the invocation, real `onejudge` runs the loop, and real
-// `oneharness` selects the identity, spawns the double, classifies its refusal,
-// and falls through. Nothing between them is stubbed, and no journey may widen
-// this to a second seam.
+// `oneagentgraph` prepares the launch, the real `onejudge` engine it links
+// against runs the loop, and real `oneharness` selects the identity, spawns the
+// double, classifies its refusal, and falls through. Nothing between them is
+// stubbed, and no journey may widen this to a second seam.
 
 // Journeys are modules, and each reaches for a different part of this support
 // surface; an unused-here helper is used two files over, so `dead_code` would
@@ -174,7 +174,6 @@ impl Workspace {
             .args(args)
             .current_dir(self.path())
             .env("ONEAGENTGRAPH_STATE_DIR", self.state())
-            .env("ONEAGENTGRAPH_ONEJUDGE_BIN", onejudge_bin())
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", oneharness_bin())
             // A journey must never inherit an enclosing dispatch's selection:
             // this suite runs inside one, and a leaked value would put the run
@@ -262,6 +261,20 @@ pub fn two_party_graph(fake: &str, extra_env: &str) -> String {
     )
 }
 
+/// A graph with one single-sided member — the kind that is still a child process
+/// of its own, and so the only one a spawn failure is reachable through.
+pub fn single_sided_graph(fake: &str) -> String {
+    format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        fake = fake,
+    )
+}
+
 /// The compiled paid-harness double.
 pub fn fake_harness() -> String {
     env!("CARGO_BIN_EXE_oneagentgraph-fake-harness").to_string()
@@ -272,30 +285,16 @@ pub fn fake_provider() -> String {
     env!("CARGO_BIN_EXE_oneagentgraph-fake-provider").to_string()
 }
 
-/// The real `onejudge` this suite drives.
+/// The real `oneharness` this suite drives.
 ///
 /// Resolved from the environment so a host or CI can pin an install, and
 /// asserted present rather than skipped: a journey that quietly did not run the
 /// real CLI proves nothing, and a suite that reports itself green on that basis
 /// is worse than one that fails.
 ///
-/// The streamed-provider contract is what every journey here rides on, so it is
-/// what resolution selects for — see [`required`].
-pub fn onejudge_bin() -> String {
-    required(
-        "ONEAGENTGRAPH_TEST_ONEJUDGE",
-        "onejudge",
-        "the streamed-provider contract (`run --stream`)",
-        |program| {
-            Command::new(program)
-                .args(["run", "--help"])
-                .output()
-                .is_ok_and(|help| String::from_utf8_lossy(&help.stdout).contains("--stream"))
-        },
-    )
-}
-
-/// The real `oneharness` this suite drives, on the same terms.
+/// There is no companion for `onejudge`: the binary under test links the real
+/// onejudge engine, so there is nothing on `PATH` for that half of the chain to
+/// be shadowed by — the version it runs is the one `Cargo.lock` pins.
 ///
 /// Probed for nothing beyond running, because that is all these journeys have
 /// established they need: they reach oneharness through its own long-standing

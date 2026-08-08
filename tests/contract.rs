@@ -18,8 +18,9 @@ use oneagentgraph::config::{
 };
 use oneagentgraph::error::{Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_SUCCESS};
 use oneagentgraph::event::{
-    Artifact, Disposition, Envelope, EventKind, FallbackAdvanced, MemberDied, Source, TurnActivity,
-    TurnCompleted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES,
+    Artifact, Cause, Disposition, Envelope, EventKind, FallbackAdvanced, MemberDied, Role, Source,
+    TurnActivity, TurnCompleted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS,
+    MAX_PAYLOAD_TEXT_BYTES,
 };
 use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
@@ -251,11 +252,50 @@ fn the_source_alternation_names_exactly_the_source_variants() {
     }
 }
 
+/// Every liveness rule this build can die by.
+///
+/// The one other closed set the contract spells in kebab case, so it has to be
+/// separated from the event kinds below — and asserting it here is what makes the
+/// separation honest rather than a filter that quietly drops a kind.
+const ALL_RULES: &[oneagentgraph::member::Rule] = &[
+    oneagentgraph::member::Rule::Unstartable,
+    oneagentgraph::member::Rule::Signalled,
+    oneagentgraph::member::Rule::ProviderFailure,
+    oneagentgraph::member::Rule::Heartbeat,
+    oneagentgraph::member::Rule::Activity,
+];
+
+#[test]
+fn the_documented_rules_are_the_ones_a_member_can_die_by() {
+    let documented: BTreeSet<String> = backticked()
+        .into_iter()
+        .filter(|token| ALL_RULES.iter().any(|rule| rule.as_str() == token))
+        .collect();
+    let taken: BTreeSet<String> = ALL_RULES
+        .iter()
+        .map(|rule| rule.as_str().to_string())
+        .collect();
+    assert_eq!(
+        documented, taken,
+        "the contract and this build disagree about the liveness rules a member dies by"
+    );
+    for rule in ALL_RULES {
+        assert_eq!(
+            oneagentgraph::member::Rule::named(rule.as_str()),
+            Some(*rule),
+            "a documented rule this build cannot read back is one a run record cannot carry"
+        );
+    }
+}
+
 #[test]
 fn the_event_kinds_paragraph_names_exactly_the_event_kind_variants() {
-    // The kinds are the only kebab-case-with-a-dash tokens in the contract's
-    // backticks; the payload fields beside them (`rule`, `exit_code`,
-    // `stderr_tail`) are single words or snake_case.
+    // The kinds are the kebab-case-with-a-dash tokens in the contract's
+    // backticks; the payload fields beside them (`rule`, `cause`, `detail`,
+    // `exit_code`, `stderr_tail`) are single words or snake_case. The liveness
+    // rules are the one other kebab-case set, and they are checked against this
+    // build in `the_documented_rules_are_the_ones_a_member_can_die_by` above —
+    // so excluding them here drops nothing unproven.
     let documented: BTreeSet<String> = backticked()
         .into_iter()
         .filter(|token| {
@@ -263,6 +303,7 @@ fn the_event_kinds_paragraph_names_exactly_the_event_kind_variants() {
                 && token.chars().all(|c| c.is_ascii_lowercase() || c == '-')
                 && !token.starts_with('-')
                 && !token.ends_with('-')
+                && !ALL_RULES.iter().any(|rule| rule.as_str() == token)
         })
         .collect();
 
@@ -374,18 +415,43 @@ fn a_fallback_advanced_payload_names_the_identity_and_the_classified_reason() {
     let advanced = FallbackAdvanced {
         identity: "codex".to_string(),
         reason: "quota".to_string(),
+        role: None,
+        turn: None,
     };
     let serialized = serde_json::to_value(&advanced).expect("serializes");
-    assert_eq!(serialized, json!({"identity": "codex", "reason": "quota"}));
+    assert_eq!(
+        serialized,
+        json!({"identity": "codex", "reason": "quota"}),
+        "a single-sided member has one side, so it stamps neither of the two-party fields"
+    );
     assert_eq!(
         serde_json::from_value::<FallbackAdvanced>(serialized).expect("parses"),
         advanced
+    );
+
+    // The two fields a two-party member's telemetry adds, which the document
+    // names beside the pair above.
+    assert!(
+        CONTRACT.contains("role: agent|judge"),
+        "the contract no longer names the side a fallback-advanced is attributed to"
+    );
+    let attributed = FallbackAdvanced {
+        role: Some(Role::Judge),
+        turn: Some(3),
+        ..advanced
+    };
+    let serialized = serde_json::to_value(&attributed).expect("serializes");
+    assert_eq!(serialized["role"], json!("judge"));
+    assert_eq!(serialized["turn"], json!(3));
+    assert_eq!(
+        serde_json::from_value::<FallbackAdvanced>(serialized).expect("parses"),
+        attributed
     );
 }
 
 #[test]
 fn a_member_died_payload_carries_every_documented_field() {
-    for field in ["rule", "exit_code", "stderr_tail"] {
+    for field in ["rule", "cause", "detail", "exit_code", "stderr_tail"] {
         assert!(
             backticked().iter().any(|token| token == field),
             "the contract no longer names the member-died field `{field}`"
@@ -394,21 +460,25 @@ fn a_member_died_payload_carries_every_documented_field() {
 
     let exited = MemberDied {
         rule: "activity-watchdog".to_string(),
-        exit_code: Some(1),
-        disposition: Disposition::Exited,
-        stderr_tail: "harness failed (quota)".to_string(),
+        cause: Cause::Exited,
+        detail: "harness failed (quota)".to_string(),
         truncated: false,
+        exit_code: Some(1),
+        disposition: Some(Disposition::Exited),
+        stderr_tail: Some("harness failed (quota)".to_string()),
     };
     let serialized = serde_json::to_value(&exited).expect("serializes");
     assert_eq!(
         serialized,
         json!({
             "rule": "activity-watchdog",
+            "cause": "exited",
+            "detail": "harness failed (quota)",
             "exit_code": 1,
             "disposition": "exited",
             "stderr_tail": "harness failed (quota)",
         }),
-        "an exited member reports its code, and an uncut tail says nothing about truncation"
+        "an exited member reports its code, and an uncut detail says nothing about truncation"
     );
     assert_eq!(
         serde_json::from_value::<MemberDied>(serialized).expect("parses"),
@@ -416,11 +486,12 @@ fn a_member_died_payload_carries_every_documented_field() {
     );
 
     let signaled = MemberDied {
+        cause: Cause::Signaled,
         exit_code: None,
-        disposition: Disposition::Signaled,
-        stderr_tail: "x".repeat(MAX_PAYLOAD_TEXT_BYTES),
+        disposition: Some(Disposition::Signaled),
+        detail: "x".repeat(MAX_PAYLOAD_TEXT_BYTES),
         truncated: true,
-        ..exited
+        ..exited.clone()
     };
     let serialized = serde_json::to_value(&signaled).expect("serializes");
     assert_eq!(
@@ -437,6 +508,71 @@ fn a_member_died_payload_carries_every_documented_field() {
         serde_json::from_value::<MemberDied>(serialized).expect("parses"),
         signaled
     );
+
+    // The shape the conversion is *for*: a member driven in this process has no
+    // exit status, no disposition, and no standard error, and says why it died
+    // through the two fields that answer for every member instead.
+    let in_process = MemberDied {
+        rule: "provider-failure".to_string(),
+        cause: Cause::Quota,
+        detail: "provider error (respond): the subscription is exhausted".to_string(),
+        truncated: false,
+        exit_code: None,
+        disposition: None,
+        stderr_tail: None,
+    };
+    let serialized = serde_json::to_value(&in_process).expect("serializes");
+    assert_eq!(
+        serialized,
+        json!({
+            "rule": "provider-failure",
+            "cause": "quota",
+            "detail": "provider error (respond): the subscription is exhausted",
+        }),
+        "a member that was never a process must not report a process's facts as null"
+    );
+    assert_eq!(
+        serde_json::from_value::<MemberDied>(serialized).expect("parses"),
+        in_process
+    );
+}
+
+/// Every `cause` the contract lists is one this build takes, and every one this
+/// build takes is listed — so a category added on either side fails here.
+#[test]
+fn the_documented_causes_are_the_ones_a_member_died_payload_takes() {
+    const ALL: &[Cause] = &[
+        Cause::Auth,
+        Cause::RateLimit,
+        Cause::ModelNotFound,
+        Cause::Quota,
+        Cause::Overloaded,
+        Cause::Timeout,
+        Cause::Cancelled,
+        Cause::Spawn,
+        Cause::Protocol,
+        Cause::Other,
+        Cause::Exited,
+        Cause::Signaled,
+        Cause::Unclassified,
+    ];
+    let documented: BTreeSet<String> = backticked()
+        .into_iter()
+        .filter(|token| ALL.iter().any(|cause| cause.as_str() == token))
+        .collect();
+    let taken: BTreeSet<String> = ALL.iter().map(|cause| cause.as_str().to_string()).collect();
+    assert_eq!(
+        documented, taken,
+        "the contract and this build disagree about the member-died causes"
+    );
+    for cause in ALL {
+        let serialized = serde_json::to_value(cause).expect("serializes");
+        assert_eq!(serialized, json!(cause.as_str()));
+        assert_eq!(
+            &serde_json::from_value::<Cause>(serialized).expect("parses"),
+            cause
+        );
+    }
 }
 
 #[test]

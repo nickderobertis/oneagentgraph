@@ -21,14 +21,10 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # cannot promise a floor the manifest no longer declares. CI reads the same field.
 msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 
-# The two CLIs this crate composes, pinned in one place because the e2e suite
-# drives both for real. oneharness comes from crates.io; onejudge is pinned to
-# the commit that merged its streamed-provider contract, which no release
-# carries yet (0.3.4 is the latest, and it has no `--stream`). Move onejudge to a
-# published version the moment one ships — a git pin is a dependency on a branch
-# staying where it is.
-oneharness-version := "0.6.7"
-onejudge-rev := "892191ea30d3aee0e20ed66525bcaeed99fbcff5"
+# The one CLI this crate still spawns, pinned here because the e2e suite drives
+# it for real. onejudge has no entry: it is a library dependency now, pinned by
+# `Cargo.lock`, so there is nothing to install and nothing on `PATH` to shadow.
+oneharness-version := "0.6.9"
 
 # Keep the gate's own output to signal: successes are silent, failures are not.
 export CARGO_TERM_QUIET := "true"
@@ -51,28 +47,19 @@ _crate-bootstrap:
       || { echo "cannot add toolchain components — install rustup (https://rustup.rs/) and re-run" >&2; exit 1; }
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
-    @just _ensure-onejudge
     @just _ensure-oneharness
     @cargo fetch --locked --quiet
 
-# The e2e suite drives both of these for real, as subprocesses, so they are part
-# of provisioning rather than something a developer is expected to have. Both are
+# The e2e suite drives this for real, as a subprocess, so it is part of
+# provisioning rather than something a developer is expected to have. It is
 # version-checked rather than merely present: a stale `oneharness` on PATH is the
 # failure mode `docs/onejudge-integration.md` records, where a run dies on a
 # confusing broken pipe because the binary rejects flags the caller relies on.
-# Both probes check the cargo bin directory as well as `PATH`, and so does the
+# The probe checks the cargo bin directory as well as `PATH`, and so does the
 # e2e suite's own resolution (tests/e2e/support.rs). Checking `PATH` alone leaves
 # bootstrap unable to satisfy itself: where an older CLI precedes the cargo bin
 # directory, the probe keeps failing on the shadow no matter how many times the
 # install below writes the pin behind it.
-# Install the pinned `onejudge` CLI. Quiet when already at the pin.
-_ensure-onejudge:
-    @for candidate in onejudge "${CARGO_HOME:-$HOME/.cargo}/bin/onejudge"; do \
-       if "$candidate" run --help 2>/dev/null | grep -q -- --stream; then exit 0; fi; \
-     done; \
-     cargo install --locked --git https://github.com/nickderobertis/onejudge \
-       --rev {{onejudge-rev}} --features cli onejudge
-
 # Install the pinned `oneharness` CLI. Quiet when already at the pin.
 _ensure-oneharness:
     @for candidate in oneharness "${CARGO_HOME:-$HOME/.cargo}/bin/oneharness"; do \

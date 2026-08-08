@@ -27,6 +27,12 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
+    # Reviewed with `oneharness-core`, whose typed report/stream contract this
+    # crate parses the oneharness boundary into: MIT-0 covers `borrow-or-share`,
+    # reached through `jsonschema` → `referencing` → `fluent-uri`. It is MIT
+    # without even the attribution clause — strictly weaker than the `MIT` above,
+    # and so imposes no term this MIT crate cannot carry downstream.
+    "MIT-0",
 ]
 confidence-threshold = 0.9
 exceptions = []
@@ -43,3 +49,11 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The one git dependency, and a **temporary** one: `onejudge` is pinned to a
+# revision because `run_plan_streaming` — the typed live event sink this crate
+# supervises a two-party member through — landed after 0.3.4, which is still the
+# newest release. A registry version is what belongs here, and a git dependency
+# also blocks `cargo publish`, so this entry comes out the moment a onejudge
+# release carries that API. Listed rather than allowed wholesale: nothing else
+# may arrive from a git ref without this file changing.
+allow-git = ["https://github.com/nickderobertis/onejudge"]

@@ -71,6 +71,28 @@ path = "src/lib.rs"
 test-doubles = []
 
 [dependencies]
+# The two-party conversation, driven **in this process** rather than by spawning
+# `onejudge run`. `cli` is what carries the YAML config surface a graph member
+# generates (`Config`/`Plan`) and the run driver over it
+# (`run_plan_streaming`), so this crate composes onejudge's own loop instead of
+# re-implementing it around `Engine`.
+#
+# A git rev, and the one in this graph: `run_plan_streaming` — a typed live event
+# sink over the same driver `--format json` uses — landed after 0.3.4, which is
+# still the newest release. Without it the choice is a buffered run, whose events
+# arrive only when a turn ends, and that starves the activity watchdog that is
+# supposed to be watching the turn. Move this to a published version the moment
+# one ships; `docs/contract.md` records what a release has to carry.
+onejudge = { git = "https://github.com/nickderobertis/onejudge", rev = "eeb11338c4d167e9a076e7876bd93acdadb49f33", features = [
+  "cli",
+] }
+# oneharness's own typed report/stream contract. Everything this crate reads back
+# from an `oneharness run` — the fallback chain, the per-candidate accounting,
+# the normalized failure kind — is parsed into oneharness's declarations rather
+# than guessed by field name, so an upstream change is a compile error here
+# instead of a silently-absent field. Already in the graph via onejudge, which
+# parses the same boundary the same way.
+oneharness-core = "0.6.9"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
