@@ -737,18 +737,28 @@ mod tests {
         assert!(effective.contains("system_prompt"), "{effective}");
         // Both sides carry the member's mode and its ownership stamp, which is
         // what replaces exporting them.
+        //
+        // Read back as TOML, not searched for as text: oneharness *parses* this
+        // file, and a path decides how it is spelled. A Windows scratch carries
+        // backslashes, which `toml_edit` correctly renders as a literal string
+        // (`'C:\…'`) rather than escaping every one of them into a basic string —
+        // so a text search for `KEY = "value"` asserted this platform's rendering
+        // rather than the value oneharness would read on either.
         for side in [AGENT_CONFIG_FILE, JUDGE_CONFIG_FILE] {
             let config = std::fs::read_to_string(scratch.join(side)).expect(side);
-            assert!(config.contains("mode = \"bypass\""), "{side}: {config}");
-            assert!(
-                config.contains(&format!(
-                    "{} = \"{}\"",
-                    crate::scratch::SCRATCH_ENV,
-                    scratch.display()
-                )),
+            let document: DocumentMut = config.parse().expect(side);
+            assert_eq!(
+                document["mode"].as_str(),
+                Some("bypass"),
                 "{side}: {config}"
             );
-            // And the operator's own file is otherwise untouched.
+            assert_eq!(
+                document["env"][crate::scratch::SCRATCH_ENV].as_str(),
+                Some(scratch.display().to_string().as_str()),
+                "{side}: {config}"
+            );
+            // And the operator's own file is otherwise untouched — comments
+            // included, which is why this half stays a check on the raw text.
             assert!(
                 config.starts_with("# an operator's own comment\n"),
                 "{config}"
@@ -896,6 +906,41 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not valid TOML"), "{err}");
+    }
+
+    /// A scratch path carrying backslashes round-trips through the stamp with
+    /// its value intact.
+    ///
+    /// The stamp is *evidence*: `crate::scratch` reads it back out of a live
+    /// process's environment to decide whether that process belongs to this
+    /// member, so a path that came back a single byte different would orphan
+    /// every descendant it was supposed to name. A Windows scratch is exactly
+    /// that path — `C:\Users\…` — and TOML has two ways to spell it, a basic
+    /// string with every backslash escaped and a literal string with none.
+    /// `toml_edit` picks the literal one, which is why this asserts the parsed
+    /// value rather than the rendered line. Run on every platform, because the
+    /// property is about the *value* and nothing here needs Windows to hold it.
+    #[test]
+    fn a_scratch_path_with_backslashes_round_trips_through_the_stamp() {
+        let windows = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpCuzqTi\scratch";
+        let stamped = stamp_side(
+            ONE_FAMILY,
+            "oneharness.toml",
+            Side {
+                mode: Some("bypass"),
+                scratch: Some(Path::new(windows)),
+                ..Side::default()
+            },
+        )
+        .expect("stamped");
+
+        let document: DocumentMut = stamped.parse().expect("the stamped config is still TOML");
+        assert_eq!(
+            document["env"][crate::scratch::SCRATCH_ENV].as_str(),
+            Some(windows),
+            "the stamp did not survive being written and read back: {stamped}"
+        );
+        assert_eq!(document["mode"].as_str(), Some("bypass"), "{stamped}");
     }
 
     /// A config whose `harness` key is not a table of sections cannot take a
