@@ -49,11 +49,9 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# The one git dependency, and a **temporary** one: `onejudge` is pinned to a
-# revision because `run_plan_streaming` — the typed live event sink this crate
-# supervises a two-party member through — landed after 0.3.4, which is still the
-# newest release. A registry version is what belongs here, and a git dependency
-# also blocks `cargo publish`, so this entry comes out the moment a onejudge
-# release carries that API. Listed rather than allowed wholesale: nothing else
-# may arrive from a git ref without this file changing.
-allow-git = ["https://github.com/nickderobertis/onejudge"]
+# No `allow-git`, deliberately. Every dependency in this graph resolves from
+# crates.io, so the tree is reproducible from the registry alone rather than from
+# whichever host happened to have a checkout — and `unknown-git = "deny"` above
+# is what keeps it that way. `onejudge` was the one exception while the APIs this
+# crate supervises through were merged but unreleased; 0.3.5 carries them, so the
+# exception is gone. Re-adding one is a decision this file has to record.

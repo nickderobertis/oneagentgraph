@@ -57,18 +57,14 @@ one NDJSON stream.
   YAML/JSON/TOML config)
 - **References composed:** base.md, shapes/cli.md, languages/rust.md,
   intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, monorepo.md
-- **Cross-repo dependencies:** `oneharness-core` is a published version.
-  `onejudge` is a **git rev** — the only one in the graph, and a temporary
-  bridge. 0.3.4 is the newest release and is short three things this crate's
-  supervision rests on: `run_plan_streaming*` (0.3.4 streams only under
-  `Format::Human`, and a `Format::Json` run — the one whose report this crate
-  needs — is buffered, which starves the activity watchdog); a *typed* event
-  (its `progress` callback takes `&str`, an already-rendered line); and
-  `RunFailure`, which does not exist there at all and is the only route to a
-  failed run's fallback telemetry. A git dependency also blocks `cargo publish`,
-  so **a onejudge release carrying all three is a release blocker for this
-  crate**. Move it to a version the moment one ships. `Cargo.toml` states the
-  same list at the dependency itself.
+- **Cross-repo dependencies: every one is a published version, and there is no
+  git ref anywhere in the graph.** `cargo deny`'s `unknown-git = "deny"` with no
+  `allow-git` beside it is what holds that, so the tree resolves from crates.io
+  alone rather than from whichever host has a checkout. `onejudge >= 0.3.5` is a
+  floor rather than a preference: 0.3.5 is the first release carrying the typed
+  streaming sink and the `RunFailure` telemetry this crate's watchdogs and
+  `fallback-advanced` are built on, and `Cargo.toml` records the whole list at
+  the dependency itself.
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so

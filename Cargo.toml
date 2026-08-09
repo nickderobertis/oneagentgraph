@@ -77,29 +77,25 @@ test-doubles = []
 # (`run_plan_streaming`), so this crate composes onejudge's own loop instead of
 # re-implementing it around `Engine`.
 #
-# A git rev, and the only one in this graph. It is a **release blocker**, not a
-# preference: a git dependency blocks `cargo publish` outright, so this crate
-# cannot ship again until onejudge does. 0.3.4 is still the newest release, and
-# it is short three things this crate's supervision is built on, not one:
+# 0.3.5 is the floor, and not for taste: it is the first release carrying the
+# three things this crate's supervision is built on, each absent from 0.3.4.
+# Lowering this requirement below 0.3.5 does not merely lose a nicety — it stops
+# compiling, and the one that would still compile is the worst of the three:
 #
-#   1. `run_plan_streaming*` — a typed live event sink. 0.3.4 streams only under
-#      `Format::Human`; a `Format::Json` run, which is the one whose report this
-#      crate needs, is buffered. Its events would arrive only when the run ends,
-#      which starves the activity watchdog that is supposed to be watching it.
-#   2. A *typed* event. 0.3.4's `progress` callback is `&mut dyn FnMut(&str)` and
-#      receives an already-rendered line ("· turn 3 — …"), so `turn-started` and
-#      `turn-activity` could only be rebuilt by parsing prose back apart — the
-#      exact string-scraping this conversion exists to delete.
-#   3. `RunFailure`, which does not exist in 0.3.4 at all. It is what carries
-#      `telemetry` off a run that produced **no** report, and that is the only
-#      route to `fallback-advanced` for a failed two-party member — which is
-#      precisely when an operator needs to know which subscription refused.
-#
-# Move this to a published version the moment one carries all three;
-# `docs/contract.md` records what a release has to carry.
-onejudge = { git = "https://github.com/nickderobertis/onejudge", rev = "eeb11338c4d167e9a076e7876bd93acdadb49f33", features = [
-  "cli",
-] }
+#   1. `run_plan_streaming*` — a typed live event sink over the same driver a
+#      `Format::Json` run uses. 0.3.4 streamed only under `Format::Human`, and
+#      the JSON run — the one whose report this crate needs — was buffered, so
+#      its events arrived when the run ended and the activity watchdog had
+#      nothing to watch for the whole of the turn it was watching.
+#   2. A *typed* event. 0.3.4's callback was `&mut dyn FnMut(&str)` and received
+#      an already-rendered line ("· turn 3 — …"), so `turn-started` and
+#      `turn-activity` could only have been rebuilt by parsing prose back apart —
+#      the exact string-scraping this conversion exists to delete.
+#   3. `RunFailure`, which did not exist in 0.3.4 at all. It carries `telemetry`
+#      off a run that produced **no** report, and is the only route to
+#      `fallback-advanced` for a failed two-party member — precisely when an
+#      operator needs to know which subscription refused.
+onejudge = { version = "0.3.5", features = ["cli"] }
 # oneharness's own typed report/stream contract. Everything this crate reads back
 # from an `oneharness run` — the fallback chain, the per-candidate accounting,
 # the normalized failure kind — is parsed into oneharness's declarations rather

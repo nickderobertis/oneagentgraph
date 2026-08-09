@@ -64,9 +64,8 @@ deterministic and free of anything the crate does not already depend on.
 
 **Provisioning installs one CLI.** `just bootstrap` pins `oneharness`, and the
 version lives at the top of the `justfile`. `onejudge` has no entry: it is a
-cargo dependency, pinned by `Cargo.lock` — and a **git rev**, because
-`run_plan_streaming` is merged but unreleased. That rev blocks `cargo publish`;
-move it to a published version as soon as one ships.
+cargo dependency from crates.io, pinned by `Cargo.lock`, so there is nothing to
+install and nothing on `PATH` to shadow it.
 
 ## Two things that bite
 
