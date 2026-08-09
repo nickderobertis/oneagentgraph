@@ -505,6 +505,81 @@ fn sweep_reports_before_it_reclaims_and_removes_nothing_in_a_dry_run() {
     );
 }
 
+/// A `smoke`'s own throwaway directory is scratch the sweep can reclaim, and a
+/// neighbour's directory in the same shared root is not.
+///
+/// Both halves matter and neither covers the other. `TMPDIR` is the host's, not
+/// this crate's: a sweep that took everything there would delete whatever else
+/// is running on the machine, and one that could take nothing there would leave
+/// the family that actually leaks — a directory per `smoke`, kept on purpose for
+/// its operator to read — growing forever. So the neighbour here is one the
+/// proofs *would* clear, and the only thing standing between it and the sweep is
+/// that it is not this crate's.
+#[test]
+fn sweep_reclaims_a_smoke_s_own_scratch_and_leaves_a_neighbour_s_alone() {
+    let workspace = Workspace::new();
+    let temp = workspace.at("tmp");
+    std::fs::create_dir_all(&temp).expect("mkdir");
+    let temp_env = temp.display().to_string();
+
+    workspace
+        .run_with(
+            &["smoke"],
+            &[
+                ("TMPDIR", temp_env.as_str()),
+                ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+                ("ONEHARNESS_HARNESSES", "claude-code"),
+            ],
+        )
+        .expect_code(0);
+    let left_behind: Vec<std::path::PathBuf> = std::fs::read_dir(&temp)
+        .expect("tmp")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        left_behind.len(),
+        1,
+        "a smoke left {left_behind:?} rather than one directory"
+    );
+
+    // Everything the proofs ask for, and nothing this crate created: a lock
+    // nobody holds, recording a number with a start token nobody holds either.
+    let neighbour = temp.join("someone-elses-work");
+    std::fs::create_dir_all(&neighbour).expect("mkdir");
+    std::fs::write(
+        neighbour.join(oneagentgraph::liveness::OWNER_LOCK_FILE),
+        format!("{} 1\n", std::process::id()),
+    )
+    .expect("write");
+    // A *file* wearing this crate's own prefix. Scratch is a directory, and a
+    // sweep that took anything whose name matched would delete a neighbour's
+    // file for looking like one.
+    let namesake = temp.join("oneagentgraph-not-a-directory");
+    std::fs::write(&namesake, "someone else's notes").expect("write");
+
+    let swept = workspace.run_with(
+        &["sweep", "--min-age-hours", "0"],
+        &[("TMPDIR", temp_env.as_str())],
+    );
+    swept.expect_code(0);
+    assert!(
+        !left_behind[0].exists(),
+        "a sweep left this crate's own throwaway scratch behind:\n{}",
+        swept.stdout
+    );
+    assert!(
+        neighbour.is_dir(),
+        "a sweep took a directory in a shared root that this crate never created:\n{}",
+        swept.stdout
+    );
+    assert!(
+        namesake.is_file(),
+        "a sweep took a file for a scratch directory because the name matched:\n{}",
+        swept.stdout
+    );
+}
+
 /// A family the sweep could not examine is named as one, so a zero is never read
 /// as "there was nothing there".
 ///
@@ -534,6 +609,27 @@ fn sweep_names_the_family_it_could_not_examine() {
         run.stdout
     );
     assert!(run.stdout.contains("reclaimed 0 B"), "{}", run.stdout);
+
+    // The other zero, and the reason both lists are always printed: a root that
+    // is not there yet holds nothing, and that *is* knowable — so it is an
+    // examined zero rather than the skip above. An operator reading the two runs
+    // side by side can tell which one they got.
+    let nowhere = workspace.at("nowhere").display().to_string();
+    let empty = workspace.run_with(
+        &["sweep", "--min-age-hours", "0"],
+        &[
+            ("TMPDIR", nowhere.as_str()),
+            ("ONEAGENTGRAPH_STATE_DIR", nowhere.as_str()),
+        ],
+    );
+    empty.expect_code(0);
+    assert!(
+        empty
+            .stdout
+            .contains("examined families: runs, temp; unexamined families: none"),
+        "a root that does not exist yet was reported as one that could not be examined: {}",
+        empty.stdout
+    );
 }
 
 /// `health` forwards what oneharness knows about each identity, and says why

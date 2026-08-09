@@ -281,7 +281,7 @@ fn preflight(
     // only the one that reaches the end: a refusal is the common case here, and
     // a `validate` that leaked a directory per failed attempt would be one of
     // the things a sweep exists to clean up after.
-    let scratch = tempdir(env)?;
+    let scratch = tempdir(env, "validate")?;
     for (name, member) in &graph.members {
         let member_scratch = scratch.path().join(name);
         let context = oneagentgraph::invoke::Context {
@@ -478,7 +478,7 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
     let dir = match &args.dir {
         Some(dir) => dir.clone(),
         None => {
-            scratch = tempdir(env)?;
+            scratch = tempdir(env, "smoke")?;
             scratch.keep();
             scratch.path().to_path_buf()
         }
@@ -546,13 +546,19 @@ fn temp_root(env: &BTreeMap<String, String>) -> PathBuf {
 /// A throwaway directory for a command that needs one: a smoke that named none,
 /// or the generated configs `validate` builds and discards.
 ///
+/// `verb` is the caller's own, because the two callers leave different things
+/// behind and one of them leaves it for a person to read — a directory called
+/// `smoke` holding a `validate`'s discarded configs is a name that lies to
+/// whoever goes looking. It also means the two can never be handed the same
+/// path.
+///
 /// Claimed rather than merely created, and that is what makes it sweepable: an
 /// `owner.lock` is the only thing that ever proves a directory is done with, so
 /// scratch this crate leaves without one is scratch its own `sweep` has to
 /// retain forever. The claim is released when this process exits, and the
 /// identity it records is dead from that moment.
-fn tempdir(env: &BTreeMap<String, String>) -> Result<Owned, Error> {
-    let dir = temp_root(env).join(format!("{SCRATCH_PREFIX}smoke-{}", std::process::id()));
+fn tempdir(env: &BTreeMap<String, String>, verb: &str) -> Result<Owned, Error> {
+    let dir = temp_root(env).join(format!("{SCRATCH_PREFIX}{verb}-{}", std::process::id()));
     Owned::claim(dir)
 }
 

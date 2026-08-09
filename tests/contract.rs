@@ -812,7 +812,7 @@ fn the_documented_sweep_names_the_families_and_the_floor_the_crate_applies() {
     // without ever being described.
     let named: Vec<&str> = families("state".into(), "temp".into())
         .iter()
-        .map(|family| family.name)
+        .map(|family| family.name.as_str())
         .collect();
     assert_eq!(named, vec![RUNS_FAMILY, TEMP_FAMILY]);
 }

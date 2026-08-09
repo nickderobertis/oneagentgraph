@@ -58,8 +58,8 @@ that one failed or died, `2` that the config is invalid.
 
 Under disk pressure, `oneagentgraph sweep --dry-run` says what scratch exists,
 what is reclaimable, and what it could not examine; without `--dry-run` it
-reclaims what it can prove nothing is using. Nothing a live run holds — or that
-a live process still names — is ever taken.
+reclaims what it proves is dead. What counts as proof is the liveness rules in
+[the contract](docs/contract.md), which is where they are stated.
 
 **oneagentgraph owns no harness, model, or fallback logic.** oneharness keeps
 owning identity chains, fallback, model pins, and quota classification; onejudge

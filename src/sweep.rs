@@ -85,12 +85,37 @@ pub enum Membership {
     Prefixed,
 }
 
+/// Which family a report is talking about.
+///
+/// Closed, because the set is: a family is a place *this crate* writes scratch,
+/// and there are two. A free-form name would let a caller report on a family the
+/// crate does not have — and the promise here is that every family is in one of
+/// two lists, which is only worth something if "every family" is knowable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FamilyName {
+    /// [`RUNS_FAMILY`].
+    Runs,
+    /// [`TEMP_FAMILY`].
+    Temp,
+}
+
+impl FamilyName {
+    /// What a report calls it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FamilyName::Runs => RUNS_FAMILY,
+            FamilyName::Temp => TEMP_FAMILY,
+        }
+    }
+}
+
 /// One family of scratch: a root, and the rule for what in it is this crate's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Family {
     /// What the report calls it. The name is the whole point of a family — an
     /// unnamed one cannot be reported as unexamined.
-    pub name: &'static str,
+    pub name: FamilyName,
     /// Where it lives.
     pub root: PathBuf,
     /// What in it belongs to this crate.
@@ -112,12 +137,12 @@ pub struct Family {
 pub fn families(state_dir: PathBuf, temp_root: PathBuf) -> Vec<Family> {
     vec![
         Family {
-            name: RUNS_FAMILY,
+            name: FamilyName::Runs,
             root: state_dir,
             membership: Membership::EveryDirectory,
         },
         Family {
-            name: TEMP_FAMILY,
+            name: FamilyName::Temp,
             root: temp_root,
             membership: Membership::Prefixed,
         },
@@ -172,7 +197,7 @@ pub enum Examination {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FamilySweep {
     /// The family's name.
-    pub name: &'static str,
+    pub name: FamilyName,
     /// Where it was looked for.
     pub root: PathBuf,
     /// What was found, or why nothing could be.
@@ -206,15 +231,21 @@ impl Report {
             })
     }
 
-    /// How many bytes the sweep reclaimed, or would reclaim.
+    /// How many bytes this sweep proved reclaimable.
+    ///
+    /// Reclaimable rather than reclaimed, because it answers for both modes and
+    /// only one of them removes anything: a directory that was taken was
+    /// reclaimable, and one a [`Mode::Report`] sweep left alone is reclaimable
+    /// too. What separates them is [`Report::mode`], which the rendering reads.
     #[must_use]
-    pub fn reclaimed_bytes(&self) -> u64 {
+    pub fn reclaimable_bytes(&self) -> u64 {
         self.taken().map(|entry| entry.bytes).sum()
     }
 
-    /// How many directories the sweep reclaimed, or would reclaim.
+    /// How many directories this sweep proved reclaimable, in both modes and for
+    /// the reason [`Report::reclaimable_bytes`] gives.
     #[must_use]
-    pub fn reclaimed_count(&self) -> usize {
+    pub fn reclaimable_count(&self) -> usize {
         self.taken().count()
     }
 
@@ -229,9 +260,9 @@ impl Report {
         let mut unexamined = Vec::new();
         for family in &self.families {
             match &family.examination {
-                Examination::Examined(_) => examined.push(family.name.to_string()),
+                Examination::Examined(_) => examined.push(family.name.as_str().to_string()),
                 Examination::Unexamined(reason) => {
-                    unexamined.push(format!("{} ({reason})", family.name));
+                    unexamined.push(format!("{} ({reason})", family.name.as_str()));
                 }
             }
         }
@@ -247,7 +278,7 @@ impl Report {
                 Examination::Examined(entries) => {
                     lines.push(format!(
                         "sweep: examined family {:?} at {} — {} director{}",
-                        family.name,
+                        family.name.as_str(),
                         family.root.display(),
                         entries.len(),
                         if entries.len() == 1 { "y" } else { "ies" }
@@ -274,7 +305,7 @@ impl Report {
                 }
                 Examination::Unexamined(reason) => lines.push(format!(
                     "sweep: could not examine family {:?} at {}: {reason}",
-                    family.name,
+                    family.name.as_str(),
                     family.root.display()
                 )),
             }
@@ -286,9 +317,9 @@ impl Report {
                 Mode::Report => "would reclaim",
                 Mode::Reclaim => "reclaimed",
             },
-            human(self.reclaimed_bytes()),
-            self.reclaimed_count(),
-            if self.reclaimed_count() == 1 {
+            human(self.reclaimable_bytes()),
+            self.reclaimable_count(),
+            if self.reclaimable_count() == 1 {
                 "y"
             } else {
                 "ies"
@@ -382,12 +413,23 @@ fn examine(family: &Family, mode: Mode, min_age: Duration, now: SystemTime) -> E
         // A walk that skipped what it could not read would report the family as
         // examined while a directory in it went unnamed — the one answer this
         // verb exists to make impossible.
+        // llmlint: ignore-block[changed_behavior_has_e2e] no journey reaches the
+        // failure arm: the root has just been opened, so a listing that then
+        // fails part way through is the filesystem going out from under this
+        // process — an unmounted device, a revoked handle — which no flag,
+        // directory layout, or fake can ask for. The reachable half of this
+        // answer, a root that cannot be listed at all, is driven through the CLI
+        // in tests/e2e/verbs.rs. What the arm decides is the direction of an
+        // unreachable failure, and it makes it the honest one: the family is
+        // reported unexamined rather than as a zero somebody would read as
+        // "nothing there".
         let (found, kind) = match identify(found) {
             Ok(identified) => identified,
             Err(err) => {
                 return Examination::Unexamined(format!("it could not be read to its end: {err}"))
             }
         };
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         // Directories only, and `file_type` does not follow a symlink — so a
         // link pointing into somebody else's tree is not this crate's scratch
         // and is never removed as if it were.
@@ -469,6 +511,17 @@ fn too_young(path: &Path, min_age: Duration, now: SystemTime) -> Option<String> 
     if min_age.is_zero() {
         return None;
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] neither arm below is
+    // reachable from a command line. A timestamp that cannot be read belongs to
+    // a directory `reclaimable` opened a lock inside a moment earlier, so it is
+    // the filesystem failing between two calls; a timestamp in the *future* is a
+    // clock that disagrees with the one this process reads, which a journey
+    // could only produce by forging an mtime — state no invocation of this
+    // binary creates, and a forgery that would make the journey a unit test with
+    // a subprocess around it. Both are held below, deterministically and on
+    // every platform, by passing the clock in. What an operator can reach — a
+    // directory inside the floor, and the same directory once it is past it — is
+    // driven through the CLI in tests/e2e/verbs.rs.
     let age = match std::fs::metadata(path).and_then(|meta| meta.modified()) {
         // A directory stamped in the future is not old, and reading it as
         // enormously old is how a clock skew reclaims a live run's scratch.
@@ -480,6 +533,7 @@ fn too_young(path: &Path, min_age: Duration, now: SystemTime) -> Option<String> 
             ))
         }
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     if age >= min_age {
         return None;
     }
@@ -571,8 +625,8 @@ mod tests {
 
         let families = two_families(&state, &temp);
         let reported = sweep(&families, Mode::Report, Duration::ZERO, SystemTime::now());
-        assert_eq!(reported.reclaimed_count(), 1);
-        assert!(reported.reclaimed_bytes() >= 2048);
+        assert_eq!(reported.reclaimable_count(), 1);
+        assert!(reported.reclaimable_bytes() >= 2048);
         assert!(dead.is_dir(), "a report removed a directory");
         let rendered = reported.lines().join("\n");
         assert!(rendered.contains("would reclaim"), "{rendered}");
@@ -584,7 +638,7 @@ mod tests {
         assert!(rendered.contains("unexamined families: none"), "{rendered}");
 
         let swept = sweep(&families, Mode::Reclaim, Duration::ZERO, SystemTime::now());
-        assert_eq!(swept.reclaimed_count(), 1);
+        assert_eq!(swept.reclaimable_count(), 1);
         assert!(!dead.exists(), "a sweep left what it reported reclaimed");
         assert!(swept.lines().join("\n").contains("sweep:   reclaimed"));
     }
@@ -604,8 +658,8 @@ mod tests {
             Duration::ZERO,
             SystemTime::now(),
         );
-        assert_eq!(report.reclaimed_count(), 0);
-        assert_eq!(report.reclaimed_bytes(), 0);
+        assert_eq!(report.reclaimable_count(), 0);
+        assert_eq!(report.reclaimable_bytes(), 0);
         assert!(live.is_dir(), "a sweep took a live run's scratch");
         let rendered = report.lines().join("\n");
         assert!(rendered.contains("sweep:   retained"), "{rendered}");
@@ -655,7 +709,7 @@ mod tests {
             Duration::ZERO,
             SystemTime::now(),
         );
-        assert_eq!(report.reclaimed_count(), 0);
+        assert_eq!(report.reclaimable_count(), 0);
         let rendered = report.lines().join("\n");
         assert!(
             rendered.contains("examined families: runs, temp"),
@@ -686,7 +740,7 @@ mod tests {
             Duration::ZERO,
             SystemTime::now(),
         );
-        assert_eq!(report.reclaimed_count(), 1);
+        assert_eq!(report.reclaimable_count(), 1);
         assert!(!ours.exists(), "this crate's own scratch was not reclaimed");
         assert!(theirs.is_dir(), "a sweep took a directory that is not ours");
         assert!(temp
@@ -710,7 +764,7 @@ mod tests {
             DEFAULT_MIN_AGE,
             SystemTime::now(),
         );
-        assert_eq!(report.reclaimed_count(), 0);
+        assert_eq!(report.reclaimable_count(), 0);
         assert!(fresh.is_dir());
         let rendered = report.lines().join("\n");
         assert!(rendered.contains("--min-age-hours 0"), "{rendered}");
@@ -724,7 +778,7 @@ mod tests {
             DEFAULT_MIN_AGE,
             later,
         );
-        assert_eq!(swept.reclaimed_count(), 1);
+        assert_eq!(swept.reclaimable_count(), 1);
         assert!(!fresh.exists());
     }
 
@@ -743,7 +797,7 @@ mod tests {
             DEFAULT_MIN_AGE,
             UNIX_EPOCH,
         );
-        assert_eq!(report.reclaimed_count(), 0);
+        assert_eq!(report.reclaimable_count(), 0);
         assert!(fresh.is_dir());
     }
 
