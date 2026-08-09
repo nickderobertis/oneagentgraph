@@ -1,9 +1,10 @@
 //! Scratch ownership, and reaping what a member left behind.
 //!
-//! `docs/contract.md`: "scratch ownership via `owner.lock` flock +
-//! pid-with-start-token, descendant reaping, successor contract for processes
-//! meant to outlive their launcher." All three are ported from ai-orchestrator
-//! intact, and each exists because a simpler rule destroyed live work:
+//! `docs/contract.md`: "scratch ownership via a non-blocking kernel-exclusive
+//! lock on `owner.lock` + pid-with-start-token, descendant reaping, successor
+//! contract for processes meant to outlive their launcher." All three are
+//! ported from ai-orchestrator intact, and each exists because a simpler rule
+//! destroyed live work:
 //!
 //! * **A recorded pid is not an identity.** This host's pid counter completes a
 //!   full cycle in under a day while one member holds a recorded pid for the
@@ -14,10 +15,11 @@
 //! * **A recorded pid cannot decide a sweep.** The pid inside a member's scratch
 //!   dies the moment the member's own process does, while the run is still
 //!   reaping its tree and reading its report out of that same directory. So a
-//!   sweeper reclaims a directory only when a *non-blocking exclusive* `flock`
-//!   on [`OWNER_LOCK_FILE`] succeeds — the kernel's own answer to "can anything
-//!   still be using this?" — **and** the recorded identity no longer names a
-//!   live process. Anything the proof does not clear is retained, not removed.
+//!   sweeper reclaims a directory only when a *non-blocking exclusive* kernel
+//!   lock on [`OWNER_LOCK_FILE`] is granted — the kernel's own answer to "can
+//!   anything still be using this?", spelled `flock` on POSIX and `LockFileEx`
+//!   on Windows — **and** the recorded identity no longer names a live process.
+//!   Anything the proof does not clear is retained, not removed.
 //! * **Ownership of a descendant is proven, not inferred.** The kernel fixes a
 //!   process's environment at `exec`, so [`SCRATCH_ENV`] is a stamp no
 //!   descendant can shed — including one reparented to init, which no walk from
