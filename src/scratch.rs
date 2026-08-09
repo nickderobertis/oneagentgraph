@@ -1,10 +1,12 @@
 //! Scratch ownership, and reaping what a member left behind.
 //!
-//! `docs/contract.md`: "scratch ownership via a non-blocking kernel-exclusive
-//! lock on `owner.lock` + pid-with-start-token, descendant reaping, successor
-//! contract for processes meant to outlive their launcher." All three are
-//! ported from ai-orchestrator intact, and each exists because a simpler rule
-//! destroyed live work:
+//! The rules themselves — the ownership lock, descendant reaping, and the
+//! successor contract — are stated once, in `docs/contract.md`'s liveness
+//! sentence, and are not restated here: a copy of a contract is a copy that
+//! drifts, and `tests/contract.rs` gates the document against this crate's own
+//! constants rather than against prose. What this module adds is *why* each is
+//! shaped the way it is. All three are ported from ai-orchestrator intact, and
+//! each exists because a simpler rule destroyed live work:
 //!
 //! * **A recorded pid is not an identity.** This host's pid counter completes a
 //!   full cycle in under a day while one member holds a recorded pid for the
@@ -305,6 +307,18 @@ impl Group {
 ///
 /// A record that fails this proves nothing about a live process, which leaves
 /// the lock as the only proof; see [`reclaimable`] for what that decides.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] the range check has no journey
+// because no journey can reach it. Its only caller is [`reclaimable`], which the
+// binary never invokes — `docs/contract.md`'s CLI surface has no sweep verb, so
+// `reclaimable` is a library entry point a future sweeper calls, and the e2e
+// journeys that touch it (`a_live_run_holds_its_scratch_against_a_sweep`) already
+// call it directly for exactly that reason. An "e2e" here would be the unit test
+// below moved one file over, driving the same function through the same call:
+// less realistic, not more, because it would imply a command surface that does
+// not exist. What the boundary is worth holding is held there — both that a
+// non-positive record is refused and that the refusal is a range check rather
+// than a blanket one.
 fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
     let recorded = std::fs::read_to_string(lock_path).ok()?;
     let mut parts = recorded.split_whitespace();
@@ -317,6 +331,7 @@ fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
         start_token: parts.next()?.parse().ok()?,
     })
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(unix)]
 mod platform {

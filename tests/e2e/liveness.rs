@@ -2,12 +2,12 @@
 //! `test_oneharness_timeout_e2e.py`, and the dispatch-scratch and leak-guard
 //! halves of `test_scratch_e2e.py` / `test_leak_guard_e2e.py`.
 //!
-//! What is being held here is the contract's own sentence: "heartbeat wrapper
-//! (default deadline 60s, `ONEAGENTGRAPH_HEARTBEAT_TIMEOUT`), activity watchdog
-//! (default 600s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via a
-//! non-blocking kernel-exclusive lock on `owner.lock` + pid-with-start-token,
-//! descendant reaping, successor contract for processes meant to outlive their
-//! launcher."
+//! What is being held here is `docs/contract.md`'s liveness sentence — the
+//! heartbeat wrapper, the activity watchdog, scratch ownership, descendant
+//! reaping, and the successor contract. It is cited rather than copied: the
+//! bounds and names it fixes are gated against this crate's constants by
+//! `tests/contract.rs`, and a second prose copy here would only be free to drift
+//! from both.
 //!
 //! Every one of these was learned from an incident, so each journey drives the
 //! failure rather than the happy path: a member that stops publishing, one that
@@ -721,16 +721,18 @@ fn a_group_reaps_a_descendant_whose_parent_has_already_exited() {
         .stderr(std::process::Stdio::null());
     let mut child = group.spawn(&mut parked).expect("the parked process starts");
 
-    until("the detached ticker to start", || ticks_written(&ticks) > 0);
+    until("the detached ticker to start", || {
+        tick_bytes_written(&ticks) > 0
+    });
 
     // Orphaned on purpose: the process that started the ticker goes first, so
     // nothing above the ticker is left to end it.
     child.kill().expect("the parked process is killed");
     child.wait().expect("the parked process is reaped");
-    let orphaned = ticks_written(&ticks);
+    let orphaned = tick_bytes_written(&ticks);
     std::thread::sleep(SETTLE);
     assert!(
-        ticks_written(&ticks) > orphaned,
+        tick_bytes_written(&ticks) > orphaned,
         "the ticker stopped when its parent did, so this journey never reached the orphan it \
          asserts on"
     );
@@ -741,10 +743,10 @@ fn a_group_reaps_a_descendant_whose_parent_has_already_exited() {
         reaped > 0,
         "the group reported reaping nothing, so an orphaned descendant is beyond it"
     );
-    let ended = ticks_written(&ticks);
+    let ended = tick_bytes_written(&ticks);
     std::thread::sleep(SETTLE);
     assert_eq!(
-        ticks_written(&ticks),
+        tick_bytes_written(&ticks),
         ended,
         "the group reported reaping {reaped} process(es), but the orphan is still running"
     );
@@ -993,7 +995,7 @@ fn a_condemned_member_leaves_no_descendant_running(
 
         // Nothing to hold against the teardown: the descendant never launched
         // inside the window this rule condemns in, so this run is not evidence.
-        let ticked = ticks_written(&ticks);
+        let ticked = tick_bytes_written(&ticks);
         if ticked == 0 {
             assert!(
                 std::time::Instant::now() < give_up_at,
@@ -1005,7 +1007,7 @@ fn a_condemned_member_leaves_no_descendant_running(
 
         std::thread::sleep(SETTLE);
         assert_eq!(
-            ticks_written(&ticks),
+            tick_bytes_written(&ticks),
             ticked,
             "attempt {attempt}: the {rule} rule condemned the member and reported it, but its \
              descendant is still running — the provider under a condemned member keeps billing \
@@ -1016,8 +1018,11 @@ fn a_condemned_member_leaves_no_descendant_running(
     }
 }
 
-/// How much the descendant has written so far, or nothing when it never wrote.
-fn ticks_written(path: &Path) -> u64 {
+/// How many bytes of ticks the descendant has written so far, or zero when it
+/// never wrote. A byte count rather than a tick count on purpose: every caller
+/// asks only whether the file *grew*, and growth is what proves the descendant is
+/// still running without this having to know a tick's size.
+fn tick_bytes_written(path: &Path) -> u64 {
     std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
 }
 
