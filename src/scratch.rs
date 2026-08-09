@@ -292,11 +292,28 @@ impl Group {
 }
 
 /// The identity a scratch directory's lock file records.
+///
+/// A lock file is external input — a scratch directory is on disk, and anything
+/// with write access to it can put a number here — so the pid is range-checked
+/// rather than merely parsed. Only a *positive* pid names a process on either
+/// platform, and the two ways a non-positive one would be read are both bad: on
+/// POSIX a negative pid is how `kill` addresses a whole process group, and on
+/// Windows it would be widened into an unrelated but perfectly real pid. Neither
+/// path is reachable from here today — this identity only ever reaches
+/// [`is_live`] — but the number is rejected at the boundary rather than trusted
+/// to stay unreachable.
+///
+/// A record that fails this proves nothing about a live process, which leaves
+/// the lock as the only proof; see [`reclaimable`] for what that decides.
 fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
     let recorded = std::fs::read_to_string(lock_path).ok()?;
     let mut parts = recorded.split_whitespace();
+    let pid: i32 = parts.next()?.parse().ok()?;
+    if pid <= 0 {
+        return None;
+    }
     Some(ProcessIdentity {
-        pid: parts.next()?.parse().ok()?,
+        pid,
         start_token: parts.next()?.parse().ok()?,
     })
 }
@@ -795,15 +812,13 @@ mod platform {
     /// answers `None`: its creation time is still readable, so the wait below is
     /// what separates "still that process" from "was that process".
     pub fn start_token(pid: i32) -> Option<u64> {
+        // Checked rather than `as`: a lossy widening turns a number that names
+        // no process into one that may name a real and unrelated one.
+        let pid = u32::try_from(pid).ok()?;
         // SAFETY: `OpenProcess` takes a pid and reports failure with a null
         // handle; nothing is borrowed.
-        let handle = unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
-                0,
-                pid as u32,
-            )
-        };
+        let handle =
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
         if handle.is_null() {
             return None;
         }
@@ -1282,7 +1297,11 @@ use platform::{try_lock_exclusive, LOCK_PROVES_OWNERSHIP};
 /// mistaken for a live process.
 #[must_use]
 pub fn own_identity() -> ProcessIdentity {
-    let pid = std::process::id() as i32;
+    // A pid past `i32::MAX` is reachable on Windows and would wrap to a negative
+    // number, which [`recorded_identity`] rejects on the way back in. `0` names
+    // no process on either platform, so such a run is judged by its lock alone
+    // rather than by a number that would read as somebody else's.
+    let pid = i32::try_from(std::process::id()).unwrap_or(0);
     ProcessIdentity {
         pid,
         start_token: platform::start_token(pid).unwrap_or(0),
@@ -1428,6 +1447,48 @@ mod tests {
         // is the only proof left — and it is free.
         let torn = recorded("torn", "not a record\n");
         assert_eq!(reclaimable(&torn), Ok(()));
+    }
+
+    /// A lock file is external input, so a pid that names no process is refused
+    /// at the boundary rather than carried into a platform call.
+    ///
+    /// The direction matters as much as the refusal. A rejected record leaves the
+    /// kernel lock as the only proof, and here that lock is free — so these are
+    /// reclaimable, which is the answer for a directory nothing can be shown to
+    /// be using. What must never happen is the other reading: a non-positive pid
+    /// treated as an identity, which is `kill`'s whole-process-group address on
+    /// POSIX and widens into an unrelated live pid on Windows.
+    #[test]
+    fn a_lock_recording_a_pid_that_names_no_process_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for (name, record) in [
+            ("negative", "-1 1\n"),
+            ("group", "-4242 1\n"),
+            ("zero", "0 1\n"),
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(&path).expect("mkdir");
+            std::fs::write(path.join(OWNER_LOCK_FILE), record).expect("write");
+            assert_eq!(
+                recorded_identity(&path.join(OWNER_LOCK_FILE)),
+                None,
+                "{record:?}"
+            );
+            assert_eq!(reclaimable(&path), Ok(()), "{record:?}");
+        }
+
+        // And the boundary is a range check, not a blanket refusal: a positive
+        // pid still reads back as the identity it records.
+        let path = root.path().join("positive");
+        std::fs::create_dir_all(&path).expect("mkdir");
+        std::fs::write(path.join(OWNER_LOCK_FILE), "4242 99\n").expect("write");
+        assert_eq!(
+            recorded_identity(&path.join(OWNER_LOCK_FILE)),
+            Some(ProcessIdentity {
+                pid: 4242,
+                start_token: 99
+            })
+        );
     }
 
     /// A scratch that cannot be created, or whose lock cannot be opened, is a
