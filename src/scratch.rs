@@ -305,8 +305,13 @@ impl Group {
 /// [`is_live`] — but the number is rejected at the boundary rather than trusted
 /// to stay unreachable.
 ///
-/// A record that fails this proves nothing about a live process, which leaves
-/// the lock as the only proof; see [`reclaimable`] for what that decides.
+/// The shape is checked as strictly as the number. [`Owned::claim`] writes
+/// exactly two fields, so a file carrying anything after them is one this crate
+/// did not write — and reading the first two numbers out of it anyway would take
+/// a stranger's word for who owns the directory.
+///
+/// A record that fails any of this proves nothing about a live process, which
+/// leaves the lock as the only proof; see [`reclaimable`] for what that decides.
 //
 // llmlint: ignore-block[changed_behavior_has_e2e] the range check has no journey
 // because no journey can reach it. Its only caller is [`reclaimable`], which the
@@ -323,13 +328,11 @@ fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
     let recorded = std::fs::read_to_string(lock_path).ok()?;
     let mut parts = recorded.split_whitespace();
     let pid: i32 = parts.next()?.parse().ok()?;
-    if pid <= 0 {
+    let start_token = parts.next()?.parse().ok()?;
+    if pid <= 0 || parts.next().is_some() {
         return None;
     }
-    Some(ProcessIdentity {
-        pid,
-        start_token: parts.next()?.parse().ok()?,
-    })
+    Some(ProcessIdentity { pid, start_token })
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -1464,8 +1467,9 @@ mod tests {
         assert_eq!(reclaimable(&torn), Ok(()));
     }
 
-    /// A lock file is external input, so a pid that names no process is refused
-    /// at the boundary rather than carried into a platform call.
+    /// A lock file is external input, so a record this crate would never have
+    /// written is refused at the boundary rather than carried into a platform
+    /// call.
     ///
     /// The direction matters as much as the refusal. A rejected record leaves the
     /// kernel lock as the only proof, and here that lock is free — so these are
@@ -1474,12 +1478,16 @@ mod tests {
     /// treated as an identity, which is `kill`'s whole-process-group address on
     /// POSIX and widens into an unrelated live pid on Windows.
     #[test]
-    fn a_lock_recording_a_pid_that_names_no_process_is_refused() {
+    fn a_lock_recording_no_identity_this_crate_would_write_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
         for (name, record) in [
             ("negative", "-1 1\n"),
             ("group", "-4242 1\n"),
             ("zero", "0 1\n"),
+            // The shape, not just the number: `claim` writes two fields, so a
+            // third is a file somebody else wrote.
+            ("trailing", "4242 99 someone-elses-record\n"),
+            ("second-line", "4242 99\n7 7\n"),
         ] {
             let path = root.path().join(name);
             std::fs::create_dir_all(&path).expect("mkdir");
@@ -1492,8 +1500,8 @@ mod tests {
             assert_eq!(reclaimable(&path), Ok(()), "{record:?}");
         }
 
-        // And the boundary is a range check, not a blanket refusal: a positive
-        // pid still reads back as the identity it records.
+        // And the boundary is a check, not a blanket refusal: the record `claim`
+        // actually writes still reads back as the identity it names.
         let path = root.path().join("positive");
         std::fs::create_dir_all(&path).expect("mkdir");
         std::fs::write(path.join(OWNER_LOCK_FILE), "4242 99\n").expect("write");

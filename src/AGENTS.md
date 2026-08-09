@@ -74,13 +74,19 @@ check a CI round-trip away. `just lint-windows` runs the same clippy against it
 here; it asks for a target and a cross compiler `just bootstrap` deliberately
 does not install, and says which when either is missing.
 
-**To prove a Windows journey red, compile the layer out rather than revert it.**
-Swapping `cfg(windows)` for `cfg(all(windows, not(windows)))` and widening the
-`cfg(not(any(unix, windows)))` module to `cfg(not(unix))` routes Windows through
-the degraded fallback — the behaviour before the layer existed — while leaving
-every test and caller compiling. Add `--no-fail-fast` to `test-quick` on that
-throwaway branch too: the four `scratch::tests` ownership proofs fail in
-milliseconds and otherwise cancel the e2e journeys that are the point.
+**To prove a Windows journey red, compile the layer out rather than revert it** —
+`cfg(all(windows, not(windows)))` on the `cfg(windows)` module, widening the
+fallback to `cfg(not(unix))`. `tests/e2e/liveness.rs` records which journeys that
+turns red and which cannot, and why.
+
+**A two-party member has no Windows group, and the missing piece is upstream.**
+Only the caller of `CreateProcess` can put a child in a job object, and since
+onejudge became a library that caller is onejudge — so `Group::open` is never
+reached for a `Launch::Library` member and `stamped_for` finds nothing.
+onejudge's `SpawnHook` (v0.3.6) is the seam, but it installs on a *provider*, and
+this crate drives `cli::Plan`, which builds providers internally; `onejudge::cli`
+has to expose a `Plan`-level hook. A shim binary that joins the job and re-spawns,
+or a local copy of `execute` to reach `Engine::new`, are not substitutes.
 
 ## Two things that bite
 
