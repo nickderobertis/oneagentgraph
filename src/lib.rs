@@ -34,3 +34,4 @@ pub mod resolve;
 pub mod run;
 pub mod scratch;
 pub mod smoke;
+pub mod sweep;

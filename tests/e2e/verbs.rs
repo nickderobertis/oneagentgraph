@@ -438,6 +438,104 @@ fn smoke_makes_its_own_throwaway_directory() {
     );
 }
 
+/// `sweep` reports what it would reclaim and removes nothing while it does, and
+/// the floor keeps a run's own record until an operator asks past it.
+///
+/// The escape hatch this is: a host that filled up has a verb that says what is
+/// there and what can go, and a `--dry-run` an operator can read before anything
+/// is destroyed. So the ordering is the assertion — the same directory is
+/// reported, kept, and only then taken.
+#[test]
+fn sweep_reports_before_it_reclaims_and_removes_nothing_in_a_dry_run() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: leave a record behind")
+        .expect_code(0);
+    let id = run_id(&workspace.state()).expect("a run");
+    let recorded = workspace.state().join(&id);
+
+    // A temp root of this journey's own: the family is the host's `TMPDIR`, and
+    // a sweep pointed at the real one would be judging scratch belonging to
+    // whatever else is running on this machine.
+    let temp = workspace.at("tmp");
+    std::fs::create_dir_all(&temp).expect("mkdir");
+    let temp = temp.display().to_string();
+    let env = [("TMPDIR", temp.as_str())];
+
+    // The floor first: a run that finished a moment ago is exactly what an
+    // operator is about to read `history` for, so the default sweep keeps it and
+    // says which flag takes it.
+    let floored = workspace.run_with(&["sweep"], &env);
+    floored.expect_code(0);
+    assert!(
+        floored.stdout.contains("--min-age-hours 0"),
+        "{}",
+        floored.stdout
+    );
+    assert!(recorded.is_dir(), "the default floor took a fresh run");
+
+    let dry = workspace.run_with(&["sweep", "--dry-run", "--min-age-hours", "0"], &env);
+    dry.expect_code(0);
+    assert!(
+        dry.stdout
+            .contains(&format!("would reclaim {}", recorded.display())),
+        "a dry run that never named what it would take: {}",
+        dry.stdout
+    );
+    assert!(
+        recorded.is_dir(),
+        "a --dry-run sweep removed a run's scratch"
+    );
+    // And the run is still there to read, which is what "removed nothing" is
+    // worth to whoever ran the dry run.
+    workspace.run(&["history", "show", &id]).expect_code(0);
+
+    let swept = workspace.run_with(&["sweep", "--min-age-hours", "0"], &env);
+    swept.expect_code(0);
+    assert!(
+        swept
+            .stdout
+            .contains(&format!("reclaimed {}", recorded.display())),
+        "{}",
+        swept.stdout
+    );
+    assert!(
+        !recorded.exists(),
+        "a sweep left behind what it reported reclaiming"
+    );
+}
+
+/// A family the sweep could not examine is named as one, so a zero is never read
+/// as "there was nothing there".
+///
+/// This is the property the whole verb rests on: `reclaimed 0 B` from a sweep
+/// that never managed to look at one of its two families is the answer that
+/// sends an operator away from the disk that is still full.
+#[test]
+fn sweep_names_the_family_it_could_not_examine() {
+    let workspace = Workspace::new();
+    // A file where the temp root should be: the family exists, and cannot be
+    // read.
+    let blocked = workspace.write("not-a-directory", "").display().to_string();
+
+    let run = workspace.run_with(&["sweep", "--min-age-hours", "0"], &[("TMPDIR", &blocked)]);
+    run.expect_code(0);
+    assert!(
+        run.stdout.contains("could not examine family \"temp\""),
+        "{}",
+        run.stdout
+    );
+    // Both lists in the one line a reader takes the verdict from, so the zero
+    // beside them cannot be mistaken for a clean host.
+    assert!(
+        run.stdout
+            .contains("examined families: runs; unexamined families: temp ("),
+        "a zero that does not say which families it covered: {}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("reclaimed 0 B"), "{}", run.stdout);
+}
+
 /// `health` forwards what oneharness knows about each identity, and says why
 /// there is no answer when there is none.
 // A POSIX shell stands in for a provider here, which is a platform
@@ -1681,6 +1779,10 @@ fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
         vec!["trigger", id.as_str(), "worker"],
         vec!["reset-timer", id.as_str(), "worker"],
         vec!["cancel", id.as_str()],
+        // Reporting only: the reclaiming half is driven by its own journeys,
+        // and a suite that removed scratch out of this one would be sweeping
+        // the host it happens to run on.
+        vec!["sweep", "--dry-run"],
     ] {
         let run = workspace.run_with(&args, &without);
         assert_eq!(

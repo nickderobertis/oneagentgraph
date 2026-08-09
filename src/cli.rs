@@ -45,6 +45,9 @@ pub enum Command {
     Health,
     /// Spend one real harness turn in a throwaway directory.
     Smoke(SmokeArgs),
+    /// Report every family of this crate's own scratch, and reclaim what is
+    /// provably dead.
+    Sweep(SweepArgs),
     /// Scaffold or check a persona.
     Persona(PersonaArgs),
 }
@@ -145,6 +148,25 @@ pub struct SmokeArgs {
     #[arg(long)]
     pub dir: Option<PathBuf>,
 }
+
+/// `oneagentgraph sweep`.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct SweepArgs {
+    /// Report what would be reclaimed without removing anything.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Leave scratch written inside this many hours alone; `0` sweeps whatever
+    /// is provably dead.
+    #[arg(long, value_name = "HOURS", default_value_t = DEFAULT_MIN_AGE_HOURS)]
+    pub min_age_hours: u64,
+}
+
+/// The default [`SweepArgs::min_age_hours`], which is
+/// [`crate::sweep::DEFAULT_MIN_AGE`] said in the unit an operator types.
+///
+/// Derived rather than spelled, so the flag's default and the floor the library
+/// applies cannot come to disagree.
+pub const DEFAULT_MIN_AGE_HOURS: u64 = crate::sweep::DEFAULT_MIN_AGE.as_secs() / 3600;
 
 /// `oneagentgraph persona`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]

@@ -85,6 +85,7 @@ oneagentgraph cancel RUN [MEMBER] [--kill]
 oneagentgraph history [RUN] | history show ID
 oneagentgraph health                      # per-identity binding/utilization/reset, read from oneharness data
 oneagentgraph smoke [--dir PATH]
+oneagentgraph sweep [--dry-run] [--min-age-hours H]   # report this crate's own scratch, and reclaim what is provably dead
 oneagentgraph persona new NAME | persona validate PATH
 ```
 
@@ -100,5 +101,7 @@ Event kinds: `graph-started`, `member-started` (`runner: library|process`, plus 
 - `exit_code`, `disposition: exited|signaled`, `stderr_tail` — a **child process's** facts, present only for a member that was one. An in-process member has none of them; `cause` and `detail` are how it says the same thing.
 
 `fallback-advanced` gains two fields a two-party member can now answer for, and only it: `role: agent|judge` and the `turn`. onejudge's report carries no fallback chain of its own, so while that hop was a subprocess a two-party member published no `fallback-advanced` at all; in-process, its per-invocation telemetry names every candidate each side stepped past — including for a run that failed and produced no report, which is exactly when an operator needs to know which subscription refused. A single-sided member stamps neither field.
+
+`sweep` is the liveness rules below, made invokable. It reports every **family** of scratch this crate creates — `runs`, the run state directory, and `temp`, the throwaway directories it leaves under `TMPDIR` — naming for each the directories it examined and what became of them, and naming every family it could **not** examine and why. Every family lands in exactly one of those two lists, so `reclaimed 0 bytes` can never hide a family that was never looked at; a family whose root does not exist yet is an examined zero, and one that cannot be read is unexamined with the reason. A directory is reclaimed only when nothing can still be using it: the `owner.lock` is free, the pid-with-start-token it records no longer names a live process, and no live process carries that directory as its scratch stamp — anything else is retained, with the reason, and ending a process a directory still names is `cancel --kill`'s job rather than this verb's. `--min-age-hours` (default 24, `0` to sweep whatever is provably dead) keeps a sweep run in anger from taking run records their operator is about to read; `--dry-run` reports without removing anything. Exit 0 whatever it finds — an unexamined family is a reported fact, not a refusal.
 
 Liveness (ported from ai-orchestrator intact): heartbeat wrapper (default deadline 60s, `ONEAGENTGRAPH_HEARTBEAT_TIMEOUT`), activity watchdog (default 600s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via a non-blocking kernel-exclusive lock on `owner.lock` + pid-with-start-token, descendant reaping, successor contract for processes meant to outlive their launcher.

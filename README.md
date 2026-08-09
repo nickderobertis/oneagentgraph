@@ -29,7 +29,7 @@ Windows (x86-64) are attached to every [release], with `sha256` checksums.
 [onejudge] is a **library dependency**, linked into this binary — there is
 nothing to install for it. `run`, `smoke`, and `health` drive the [oneharness]
 CLI, so that has to be on `PATH`; `validate`, `history`, `persona`, `trigger`,
-`reset-timer`, and `cancel` need nothing at all.
+`reset-timer`, `cancel`, and `sweep` need nothing at all.
 `ONEAGENTGRAPH_ONEHARNESS_BIN` names a pinned install instead.
 
 ## What it does
@@ -55,6 +55,11 @@ members:
 
 `run` streams one envelope per line. Exit `0` means every member settled, `1`
 that one failed or died, `2` that the config is invalid.
+
+Under disk pressure, `oneagentgraph sweep --dry-run` says what scratch exists,
+what is reclaimable, and what it could not examine; without `--dry-run` it
+reclaims what it can prove nothing is using. Nothing a live run holds — or that
+a live process still names — is ever taken.
 
 **oneagentgraph owns no harness, model, or fallback logic.** oneharness keeps
 owning identity chains, fallback, model pins, and quota classification; onejudge

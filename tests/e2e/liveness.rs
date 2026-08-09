@@ -22,12 +22,11 @@
 // rest on the job object that stands in there for the environment stamp.
 // `src/scratch.rs` documents every one of those mappings, including which
 // direction each differs in. Every other journey runs on all three platforms.
-// They also read
-// `oneagentgraph::scratch` directly, because scratch ownership is a liveness rule
-// the contract gives no CLI verb of its own — the sweep a future operator runs is
-// this same library call, so this is the interface, not a reach past one. Where a
-// verb does answer — `cancel --kill` reporting what it signalled — the journey
-// asserts on that instead.
+// Where a verb answers for a rule, the journey drives the verb: `cancel --kill`
+// reports what it signalled, and `sweep` reports what it kept and why. The
+// journeys that still read `oneagentgraph::scratch` directly do so to *arrange*
+// or *observe* what no verb can — a group holding an orphan, a process table
+// checked between two commands — never to stand in for the verb itself.
 
 use std::path::Path;
 
@@ -409,6 +408,154 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
         oneagentgraph::scratch::reclaimable(lock.parent().expect("the run root")),
         Ok(())
     );
+}
+
+/// The same proof through the verb an operator actually runs: `sweep` leaves a
+/// live run's scratch alone, and says which directory it kept and why.
+///
+/// The journey above holds the *rule*; this holds the thing that acts on it. A
+/// sweep is invoked under disk pressure, which is exactly when runs are in
+/// flight, so "reclaims nothing a run is working in" is the property that makes
+/// the verb safe to hand an operator at all.
+#[test]
+fn a_sweep_leaves_a_live_run_s_scratch_alone() {
+    let workspace = Workspace::new();
+    let release = workspace.at("release");
+    let state = workspace.state();
+    let temp = workspace.at("tmp");
+    std::fs::create_dir_all(&temp).expect("mkdir");
+
+    let handle = {
+        let workspace_dir = workspace.path().to_path_buf();
+        let state = state.clone();
+        let release = release.clone();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+                .args([
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    &format!("fake:complete-now: fake:hold={}", release.display()),
+                    "--dir",
+                    &workspace_dir.join("work").display().to_string(),
+                ])
+                .current_dir(&workspace_dir)
+                .env("ONEAGENTGRAPH_STATE_DIR", &state)
+                .env(
+                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                    crate::support::oneharness_bin(),
+                )
+                .env_remove("ONEHARNESS_HARNESSES")
+                .output()
+                .expect("the run finishes")
+        })
+    };
+
+    until("the run to claim its scratch", || {
+        first_lock(&state).is_some()
+    });
+    let root = first_lock(&state)
+        .expect("a lock")
+        .parent()
+        .expect("the run root")
+        .to_path_buf();
+
+    // No floor and no dry run: everything this sweep can prove dead, it takes.
+    let swept = workspace.run_with(
+        &["sweep", "--min-age-hours", "0"],
+        &[("TMPDIR", &temp.display().to_string())],
+    );
+    swept.expect_code(0);
+    assert!(
+        root.is_dir(),
+        "a sweep took a live run's scratch:\n{}",
+        swept.stdout
+    );
+    // On the *lock*, named: a live run also has processes stamped for it, so a
+    // sweep with the ownership proof taken out would keep this directory anyway
+    // and pass an assertion that only checked it survived. The reason is what
+    // separates the two, and the run holds its claim from before it launches
+    // anything until its process exits, so this one is not a race.
+    assert!(
+        swept
+            .stdout
+            .contains(&format!("{} is still locked by its owner", root.display())),
+        "a sweep that kept a live run's scratch, but not because a run owns it:\n{}",
+        swept.stdout
+    );
+
+    std::fs::write(&release, "go").expect("release");
+    let output = handle.join().expect("the run thread");
+    assert_eq!(output.status.code(), Some(0));
+}
+
+/// Scratch a **live process still names** survives a sweep, even once its owner
+/// is gone.
+///
+/// The other half of "never reclaim what is in use", and the half the ownership
+/// lock cannot answer: a supervisor that died leaves its lock free and its
+/// recorded identity stale, while a descendant it started keeps running — a paid
+/// harness reparented to init, still writing into the tree below that directory.
+/// Removing it would destroy live work and leave the harness billing, so the
+/// stamp the kernel fixed at `exec` is proof enough to keep it. Ending it stays
+/// `cancel --kill`'s job; a sweep that killed would be a teardown wearing a
+/// report's name.
+#[test]
+fn a_sweep_leaves_scratch_a_live_process_still_names_alone() {
+    use oneagentgraph::scratch::{Group, SCRATCH_ENV};
+
+    let workspace = Workspace::new();
+    let state = workspace.state();
+    let temp = workspace.at("tmp");
+    std::fs::create_dir_all(&temp).expect("mkdir");
+
+    // A directory whose *ownership* proof clears completely: the lock is free,
+    // and the identity recorded in it names this process's number with a start
+    // token nobody holds — the recycled number the token exists to see through.
+    // Without the stamp below, this is a directory the sweep would take.
+    let abandoned = state.join("node-scope-abandoned");
+    std::fs::create_dir_all(&abandoned).expect("mkdir");
+    std::fs::write(
+        abandoned.join(oneagentgraph::liveness::OWNER_LOCK_FILE),
+        format!("{} 1\n", std::process::id()),
+    )
+    .expect("write");
+
+    // Through a group, because that is what membership *is* on Windows: a bare
+    // spawn carrying the environment stamp is invisible to `stamped_for` there,
+    // and this journey would pass for the wrong reason.
+    let group = Group::open(&abandoned).expect("a group");
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args(["-p", "fake:hang"])
+        .env(SCRATCH_ENV, &abandoned)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = group.spawn(&mut parked).expect("the parked process starts");
+    until("the scratch to be named by a live process", || {
+        !oneagentgraph::scratch::stamped_for(&abandoned.display().to_string()).is_empty()
+    });
+
+    let swept = workspace.run_with(
+        &["sweep", "--min-age-hours", "0"],
+        &[("TMPDIR", &temp.display().to_string())],
+    );
+    swept.expect_code(0);
+    assert!(
+        abandoned.is_dir(),
+        "a sweep took scratch a live process is still writing into:\n{}",
+        swept.stdout
+    );
+    assert!(
+        swept.stdout.contains("still named by"),
+        "a sweep kept it without saying which proof kept it:\n{}",
+        swept.stdout
+    );
+
+    group.terminate();
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// A two-party member puts **every process its engine spawns** into the group its
