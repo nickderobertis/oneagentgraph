@@ -362,16 +362,15 @@ impl Group {
 /// leaves the lock as the only proof; see [`reclaimable`] for what that decides.
 //
 // llmlint: ignore-block[changed_behavior_has_e2e] the range check has no journey
-// because no journey can reach it. Its only caller is [`reclaimable`], which the
-// binary never invokes — `docs/contract.md`'s CLI surface has no sweep verb, so
-// `reclaimable` is a library entry point a future sweeper calls, and the e2e
-// journeys that touch it (`a_live_run_holds_its_scratch_against_a_sweep`) already
-// call it directly for exactly that reason. An "e2e" here would be the unit test
-// below moved one file over, driving the same function through the same call:
-// less realistic, not more, because it would imply a command surface that does
-// not exist. What the boundary is worth holding is held there — both that a
-// non-positive record is refused and that the refusal is a range check rather
-// than a blanket one.
+// because no journey can reach it. Its only caller is [`reclaimable`], which
+// `oneagentgraph sweep` does drive end to end — but only over lock files this
+// crate itself wrote, and `Owned::claim` cannot write one of these. Reaching it
+// through the verb would mean forging a lock file in a swept directory and
+// asserting that nothing happened, which is a unit test with a subprocess
+// wrapped around it rather than a journey. What the boundary is worth holding is
+// held below — both that a non-positive record is refused and that the refusal
+// is a range check rather than a blanket one — and the sweep journeys in
+// tests/e2e/liveness.rs hold what an operator can actually reach.
 fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
     let recorded = std::fs::read_to_string(lock_path).ok()?;
     let mut parts = recorded.split_whitespace();

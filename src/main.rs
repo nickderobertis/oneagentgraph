@@ -12,14 +12,15 @@ use std::process::ExitCode;
 use clap::Parser;
 use oneagentgraph::cli::{
     CancelArgs, Cli, Command, HistoryArgs, HistoryCommand, MemberArgs, OutputFormat, PersonaArgs,
-    PersonaCommand, RunArgs, SmokeArgs, ValidateArgs,
+    PersonaCommand, RunArgs, SmokeArgs, SweepArgs, ValidateArgs,
 };
 use oneagentgraph::config::GraphConfig;
 use oneagentgraph::error::{Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_SUCCESS};
 use oneagentgraph::persona::{Persona, PERSONA_TEMPLATE};
 use oneagentgraph::render::Text;
 use oneagentgraph::resolve::Resolver;
-use oneagentgraph::{config, health, history, run, smoke};
+use oneagentgraph::scratch::{Owned, SCRATCH_PREFIX};
+use oneagentgraph::{config, health, history, run, smoke, sweep};
 
 /// Where run state lives unless the environment says otherwise.
 const STATE_DIR_ENV: &str = "ONEAGENTGRAPH_STATE_DIR";
@@ -81,6 +82,7 @@ fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Err
             Ok(EXIT_SUCCESS)
         }
         Command::Smoke(args) => run_smoke(&args, env),
+        Command::Sweep(args) => sweep_scratch(&args, env),
         Command::Persona(args) => persona(&args),
     }
 }
@@ -275,9 +277,13 @@ fn preflight(
     // checked is that they *can* be generated, not what they say. The task is
     // the caller's to supply, because the two callers mean different things by
     // its absence — see [`VALIDATE_TASK`].
-    let scratch = tempdir(env)?;
+    // Removed when this claim drops, on the way out of *every* path rather than
+    // only the one that reaches the end: a refusal is the common case here, and
+    // a `validate` that leaked a directory per failed attempt would be one of
+    // the things a sweep exists to clean up after.
+    let scratch = tempdir(env, "validate")?;
     for (name, member) in &graph.members {
-        let member_scratch = scratch.join(name);
+        let member_scratch = scratch.path().join(name);
         let context = oneagentgraph::invoke::Context {
             dir: Path::new("."),
             scratch: &member_scratch,
@@ -289,7 +295,6 @@ fn preflight(
         oneagentgraph::invoke::build(member, &context, &mut resolver)
             .map_err(|err| Error::InvalidConfig(format!("member {name:?}: {err}")))?;
     }
-    let _ = std::fs::remove_dir_all(&scratch);
     Ok(graph)
 }
 
@@ -464,12 +469,18 @@ fn show_history(args: &HistoryArgs, env: &BTreeMap<String, String>) -> Result<i3
 
 /// `oneagentgraph smoke`.
 fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
-    let scratch;
+    // Kept rather than removed on the way out: a smoke that failed is one an
+    // operator reads the harness's own leavings out of, and taking them away
+    // would leave them the exit code alone. It is claimed scratch, so `sweep`
+    // can prove it dead and reclaim it later — which is what a throwaway
+    // directory nobody is left holding needs to be.
+    let mut scratch;
     let dir = match &args.dir {
         Some(dir) => dir.clone(),
         None => {
-            scratch = tempdir(env)?;
-            scratch.clone()
+            scratch = tempdir(env, "smoke")?;
+            scratch.keep();
+            scratch.path().to_path_buf()
         }
     };
     std::fs::create_dir_all(&dir)
@@ -496,16 +507,59 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
     Ok(EXIT_SUCCESS)
 }
 
+/// `oneagentgraph sweep`.
+///
+/// The roots come from the same environment every other verb reads, so a sweep
+/// answers for the run state this install actually uses rather than for a host's
+/// defaults. Exit 0 whatever it finds: a family it could not examine is a
+/// *reported* fact, not a refusal — the report names it, and an operator acting
+/// on that is the whole point of the verb.
+fn sweep_scratch(args: &SweepArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let families = sweep::families(state_dir(env), temp_root(env));
+    let mode = if args.dry_run {
+        sweep::Mode::Report
+    } else {
+        sweep::Mode::Reclaim
+    };
+    let report = sweep::sweep(
+        &families,
+        mode,
+        std::time::Duration::from_secs(args.min_age_hours.saturating_mul(3600)),
+        std::time::SystemTime::now(),
+    );
+    for line in report.lines() {
+        println!("{line}");
+    }
+    Ok(EXIT_SUCCESS)
+}
+
+/// The directory this crate leaves its throwaway scratch in.
+///
+/// `TMPDIR` first, so a caller can point one invocation somewhere with room on
+/// it — and so `sweep` looks in the same place the invocation that made the
+/// scratch did.
+fn temp_root(env: &BTreeMap<String, String>) -> PathBuf {
+    env.get("TMPDIR")
+        .map_or_else(std::env::temp_dir, PathBuf::from)
+}
+
 /// A throwaway directory for a command that needs one: a smoke that named none,
 /// or the generated configs `validate` builds and discards.
-fn tempdir(env: &BTreeMap<String, String>) -> Result<PathBuf, Error> {
-    let base = env
-        .get("TMPDIR")
-        .map_or_else(std::env::temp_dir, PathBuf::from);
-    let dir = base.join(format!("oneagentgraph-smoke-{}", std::process::id()));
-    std::fs::create_dir_all(&dir)
-        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
-    Ok(dir)
+///
+/// `verb` is the caller's own, because the two callers leave different things
+/// behind and one of them leaves it for a person to read — a directory called
+/// `smoke` holding a `validate`'s discarded configs is a name that lies to
+/// whoever goes looking. It also means the two can never be handed the same
+/// path.
+///
+/// Claimed rather than merely created, and that is what makes it sweepable: an
+/// `owner.lock` is the only thing that ever proves a directory is done with, so
+/// scratch this crate leaves without one is scratch its own `sweep` has to
+/// retain forever. The claim is released when this process exits, and the
+/// identity it records is dead from that moment.
+fn tempdir(env: &BTreeMap<String, String>, verb: &str) -> Result<Owned, Error> {
+    let dir = temp_root(env).join(format!("{SCRATCH_PREFIX}{verb}-{}", std::process::id()));
+    Owned::claim(dir)
 }
 
 /// `oneagentgraph persona`.

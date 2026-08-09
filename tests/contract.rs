@@ -12,6 +12,7 @@
 
 use std::collections::BTreeSet;
 
+use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
     Schedule,
@@ -27,6 +28,7 @@ use oneagentgraph::liveness::{
     STALL_TIMEOUT_ENV,
 };
 use oneagentgraph::run::{RunId, Started};
+use oneagentgraph::sweep::{families, RUNS_FAMILY, TEMP_FAMILY};
 use serde_json::{json, Value};
 
 /// The approved contract itself.
@@ -785,6 +787,36 @@ fn the_documented_liveness_bounds_are_the_ones_the_crate_declares() {
     }
 }
 
+/// The families `sweep` names, and the floor it applies, are the ones the crate
+/// declares.
+///
+/// The document's promise is that a family is always in one of two lists, which
+/// is a promise about *names*: a family the code calls something else is one an
+/// operator cannot find in the report, and a floor the document states and the
+/// code does not apply is a directory taken from under them. Both are gated
+/// against the constants rather than restated here.
+#[test]
+fn the_documented_sweep_names_the_families_and_the_floor_the_crate_applies() {
+    for name in [RUNS_FAMILY, TEMP_FAMILY] {
+        assert!(
+            CONTRACT.contains(&format!("`{name}`")),
+            "docs/contract.md no longer names the `{name}` scratch family"
+        );
+    }
+    assert!(
+        CONTRACT.contains(&format!("default {DEFAULT_MIN_AGE_HOURS}")),
+        "the sweep floor in docs/contract.md and DEFAULT_MIN_AGE disagree"
+    );
+    // The families the document names are the families the binary sweeps: a
+    // third one added to the crate and not to the document would be swept
+    // without ever being described.
+    let named: Vec<&str> = families("state".into(), "temp".into())
+        .iter()
+        .map(|family| family.name.as_str())
+        .collect();
+    assert_eq!(named, vec![RUNS_FAMILY, TEMP_FAMILY]);
+}
+
 #[test]
 fn the_documented_graph_round_trips_through_the_config_schema() {
     let yaml = fenced_block("yaml");
@@ -928,6 +960,7 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "history",
         "health",
         "smoke",
+        "sweep",
         "persona",
     ] {
         assert!(
@@ -944,6 +977,8 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "--output",
         "--detach",
         "--kill",
+        "--dry-run",
+        "--min-age-hours",
     ] {
         assert!(
             usage.contains(flag),

@@ -438,6 +438,200 @@ fn smoke_makes_its_own_throwaway_directory() {
     );
 }
 
+/// `sweep` reports what it would reclaim and removes nothing while it does, and
+/// the floor keeps a run's own record until an operator asks past it.
+///
+/// The escape hatch this is: a host that filled up has a verb that says what is
+/// there and what can go, and a `--dry-run` an operator can read before anything
+/// is destroyed. So the ordering is the assertion — the same directory is
+/// reported, kept, and only then taken.
+#[test]
+fn sweep_reports_before_it_reclaims_and_removes_nothing_in_a_dry_run() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: leave a record behind")
+        .expect_code(0);
+    let id = run_id(&workspace.state()).expect("a run");
+    let recorded = workspace.state().join(&id);
+
+    // A temp root of this journey's own: the family is the host's `TMPDIR`, and
+    // a sweep pointed at the real one would be judging scratch belonging to
+    // whatever else is running on this machine.
+    let temp = workspace.at("tmp");
+    std::fs::create_dir_all(&temp).expect("mkdir");
+    let temp = temp.display().to_string();
+    let env = [("TMPDIR", temp.as_str())];
+
+    // The floor first: a run that finished a moment ago is exactly what an
+    // operator is about to read `history` for, so the default sweep keeps it and
+    // says which flag takes it.
+    let floored = workspace.run_with(&["sweep"], &env);
+    floored.expect_code(0);
+    assert!(
+        floored.stdout.contains("--min-age-hours 0"),
+        "{}",
+        floored.stdout
+    );
+    assert!(recorded.is_dir(), "the default floor took a fresh run");
+
+    let dry = workspace.run_with(&["sweep", "--dry-run", "--min-age-hours", "0"], &env);
+    dry.expect_code(0);
+    assert!(
+        dry.stdout
+            .contains(&format!("would reclaim {}", recorded.display())),
+        "a dry run that never named what it would take: {}",
+        dry.stdout
+    );
+    assert!(
+        recorded.is_dir(),
+        "a --dry-run sweep removed a run's scratch"
+    );
+    // And the run is still there to read, which is what "removed nothing" is
+    // worth to whoever ran the dry run.
+    workspace.run(&["history", "show", &id]).expect_code(0);
+
+    let swept = workspace.run_with(&["sweep", "--min-age-hours", "0"], &env);
+    swept.expect_code(0);
+    assert!(
+        swept
+            .stdout
+            .contains(&format!("reclaimed {}", recorded.display())),
+        "{}",
+        swept.stdout
+    );
+    assert!(
+        !recorded.exists(),
+        "a sweep left behind what it reported reclaiming"
+    );
+}
+
+/// A `smoke`'s own throwaway directory is scratch the sweep can reclaim, and a
+/// neighbour's directory in the same shared root is not.
+///
+/// Both halves matter and neither covers the other. `TMPDIR` is the host's, not
+/// this crate's: a sweep that took everything there would delete whatever else
+/// is running on the machine, and one that could take nothing there would leave
+/// the family that actually leaks — a directory per `smoke`, kept on purpose for
+/// its operator to read — growing forever. So the neighbour here is one the
+/// proofs *would* clear, and the only thing standing between it and the sweep is
+/// that it is not this crate's.
+#[test]
+fn sweep_reclaims_a_smoke_s_own_scratch_and_leaves_a_neighbour_s_alone() {
+    let workspace = Workspace::new();
+    let temp = workspace.at("tmp");
+    std::fs::create_dir_all(&temp).expect("mkdir");
+    let temp_env = temp.display().to_string();
+
+    workspace
+        .run_with(
+            &["smoke"],
+            &[
+                ("TMPDIR", temp_env.as_str()),
+                ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+                ("ONEHARNESS_HARNESSES", "claude-code"),
+            ],
+        )
+        .expect_code(0);
+    let left_behind: Vec<std::path::PathBuf> = std::fs::read_dir(&temp)
+        .expect("tmp")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        left_behind.len(),
+        1,
+        "a smoke left {left_behind:?} rather than one directory"
+    );
+
+    // Everything the proofs ask for, and nothing this crate created: a lock
+    // nobody holds, recording a number with a start token nobody holds either.
+    let neighbour = temp.join("someone-elses-work");
+    std::fs::create_dir_all(&neighbour).expect("mkdir");
+    std::fs::write(
+        neighbour.join(oneagentgraph::liveness::OWNER_LOCK_FILE),
+        format!("{} 1\n", std::process::id()),
+    )
+    .expect("write");
+    // A *file* wearing this crate's own prefix. Scratch is a directory, and a
+    // sweep that took anything whose name matched would delete a neighbour's
+    // file for looking like one.
+    let namesake = temp.join("oneagentgraph-not-a-directory");
+    std::fs::write(&namesake, "someone else's notes").expect("write");
+
+    let swept = workspace.run_with(
+        &["sweep", "--min-age-hours", "0"],
+        &[("TMPDIR", temp_env.as_str())],
+    );
+    swept.expect_code(0);
+    assert!(
+        !left_behind[0].exists(),
+        "a sweep left this crate's own throwaway scratch behind:\n{}",
+        swept.stdout
+    );
+    assert!(
+        neighbour.is_dir(),
+        "a sweep took a directory in a shared root that this crate never created:\n{}",
+        swept.stdout
+    );
+    assert!(
+        namesake.is_file(),
+        "a sweep took a file for a scratch directory because the name matched:\n{}",
+        swept.stdout
+    );
+}
+
+/// A family the sweep could not examine is named as one, so a zero is never read
+/// as "there was nothing there".
+///
+/// This is the property the whole verb rests on: `reclaimed 0 B` from a sweep
+/// that never managed to look at one of its two families is the answer that
+/// sends an operator away from the disk that is still full.
+#[test]
+fn sweep_names_the_family_it_could_not_examine() {
+    let workspace = Workspace::new();
+    // A file where the temp root should be: the family exists, and cannot be
+    // read.
+    let blocked = workspace.write("not-a-directory", "").display().to_string();
+
+    let run = workspace.run_with(&["sweep", "--min-age-hours", "0"], &[("TMPDIR", &blocked)]);
+    run.expect_code(0);
+    assert!(
+        run.stdout.contains("could not examine family \"temp\""),
+        "{}",
+        run.stdout
+    );
+    // Both lists in the one line a reader takes the verdict from, so the zero
+    // beside them cannot be mistaken for a clean host.
+    assert!(
+        run.stdout
+            .contains("examined families: runs; unexamined families: temp ("),
+        "a zero that does not say which families it covered: {}",
+        run.stdout
+    );
+    assert!(run.stdout.contains("reclaimed 0 B"), "{}", run.stdout);
+
+    // The other zero, and the reason both lists are always printed: a root that
+    // is not there yet holds nothing, and that *is* knowable — so it is an
+    // examined zero rather than the skip above. An operator reading the two runs
+    // side by side can tell which one they got.
+    let nowhere = workspace.at("nowhere").display().to_string();
+    let empty = workspace.run_with(
+        &["sweep", "--min-age-hours", "0"],
+        &[
+            ("TMPDIR", nowhere.as_str()),
+            ("ONEAGENTGRAPH_STATE_DIR", nowhere.as_str()),
+        ],
+    );
+    empty.expect_code(0);
+    assert!(
+        empty
+            .stdout
+            .contains("examined families: runs, temp; unexamined families: none"),
+        "a root that does not exist yet was reported as one that could not be examined: {}",
+        empty.stdout
+    );
+}
+
 /// `health` forwards what oneharness knows about each identity, and says why
 /// there is no answer when there is none.
 // A POSIX shell stands in for a provider here, which is a platform
@@ -1681,6 +1875,10 @@ fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
         vec!["trigger", id.as_str(), "worker"],
         vec!["reset-timer", id.as_str(), "worker"],
         vec!["cancel", id.as_str()],
+        // Reporting only: the reclaiming half is driven by its own journeys,
+        // and a suite that removed scratch out of this one would be sweeping
+        // the host it happens to run on.
+        vec!["sweep", "--dry-run"],
     ] {
         let run = workspace.run_with(&args, &without);
         assert_eq!(
