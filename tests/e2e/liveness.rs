@@ -4,9 +4,10 @@
 //!
 //! What is being held here is the contract's own sentence: "heartbeat wrapper
 //! (default deadline 60s, `ONEAGENTGRAPH_HEARTBEAT_TIMEOUT`), activity watchdog
-//! (default 600s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via
-//! `owner.lock` flock + pid-with-start-token, descendant reaping, successor
-//! contract for processes meant to outlive their launcher."
+//! (default 600s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via a
+//! non-blocking kernel-exclusive lock on `owner.lock` + pid-with-start-token,
+//! descendant reaping, successor contract for processes meant to outlive their
+//! launcher."
 //!
 //! Every one of these was learned from an incident, so each journey drives the
 //! failure rather than the happy path: a member that stops publishing, one that
@@ -233,6 +234,21 @@ fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
 /// `oneharness` under it and the paid provider under that, and condemning the
 /// one this supervisor holds leaves the other two running — still billing
 /// whoever owns the subscription, with nothing left watching them.
+///
+/// **What this journey and its heartbeat twin can and cannot isolate.** They
+/// *cover* the guarantee on every platform, and that is what they are for; they
+/// cannot be made to fail by compiling the Windows platform layer out, and no
+/// reader should spend an afternoon trying. The reason is structural rather
+/// than a weakness in the journeys: a condemnation kills the member this
+/// supervisor holds, and the chain below it — `onejudge`, then `oneharness`,
+/// then the provider — tears itself down from that alone, so the tree dies
+/// whether or not a job object also reached it. The guarantee the *group* adds
+/// on top is only observable where that containment cannot apply, which is a
+/// descendant with nothing above it left to end it. That case has its own
+/// journey — [`a_group_reaps_a_descendant_whose_parent_has_already_exited`] —
+/// and *that* one does fail with the layer removed. So: these two for coverage,
+/// that one for isolation. Do not contort these into failing, and do not delete
+/// them for failing to.
 #[test]
 fn a_member_the_activity_watchdog_condemns_leaves_no_descendant_running() {
     // The stall bound is wider than the 2s the journey above uses, and the
@@ -253,6 +269,8 @@ fn a_member_the_activity_watchdog_condemns_leaves_no_descendant_running() {
 /// Two rules, two `kill_and_report` call sites: a teardown wired into one and
 /// not the other is a real regression, and one journey cannot see it.
 ///
+/// It covers rather than isolates, for the reason spelled out on the journey
+/// above.
 #[test]
 fn a_member_the_heartbeat_rule_condemns_leaves_no_descendant_running() {
     a_condemned_member_leaves_no_descendant_running(
@@ -668,6 +686,11 @@ fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
 /// `oneharness`, which ends the provider, and a detached grandchild goes with
 /// them. So the guarantee the *group* adds is only visible where that
 /// containment cannot apply: an orphan, with nothing above it left to end it.
+///
+/// Which makes this the one journey that **fails without the platform layer**
+/// and passes with it — the isolating test for the job object, where the two
+/// above are covering ones. Keep it that way: if a change here makes it pass
+/// with the layer removed, it has stopped testing the layer.
 ///
 /// Driven at [`Group`] rather than through a verb because no graph can produce
 /// one on demand — the real CLIs decline to leak. The double is still a real
