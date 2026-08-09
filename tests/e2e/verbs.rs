@@ -560,6 +560,119 @@ fn smoke_spends_one_turn_and_names_the_identity_that_ran_it() {
     );
 }
 
+/// A launch whose provider crashed having spent nothing is relaunched, and a
+/// smoke that never got one going says how many starts reached that answer.
+///
+/// This is the accounting decision read end to end. A crashed provider's report
+/// carries oneharness's own `usage` with every counter empty and no failure
+/// classification, and `smoke` asks *oneharness's own* predicate whether that is
+/// billed work — the same one its quota classifier and its fallback chain share.
+/// Answering yes would refuse to retry a host that merely stumbled; answering no
+/// on a report that says nothing at all would pay for the same question twice.
+#[test]
+fn a_smoke_whose_provider_spent_nothing_is_relaunched_and_says_how_often() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+    let attempts = workspace.at("harness-attempts");
+
+    let run = workspace.run_with(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[
+            ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+            ("FAKE_HARNESS_ATTEMPT_LOG", &attempts.display().to_string()),
+            ("FAKE_HARNESS_CRASH", "1"),
+        ],
+    );
+    run.expect_code(1);
+    assert!(
+        run.stderr.contains("after 3 attempts"),
+        "a smoke that spent nothing did not report its attempts: {}",
+        run.stderr
+    );
+    assert_eq!(
+        std::fs::read_to_string(&attempts)
+            .expect("the harness recorded its launches")
+            .lines()
+            .count(),
+        3,
+        "a launch that provably spent nothing was not relaunched"
+    );
+}
+
+/// Accounting this build cannot read is **not** proof that a turn was free, so
+/// the launch is not retried.
+///
+/// The pair with the journey above is the whole point, and the difference is one
+/// launch versus three. A report whose `usage` is absent proves the provider
+/// published nothing and is worth another try; a `usage` that is *there* and
+/// unparsable proves nothing at all — least of all that nobody was billed — and
+/// relaunching on it pays for the same question twice, which is the one thing
+/// `smoke` must never do. An upstream `Usage` that gained a required field would
+/// have walked straight into that, silently.
+///
+/// oneharness itself stands in here, because the subject *is* what this crate
+/// does with a report it cannot fully parse — the same seam and the same reason
+/// `health`'s journeys above use one. The launch count is read from the script's
+/// own log, so the assertion is on what was actually spawned.
+// A POSIX shell, for the reason the journey below it gives: a canned answer is
+// how a report shape this crate must handle is expressed without a second
+// compiled binary per case.
+#[cfg(unix)]
+#[test]
+fn a_smoke_whose_accounting_cannot_be_read_is_not_relaunched() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+    let attempts = workspace.at("oneharness-attempts");
+
+    // A report shaped exactly like a real one except for `usage`, whose token
+    // counts are prose. Nothing here names a `failure_kind`, so the accounting is
+    // the *only* thing standing between this and a relaunch.
+    let answering = workspace.write(
+        "unreadable-usage.sh",
+        &format!(
+            concat!(
+                "#!/bin/sh\n",
+                "echo launched >> {log}\n",
+                "cat <<'JSON'\n",
+                "{{\"results\": [{{\"harness\": \"claude-code\", \"status\": \"nonzero\",\n",
+                "  \"exit_code\": 1, \"failure_kind\": null,\n",
+                "  \"usage\": {{\"input_tokens\": \"lots\", \"output_tokens\": \"some\"}}}}]}}\n",
+                "JSON\n",
+                "exit 1\n",
+            ),
+            log = attempts.display()
+        ),
+    );
+    executable(&answering);
+
+    let run = workspace.run_with(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[(
+            "ONEAGENTGRAPH_ONEHARNESS_BIN",
+            &answering.display().to_string(),
+        )],
+    );
+    run.expect_code(1);
+    assert!(
+        !run.stdout.contains("passed"),
+        "a smoke whose accounting was unreadable was reported as a pass: {}",
+        run.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&attempts)
+            .expect("the stand-in recorded its launches")
+            .lines()
+            .count(),
+        1,
+        "a launch whose accounting proved nothing was retried anyway — which is \
+         how the same question gets paid for twice"
+    );
+}
+
 /// Real `oneagentgraph run` dispatches, every one of them held live inside its
 /// agent for as long as a journey needs.
 ///
@@ -1003,7 +1116,6 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
                 ])
                 .current_dir(&dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -1043,6 +1155,137 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
     let stream = std::fs::read_to_string(&events).expect("the stream");
     let fired = stream.matches("\"cron-fired\"").count();
     assert!(fired >= 1, "the trigger never fired the member: {stream}");
+}
+
+/// `cancel RUN MEMBER`, with no `--kill`, stops **that member alone** and leaves
+/// the rest of the run running.
+///
+/// The pair with the whole-run cancels in `tests/e2e/liveness.rs` is the point,
+/// and this is the half neither of those reaches. Both of those name `--kill`,
+/// which reaps a process tree — an escalation. This is the *ask*: a member-scoped
+/// stop signal the run picks up on its own, with nothing signalled and nothing
+/// killed. A cancel that quietly stopped every member would pass every other
+/// journey here and lose an operator the whole point of naming one.
+#[test]
+fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
+    let workspace = Workspace::new();
+    workspace.graph(&format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n",
+            "  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {{every: 3600, resettable: true}}\n",
+            "  auditor:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {{every: 3600, resettable: true}}\n",
+        ),
+        fake = fake_harness(),
+    ));
+    let state = workspace.state();
+    let handle = {
+        let dir = workspace.path().to_path_buf();
+        let state = state.clone();
+        std::thread::spawn(move || {
+            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+                .args([
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    "fake:complete-now: scheduled",
+                    "--dir",
+                    &dir.join("work").display().to_string(),
+                ])
+                .current_dir(&dir)
+                .env("ONEAGENTGRAPH_STATE_DIR", &state)
+                .env(
+                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
+                    crate::support::oneharness_bin(),
+                )
+                .env_remove("ONEHARNESS_HARNESSES")
+                .output()
+                .expect("the run finishes")
+        })
+    };
+
+    until("the run to record itself", || run_id(&state).is_some());
+    let id = run_id(&state).expect("a run");
+    let events = state.join(&id).join("events.jsonl");
+    let fired_by = |member: &str| {
+        let stream = std::fs::read_to_string(&events).unwrap_or_default();
+        stream
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| {
+                event["kind"] == serde_json::json!("cron-fired")
+                    && crate::support::labels(event)
+                        .get("member")
+                        .map(String::as_str)
+                        == Some(member)
+            })
+            .count()
+    };
+    // Both members have to have started before one of them can be told to stop:
+    // a signal written before its loop exists would be read as a stop it never
+    // saw, and the assertion below would pass on a member that never ran.
+    until("both members to settle their first run", || {
+        let stream = std::fs::read_to_string(&events).unwrap_or_default();
+        ["reporter", "auditor"].iter().all(|member| {
+            stream
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .any(|event| {
+                    event["kind"] == serde_json::json!("member-settled")
+                        && crate::support::labels(&event)
+                            .get("member")
+                            .map(String::as_str)
+                            == Some(*member)
+                })
+        })
+    });
+
+    let cancelled = workspace.run(&["cancel", &id, "reporter"]);
+    cancelled.expect_code(0);
+    assert!(
+        cancelled.stdout.contains("reporter"),
+        "a member-scoped cancel did not name the member: {}",
+        cancelled.stdout
+    );
+    // Nothing was reaped: this is the ask, not the kill.
+    assert!(
+        !cancelled.stdout.contains("signalled"),
+        "a cancel with no --kill reaped a process tree: {}",
+        cancelled.stdout
+    );
+
+    let stopped = fired_by("reporter");
+    // Two full firings of the *other* member after the cancel. Both loops tick on
+    // the same cadence in the same process, so by the second one reporter has had
+    // many ticks in which it would have consumed the trigger below had its loop
+    // still been running — which is what makes "it never fired again" an
+    // assertion rather than a race won.
+    for round in 1..=2 {
+        let before = fired_by("auditor");
+        workspace.run(&["trigger", &id, "reporter"]).expect_code(0);
+        workspace.run(&["trigger", &id, "auditor"]).expect_code(0);
+        until("the surviving member to fire", || {
+            fired_by("auditor") > before
+        });
+        assert_eq!(
+            fired_by("reporter"),
+            stopped,
+            "round {round}: the cancelled member fired again"
+        );
+    }
+
+    // And the run is still the run: the whole-run cancel is what ends it.
+    workspace.run(&["cancel", &id]).expect_code(0);
+    let output = handle.join().expect("the run thread");
+    assert!(
+        output.status.code().is_some(),
+        "the cancelled run never exited"
+    );
 }
 
 /// `trigger` and `reset-timer` name a member the run does not have rather than
@@ -1147,7 +1390,6 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
                 ])
                 .current_dir(&dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -1372,7 +1614,6 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
                 ])
                 .current_dir(&dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -1428,10 +1669,7 @@ fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
     let id = run_id(&workspace.state()).expect("a run");
 
     let absent = workspace.at("no-such-binary").display().to_string();
-    let without = [
-        ("ONEAGENTGRAPH_ONEJUDGE_BIN", absent.as_str()),
-        ("ONEAGENTGRAPH_ONEHARNESS_BIN", absent.as_str()),
-    ];
+    let without = [("ONEAGENTGRAPH_ONEHARNESS_BIN", absent.as_str())];
     for args in [
         vec!["validate", "./graph.yaml"],
         vec!["history"],

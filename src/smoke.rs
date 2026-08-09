@@ -298,17 +298,36 @@ fn spent_nothing(report: &Value) -> bool {
     };
     !results.is_empty()
         && results.iter().all(|result| {
-            result.get("failure_kind").is_none_or(Value::is_null)
-                && result
-                    .get("usage")
-                    .and_then(Value::as_object)
-                    .is_none_or(|usage| {
-                        // Tokens and cost alike: any positive number is work
-                        // somebody is billed for.
-                        usage
-                            .values()
-                            .all(|value| value.as_f64().unwrap_or(0.0) <= 0.0)
-                    })
+            // Any classification at all stops a relaunch: oneharness naming a
+            // failure kind means it knows something this module does not.
+            let unclassified = result.get("failure_kind").is_none_or(Value::is_null);
+            // The accounting is read into oneharness's **own** `Usage`, and
+            // judged by oneharness's **own** predicate for whether a provider
+            // billed real work — the same one its quota classifier and its
+            // fallback chain share. Restating that rule here is how this module
+            // would come to disagree with the chain it is judging, on the one
+            // decision that can pay for the same question twice.
+            //
+            // Absent accounting is deliberately *not* work, which is oneharness's
+            // own reading of it too: a plain-text harness reports none at all, and
+            // a candidate that published nothing is exactly the launch worth
+            // trying again. What stops a relaunch is a classification, above.
+            //
+            // Accounting that is *present but unreadable* is the opposite case,
+            // and `is_ok_and` is what separates them: a `usage` object this build
+            // cannot parse proves nothing at all, least of all that the turn was
+            // free. Treating it as free is how a relaunch pays for the same
+            // question twice — the one thing this module must never do — and an
+            // upstream `Usage` that gained a required field would have been
+            // exactly that, silently.
+            let free = result
+                .get("usage")
+                .filter(|usage| !usage.is_null())
+                .is_none_or(|usage| {
+                    serde_json::from_value::<oneharness_core::domain::signals::Usage>(usage.clone())
+                        .is_ok_and(|usage| !usage.reports_billed_work())
+                });
+            unclassified && free
         })
 }
 
@@ -506,6 +525,19 @@ mod tests {
         assert!(!spent_nothing(&json!({"results": [
             {"usage": {"input_tokens": 0}},
             {"usage": {"input_tokens": 12}}]})));
+
+        // Accounting that is present but unreadable proves nothing, so it is not
+        // proof of a free turn. The distinction against the absent case below is
+        // the whole of it: nothing published is a launch worth retrying, and
+        // something published this build cannot parse is not.
+        assert!(!spent_nothing(
+            &json!({"results": [{"usage": {"input_tokens": "lots"}}]})
+        ));
+        assert!(!spent_nothing(
+            &json!({"results": [{"usage": "the provider wrote prose"}]})
+        ));
+        assert!(spent_nothing(&json!({"results": [{"usage": Value::Null}]})));
+        assert!(spent_nothing(&json!({"results": [{}]})));
     }
 
     /// Every launch failing having spent nothing is a launch path, not a turn:

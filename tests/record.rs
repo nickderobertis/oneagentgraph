@@ -1,5 +1,5 @@
-//! `record.json` is a persisted contract: its goldens, and how the CLI treats one
-//! this build did not write.
+//! The persisted contracts: their goldens, and how the CLI treats one this build
+//! did not write.
 //!
 //! A run record outlives the binary that wrote it: `history` reads runs from
 //! months ago, and an operator's tooling reads the same file. So its shape is
@@ -10,6 +10,10 @@
 //! * `record.v1.json` — the shape written before the version field existed. It
 //!   must keep reading, unchanged, forever, or upgrading loses history.
 //! * `record.v2.json` — what this build writes, byte for byte.
+//! * `member-died.json` — the two shapes of the one *event* payload that
+//!   changed when onejudge became a library. It is not in `record.json`, but it
+//!   is in the `events.jsonl` a record points at, which outlives the run exactly
+//!   as the record does, and onepipeline compiles against it.
 //!
 //! Regenerating `record.v2.json` to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -25,6 +29,7 @@
 
 use std::collections::BTreeMap;
 
+use oneagentgraph::event::{Cause, Disposition, MemberDied, ENVELOPE_VERSION};
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
 use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
@@ -144,6 +149,135 @@ fn an_empty_optional_field_is_omitted_and_a_filled_one_round_trips() {
             .expect("round-trips")
             .declared_members,
         vec!["reporter".to_string(), "worker".to_string()]
+    );
+}
+
+/// The two `member-died` payloads this build writes, in the order the golden
+/// commits them: the member that really was a child process, then the one this
+/// process drove in-library.
+fn golden_deaths() -> Vec<MemberDied> {
+    vec![
+        MemberDied {
+            rule: "provider-failure".into(),
+            cause: Cause::Exited,
+            detail: "harness failed (quota)".into(),
+            truncated: false,
+            exit_code: Some(2),
+            disposition: Some(Disposition::Exited),
+            stderr_tail: "harness failed (quota)".to_string().into(),
+        },
+        MemberDied {
+            rule: "provider-failure".into(),
+            cause: Cause::Quota,
+            detail: "provider error (respond): the subscription is exhausted".into(),
+            truncated: false,
+            exit_code: None,
+            disposition: None,
+            stderr_tail: None,
+        },
+    ]
+}
+
+/// `member-died`'s two shapes are byte-for-byte the committed golden.
+///
+/// This payload is the one wire shape the onejudge library conversion changed,
+/// and both halves of the change are here because both have to keep holding. A
+/// member that really was a child process still reports `exit_code`,
+/// `disposition`, and `stderr_tail` — dropping those would narrow what a
+/// single-sided member's death says. One driven in this process reports none of
+/// them, and says the same thing through `cause` and `detail` instead; writing
+/// them as `null` would have a consumer read a process that never existed.
+///
+/// It rides envelope version 1, unchanged: `v` is the shared envelope's own
+/// version, duplicated verbatim into every producer in this stack, so bumping it
+/// here alone would desynchronize the very field a consumer reads *before* it
+/// knows whether it can decode the rest.
+#[test]
+fn the_member_died_goldens_are_exactly_what_this_build_writes() {
+    assert_eq!(ENVELOPE_VERSION, 1, "the envelope this payload rides");
+    let golden = include_str!("golden/member-died.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_deaths()).expect("the payloads serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "member-died's shape changed. If that was deliberate it is a change to \
+         docs/contract.md and to every consumer compiled against it — amend the contract \
+         and commit the new bytes here in the same change."
+    );
+
+    let read: Vec<MemberDied> = serde_json::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_deaths(), "the golden did not round-trip");
+}
+
+/// The three fields only a child process has are omitted when it had none, and
+/// survive the trip when it did.
+///
+/// This is the half a consumer branches on. A build that wrote them as `null`
+/// for an in-process member would make "no exit status" and "exit status null"
+/// the same document, and a build that dropped them from a child's death would
+/// lose the evidence that death carries.
+#[test]
+fn a_child_process_s_own_fields_are_omitted_when_empty_and_round_trip_when_not() {
+    let (child, in_process) = {
+        let mut deaths = golden_deaths().into_iter();
+        (deaths.next().expect("child"), deaths.next().expect("lib"))
+    };
+
+    let value = serde_json::to_value(&in_process).expect("serializes");
+    let keys: Vec<&str> = value
+        .as_object()
+        .expect("a mapping")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for absent in ["exit_code", "disposition", "stderr_tail", "truncated"] {
+        assert!(
+            !keys.contains(&absent),
+            "{absent} is empty and must be omitted, not written as null: {keys:?}"
+        );
+    }
+    // The three that answer for *every* member are never optional: a death that
+    // named no rule or no cause is one a supervisor cannot branch on at all.
+    for present in ["rule", "cause", "detail"] {
+        assert!(keys.contains(&present), "{present} is missing: {keys:?}");
+    }
+    assert_eq!(
+        serde_json::from_value::<MemberDied>(value).expect("round-trips"),
+        in_process
+    );
+
+    let value = serde_json::to_value(&child).expect("serializes");
+    assert_eq!(value["exit_code"], serde_json::json!(2));
+    assert_eq!(value["disposition"], serde_json::json!("exited"));
+    assert_eq!(
+        value["stderr_tail"],
+        serde_json::json!("harness failed (quota)")
+    );
+    assert_eq!(
+        serde_json::from_value::<MemberDied>(value).expect("round-trips"),
+        child
+    );
+}
+
+/// A `member-died` payload carrying a field this build never heard of is
+/// refused rather than silently dropped.
+///
+/// The envelope is external input — a consumer of this crate's library reads
+/// streams this build did not write — and `docs/contract.md`'s trust-boundary
+/// rule is that a typo fails loudly. Adding three optional fields is exactly the
+/// change that would quietly turn `deny_unknown_fields` off if the derive were
+/// lost, and nothing else here would notice.
+#[test]
+fn a_member_died_payload_with_an_unknown_field_is_rejected() {
+    let mut value = serde_json::to_value(&golden_deaths()[1]).expect("serializes");
+    value["exit_status"] = serde_json::json!(2);
+    let err = serde_json::from_value::<MemberDied>(value)
+        .expect_err("an unknown member-died field must not be silently dropped");
+    assert!(
+        err.to_string().contains("exit_status"),
+        "the refusal did not name the field: {err}"
     );
 }
 

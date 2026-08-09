@@ -199,7 +199,7 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
             graph.name
         )));
     }
-    for key in graph.env.keys() {
+    for (key, value) in &graph.env {
         // An `env:` key is exported to every member process, and the platform —
         // not this crate — decides what a variable may be called. An empty name,
         // or one carrying `=` or a NUL, is not a variable at all: it is refused
@@ -210,6 +210,17 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
             return Err(Error::InvalidConfig(format!(
                 "env key {key:?}: an environment variable name cannot be empty or contain '=' or \
                  a NUL, and this one is exported to every member"
+            )));
+        }
+        // A NUL in the *value* is the same class of thing and now matters more:
+        // the block is put into this process's own environment before any member
+        // starts, and `std::env::set_var` answers a value it cannot represent by
+        // panicking. A graph is external input, so that would be a document
+        // taking the run down instead of being refused.
+        if value.contains('\0') {
+            return Err(Error::InvalidConfig(format!(
+                "env value for {key:?}: an environment value cannot contain a NUL, and this one \
+                 is exported to every member"
             )));
         }
     }

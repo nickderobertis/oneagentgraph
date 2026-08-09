@@ -27,6 +27,12 @@ allow = [
     "ISC",
     "BSD-3-Clause",
     "CDLA-Permissive-2.0",
+    # Reviewed with `oneharness-core`, whose typed report/stream contract this
+    # crate parses the oneharness boundary into: MIT-0 covers `borrow-or-share`,
+    # reached through `jsonschema` → `referencing` → `fluent-uri`. It is MIT
+    # without even the attribution clause — strictly weaker than the `MIT` above,
+    # and so imposes no term this MIT crate cannot carry downstream.
+    "MIT-0",
 ]
 confidence-threshold = 0.9
 exceptions = []
@@ -43,3 +49,9 @@ skip-tree = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# No `allow-git`, deliberately. Every dependency in this graph resolves from
+# crates.io, so the tree is reproducible from the registry alone rather than from
+# whichever host happened to have a checkout — and `unknown-git = "deny"` above
+# is what keeps it that way. `onejudge` was the one exception while the APIs this
+# crate supervises through were merged but unreleased; 0.3.5 carries them, so the
+# exception is gone. Re-adding one is a decision this file has to record.

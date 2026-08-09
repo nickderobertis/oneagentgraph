@@ -66,10 +66,23 @@ fn a_member_that_publishes_nothing_is_condemned_by_the_activity_watchdog() {
     assert_eq!(died.len(), 1, "{:?}", run.kinds());
     let payload = &died[0]["payload"];
     assert_eq!(payload["rule"], serde_json::json!("activity"));
-    // A member the watchdog killed did not choose to stop, so the disposition
-    // is what separates it from an exit status the member itself returned.
-    assert_eq!(payload["disposition"], serde_json::json!("signaled"));
-    assert!(payload.get("stderr_tail").is_some(), "{payload}");
+    // A member the watchdog condemned did not choose to stop: it was cancelled,
+    // and that is what separates it from a member that failed on its own terms.
+    assert_eq!(payload["cause"], serde_json::json!("cancelled"));
+    assert!(
+        payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("activity")),
+        "a death with no evidence: {payload}"
+    );
+    // This member was never a process, so it reports none of a process's facts
+    // rather than reporting them as null.
+    for absent in ["exit_code", "disposition", "stderr_tail"] {
+        assert!(
+            payload.get(absent).is_none(),
+            "an in-process member reported {absent}: {payload}"
+        );
+    }
     assert_eq!(labels(&died[0])["member"], "worker");
     assert_eq!(
         workspace.record()["members"]["worker"],
@@ -78,13 +91,15 @@ fn a_member_that_publishes_nothing_is_condemned_by_the_activity_watchdog() {
 }
 
 /// A member whose harness process exits without publishing a report dies as a
-/// provider failure, carrying the exit code and the stderr that names it.
+/// provider failure, carrying the **typed** cause and the detail that names it.
 ///
-/// This is the distinction `worker-died` exists for: provider throttling, an OOM
+/// This is the distinction `member-died` exists for: provider throttling, an OOM
 /// kill, and a genuine crash otherwise all reach a supervisor as the same dead
-/// process.
+/// member. It is also the half the library conversion changed — the classification
+/// now comes from onejudge's own `ProviderErrorKind`, which is oneharness's
+/// normalized `failure_kind`, instead of being read out of a stderr tail.
 #[test]
-fn a_provider_failure_carries_its_exit_code_and_stderr_tail() {
+fn a_provider_failure_carries_its_typed_cause_and_detail() {
     let workspace = Workspace::new();
     let run = workspace.run_with(
         &[
@@ -103,14 +118,39 @@ fn a_provider_failure_carries_its_exit_code_and_stderr_tail() {
     assert_eq!(died.len(), 1, "{:?}", run.kinds());
     let payload = &died[0]["payload"];
     assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
-    assert_eq!(payload["disposition"], serde_json::json!("exited"));
-    assert_eq!(payload["exit_code"], serde_json::json!(2));
-    let tail = payload["stderr_tail"].as_str().unwrap_or_default();
-    assert!(!tail.is_empty(), "a death with no evidence: {payload}");
+    // A classified cause, drawn from the closed set the contract lists — never a
+    // bare string this build invented, and never the two dispositions only a
+    // child process has.
+    let cause = payload["cause"].as_str().unwrap_or_default();
     assert!(
-        tail.len() <= 4096,
-        "the stderr tail outgrew its documented bound"
+        [
+            "auth",
+            "rate_limit",
+            "model_not_found",
+            "quota",
+            "overloaded",
+            "timeout",
+            "cancelled",
+            "spawn",
+            "protocol",
+            "other",
+            "unclassified",
+        ]
+        .contains(&cause),
+        "a member driven in-process reported the cause {cause:?}: {payload}"
     );
+    let detail = payload["detail"].as_str().unwrap_or_default();
+    assert!(!detail.is_empty(), "a death with no evidence: {payload}");
+    assert!(
+        detail.len() <= 4096,
+        "the detail outgrew its documented bound"
+    );
+    for absent in ["exit_code", "disposition", "stderr_tail"] {
+        assert!(
+            payload.get(absent).is_none(),
+            "an in-process member reported {absent}: {payload}"
+        );
+    }
 }
 
 /// A live member publishes a heartbeat, so a consumer can tell a working member
@@ -156,16 +196,10 @@ fn a_live_member_publishes_a_heartbeat_while_its_turn_runs() {
 /// exactly why the production default is far above it: at the cadence itself,
 /// the margin reaps healthy members under the load this crate creates.
 ///
-/// The turn hangs rather than completing, and that is what makes the
-/// *disposition* an assertion rather than a coin toss. The supervisor refreshes
-/// on a 500ms interval, so the rule always fires after the first one — but a
-/// task that finishes inside that window has already exited by the time the
-/// kill lands, and `member-died` then truthfully reports `exited`. This is the
-/// same margin the production default is wide for, read from the other side: on
-/// a loaded host the member outlives the window and the kill is what ends it,
-/// while on an idle one the turn wins the race. A member that cannot finish
-/// leaves the watchdog as the only thing that can end it, on a host of any
-/// speed.
+/// The turn hangs rather than completing, so the watchdog is the only thing that
+/// can end this member — which is what makes the `cancelled` cause an assertion
+/// rather than a coin toss. A member that *could* have finished would race the
+/// deadline and settle on its own terms on an idle host.
 #[test]
 fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
     let workspace = Workspace::new();
@@ -189,10 +223,7 @@ fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
     let died = run.of_kind("member-died");
     assert_eq!(died.len(), 1, "{:?}", run.kinds());
     assert_eq!(died[0]["payload"]["rule"], serde_json::json!("heartbeat"));
-    assert_eq!(
-        died[0]["payload"]["disposition"],
-        serde_json::json!("signaled")
-    );
+    assert_eq!(died[0]["payload"]["cause"], serde_json::json!("cancelled"));
 }
 
 /// A member the **activity watchdog** condemns takes its descendants with it.
@@ -316,7 +347,6 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
                 ])
                 .current_dir(&workspace_dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -391,7 +421,6 @@ fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
                 ])
                 .current_dir(&workspace_dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
@@ -463,7 +492,6 @@ fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
                 ])
                 .current_dir(&workspace_dir)
                 .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env("ONEAGENTGRAPH_ONEJUDGE_BIN", crate::support::onejudge_bin())
                 .env(
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),

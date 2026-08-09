@@ -7,16 +7,29 @@ Terse on purpose: this file is always-loaded context.
 
 ## What this is
 
-`oneagentgraph` composes agents into a **graph**, constructs onejudge/oneharness
-invocations for each member, and merges their outputs into **one NDJSON event
-stream**. It is the reusable multi-agent layer extracted from `ai-orchestrator`:
-one config file and one CLI call, usable outside that repo's opinionated
-workflow.
+`oneagentgraph` composes agents into a **graph**, prepares each member's launch,
+and merges their outputs into **one NDJSON event stream**. It is the reusable
+multi-agent layer extracted from `ai-orchestrator`: one config file and one CLI
+call, usable outside that repo's opinionated workflow.
 
 It owns **no** harness/model/fallback logic. The graph YAML names an oneharness
 config file per role/side; oneharness keeps owning identity chains, fallback,
 model pins, and quota classification, and onejudge keeps owning the two-party
 conversation. Do not grow harness selection here.
+
+**onejudge is a library dependency, not a CLI.** A two-party member is driven
+in-process, on a thread of this process, through onejudge's own config, plan, and
+streamed run driver. `oneharness run` is still a child process — its library
+surface prints its report to the process's stdout and returns only an exit code,
+and this process's stdout is the merged stream — and so are the agent harness and
+a `judge: {command: [...]}` provider. That hop collapses when oneharness grows a
+non-printing run entrypoint or an event-sink parameter. `health` is the same
+story one command over: `oneharness-core` probes one *named* identity, and
+enumerating a config's identities is the `oneharness` CLI's own, so `health`
+still runs `oneharness usage --format json` rather than rebuilding that
+enumeration here — which is the harness logic the paragraph above forbids. It
+collapses when oneharness-core grows an entrypoint that builds a whole
+`UsageReport` from a resolved config.
 
 Ships as a Rust library plus the `oneagentgraph` binary, distributed on
 crates.io, PyPI (`oneagentgraph-cli`), and npm (`oneagentgraph-cli`).
@@ -44,6 +57,14 @@ one NDJSON stream.
   YAML/JSON/TOML config)
 - **References composed:** base.md, shapes/cli.md, languages/rust.md,
   intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, monorepo.md
+- **Cross-repo dependencies: every one is a published version, and there is no
+  git ref anywhere in the graph.** `cargo deny`'s `unknown-git = "deny"` with no
+  `allow-git` beside it is what holds that, so the tree resolves from crates.io
+  alone rather than from whichever host has a checkout. `onejudge >= 0.3.5` is a
+  floor rather than a preference: 0.3.5 is the first release carrying the typed
+  streaming sink and the `RunFailure` telemetry this crate's watchdogs and
+  `fallback-advanced` are built on, and `Cargo.toml` records the whole list at
+  the dependency itself.
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so
@@ -78,7 +99,8 @@ consuming `project.json` — an undeclared one silently drops that project out o
   `#[ignore]`.
 - **One seam may be faked, and only one:** the paid harness process, at
   oneharness's own `ONEHARNESS_BIN_<ID>` binary override. Everything else in a
-  journey — this binary, `onejudge`, `oneharness` — is a real subprocess.
+  journey is real — this binary and `oneharness` as subprocesses, and the real
+  onejudge engine linked into the binary under test.
 - **Validate external input at its trust boundary.** Graph configs and event
   envelopes are external input: the schema structs reject unknown fields, so a
   typo fails loudly instead of being silently dropped.

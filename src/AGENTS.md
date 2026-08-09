@@ -19,8 +19,9 @@ Rules that hold as this grows:
 | `config` | the graph YAML schema, and what `validate` can check without launching |
 | `resolve` | a `ConfigRef` → bytes, content-addressed for the run record |
 | `persona` | the persona delta schema, the merge onto a onejudge base, the shipped catalog |
-| `invoke` | one member's argv, its generated configs, and the model pairing rule |
-| `member` | one child process: its stream, its two watchdogs, its death |
+| `invoke` | one member's launch, its generated configs, and the model pairing rule |
+| `member` | a single-sided member's child process: its stream, its watchdogs, its death |
+| `judge` | a two-party member, driven through onejudge's library in this process |
 | `run` | dependency order, cron members, the merged stream, the exit code |
 | `scratch` | `owner.lock` ownership, proven descendant reaping |
 | `event` / `render` | the wire envelope, and the text rendering of the same events |
@@ -28,17 +29,31 @@ Rules that hold as this grows:
 
 ## The seams that are easy to get wrong
 
-**Each conversation side is pinned without a wrapper script.** onejudge gives the
-judge side `oneharness run --config <judge_config>` and the agent side none, so
-the agent side is pinned by *placing* its resolved config at
-`<member scratch>/oneharness.toml` and running `onejudge` from there — oneharness
-discovers it upward from its own working directory. The harness still works in
-the graph's `--dir`, which onejudge passes through as `--cwd`.
+**Each conversation side is pinned without a wrapper script, and without a `cd`.**
+onejudge gives the judge side `oneharness run --config <judge_config>` and the
+agent side none, so the agent side is pinned by *placing* its resolved config at
+`<member scratch>/oneharness.toml` and **naming that directory as the
+conversation's worktree** — oneharness discovers a project config upward from
+`--cwd`. Naming rather than entering, because every member of a graph now shares
+one process: a member that `cd`-ed would pin its siblings too.
 
-**The two CLIs read their exit codes differently.** `onejudge` exits `1` for a
-task it drove but did not complete, which is a settle; `oneharness` exits
-non-zero when it could not run the turn at all, which is a death. `member::Kind`
-is the one place that distinction lives.
+**Nothing per-member is exported.** Same reason. A member's `mode` and its
+`ONEAGENTGRAPH_SCRATCH_DIR` ownership stamp go into that member's own resolved
+oneharness configs (`mode`, and `[env]`, which oneharness gives to every harness
+process it starts), so the stamp still reaches the harness fixed at `exec`. Only
+the graph's own `env:` block is exported, once, before any member starts.
+
+**A thread cannot be killed.** A watchdog on a two-party member therefore
+escalates the way `cancel --kill` does — set the abort flag so the sink answers
+the engine's next event with `ControlFlow::Break`, reap everything stamped for
+the member, and after `TEARDOWN_GRACE` report the member dead and abandon the
+thread. Never wait forever: a run that hangs on a member it already condemned is
+the failure the watchdog exists to prevent.
+
+**The two sides read their outcomes differently.** onejudge settles `1` for a
+task it drove but did not complete; `oneharness` exits non-zero when it could not
+run the turn at all, which is a death. `member::Kind` is the one place that
+distinction lives.
 
 **A test chain names bare identities, never variants.** `ONEHARNESS_BIN_*` keys
 on a harness id and no spelling of it reaches a variant, so a chain naming
@@ -47,10 +62,10 @@ unused beside it. That is a money hazard, not a style point. `src/bin/` holds th
 two doubles, behind the non-default `test-doubles` feature; keep them
 deterministic and free of anything the crate does not already depend on.
 
-**Provisioning installs both CLIs.** `just bootstrap` pins them, and the versions
-live at the top of the `justfile`. `onejudge` is a **git pin** because its
-streamed-provider contract is merged but unreleased — move it to a published
-version as soon as one ships.
+**Provisioning installs one CLI.** `just bootstrap` pins `oneharness`, and the
+version lives at the top of the `justfile`. `onejudge` has no entry: it is a
+cargo dependency from crates.io, pinned by `Cargo.lock`, so there is nothing to
+install and nothing on `PATH` to shadow it.
 
 **`scratch` is the one module a Linux `check` never compiles all of.** Its
 `cfg(windows)` half is the whole liveness layer again in job objects, and the

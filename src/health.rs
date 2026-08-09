@@ -9,6 +9,19 @@
 //! What this module adds is the one thing a caller cannot get from that command
 //! alone: a refusal that says *why* there is no answer, in this crate's own
 //! terms, rather than a stack trace or an empty document.
+//!
+//! # Why this one is still a child process
+//!
+//! `oneharness-core` is a library dependency of this crate, and it does expose
+//! the probes — but one identity at a time, as
+//! `io::usage::probe(&UsageProbeRequest)`, against a request naming the harness,
+//! its binary, and the exact variant environment to probe it under. *Which*
+//! identities a host has is assembled from the oneharness config, and that
+//! assembly lives in the `oneharness` CLI rather than in the library. Rebuilding
+//! it here would be this crate growing harness logic, which `AGENTS.md` forbids
+//! for the reason this whole split exists. So the hop stays, and it collapses
+//! when oneharness-core grows an entrypoint that returns a whole
+//! `domain::usage::UsageReport` for a resolved config.
 
 use std::process::Command;
 
