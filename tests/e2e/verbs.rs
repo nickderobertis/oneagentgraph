@@ -601,6 +601,78 @@ fn a_smoke_whose_provider_spent_nothing_is_relaunched_and_says_how_often() {
     );
 }
 
+/// Accounting this build cannot read is **not** proof that a turn was free, so
+/// the launch is not retried.
+///
+/// The pair with the journey above is the whole point, and the difference is one
+/// launch versus three. A report whose `usage` is absent proves the provider
+/// published nothing and is worth another try; a `usage` that is *there* and
+/// unparsable proves nothing at all — least of all that nobody was billed — and
+/// relaunching on it pays for the same question twice, which is the one thing
+/// `smoke` must never do. An upstream `Usage` that gained a required field would
+/// have walked straight into that, silently.
+///
+/// oneharness itself stands in here, because the subject *is* what this crate
+/// does with a report it cannot fully parse — the same seam and the same reason
+/// `health`'s journeys above use one. The launch count is read from the script's
+/// own log, so the assertion is on what was actually spawned.
+// A POSIX shell, for the reason the journey below it gives: a canned answer is
+// how a report shape this crate must handle is expressed without a second
+// compiled binary per case.
+#[cfg(unix)]
+#[test]
+fn a_smoke_whose_accounting_cannot_be_read_is_not_relaunched() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+    let attempts = workspace.at("oneharness-attempts");
+
+    // A report shaped exactly like a real one except for `usage`, whose token
+    // counts are prose. Nothing here names a `failure_kind`, so the accounting is
+    // the *only* thing standing between this and a relaunch.
+    let answering = workspace.write(
+        "unreadable-usage.sh",
+        &format!(
+            concat!(
+                "#!/bin/sh\n",
+                "echo launched >> {log}\n",
+                "cat <<'JSON'\n",
+                "{{\"results\": [{{\"harness\": \"claude-code\", \"status\": \"nonzero\",\n",
+                "  \"exit_code\": 1, \"failure_kind\": null,\n",
+                "  \"usage\": {{\"input_tokens\": \"lots\", \"output_tokens\": \"some\"}}}}]}}\n",
+                "JSON\n",
+                "exit 1\n",
+            ),
+            log = attempts.display()
+        ),
+    );
+    executable(&answering);
+
+    let run = workspace.run_with(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[(
+            "ONEAGENTGRAPH_ONEHARNESS_BIN",
+            &answering.display().to_string(),
+        )],
+    );
+    run.expect_code(1);
+    assert!(
+        !run.stdout.contains("passed"),
+        "a smoke whose accounting was unreadable was reported as a pass: {}",
+        run.stdout
+    );
+    assert_eq!(
+        std::fs::read_to_string(&attempts)
+            .expect("the stand-in recorded its launches")
+            .lines()
+            .count(),
+        1,
+        "a launch whose accounting proved nothing was retried anyway — which is \
+         how the same question gets paid for twice"
+    );
+}
+
 /// Real `oneagentgraph run` dispatches, every one of them held live inside its
 /// agent for as long as a journey needs.
 ///
