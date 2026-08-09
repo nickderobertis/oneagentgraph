@@ -97,8 +97,33 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         ]),
     );
 
+    // The group is opened before the plan is driven for the same reason
+    // `crate::member` opens one before it spawns: it is what the spawns go
+    // *into*. Here they are not this module's spawns to make — onejudge starts
+    // `oneharness` for each side of each turn — so the group is handed to it as
+    // a hook instead, and the failure direction is identical. A member that
+    // could not be grouped is refused rather than started, because a paid
+    // harness no cancel can reach is worse than a member that never ran.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
+    // for the reason `crate::member`'s twin does not: opening a group takes no
+    // input, and the only ways it fails are the kernel refusing a job object or
+    // a scratch this run created moments ago having become unwritable. Both are
+    // host failures rather than requests. The reachable half — that both sides
+    // of a two-party member land in the group, and that a cancel reaps them
+    // through it — is `tests/e2e/liveness.rs`.
+    let group = match crate::scratch::Group::open(scratch) {
+        Ok(group) => Arc::new(group),
+        Err(err) => {
+            let reason = err.to_string();
+            emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+            return Outcome::Unstartable(reason);
+        }
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+
     let plan = match plan(launch) {
-        Ok(plan) => plan,
+        Ok(plan) => plan.with_spawn_hook(Arc::new(Grouped(Arc::clone(&group)))),
         Err(reason) => {
             emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
@@ -174,6 +199,39 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
 
 /// The answer the engine thread sends back.
 type Answer = Result<RunSummary, Box<RunFailure>>;
+
+/// This member's [`crate::scratch::Group`], offered to onejudge as the group
+/// every process it spawns belongs to.
+///
+/// The seam exists because driving onejudge in-process took away grouping that a
+/// subprocess hop gave for free: while a member *was* `onejudge run`, this crate
+/// spawned one process into a group and everything below it joined by
+/// inheritance. In-process, the `oneharness run` for each side is spawned by this
+/// process — so without this, a two-party member's harnesses sit in whatever
+/// group the supervisor is in, and `cancel --kill` has no tree to name.
+///
+/// One hook for both sides on purpose: onejudge installs it on both backends of a
+/// `split`, so the worker's harness and the judge's land in the *same* group, and
+/// one `TerminateJobObject` ends the pair.
+struct Grouped(Arc<crate::scratch::Group>);
+
+impl onejudge::SpawnHook for Grouped {
+    fn spawning(
+        &self,
+        command: &mut std::process::Command,
+        _context: &onejudge::SpawnContext<'_>,
+    ) -> std::io::Result<()> {
+        self.0.prepare(command)
+    }
+
+    fn spawned(
+        &self,
+        child: &std::process::Child,
+        _context: &onejudge::SpawnContext<'_>,
+    ) -> std::io::Result<Option<String>> {
+        self.0.adopt(child).map(Some)
+    }
+}
 
 /// Resolve the member's effective config into onejudge's own plan.
 ///
@@ -686,12 +744,14 @@ mod tests {
                 onejudge::ProviderErrorKind::Quota,
             )),
             telemetry: None,
+            processes: Vec::new(),
         };
         assert_eq!(provider_cause(&classified), Cause::Quota);
 
         let bare = RunFailure {
             error: onejudge::cli::CliError::Engine(onejudge::Error::provider("respond", "boom")),
             telemetry: None,
+            processes: Vec::new(),
         };
         assert_eq!(provider_cause(&bare), Cause::Unclassified);
 
@@ -699,6 +759,7 @@ mod tests {
         let config = RunFailure {
             error: onejudge::cli::CliError::Config("no task".into()),
             telemetry: None,
+            processes: Vec::new(),
         };
         assert_eq!(provider_cause(&config), Cause::Unclassified);
     }
@@ -758,6 +819,7 @@ mod tests {
                                  "candidates": []}],
             }))
             .expect("telemetry"),
+            processes: Vec::new(),
         })))
         .expect("send");
 

@@ -60,11 +60,11 @@ one NDJSON stream.
 - **Cross-repo dependencies: every one is a published version, and there is no
   git ref anywhere in the graph.** `cargo deny`'s `unknown-git = "deny"` with no
   `allow-git` beside it is what holds that, so the tree resolves from crates.io
-  alone rather than from whichever host has a checkout. `onejudge >= 0.3.5` is a
-  floor rather than a preference: 0.3.5 is the first release carrying the typed
-  streaming sink and the `RunFailure` telemetry this crate's watchdogs and
-  `fallback-advanced` are built on, and `Cargo.toml` records the whole list at
-  the dependency itself.
+  alone rather than from whichever host has a checkout. The `onejudge` floor is a
+  floor rather than a preference — each bump of it buys a seam this crate's
+  supervision is built on, and dropping below it stops compiling. The number and
+  the reason for it live at the dependency in `Cargo.toml`, which is also where
+  the next one goes; do not copy either here.
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so

@@ -411,6 +411,71 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
     );
 }
 
+/// A two-party member puts **every process its engine spawns** into the group its
+/// own scratch names — both sides of the conversation, in the same group.
+///
+/// This is what the three cancel journeys below rest on, and it stopped being
+/// free when a two-party member stopped being a child process. While a member
+/// *was* `onejudge run`, this crate spawned one process into a group and
+/// everything below joined by inheritance. In-process, the `oneharness run` for
+/// each side is spawned by the supervisor itself — so unless it hands onejudge
+/// the group, a worker and a judge sit in whatever group the supervisor is in,
+/// and `cancel --kill` has no tree to name. On Windows that is not a degradation
+/// but an absence: membership there *is* the job object, so an ungrouped member
+/// is one nothing can reap.
+///
+/// Asserted on the report rather than on a process table because that is where
+/// the answer is honest on every platform: onejudge records the group a hook
+/// named, and names none when no hook ran. So a member whose engine was handed no
+/// group fails here on Linux and macOS too, rather than only on the platform the
+/// consequence bites.
+#[test]
+fn a_two_party_member_groups_both_sides_of_its_conversation() {
+    let workspace = Workspace::new();
+    let run = workspace.run_task("fake:complete-now: group both sides");
+    run.expect_code(0);
+
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    let path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the stored report"))
+            .expect("the stored report is JSON");
+    let processes = report["processes"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !processes.is_empty(),
+        "the engine reported spawning nothing: {report}"
+    );
+
+    // The group is the member's own scratch, which is exactly the string
+    // `cancel --kill` and the end-of-run reap are given.
+    let scratch = member_scratch(&workspace.state()).expect("a member scratch");
+    let group = scratch.display().to_string();
+    for process in &processes {
+        assert_eq!(
+            process["group"].as_str(),
+            Some(group.as_str()),
+            "a spawned process outside the member's group: {process}"
+        );
+    }
+
+    // Both sides, not just the one under evaluation: onejudge installs the hook
+    // on both backends of a `split`, and a worker reaped without its judge is
+    // half a leaked tree.
+    let roles: std::collections::BTreeSet<&str> = processes
+        .iter()
+        .filter_map(|process| process["role"].as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        ["agent", "judge"].into_iter().collect(),
+        "only one side of the conversation was grouped: {processes:?}"
+    );
+}
+
 /// `cancel RUN --kill`, with no member named, reaps every process stamped for
 /// the run — including one stamped for a member below it.
 ///

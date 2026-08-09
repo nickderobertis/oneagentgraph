@@ -55,7 +55,7 @@ use crate::invoke::{Invocation, Launch};
 use crate::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
 };
-use crate::scratch::{Group, SCRATCH_ENV};
+use crate::scratch::Group;
 
 /// How often this supervisor refreshes a live member's heartbeat.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
@@ -297,7 +297,11 @@ fn spawned(
         .env_remove(crate::invoke::PROCESS_WIDE_HARNESS_ENV)
         .envs(env)
         .envs(member_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .env(SCRATCH_ENV, scratch.display().to_string())
+        // The ownership stamp is deliberately *not* set here: `Group::spawn`
+        // applies it as it spawns, so the one place a command joins a group is
+        // the group itself — which is also the only way the commands this
+        // process does not spawn, the ones onejudge starts for a two-party
+        // member, could be stamped the same way.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

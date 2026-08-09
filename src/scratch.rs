@@ -243,7 +243,8 @@ pub fn reclaimable(path: &Path) -> Result<(), String> {
 ///
 /// * **POSIX** — the group *is* the [`SCRATCH_ENV`] stamp. The kernel fixes an
 ///   environment at `exec`, so every descendant carries it whether or not its
-///   parent is still alive, and spawning needs nothing extra.
+///   parent is still alive, and joining is nothing more than carrying the stamp
+///   into the spawn.
 /// * **Windows** — the group is a **job object**. There is no environment a
 ///   sweeper can read out of another process here, and no process group to
 ///   signal; a job is the kernel's own answer to "everything this process
@@ -284,7 +285,54 @@ impl Group {
     /// the child in the group *before* it runs — the failure to do so. A child
     /// that started but could not be grouped is killed rather than returned.
     pub fn spawn(&self, command: &mut Command) -> std::io::Result<Child> {
-        self.inner.spawn(command)
+        self.prepare(command)?;
+        let mut child = command.spawn()?;
+        match self.adopt(&child) {
+            Ok(_) => Ok(child),
+            // A member running unsupervised is worse than one that never
+            // started: a harness no cancel can reach keeps billing.
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(err)
+            }
+        }
+    }
+
+    /// The half of joining a group that has to happen *before* the fork.
+    ///
+    /// Split out of [`Group::spawn`] because a caller that does not own the
+    /// `spawn` call needs the same two moments in the same order —
+    /// [`crate::judge`] hands them to onejudge's `SpawnHook`, whose two methods
+    /// are exactly this split, for exactly this reason.
+    ///
+    /// The [`SCRATCH_ENV`] stamp is applied here rather than by each caller
+    /// because on POSIX the stamp **is** the group: a command that reaches the
+    /// kernel without it is outside the group no matter what this returns.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the platform reports when a command cannot be configured for its
+    /// group; the spawn is then refused rather than made ungrouped.
+    pub(crate) fn prepare(&self, command: &mut Command) -> std::io::Result<()> {
+        command.env(SCRATCH_ENV, self.scratch.display().to_string());
+        self.inner.prepare(command)
+    }
+
+    /// The half that has to happen *after* the process exists, answering the
+    /// name of the group it was placed in.
+    ///
+    /// The name is the scratch directory, which is what a group is called on
+    /// both platforms — [`stamped_for`] and [`reap`] take exactly this string,
+    /// so a record of it is a record something else can act on.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the platform reports when a live process cannot be put in the
+    /// group. The caller kills the child rather than running it ungrouped.
+    pub(crate) fn adopt(&self, child: &Child) -> std::io::Result<String> {
+        self.inner.adopt(child)?;
+        Ok(self.scratch.display().to_string())
     }
 
     /// Terminate every live process in this group, and say how many.
@@ -652,12 +700,15 @@ mod platform {
             Ok(Self)
         }
 
-        /// Spawn straight into the group, which the stamp already puts it in.
-        pub fn spawn(
-            &self,
-            command: &mut std::process::Command,
-        ) -> std::io::Result<std::process::Child> {
-            command.spawn()
+        /// Nothing to configure: the caller's stamp is the whole membership.
+        pub fn prepare(&self, _command: &mut std::process::Command) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing to do to a live process either — it was in the group the
+        /// moment it `exec`ed, and it cannot be moved out of one.
+        pub fn adopt(&self, _child: &std::process::Child) -> std::io::Result<()> {
+            Ok(())
         }
 
         /// Reap everything still stamped for this scratch.
@@ -977,49 +1028,44 @@ mod platform {
             Ok(Self { job, record })
         }
 
-        /// Spawn `command` into the job before it can run.
+        /// Ask for the child suspended, so it cannot run before it is in the
+        /// job.
         ///
-        /// Suspended and then resumed, rather than assigned after the fact: a
+        /// Suspended and then assigned, rather than assigned after the fact: a
         /// child that runs for even an instant outside the job can start a
         /// descendant outside it too, and that descendant is the thing no cancel
-        /// would ever reach. A child that cannot be grouped or cannot be resumed
-        /// is killed rather than returned — a member running unsupervised is
-        /// worse than one that never started.
-        pub fn spawn(&self, command: &mut Command) -> std::io::Result<Child> {
-            let mut child = command.creation_flags(CREATE_SUSPENDED).spawn()?;
+        /// would ever reach.
+        pub fn prepare(&self, command: &mut Command) -> std::io::Result<()> {
+            command.creation_flags(CREATE_SUSPENDED);
+            Ok(())
+        }
+
+        /// Put the suspended child in the job and let it run.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] there is no journey
+        // for the failure arms because there is no input that reaches them: a
+        // job this process created a moment ago refusing its own child, or a
+        // suspended process with no resumable thread, are kernel failures rather
+        // than anything a caller can ask for, and no seam this crate sanctions
+        // fakes Win32. The reachable half — that a member which *is* grouped is
+        // torn down whole, by a cancel, a watchdog, or its launcher dying — is
+        // covered in tests/e2e/liveness.rs. What these arms decide is the
+        // direction of an unreachable failure, and the callers make it the safe
+        // one: a child that started but could not be put in the job is killed
+        // rather than returned, because returning it would leave a paid harness
+        // running that no cancel could ever find.
+        pub fn adopt(&self, child: &Child) -> std::io::Result<()> {
             // SAFETY: the child handle is live for the borrow, and the job is
             // one this group owns; failure is reported through the return value.
             let assigned = unsafe {
                 AssignProcessToJobObject(self.job.as_raw(), child.as_raw_handle() as HANDLE)
             };
-            let outcome = if assigned == 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                resume(child.id())
-            };
-            // llmlint: ignore-block[changed_behavior_has_e2e] there is no journey
-            // for this arm because there is no input that reaches it: a job this
-            // process created a moment ago refusing its own child, or a suspended
-            // process with no resumable thread, are kernel failures rather than
-            // anything a caller can ask for, and no seam this crate sanctions
-            // fakes Win32. The reachable half — that a member which *is* grouped
-            // is torn down whole, by a cancel, a watchdog, or its launcher
-            // dying — is covered in tests/e2e/liveness.rs. What this arm decides
-            // is the direction of an unreachable failure, and it is the safe one:
-            // a child that started but could not be put in the job is killed here
-            // rather than returned, because returning it would leave a paid
-            // harness running that no cancel could ever find.
-            let started = match outcome {
-                Ok(()) => Ok(child),
-                Err(err) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    Err(err)
-                }
-            };
-            // llmlint: ignore-end[changed_behavior_has_e2e]
-            started
+            if assigned == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            resume(child.id())
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
 
         /// End this group's whole tree.
         pub fn terminate(&self, _scratch: &Path) -> usize {
@@ -1289,12 +1335,14 @@ mod platform {
             Ok(Self)
         }
 
-        /// A plain spawn: there is no group to put the child in.
-        pub fn spawn(
-            &self,
-            command: &mut std::process::Command,
-        ) -> std::io::Result<std::process::Child> {
-            command.spawn()
+        /// Nothing to configure: there is no group to put the child in.
+        pub fn prepare(&self, _command: &mut std::process::Command) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing to adopt either, for the same reason.
+        pub fn adopt(&self, _child: &std::process::Child) -> std::io::Result<()> {
+            Ok(())
         }
 
         /// Nothing provable to terminate.

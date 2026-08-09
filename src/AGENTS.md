@@ -41,7 +41,10 @@ one process: a member that `cd`-ed would pin its siblings too.
 `ONEAGENTGRAPH_SCRATCH_DIR` ownership stamp go into that member's own resolved
 oneharness configs (`mode`, and `[env]`, which oneharness gives to every harness
 process it starts), so the stamp still reaches the harness fixed at `exec`. Only
-the graph's own `env:` block is exported, once, before any member starts.
+the graph's own `env:` block is exported, once, before any member starts. The
+stamp also goes on each command as it is spawned, by `Group::prepare` — on POSIX
+the stamp *is* the group, so a command that reached the kernel without it would
+be outside its group whatever else was recorded.
 
 **A thread cannot be killed.** A watchdog on a two-party member therefore
 escalates the way `cancel --kill` does — set the abort flag so the sink answers
@@ -79,14 +82,18 @@ does not install, and says which when either is missing.
 fallback to `cfg(not(unix))`. `tests/e2e/liveness.rs` records which journeys that
 turns red and which cannot, and why.
 
-**A two-party member has no Windows group, and the missing piece is upstream.**
-Only the caller of `CreateProcess` can put a child in a job object, and since
-onejudge became a library that caller is onejudge — so `Group::open` is never
-reached for a `Launch::Library` member and `stamped_for` finds nothing.
-onejudge's `SpawnHook` (v0.3.6) is the seam, but it installs on a *provider*, and
-this crate drives `cli::Plan`, which builds providers internally; `onejudge::cli`
-has to expose a `Plan`-level hook. A shim binary that joins the job and re-spawns,
-or a local copy of `execute` to reach `Engine::new`, are not substitutes.
+**A two-party member is grouped through onejudge, not around it.** Only the
+caller of `CreateProcess` can put a child in a job object, and since onejudge
+became a library that caller is onejudge — so nothing this crate spawns is left
+to group. onejudge's `Plan::with_spawn_hook` is the seam — and the reason the
+floor in `Cargo.toml` is where it is: `judge::run` opens the member's `Group` and
+hands it over,
+and onejudge installs it on **both** backends of a `split`, so the worker's
+harness and the judge's land in the same group. `Group::prepare` and
+`Group::adopt` exist for that hook — its two methods are the before-the-fork and
+after-the-process moments the two platforms need, and `Group::spawn` is the same
+pair for the commands this crate does spawn. Never reach for a shim binary that
+re-spawns itself into the job, or a local copy of onejudge's `execute`.
 
 ## Two things that bite
 
