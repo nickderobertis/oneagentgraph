@@ -4,7 +4,7 @@ Compose agents into a graph over [oneharness] and [onejudge], and merge their
 outputs into **one NDJSON event stream**.
 
 One config file and one CLI call: the graph names an oneharness config per role
-and side, and `oneagentgraph` constructs the invocations, supervises liveness,
+and side, and `oneagentgraph` prepares each member's launch, supervises liveness,
 and emits every turn, tool call, fallback, and settle as an event you can pipe
 into anything.
 
@@ -26,10 +26,11 @@ cargo install --git https://github.com/nickderobertis/oneagentgraph --locked
 Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every [release], with `sha256` checksums.
 
-`run` drives the [onejudge] and [oneharness] CLIs, and `smoke` and `health` drive
-[oneharness], so those have to be on `PATH`; `validate`, `history`, `persona`,
-`trigger`, `reset-timer`, and `cancel` need neither. `ONEAGENTGRAPH_ONEJUDGE_BIN`
-and `ONEAGENTGRAPH_ONEHARNESS_BIN` name a pinned install instead.
+[onejudge] is a **library dependency**, linked into this binary — there is
+nothing to install for it. `run`, `smoke`, and `health` drive the [oneharness]
+CLI, so that has to be on `PATH`; `validate`, `history`, `persona`, `trigger`,
+`reset-timer`, and `cancel` need nothing at all.
+`ONEAGENTGRAPH_ONEHARNESS_BIN` names a pinned install instead.
 
 ## What it does
 
@@ -63,7 +64,7 @@ keeps owning the two-party conversation. This composes them.
 ## Develop
 
 ```bash
-just bootstrap   # from a clean clone; installs the onejudge and oneharness CLIs
+just bootstrap   # from a clean clone; installs the oneharness CLI
 just check       # the deterministic gate: format, clippy, tests, coverage, docs
 just gate        # check + the LLM-judge tier; the pre-push bar
 ```

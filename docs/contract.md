@@ -29,7 +29,14 @@ Every process in the stack emits NDJSON, one envelope shape:
 
 ### oneagentgraph contract
 
-oneagentgraph owns NO harness/model/fallback logic. The graph YAML names an oneharness config file per role/side (path or URL); oneharness keeps owning identity chains, fallback, model pins, quota classification; onejudge keeps owning the two-party conversation. oneagentgraph composes agents into a graph, constructs onejudge/oneharness invocations, and merges outputs into one event stream.
+oneagentgraph owns NO harness/model/fallback logic. The graph YAML names an oneharness config file per role/side (path or URL); oneharness keeps owning identity chains, fallback, model pins, quota classification; onejudge keeps owning the two-party conversation. oneagentgraph composes agents into a graph, prepares each member's launch, and merges outputs into one event stream.
+
+How a member is launched, and why the two kinds differ:
+
+- A `kind: onejudge` member is **driven in-process through the onejudge library** — onejudge's own config, plan, and streamed run driver, called on a thread of this process. There is no `onejudge` binary in the chain, so that member has no argv, no exit status, and no stderr; what it has instead is a typed error, which is what `member-died` carries.
+- A `kind: oneharness` member is still `oneharness run`, a child process. oneharness's library surface writes its report to the **process's** stdout and returns only an exit code — it neither returns the report nor accepts an event sink — and this process's stdout is the merged stream. The hop collapses when oneharness grows a non-printing run entrypoint or an event-sink parameter.
+- The agent harness itself, and a `judge: {command: [...]}` provider, are subprocesses by definition and stay so.
+- Because every two-party member shares one process, nothing per-member is exported: a member's `mode` and its scratch-ownership stamp are written into that member's own resolved oneharness configs (`mode`, and `[env]`, which oneharness gives to every harness process it starts). A graph's own `env:` block is still exported — it is one block for the whole graph, applied before any member starts.
 
 Graph config (YAML, by path or URL):
 
@@ -83,6 +90,15 @@ oneagentgraph persona new NAME | persona validate PATH
 
 `run` streams envelopes to stdout. Exit 0 = every member settled successfully; 1 = a member failed or died (the stream says which and why); 2 = invalid config. `--detach` prints `{run_id, events_path, pid}` and exits 0.
 
-Event kinds: `graph-started`, `member-started`, `turn-started`, `turn-activity` (bounded tool summary: kind, name, 160-char detail), `turn-completed` (usage: tokens in/out, cache r/w, cost, duration), `member-heartbeat`, `fallback-advanced` (identity, classified reason), `member-died` (payload: `rule` fired, `exit_code`, `disposition: exited|signaled`, `stderr_tail`), `cron-fired`, `cron-reset`, `member-settled` (full onejudge report as artifact, verdict inline), `graph-settled`.
+Event kinds: `graph-started`, `member-started` (`runner: library|process`, plus what that runner is: the `engine`, `config`, and `worktree` of an in-process member — which has no working directory of its own — and the `program`, `args`, and `cwd` of a child one), `turn-started`, `turn-activity` (bounded tool summary: kind, name, 160-char detail), `turn-completed` (usage: tokens in/out, cache r/w, cost, duration), `member-heartbeat`, `fallback-advanced` (identity, classified reason), `member-died`, `cron-fired`, `cron-reset`, `member-settled` (full onejudge report as artifact, verdict inline, and the `report_path` that artifact is stored at), `graph-settled`.
+
+`member-died` describes an in-process failure honestly, and a member that *died* stays distinct from one that *failed its task* — the latter is a `member-settled` with `completed: false`, never this event. Its payload:
+
+- `rule` — the liveness rule that fired: `unstartable`, `signalled`, `provider-failure`, `heartbeat`, `activity`.
+- `cause` — the typed cause. Ten of these are onejudge's `ProviderErrorKind`, which is oneharness's own normalized `failure_kind`, mapped totally: `auth`, `rate_limit`, `model_not_found`, `quota`, `overloaded`, `timeout`, `cancelled`, `spawn`, `protocol`, `other`. Three exist outside that taxonomy: `exited` and `signaled` for a member that was a child process, and `unclassified` for an engine failure that named no kind.
+- `detail` — what that cause said, bounded like every payload text field: the engine's own error for an in-process member, the tail of standard error for a child one. `truncated` when it was cut.
+- `exit_code`, `disposition: exited|signaled`, `stderr_tail` — a **child process's** facts, present only for a member that was one. An in-process member has none of them; `cause` and `detail` are how it says the same thing.
+
+`fallback-advanced` gains two fields a two-party member can now answer for, and only it: `role: agent|judge` and the `turn`. onejudge's report carries no fallback chain of its own, so while that hop was a subprocess a two-party member published no `fallback-advanced` at all; in-process, its per-invocation telemetry names every candidate each side stepped past — including for a run that failed and produced no report, which is exactly when an operator needs to know which subscription refused. A single-sided member stamps neither field.
 
 Liveness (ported from ai-orchestrator intact): heartbeat wrapper (default deadline 60s, `ONEAGENTGRAPH_HEARTBEAT_TIMEOUT`), activity watchdog (default 600s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via `owner.lock` flock + pid-with-start-token, descendant reaping, successor contract for processes meant to outlive their launcher.

@@ -71,6 +71,38 @@ path = "src/lib.rs"
 test-doubles = []
 
 [dependencies]
+# The two-party conversation, driven **in this process** rather than by spawning
+# `onejudge run`. `cli` is what carries the YAML config surface a graph member
+# generates (`Config`/`Plan`) and the run driver over it
+# (`run_plan_streaming`), so this crate composes onejudge's own loop instead of
+# re-implementing it around `Engine`.
+#
+# 0.3.5 is the floor, and not for taste: it is the first release carrying the
+# three things this crate's supervision is built on, each absent from 0.3.4.
+# Lowering this requirement below 0.3.5 does not merely lose a nicety — it stops
+# compiling, and the one that would still compile is the worst of the three:
+#
+#   1. `run_plan_streaming*` — a typed live event sink over the same driver a
+#      `Format::Json` run uses. 0.3.4 streamed only under `Format::Human`, and
+#      the JSON run — the one whose report this crate needs — was buffered, so
+#      its events arrived when the run ended and the activity watchdog had
+#      nothing to watch for the whole of the turn it was watching.
+#   2. A *typed* event. 0.3.4's callback was `&mut dyn FnMut(&str)` and received
+#      an already-rendered line ("· turn 3 — …"), so `turn-started` and
+#      `turn-activity` could only have been rebuilt by parsing prose back apart —
+#      the exact string-scraping this conversion exists to delete.
+#   3. `RunFailure`, which did not exist in 0.3.4 at all. It carries `telemetry`
+#      off a run that produced **no** report, and is the only route to
+#      `fallback-advanced` for a failed two-party member — precisely when an
+#      operator needs to know which subscription refused.
+onejudge = { version = "0.3.5", features = ["cli"] }
+# oneharness's own typed report/stream contract. Everything this crate reads back
+# from an `oneharness run` — the fallback chain, the per-candidate accounting,
+# the normalized failure kind — is parsed into oneharness's declarations rather
+# than guessed by field name, so an upstream change is a compile error here
+# instead of a silently-absent field. Already in the graph via onejudge, which
+# parses the same boundary the same way.
+oneharness-core = "0.6.9"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

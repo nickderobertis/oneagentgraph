@@ -24,11 +24,11 @@ use oneagentgraph::{config, health, history, run, smoke};
 /// Where run state lives unless the environment says otherwise.
 const STATE_DIR_ENV: &str = "ONEAGENTGRAPH_STATE_DIR";
 
-/// The `onejudge` binary a run drives, overridable so a test — or a host with a
-/// pinned install — can name its own.
-const ONEJUDGE_BIN_ENV: &str = "ONEAGENTGRAPH_ONEJUDGE_BIN";
-
-/// The `oneharness` binary, on the same terms.
+/// The `oneharness` binary a run drives, overridable so a test — or a host with
+/// a pinned install — can name its own.
+///
+/// There is no companion for `onejudge`: `docs/contract.md` runs that one through
+/// its library, so no build of this crate has a `onejudge` binary to point at.
 const ONEHARNESS_BIN_ENV: &str = "ONEAGENTGRAPH_ONEHARNESS_BIN";
 
 fn main() -> ExitCode {
@@ -122,7 +122,6 @@ fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error
             .map(|raw| run::parse_set(raw))
             .collect::<Result<Vec<_>, _>>()?,
         state_dir: state_dir(env),
-        onejudge_bin: onejudge_bin(env),
         oneharness_bin: oneharness_bin(env),
     };
     if args.detach {
@@ -285,7 +284,6 @@ fn preflight(
             graph_dir: document.base_dir.as_deref(),
             task,
             session: "validate",
-            onejudge_bin: &onejudge_bin(env),
             oneharness_bin: &oneharness_bin(env),
         };
         oneagentgraph::invoke::build(member, &context, &mut resolver)
@@ -636,13 +634,6 @@ fn state_dir(env: &BTreeMap<String, String>) -> PathBuf {
         },
         PathBuf::from,
     )
-}
-
-/// The `onejudge` binary a run drives.
-fn onejudge_bin(env: &BTreeMap<String, String>) -> String {
-    env.get(ONEJUDGE_BIN_ENV)
-        .cloned()
-        .unwrap_or_else(|| "onejudge".into())
 }
 
 /// The `oneharness` binary a run drives.

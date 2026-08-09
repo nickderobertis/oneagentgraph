@@ -16,7 +16,12 @@ pub fn line(envelope: &Envelope) -> String {
     let member = envelope.labels.member.as_deref().unwrap_or("graph");
     let detail = match envelope.kind {
         EventKind::GraphStarted => field(envelope, "name"),
-        EventKind::MemberStarted => field(envelope, "program"),
+        // Whichever runner this member has: a child process names its program,
+        // and one driven in this process names the engine driving it.
+        EventKind::MemberStarted => match field(envelope, "program") {
+            program if program.is_empty() => field(envelope, "engine"),
+            program => program,
+        },
         EventKind::TurnStarted => format!("turn {}", field(envelope, "turn")),
         EventKind::TurnActivity => {
             let (name, detail) = (field(envelope, "name"), field(envelope, "detail"));
@@ -35,17 +40,19 @@ pub fn line(envelope: &Envelope) -> String {
             field(envelope, "reason")
         ),
         EventKind::MemberDied => {
-            let tail = field(envelope, "stderr_tail");
-            let head = format!(
-                "{} exit={} {}",
-                field(envelope, "rule"),
-                field(envelope, "exit_code"),
-                field(envelope, "disposition"),
-            );
-            if tail.is_empty() {
+            // The three fields answering for every member, then the exit status
+            // only a member that was a child process has — omitted rather than
+            // rendered empty, so a line never claims a process that never was.
+            let mut head = format!("{} ({})", field(envelope, "rule"), field(envelope, "cause"),);
+            let code = field(envelope, "exit_code");
+            if !code.is_empty() {
+                head.push_str(&format!(" exit={code}"));
+            }
+            let detail = field(envelope, "detail");
+            if detail.is_empty() {
                 head
             } else {
-                format!("{head}: {}", tail.lines().next_back().unwrap_or_default())
+                format!("{head}: {}", detail.lines().next_back().unwrap_or_default())
             }
         }
         EventKind::CronFired => "fired".to_string(),
@@ -205,7 +212,12 @@ mod tests {
             ),
             (
                 EventKind::MemberStarted,
-                json!({"program": "onejudge"}),
+                json!({"runner": "process", "program": "oneharness"}),
+                "member-started oneharness",
+            ),
+            (
+                EventKind::MemberStarted,
+                json!({"runner": "library", "engine": "onejudge"}),
                 "member-started onejudge",
             ),
             (
@@ -237,9 +249,18 @@ mod tests {
             ),
             (
                 EventKind::MemberDied,
-                json!({"rule": "activity", "exit_code": 1, "disposition": "exited",
-                       "stderr_tail": "first\nharness failed (quota)"}),
-                "member-died activity exit=1 exited: harness failed (quota)",
+                json!({"rule": "activity", "cause": "exited", "exit_code": 1,
+                       "disposition": "exited",
+                       "detail": "first\nharness failed (quota)"}),
+                "member-died activity (exited) exit=1: harness failed (quota)",
+            ),
+            // The same event from a member that was never a process: the typed
+            // cause carries it, and no exit status is claimed.
+            (
+                EventKind::MemberDied,
+                json!({"rule": "provider-failure", "cause": "quota",
+                       "detail": "the subscription is exhausted"}),
+                "member-died provider-failure (quota): the subscription is exhausted",
             ),
             (EventKind::CronFired, json!({}), "cron-fired fired"),
             (
@@ -295,13 +316,10 @@ mod tests {
     fn an_event_with_nothing_to_add_renders_the_bare_fact() {
         let died = line(&envelope(
             EventKind::MemberDied,
-            json!({"rule": "heartbeat", "exit_code": Value::Null,
-                   "disposition": "signaled", "stderr_tail": ""}),
+            json!({"rule": "heartbeat", "cause": "signaled", "exit_code": Value::Null,
+                   "disposition": "signaled", "detail": ""}),
         ));
-        assert!(
-            died.ends_with("member-died heartbeat exit= signaled"),
-            "{died}"
-        );
+        assert!(died.ends_with("member-died heartbeat (signaled)"), "{died}");
 
         let settled = line(&envelope(
             EventKind::MemberSettled,

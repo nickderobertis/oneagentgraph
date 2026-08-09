@@ -198,8 +198,6 @@ pub struct Request {
     pub overrides: Vec<Override>,
     /// Where run state lives.
     pub state_dir: PathBuf,
-    /// The `onejudge` binary.
-    pub onejudge_bin: String,
     /// The `oneharness` binary.
     pub oneharness_bin: String,
 }
@@ -542,6 +540,7 @@ pub fn run(
         member_env.insert(key.clone(), expand(value, env));
     }
     let bounds = Bounds::from_env(&member_env).map_err(Error::InvalidConfig)?;
+    export(&graph.env, env)?;
 
     let file = std::fs::File::create(&events_path).map_err(|err| {
         Error::InvalidConfig(format!("cannot create {}: {err}", events_path.display()))
@@ -592,7 +591,6 @@ pub fn run(
             graph_dir: graph_document.base_dir.as_deref(),
             task: request.task.as_deref(),
             session: &format!("{run_id}-{name}"),
-            onejudge_bin: &request.onejudge_bin,
             oneharness_bin: &request.oneharness_bin,
         };
         invocations.insert(
@@ -758,10 +756,18 @@ fn cron(
     let own_stop = signals.join(format!("{name}.stop"));
     let trigger = signals.join(format!("{name}.trigger"));
     let reset = signals.join(format!("{name}.reset"));
+    let stopped = || stop.exists() || own_stop.exists();
     let mut last = first;
     let mut due = Instant::now() + Duration::from_secs(schedule.every);
-    while !stop.exists() && !own_stop.exists() {
+    while !stopped() {
         std::thread::sleep(TICK);
+        // Again, after the sleep: a cancel that landed while this member slept
+        // has to beat a trigger that landed beside it. Read only at the top, a
+        // `cancel` and a `trigger` arriving inside the same tick let the trigger
+        // win, and the member spent a paid turn *after* an operator stopped it.
+        if stopped() {
+            break;
+        }
         if schedule.resettable && reset.exists() {
             let _ = std::fs::remove_file(&reset);
             due = Instant::now() + Duration::from_secs(schedule.every);
@@ -792,6 +798,53 @@ fn describe(outcome: &Outcome) -> MemberOutcome {
         Outcome::Died(died) => MemberOutcome::Died(died.rule),
         Outcome::Unstartable(reason) => MemberOutcome::Unstartable(reason.clone()),
     }
+}
+
+/// Put the graph's `env` block into **this process's** environment.
+///
+/// The contract says a graph's `env` is "exported to every member process", and a
+/// two-party member no longer *is* a process: it runs here, and the
+/// `oneharness run` it starts inherits this environment. So the block has to be
+/// on this process for that member to receive what the contract promises it —
+/// `ONEHARNESS_BIN_<ID>`, a proxy, a credential path.
+///
+/// Once, here, before the first member thread starts, and never again: an
+/// environment is process-wide, so a per-member write would race every sibling's
+/// spawn. That is exactly why nothing per-member is exported at all — a member's
+/// `mode` and its scratch stamp are stamped into the files `crate::invoke` writes
+/// instead. A graph's block is safe to export because it is one block for the
+/// whole graph, decided before anything runs.
+///
+/// `PROCESS_WIDE_HARNESS_ENV` is removed first for the reason that constant
+/// gives, and re-added when the graph's own block asks for it.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] naming the pair that cannot be a variable.
+/// `std::env::set_var` answers a name or value it cannot represent by
+/// *panicking*, and a graph is external input, so every pair is checked against
+/// the same rule [`crate::config::validate`] applies — here too, and not only
+/// there, because a panic reached through a second door is still a document
+/// taking the run down.
+fn export(block: &BTreeMap<String, String>, env: &BTreeMap<String, String>) -> Result<(), Error> {
+    let expanded: Vec<(&String, String)> = block
+        .iter()
+        .map(|(key, value)| (key, expand(value, env)))
+        .collect();
+    for (key, value) in &expanded {
+        if key.is_empty() || key.contains('=') || key.contains('\0') || value.contains('\0') {
+            return Err(Error::InvalidConfig(format!(
+                "env {key:?}: an environment variable name cannot be empty or contain '=' or a \
+                 NUL, and neither a name nor a value may carry one — this pair is exported to \
+                 every member"
+            )));
+        }
+    }
+    std::env::remove_var(invoke::PROCESS_WIDE_HARNESS_ENV);
+    for (key, value) in expanded {
+        std::env::set_var(key, value);
+    }
+    Ok(())
 }
 
 /// Expand `${VAR}` references in a graph's `env` value.
@@ -990,6 +1043,42 @@ mod tests {
         assert_eq!((label.key(), label.value()), ("tier", "gate"));
     }
 
+    /// A graph's `env` block reaches this process's own environment, and a pair
+    /// the platform cannot represent is refused rather than allowed to panic
+    /// `set_var` — a graph is a document somebody wrote, not a reason to take
+    /// the run down.
+    #[test]
+    fn an_env_pair_the_platform_cannot_represent_is_refused_rather_than_fatal() {
+        let launching: BTreeMap<String, String> = BTreeMap::new();
+        for (key, value) in [
+            ("", "fine"),
+            ("HAS=EQUALS", "fine"),
+            ("HAS\0NUL", "fine"),
+            ("FINE", "has\0nul"),
+        ] {
+            let block: BTreeMap<String, String> =
+                [(key.to_string(), value.to_string())].into_iter().collect();
+            let err = export(&block, &launching).unwrap_err();
+            assert!(
+                err.to_string().contains("exported to every member"),
+                "{key:?}={value:?}: {err}"
+            );
+        }
+
+        // And the same pairs are refused by `validate`, so `oneagentgraph
+        // validate` answers for them without a run being started at all.
+        for document in [
+            "version: 1\nname: g\nenv:\n  \"HAS=EQUALS\": fine\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+            "version: 1\nname: g\nenv:\n  FINE: \"has\\0nul\"\nmembers:\n  a:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+        ] {
+            let err = crate::config::validate(&graph(document)).unwrap_err();
+            assert!(
+                err.to_string().contains("exported to every member"),
+                "{document}: {err}"
+            );
+        }
+    }
+
     /// `${VAR}` expands from the launching environment; an unset one expands to
     /// nothing rather than to its own spelling.
     #[test]
@@ -1048,10 +1137,12 @@ mod tests {
                     rule: crate::member::Rule::Activity,
                     payload: crate::event::MemberDied {
                         rule: "activity".into(),
-                        exit_code: None,
-                        disposition: crate::event::Disposition::Signaled,
-                        stderr_tail: String::new(),
+                        cause: crate::event::Cause::Cancelled,
+                        detail: String::new(),
                         truncated: false,
+                        exit_code: None,
+                        disposition: None,
+                        stderr_tail: None,
                     },
                 })),
                 "died (activity)",

@@ -11,7 +11,9 @@
 // process is the single sanctioned double, replaced at oneharness's own
 // `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
 
-use crate::support::{fake_harness, fake_provider, labels, two_party_graph, Workspace, CHAIN};
+use crate::support::{
+    fake_harness, fake_provider, labels, single_sided_graph, two_party_graph, Workspace, CHAIN,
+};
 
 /// The whole happy path: a two-party member completes, and the stream carries
 /// the lifecycle a consumer renders.
@@ -42,6 +44,101 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert_eq!(kinds.first().map(String::as_str), Some("graph-started"));
     assert_eq!(kinds.last().map(String::as_str), Some("graph-settled"));
 
+    // The turn events a two-party member produces are built from onejudge's
+    // *typed* live sink now, so what they carry is asserted here rather than
+    // only that they arrived. This is the CLI half of the conversion: every
+    // field the engine hands this process in-library has to be reachable by a
+    // caller who only has the stream, and machine-readable when it gets there.
+    let activity = run.of_kind("turn-activity");
+    assert!(!activity.is_empty(), "{kinds:?}");
+    for event in &activity {
+        let payload = &event["payload"];
+        for named in ["kind", "name", "detail"] {
+            assert!(
+                payload[named].is_string(),
+                "turn-activity carried no {named}: {payload}"
+            );
+        }
+        assert!(
+            payload["name"]
+                .as_str()
+                .is_some_and(|name| !name.is_empty()),
+            "an action this crate could not name was published anyway: {payload}"
+        );
+        // The contract's bound on a tool summary, on the wire where a consumer
+        // meets it.
+        assert!(
+            payload["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .count()
+                <= 160,
+            "the tool detail outgrew its documented bound: {payload}"
+        );
+        assert!(payload["truncated"].is_boolean(), "{payload}");
+    }
+    for event in &run.of_kind("turn-started") {
+        assert!(
+            event["payload"]["turn"].as_u64().is_some(),
+            "turn-started named no turn: {event}"
+        );
+    }
+    // `turn-completed` carries the usage the contract names. It comes off the
+    // report onejudge returns to this process, so a caller reading only the
+    // stream still gets the accounting rather than having to open the artifact.
+    let completed = run.of_kind("turn-completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    let usage = &completed[0]["payload"]["usage"];
+    assert!(
+        usage.is_object(),
+        "turn-completed carried no usage: {usage}"
+    );
+    // Every field the contract names for this payload: tokens in and out, cache
+    // reads and writes, and cost.
+    for counted in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cost_usd",
+    ] {
+        assert!(
+            usage.get(counted).is_some_and(|value| value.is_number()),
+            "the usage a consumer bills on has no {counted}: {usage}"
+        );
+    }
+
+    // A two-party member says which runner it has, and what that runner is: the
+    // engine driving it and the effective config it was given. There is no
+    // `program` or `args` on this one, because nothing was spawned for it — and
+    // a consumer reading the stream is how an operator learns that.
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let payload = &started[0]["payload"];
+    assert_eq!(payload["runner"], serde_json::json!("library"));
+    assert_eq!(payload["engine"], serde_json::json!("onejudge"));
+    assert!(
+        payload["config"]
+            .as_str()
+            .is_some_and(|config| config.ends_with("onejudge.yaml")),
+        "the member named no effective config: {payload}"
+    );
+    assert!(
+        payload["worktree"]
+            .as_str()
+            .is_some_and(|worktree| !worktree.is_empty()),
+        "the member named no worktree: {payload}"
+    );
+    // Not `cwd`: a member driven in this process has no working directory of its
+    // own, and claiming one would name a thing that is not true.
+    for absent in ["program", "args", "cwd"] {
+        assert!(
+            payload.get(absent).is_none(),
+            "a member nothing was spawned for reported {absent}: {payload}"
+        );
+    }
+
     let settled = run.of_kind("member-settled");
     assert_eq!(settled.len(), 1, "{settled:?}");
     assert_eq!(settled[0]["payload"]["completed"], serde_json::json!(true));
@@ -53,6 +150,181 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     );
     assert!(settled[0]["artifacts"][0]["bytes"].as_u64().unwrap_or(0) > 0);
     assert!(settled[0]["payload"]["verdict"].is_array());
+}
+
+/// A single-sided member says the other thing: it is a child process, and it
+/// names the program and argv it was spawned with.
+///
+/// The pair with the journey above is the point. `member-started` now carries a
+/// `runner`, and a consumer branching on it has to be able to trust that the
+/// fields beside it match — a member reported as a process with no argv, or as a
+/// library call with one, is a stream that cannot be read.
+#[test]
+fn a_single_sided_member_reports_the_process_it_spawned() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_task("fake:complete-now: one sided");
+    run.expect_code(0);
+
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let payload = &started[0]["payload"];
+    assert_eq!(payload["runner"], serde_json::json!("process"));
+    assert!(
+        payload["program"]
+            .as_str()
+            .is_some_and(|program| program.contains("oneharness")),
+        "the member named no program: {payload}"
+    );
+    assert!(
+        payload["args"]
+            .as_array()
+            .is_some_and(|args| args.iter().any(|arg| arg == "run")),
+        "the member named no argv: {payload}"
+    );
+    assert!(
+        payload["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()),
+        "the child named no working directory: {payload}"
+    );
+    assert!(payload.get("engine").is_none(), "{payload}");
+
+    // And this member stores its report where the settle says it is, the same as
+    // a two-party one: the artifact the contract promises has something behind
+    // its id to fetch whichever kind of member produced it.
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{settled:?}");
+    let path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!path.is_empty(), "the settle named no stored report");
+    assert_eq!(
+        settled[0]["artifacts"][0]["bytes"].as_u64().unwrap_or(0),
+        std::fs::metadata(&path).expect("the stored report").len(),
+        "the artifact's size is not the size of what was stored"
+    );
+}
+
+/// A single-sided member whose harness exits without publishing a report dies as
+/// a provider failure — and, because this member really *was* a process, its
+/// death carries the three facts one leaves behind alongside the typed cause.
+///
+/// The pair with the two-party provider failure in `tests/e2e/liveness.rs` is the
+/// point: one member kind has an exit status and a stderr tail and the other does
+/// not, and `member-died` has to say which it is rather than reporting a process
+/// that never existed.
+#[test]
+fn a_single_sided_member_that_crashes_carries_its_process_s_own_facts() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: the provider dies",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[("FAKE_HARNESS_CRASH", "1")],
+    );
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let payload = &died[0]["payload"];
+    assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
+    // A process's own disposition, not a provider classification: an exit status
+    // is what a process failure *is*, and inventing a category from one would be
+    // this crate guessing at something oneharness already owns.
+    assert_eq!(payload["cause"], serde_json::json!("exited"));
+    assert_eq!(payload["disposition"], serde_json::json!("exited"));
+    assert!(
+        payload["exit_code"].as_i64().is_some(),
+        "a child that exited reported no code: {payload}"
+    );
+    let tail = payload["stderr_tail"].as_str().unwrap_or_default();
+    assert!(!tail.is_empty(), "a death with no evidence: {payload}");
+    assert_eq!(
+        payload["detail"], payload["stderr_tail"],
+        "the detail every member carries must be this one's evidence too"
+    );
+    assert!(
+        tail.len() <= 4096,
+        "the stderr tail outgrew its documented bound"
+    );
+}
+
+/// A base config that names its own **skill directory** loads it from where its
+/// author wrote it — a path relative to that config, not to the copy this crate
+/// generates.
+///
+/// onejudge resolves a config-file `skill:` against *that config's* directory,
+/// and the config it is now handed is the merged copy written into the member's
+/// scratch, a directory the author never saw. Left alone, `skills/greeter`
+/// resolved under the scratch and the member died having found no `SKILL.md`.
+/// The skill's body arriving as the harness's instructions is the proof it was
+/// found, and finding it is the whole of what naming one does.
+#[test]
+fn a_base_config_that_names_a_skill_directory_loads_it_from_where_it_was_written() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "skills/greeter/SKILL.md",
+        "---\nname: greeter\ndescription: a greeter\n---\nGreet the user warmly.\n",
+    );
+    // Relative, as an author writes it: against the base config's own directory,
+    // which is this workspace.
+    workspace.write(
+        "base.yaml",
+        &format!("{}skill: skills/greeter\n", crate::support::BASE),
+    );
+    let prompts = workspace.at("prompts.txt");
+    workspace
+        .run_task(&format!(
+            "fake:complete-now: skill body fake:record-prompt={}",
+            prompts.display()
+        ))
+        .expect_code(0);
+    assert!(
+        std::fs::read_to_string(&prompts)
+            .expect("the harness recorded its prompt")
+            .contains("Greet the user warmly."),
+        "the skill the base config named never reached the harness"
+    );
+}
+
+/// A graph carrying an `env` value the platform cannot represent is refused by
+/// `validate`, before anything is started.
+///
+/// The block reaches *this* process's environment now, because a two-party member
+/// inherits it from here rather than being handed one — and `set_var` answers a
+/// value it cannot represent by panicking. A graph is a document somebody wrote,
+/// so it gets exit 2 and a sentence, not a crash.
+#[test]
+fn a_graph_env_value_the_platform_cannot_represent_is_refused() {
+    let workspace = Workspace::new();
+    workspace.graph(concat!(
+        "version: 1\nname: node-scope\n",
+        "env:\n  ONEAGENTGRAPH_TEST_MARKER: \"has\\0nul\"\n",
+        "members:\n  reporter:\n    kind: oneharness\n",
+        "    oneharness_config: ./oneharness.toml\n",
+    ));
+    let validated = workspace.run(&["validate", "./graph.yaml"]);
+    validated.expect_code(2);
+    assert!(
+        validated.stderr.contains("exported to every member"),
+        "{}",
+        validated.stderr
+    );
+
+    // And a run refuses it on the same terms rather than starting members under
+    // a block it cannot apply.
+    let run = workspace.run_task("fake:complete-now: never gets here");
+    run.expect_code(2);
+    assert!(
+        run.stdout.is_empty(),
+        "a refusal must not read as an event stream"
+    );
 }
 
 /// A task that *talks about* the double's sentinels is steered by none of them.
@@ -305,26 +577,37 @@ fn the_graphs_env_reaches_the_member_process_expanded() {
 
 /// A member's `mode` reaches both sides as the approval posture, because
 /// onejudge's own config schema has no key for it.
+///
+/// Asserted on the **argv oneharness built**, which is oneharness applying the
+/// mode rather than merely being told it: `read-only` is the one posture that
+/// denies the mutating tools. That is also what makes this journey the proof
+/// that a per-member setting still arrives without being exported — every
+/// two-party member of every graph now runs in one process, so `mode` rides each
+/// side's own resolved config instead of the environment, and a member whose
+/// stamp went missing would spawn a harness with no `--disallowedTools` at all.
 #[test]
 fn the_members_mode_reaches_the_harness_process() {
     let workspace = Workspace::new();
-    let record = workspace.at("env.txt");
+    let record = workspace.at("argv.txt");
     workspace
         .graph(&two_party_graph(&fake_harness(), "").replace("mode: bypass", "mode: read-only"));
     workspace
         .run_task(&format!(
-            "fake:complete-now: mode fake:record-env={}",
+            "fake:complete-now: mode fake:record-argv={}",
             record.display()
         ))
         .expect_code(0);
 
-    let recorded = std::fs::read_to_string(&record).expect("env");
-    for line in recorded.lines() {
-        let seen: serde_json::Value = serde_json::from_str(line).expect("json");
-        assert_eq!(
-            seen["ONEHARNESS_MODE"],
-            serde_json::json!("read-only"),
-            "{line}"
+    let recorded = std::fs::read_to_string(&record).expect("the harness recorded its argv");
+    let lines: Vec<&str> = recorded.lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "not every side reached the double: {recorded}"
+    );
+    for line in &lines {
+        assert!(
+            line.contains("--disallowedTools"),
+            "a side ran without the member's read-only posture: {line}"
         );
     }
 }
@@ -603,11 +886,19 @@ fn an_unreadable_ref_refuses_with_the_path_it_could_not_read() {
     assert!(run.stderr.contains("nowhere.yaml"), "{}", run.stderr);
 }
 
-/// A member whose `onejudge` binary is not there dies as `unstartable`, with the
-/// stream saying so — rather than the run reporting a settled graph.
+/// A single-sided member whose `oneharness` binary is not there dies as
+/// `unstartable`, with the stream saying so — rather than the run reporting a
+/// settled graph.
+///
+/// This is the member kind that still *is* a child process, so it is where a
+/// binary that cannot be spawned is still reachable. What it proves about the
+/// payload is the half the conversion changed: a member that never started has
+/// no exit code, no disposition, and no standard error, so it says why through
+/// `cause` and `detail` instead of reporting a process's facts as null.
 #[test]
 fn a_member_that_cannot_start_is_a_death_the_stream_names() {
     let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph(&fake_harness()));
     let run = workspace.run_with(
         &[
             "run",
@@ -618,21 +909,29 @@ fn a_member_that_cannot_start_is_a_death_the_stream_names() {
             &workspace.dir().display().to_string(),
         ],
         &[(
-            "ONEAGENTGRAPH_ONEJUDGE_BIN",
-            "onejudge-that-is-not-installed",
+            "ONEAGENTGRAPH_ONEHARNESS_BIN",
+            "oneharness-that-is-not-installed",
         )],
     );
     run.expect_code(1);
     let died = run.of_kind("member-died");
     assert_eq!(died.len(), 1, "{died:?}");
-    assert_eq!(died[0]["payload"]["rule"], serde_json::json!("unstartable"));
+    let payload = &died[0]["payload"];
+    assert_eq!(payload["rule"], serde_json::json!("unstartable"));
+    assert_eq!(payload["cause"], serde_json::json!("spawn"));
     assert!(
-        died[0]["payload"]["stderr_tail"]
+        payload["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("onejudge-that-is-not-installed"),
+            .contains("oneharness-that-is-not-installed"),
         "{died:?}"
     );
+    for absent in ["exit_code", "disposition", "stderr_tail"] {
+        assert!(
+            payload.get(absent).is_none(),
+            "a member that never started reported {absent}: {payload}"
+        );
+    }
 }
 
 /// The base and the persona are recorded content-addressed, so a replay is

@@ -1,0 +1,15 @@
+[
+  {
+    "rule": "provider-failure",
+    "cause": "exited",
+    "detail": "harness failed (quota)",
+    "exit_code": 2,
+    "disposition": "exited",
+    "stderr_tail": "harness failed (quota)"
+  },
+  {
+    "rule": "provider-failure",
+    "cause": "quota",
+    "detail": "provider error (respond): the subscription is exhausted"
+  }
+]
