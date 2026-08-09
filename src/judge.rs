@@ -492,7 +492,19 @@ mod tests {
         launch.worktree = dir.path().to_path_buf();
 
         let plan = plan(&launch).expect("a plan");
-        assert_eq!(plan.conversation.skill.dir, skill.display().to_string());
+        // Compared as a *path*, not as a string. A config names its skill the way
+        // its author writes one — `skills/greeter` — and rebasing that is a join,
+        // so on Windows the result carries both separators
+        // (`C:\…\skills/greeter`). That is a real directory there and onejudge
+        // opens it without complaint; only the spelling differs from a
+        // `join("skills").join("greeter")`. Canonicalizing both is what asserts
+        // the thing that matters — the plan names *this* directory — and it
+        // fails if the plan names one that does not exist at all.
+        assert_eq!(
+            std::fs::canonicalize(&plan.conversation.skill.dir)
+                .expect("the plan named a directory that is not there"),
+            std::fs::canonicalize(&skill).expect("the skill directory"),
+        );
         // The config's own preamble first, then the skill's body — onejudge's
         // composition, carried through untouched.
         assert_eq!(
