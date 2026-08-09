@@ -1,9 +1,12 @@
 //! Scratch ownership, and reaping what a member left behind.
 //!
-//! `docs/contract.md`: "scratch ownership via `owner.lock` flock +
-//! pid-with-start-token, descendant reaping, successor contract for processes
-//! meant to outlive their launcher." All three are ported from ai-orchestrator
-//! intact, and each exists because a simpler rule destroyed live work:
+//! The rules themselves — the ownership lock, descendant reaping, and the
+//! successor contract — are stated once, in `docs/contract.md`'s liveness
+//! sentence, and are not restated here: a copy of a contract is a copy that
+//! drifts, and `tests/contract.rs` gates the document against this crate's own
+//! constants rather than against prose. What this module adds is *why* each is
+//! shaped the way it is. All three are ported from ai-orchestrator intact, and
+//! each exists because a simpler rule destroyed live work:
 //!
 //! * **A recorded pid is not an identity.** This host's pid counter completes a
 //!   full cycle in under a day while one member holds a recorded pid for the
@@ -14,10 +17,11 @@
 //! * **A recorded pid cannot decide a sweep.** The pid inside a member's scratch
 //!   dies the moment the member's own process does, while the run is still
 //!   reaping its tree and reading its report out of that same directory. So a
-//!   sweeper reclaims a directory only when a *non-blocking exclusive* `flock`
-//!   on [`OWNER_LOCK_FILE`] succeeds — the kernel's own answer to "can anything
-//!   still be using this?" — **and** the recorded identity no longer names a
-//!   live process. Anything the proof does not clear is retained, not removed.
+//!   sweeper reclaims a directory only when a *non-blocking exclusive* kernel
+//!   lock on [`OWNER_LOCK_FILE`] is granted — the kernel's own answer to "can
+//!   anything still be using this?", spelled `flock` on POSIX and `LockFileEx`
+//!   on Windows — **and** the recorded identity no longer names a live process.
+//!   Anything the proof does not clear is retained, not removed.
 //! * **Ownership of a descendant is proven, not inferred.** The kernel fixes a
 //!   process's environment at `exec`, so [`SCRATCH_ENV`] is a stamp no
 //!   descendant can shed — including one reparented to init, which no walk from
@@ -30,15 +34,41 @@
 //! degraded answer but a wrong one — every identity reports dead, so no
 //! directory is ever pinned and a live run's scratch is free for the taking.
 //!
-//! On a platform that can do neither the ownership claim degrades to the
-//! `flock` alone plus the directory's own existence, and reaping to the child
-//! this process holds. Nothing is reported live that cannot be *proven* live,
-//! which retains a directory rather than reclaiming one still in use. The
-//! liveness journeys are Unix-only for exactly that reason.
+//! Windows has none of the four POSIX facilities the rules were written on, so
+//! each is answered by the equivalent that preserves the same safety property:
+//!
+//! | rule | POSIX | Windows |
+//! | --- | --- | --- |
+//! | ownership lock | `flock(LOCK_EX \| LOCK_NB)` | `LockFileEx(EXCLUSIVE \| FAIL_IMMEDIATELY)` |
+//! | start token | `/proc/<pid>/stat`, `libproc` | `GetProcessTimes` creation time |
+//! | tree membership | an environment stamp fixed at `exec` | a job object every child joins |
+//! | teardown | `SIGTERM`, grace, `SIGKILL` | `TerminateJobObject` |
+//!
+//! The first two are the same guarantee by another name. The other two are the
+//! two places the guarantee is *not* identical, and a consumer supervising on
+//! Windows should know which:
+//!
+//! * **There is no signal to decline.** `SIGTERM`-then-`SIGKILL` is an ask
+//!   followed by a compulsion, and Windows has only the compulsion. What a
+//!   member loses is the chance to shut itself down cleanly first; what a caller
+//!   of [`reap`] is promised — nothing stamped for this scratch is still running
+//!   when it returns — is unchanged.
+//! * **A group is created by its launcher**, not fixed at `exec`. So a scratch
+//!   nobody launched into has no group to find, and [`stamped_for`] reports
+//!   nothing rather than guessing — the direction that retains a directory
+//!   rather than killing something still using it.
+//!
+//! On a platform that is neither, there is no kernel lock to degrade *to*: a
+//! claim is granted on the directory's own existence, and taking it proves
+//! nothing, so [`reclaimable`] retains every directory and reaping falls back to
+//! the child the supervisor holds. That is the safe direction of each answer —
+//! nothing is reported live that cannot be *proven* live, and nothing is
+//! reclaimed or killed on an unproven one.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 
 use crate::error::Error;
 use crate::liveness::OWNER_LOCK_FILE;
@@ -59,6 +89,18 @@ pub const SCRATCH_PREFIX: &str = "oneagentgraph-";
 ///
 /// Two processes that reuse one number never share a start token, so this
 /// answers "is that still the same process?" — the question a bare pid cannot.
+// llmlint: ignore-block[invalid_states_unrepresentable] both fields are
+// deliberately unvalidated, because this type is a *record* of two numbers read
+// back off disk rather than a claim about them. The pair is the whole of
+// `owner.lock`'s format — `docs/contract.md` names it "pid-with-start-token" —
+// and narrowing either field would change a serialized contract to describe a
+// state nothing acts on. Nothing here trusts a value: the only reader is
+// [`is_live`], which asks the kernel for the token `pid` holds *now* and
+// compares, so an out-of-range pid and an absent token both answer "not live"
+// by the same path a stale one does. That is also the direction that retains a
+// directory rather than reclaiming one still in use, and
+// `an_identity_answers_for_the_process_it_was_taken_from` holds it against a
+// pid that cannot exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProcessIdentity {
     /// The process id.
@@ -67,6 +109,7 @@ pub struct ProcessIdentity {
     /// was taken.
     pub start_token: u64,
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// A scratch directory this process owns for as long as it holds the handle.
 ///
@@ -187,15 +230,159 @@ pub fn reclaimable(path: &Path) -> Result<(), String> {
     }
 }
 
+/// One member's process tree, grouped so that it can be torn down whole.
+///
+/// The tree is what has to end, not the child this process happens to hold: a
+/// member is `onejudge`, which spawns `oneharness`, which spawns the paid
+/// provider — and killing the first leaves the other two running, still holding
+/// the pipes this supervisor is reading and still billing whoever owns the
+/// subscription.
+///
+/// The two platforms prove membership by opposite means, and a [`Group`] is the
+/// one seam that hides the difference:
+///
+/// * **POSIX** — the group *is* the [`SCRATCH_ENV`] stamp. The kernel fixes an
+///   environment at `exec`, so every descendant carries it whether or not its
+///   parent is still alive, and joining is nothing more than carrying the stamp
+///   into the spawn.
+/// * **Windows** — the group is a **job object**. There is no environment a
+///   sweeper can read out of another process here, and no process group to
+///   signal; a job is the kernel's own answer to "everything this process
+///   started", it holds a descendant whose parent has already exited, and
+///   `TerminateJobObject` ends the whole tree at once.
+///
+/// Dropping a group is *not* nothing on Windows: the job is created
+/// `KILL_ON_JOB_CLOSE`, so a supervisor that panics or is killed outright takes
+/// its member's tree with it rather than leaking a paid harness.
+#[derive(Debug)]
+pub struct Group {
+    /// The scratch this group belongs to, which is also its name.
+    scratch: PathBuf,
+    /// What the platform holds the group open with.
+    inner: platform::Group,
+}
+
+impl Group {
+    /// Open the group `scratch` names, creating whatever proves membership.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] when the platform's grouping facility cannot be
+    /// created. A member launched outside its group is one a cancel cannot
+    /// reach, so this refuses rather than proceeding ungrouped.
+    pub fn open(scratch: &Path) -> Result<Self, Error> {
+        Ok(Self {
+            scratch: scratch.to_path_buf(),
+            inner: platform::Group::open(scratch)?,
+        })
+    }
+
+    /// Spawn `command` inside this group, so everything it starts joins too.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Command::spawn`] reports, and — on a platform that has to put
+    /// the child in the group *before* it runs — the failure to do so. A child
+    /// that started but could not be grouped is killed rather than returned.
+    pub fn spawn(&self, command: &mut Command) -> std::io::Result<Child> {
+        self.prepare(command)?;
+        let mut child = command.spawn()?;
+        match self.adopt(&child) {
+            Ok(_) => Ok(child),
+            // A member running unsupervised is worse than one that never
+            // started: a harness no cancel can reach keeps billing.
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                Err(err)
+            }
+        }
+    }
+
+    /// The half of joining a group that has to happen *before* the fork.
+    ///
+    /// Split out of [`Group::spawn`] because a caller that does not own the
+    /// `spawn` call needs the same two moments in the same order —
+    /// [`crate::judge`] hands them to onejudge's `SpawnHook`, whose two methods
+    /// are exactly this split, for exactly this reason.
+    ///
+    /// The [`SCRATCH_ENV`] stamp is applied here rather than by each caller
+    /// because on POSIX the stamp **is** the group: a command that reaches the
+    /// kernel without it is outside the group no matter what this returns.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the platform reports when a command cannot be configured for its
+    /// group; the spawn is then refused rather than made ungrouped.
+    pub(crate) fn prepare(&self, command: &mut Command) -> std::io::Result<()> {
+        command.env(SCRATCH_ENV, self.scratch.display().to_string());
+        self.inner.prepare(command)
+    }
+
+    /// The half that has to happen *after* the process exists, answering the
+    /// name of the group it was placed in.
+    ///
+    /// The name is the scratch directory, which is what a group is called on
+    /// both platforms — [`stamped_for`] and [`reap`] take exactly this string,
+    /// so a record of it is a record something else can act on.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the platform reports when a live process cannot be put in the
+    /// group. The caller kills the child rather than running it ungrouped.
+    pub(crate) fn adopt(&self, child: &Child) -> std::io::Result<String> {
+        self.inner.adopt(child)?;
+        Ok(self.scratch.display().to_string())
+    }
+
+    /// Terminate every live process in this group, and say how many.
+    pub fn terminate(&self) -> usize {
+        self.inner.terminate(&self.scratch)
+    }
+}
+
 /// The identity a scratch directory's lock file records.
+///
+/// A lock file is external input — a scratch directory is on disk, and anything
+/// with write access to it can put a number here — so the pid is range-checked
+/// rather than merely parsed. Only a *positive* pid names a process on either
+/// platform, and the two ways a non-positive one would be read are both bad: on
+/// POSIX a negative pid is how `kill` addresses a whole process group, and on
+/// Windows it would be widened into an unrelated but perfectly real pid. Neither
+/// path is reachable from here today — this identity only ever reaches
+/// [`is_live`] — but the number is rejected at the boundary rather than trusted
+/// to stay unreachable.
+///
+/// The shape is checked as strictly as the number. [`Owned::claim`] writes
+/// exactly two fields, so a file carrying anything after them is one this crate
+/// did not write — and reading the first two numbers out of it anyway would take
+/// a stranger's word for who owns the directory.
+///
+/// A record that fails any of this proves nothing about a live process, which
+/// leaves the lock as the only proof; see [`reclaimable`] for what that decides.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] the range check has no journey
+// because no journey can reach it. Its only caller is [`reclaimable`], which the
+// binary never invokes — `docs/contract.md`'s CLI surface has no sweep verb, so
+// `reclaimable` is a library entry point a future sweeper calls, and the e2e
+// journeys that touch it (`a_live_run_holds_its_scratch_against_a_sweep`) already
+// call it directly for exactly that reason. An "e2e" here would be the unit test
+// below moved one file over, driving the same function through the same call:
+// less realistic, not more, because it would imply a command surface that does
+// not exist. What the boundary is worth holding is held there — both that a
+// non-positive record is refused and that the refusal is a range check rather
+// than a blanket one.
 fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
     let recorded = std::fs::read_to_string(lock_path).ok()?;
     let mut parts = recorded.split_whitespace();
-    Some(ProcessIdentity {
-        pid: parts.next()?.parse().ok()?,
-        start_token: parts.next()?.parse().ok()?,
-    })
+    let pid: i32 = parts.next()?.parse().ok()?;
+    let start_token = parts.next()?.parse().ok()?;
+    if pid <= 0 || parts.next().is_some() {
+        return None;
+    }
+    Some(ProcessIdentity { pid, start_token })
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 #[cfg(unix)]
 mod platform {
@@ -225,25 +412,6 @@ mod platform {
                 return false;
             }
         }
-    }
-
-    /// This process's own identity.
-    pub fn own_identity() -> ProcessIdentity {
-        let pid = std::process::id() as i32;
-        ProcessIdentity {
-            pid,
-            start_token: start_token(pid).unwrap_or(0),
-        }
-    }
-
-    /// Whether `identity` still names the process it was taken from.
-    ///
-    /// A platform that cannot answer for a token answers `None` here, which is
-    /// never equal to a recorded token — so an identity is reported live only
-    /// where it can be *proven* live, and a sweeper on such a platform falls
-    /// back to the `flock`, which is the independent half of the same proof.
-    pub fn is_live(identity: ProcessIdentity) -> bool {
-        start_token(identity.pid).is_some_and(|token| token == identity.start_token)
     }
 
     /// Every live process carrying `stamp`, **or a scratch below it**, as its
@@ -479,7 +647,7 @@ mod platform {
     /// strength of the first check would be aimed at a number the kernel was
     /// free to hand to somebody else.
     pub fn signal(identity: ProcessIdentity, sig: i32) -> bool {
-        if !is_live(identity) {
+        if !super::is_live(identity) {
             return false;
         }
         // SAFETY: `kill` takes a pid and a signal number and reports failure
@@ -493,9 +661,61 @@ mod platform {
     pub const LOCK_PROVES_OWNERSHIP: bool = true;
 
     /// `SIGTERM`, then `SIGKILL` for whatever ignored it.
-    pub const TERM: i32 = libc::SIGTERM;
+    const TERM: i32 = libc::SIGTERM;
     /// The signal nothing survives.
-    pub const KILL: i32 = libc::SIGKILL;
+    const KILL: i32 = libc::SIGKILL;
+
+    /// How long a proven descendant is given to shut itself down before it is
+    /// killed. Short, because everything here has already been asked to stop.
+    const GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// Ask every target to stop, then kill whatever declined.
+    ///
+    /// Each signal revalidates the identity, so a member that shut itself down
+    /// on the first is never sent a second, and a number its exit released is
+    /// never signalled at all.
+    pub fn terminate(_scratch: &std::path::Path, targets: &[ProcessIdentity]) -> usize {
+        let mut signalled = 0;
+        for identity in targets {
+            if signal(*identity, TERM) {
+                signalled += 1;
+            }
+        }
+        std::thread::sleep(GRACE);
+        for identity in targets {
+            signal(*identity, KILL);
+        }
+        signalled
+    }
+
+    /// A member's process tree, which here is just its [`super::SCRATCH_ENV`]
+    /// stamp: the kernel fixes an environment at `exec`, so a descendant is in
+    /// the group by construction and there is nothing to create or hold open.
+    #[derive(Debug)]
+    pub struct Group;
+
+    impl Group {
+        /// Nothing to open: the stamp is applied by the caller's `Command`.
+        pub fn open(_scratch: &std::path::Path) -> Result<Self, crate::error::Error> {
+            Ok(Self)
+        }
+
+        /// Nothing to configure: the caller's stamp is the whole membership.
+        pub fn prepare(&self, _command: &mut std::process::Command) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing to do to a live process either — it was in the group the
+        /// moment it `exec`ed, and it cannot be moved out of one.
+        pub fn adopt(&self, _child: &std::process::Child) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Reap everything still stamped for this scratch.
+        pub fn terminate(&self, scratch: &std::path::Path) -> usize {
+            super::reap(scratch)
+        }
+    }
 
     #[cfg(test)]
     mod tests {
@@ -528,43 +748,575 @@ mod platform {
     }
 }
 
-#[cfg(not(unix))]
+/// The same four proofs on Windows, which has none of the POSIX facilities they
+/// were written on.
+///
+/// Two of the four map across exactly, and are the same guarantee by another
+/// name: `LockFileEx` is a kernel byte-range lock the way `flock` is a kernel
+/// file lock, and a process's `GetProcessTimes` creation time is fixed when it
+/// starts the way a Linux start jiffy or a Darwin start microsecond is. Both are
+/// refused to a process that is not the owner and survive a recycled pid.
+///
+/// The other two cannot be expressed the same way, and this is exactly what
+/// differs:
+///
+/// * **There is no environment stamp a sweeper can read.** A process's
+///   environment lives in its own address space here, reachable only by reading
+///   another process's memory through an undocumented structure. So membership
+///   is proven by a **job object** instead — the kernel's own record of
+///   "everything this process started". A job holds a descendant whose parent
+///   has already exited, exactly as the `exec`-fixed stamp does, and it is
+///   stronger in one respect: a descendant cannot leave a job, whereas a
+///   descendant that re-`exec`s with a scrubbed environment sheds a stamp. It is
+///   weaker in another: a job is created *by the launcher*, so a scratch nobody
+///   launched into — one left by a build that predates this, or by a crash
+///   between creating the directory and creating the job — has no job to find,
+///   and `stamped_for` reports nothing rather than guessing. That direction
+///   retains rather than kills, which is the safe one.
+/// * **There is no signal to decline.** `SIGTERM`-then-`SIGKILL` is an ask
+///   followed by a compulsion, and Windows has only the compulsion:
+///   `TerminateJobObject` ends the whole tree at once and cannot be refused. The
+///   safety property — nothing stamped for this scratch is still running when
+///   the reap returns — holds identically; what a member loses is the chance to
+///   shut itself down cleanly first. The e2e journey named for a descendant
+///   that refuses to stop is POSIX-only for that reason: its subject is the
+///   escalation, and here there is nothing to escalate past.
+///
+/// A job is created `KILL_ON_JOB_CLOSE`, so the tree also dies with the
+/// supervisor that launched it — a leaked paid harness is what the whole rule
+/// exists to prevent, and a supervisor killed outright cannot run a reap.
+#[cfg(windows)]
+mod platform {
+    use std::ffi::c_void;
+    use std::fs::File;
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
+    use std::os::windows::process::CommandExt as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command};
+
+    use sha2::{Digest as _, Sha256};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
+        JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject,
+        SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, OpenThread, ResumeThread, WaitForSingleObject,
+        CREATE_SUSPENDED, PROCESS_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+    };
+
+    use super::ProcessIdentity;
+    use crate::error::Error;
+
+    /// The file, inside a scratch directory, naming the job object that scratch's
+    /// process tree belongs to.
+    ///
+    /// A job object is reachable by name, and this is where the name is written —
+    /// the thing that lets a *second* process (an operator's `cancel --kill`)
+    /// find the tree a first one launched. It sits beside `owner.lock` for the
+    /// same reason: the scratch directory is the run's own record of itself.
+    const OWNER_JOB_FILE: &str = "owner.job";
+
+    /// How far below a scratch a walk looks for a group's record.
+    ///
+    /// A run's own layout puts a member's scratch at `<run>/members/<name>`, two
+    /// levels down, and the harnesses working under it put arbitrary trees below
+    /// that. The bound is what keeps `cancel` on a run whose members have been
+    /// writing for an hour from walking their output; nothing this crate creates
+    /// records a group deeper than that.
+    const RECORD_DEPTH: usize = 4;
+
+    /// The byte a claim is taken on: one byte, at an offset no `owner.lock` will
+    /// ever reach.
+    ///
+    /// A Windows byte-range lock is *mandatory* where `flock` is advisory, so
+    /// locking the bytes the record is written in would make the record itself
+    /// unreadable to everyone but the owner — and the record is the second half
+    /// of the proof, which a sweeper has to read while the first half is still
+    /// held. Locking past the end of the file instead, which the API explicitly
+    /// permits, keeps the lock a pure semaphore: mutual exclusion between
+    /// claimants, and no bearing on anybody reading the file.
+    const CLAIM_OFFSET_HIGH: u32 = 0x8000_0000;
+
+    /// Take a non-blocking exclusive byte-range lock, reporting whether it was
+    /// granted.
+    pub fn try_lock_exclusive(file: &File) -> bool {
+        let mut overlapped: windows_sys::Win32::System::IO::OVERLAPPED =
+            unsafe { std::mem::zeroed() };
+        overlapped.Anonymous.Anonymous.OffsetHigh = CLAIM_OFFSET_HIGH;
+        // SAFETY: the handle is one this process owns for the lifetime of the
+        // borrow, and `overlapped` is a live structure this frame owns carrying
+        // the offset the range starts at. Failure is reported through the
+        // return value.
+        unsafe {
+            LockFileEx(
+                file.as_raw_handle() as HANDLE,
+                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                0,
+                1,
+                0,
+                &raw mut overlapped,
+            ) != 0
+        }
+    }
+
+    /// The kernel's start token for `pid`: the wall-clock time that process
+    /// started, in 100-nanosecond ticks, which a recycled number never repeats.
+    ///
+    /// `None` for a pid this process cannot open — one that has exited, or one
+    /// belonging to another user, neither of which this run could have launched.
+    /// A process that has *finished* but whose handle somebody still holds also
+    /// answers `None`: its creation time is still readable, so the wait below is
+    /// what separates "still that process" from "was that process".
+    pub fn start_token(pid: i32) -> Option<u64> {
+        // Checked rather than `as`: a lossy widening turns a number that names
+        // no process into one that may name a real and unrelated one.
+        let pid = u32::try_from(pid).ok()?;
+        // SAFETY: `OpenProcess` takes a pid and reports failure with a null
+        // handle; nothing is borrowed.
+        let handle =
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            return None;
+        }
+        // SAFETY: `handle` is a live process handle this frame owns until the
+        // `CloseHandle` below, and every out-parameter is a live local.
+        let (running, times) = unsafe {
+            let running = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
+            let mut created = std::mem::zeroed();
+            let mut exited = std::mem::zeroed();
+            let mut kernel = std::mem::zeroed();
+            let mut user = std::mem::zeroed();
+            let read = GetProcessTimes(
+                handle,
+                &raw mut created,
+                &raw mut exited,
+                &raw mut kernel,
+                &raw mut user,
+            );
+            CloseHandle(handle);
+            (running, (read != 0).then_some(created))
+        };
+        if !running {
+            return None;
+        }
+        let created = times?;
+        Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+
+    /// Every live process in the group `stamp` names, **or in one below it**.
+    ///
+    /// The "or below" is what makes a *run* answerable for its members: a member
+    /// is grouped under its own scratch, `<run>/members/<name>`, and nothing is
+    /// ever grouped under the run directory itself — so `cancel RUN --kill` has
+    /// to reach a group recorded beneath the one it was given.
+    pub fn stamped_for(stamp: &str) -> Vec<ProcessIdentity> {
+        // Asking, not acting: a handle opened for `JOB_OBJECT_QUERY` alone
+        // cannot terminate the tree it reports on, so a reader that is only ever
+        // meant to enumerate cannot become a teardown by mistake.
+        let mut found: Vec<ProcessIdentity> = groups_under(Path::new(stamp), JOB_OBJECT_QUERY)
+            .into_iter()
+            .flat_map(|job| pids_in(job.as_raw()))
+            .filter_map(|pid| {
+                let pid = i32::try_from(pid).ok()?;
+                Some(ProcessIdentity {
+                    pid,
+                    start_token: start_token(pid)?,
+                })
+            })
+            .collect();
+        found.sort();
+        found.dedup();
+        found
+    }
+
+    /// Terminate every group at or below `scratch`, and say how many of the
+    /// targets they held.
+    ///
+    /// One step rather than two: there is no signal for a process to decline
+    /// here, so the ask-then-compel escalation POSIX makes has nothing to ask
+    /// with. A group holding this process is left alone — a reap that took its
+    /// own supervisor down would lose the report it exists to write.
+    pub fn terminate(scratch: &Path, targets: &[ProcessIdentity]) -> usize {
+        let own = std::process::id();
+        let mut ended = 0;
+        for job in groups_under(scratch, JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE) {
+            let pids = pids_in(job.as_raw());
+            if pids.contains(&own) {
+                continue;
+            }
+            // SAFETY: `job` is a live job handle this frame owns; failure is
+            // reported through the return value and there is nothing to do
+            // about a job that has already gone.
+            if unsafe { TerminateJobObject(job.as_raw(), 1) } != 0 {
+                ended += targets
+                    .iter()
+                    .filter(|identity| {
+                        u32::try_from(identity.pid).is_ok_and(|pid| pids.contains(&pid))
+                    })
+                    .count();
+            }
+        }
+        ended
+    }
+
+    /// A job object is the kernel's own answer to "is anything still using
+    /// this?" being asked of a *lock*, and `LockFileEx` is that answer for the
+    /// lock itself — so acquiring one is evidence a sweeper may act on.
+    pub const LOCK_PROVES_OWNERSHIP: bool = true;
+
+    /// One member's process tree, as the job object holding it.
+    #[derive(Debug)]
+    pub struct Group {
+        /// The job every process in the tree belongs to. Closing it terminates
+        /// whatever is left, because the job is `KILL_ON_JOB_CLOSE`.
+        job: Job,
+        /// Where the job's name is recorded, removed with the group so a name
+        /// that no longer resolves is not left behind for a sweeper to open.
+        record: PathBuf,
+    }
+
+    impl Group {
+        /// Create the job `scratch` names and record it there.
+        pub fn open(scratch: &Path) -> Result<Self, Error> {
+            let name = wide(&job_name(scratch));
+            // SAFETY: `name` is a live, null-terminated wide string for the
+            // duration of the call; failure is reported with a null handle.
+            let job = unsafe { CreateJobObjectW(std::ptr::null(), name.as_ptr()) };
+            let job = Job::own(job).ok_or_else(|| {
+                Error::InvalidConfig(format!(
+                    "cannot create the job object for {}: {}",
+                    scratch.display(),
+                    std::io::Error::last_os_error()
+                ))
+            })?;
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            // SAFETY: `limits` is a live, fully initialised structure of exactly
+            // the size passed alongside it, and the class named is the one it is.
+            let set = unsafe {
+                SetInformationJobObject(
+                    job.as_raw(),
+                    JobObjectExtendedLimitInformation,
+                    std::ptr::from_ref(&limits).cast(),
+                    u32::try_from(std::mem::size_of_val(&limits)).unwrap_or(u32::MAX),
+                )
+            };
+            if set == 0 {
+                return Err(Error::InvalidConfig(format!(
+                    "cannot bind the job object for {} to its launcher: {}",
+                    scratch.display(),
+                    std::io::Error::last_os_error()
+                )));
+            }
+            let record = scratch.join(OWNER_JOB_FILE);
+            std::fs::write(&record, job_name(scratch)).map_err(|err| {
+                Error::InvalidConfig(format!("cannot write {}: {err}", record.display()))
+            })?;
+            Ok(Self { job, record })
+        }
+
+        /// Ask for the child suspended, so it cannot run before it is in the
+        /// job.
+        ///
+        /// Suspended and then assigned, rather than assigned after the fact: a
+        /// child that runs for even an instant outside the job can start a
+        /// descendant outside it too, and that descendant is the thing no cancel
+        /// would ever reach.
+        pub fn prepare(&self, command: &mut Command) -> std::io::Result<()> {
+            command.creation_flags(CREATE_SUSPENDED);
+            Ok(())
+        }
+
+        /// Put the suspended child in the job and let it run.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] there is no journey
+        // for the failure arms because there is no input that reaches them: a
+        // job this process created a moment ago refusing its own child, or a
+        // suspended process with no resumable thread, are kernel failures rather
+        // than anything a caller can ask for, and no seam this crate sanctions
+        // fakes Win32. The reachable half — that a member which *is* grouped is
+        // torn down whole, by a cancel, a watchdog, or its launcher dying — is
+        // covered in tests/e2e/liveness.rs. What these arms decide is the
+        // direction of an unreachable failure, and the callers make it the safe
+        // one: a child that started but could not be put in the job is killed
+        // rather than returned, because returning it would leave a paid harness
+        // running that no cancel could ever find.
+        pub fn adopt(&self, child: &Child) -> std::io::Result<()> {
+            // SAFETY: the child handle is live for the borrow, and the job is
+            // one this group owns; failure is reported through the return value.
+            let assigned = unsafe {
+                AssignProcessToJobObject(self.job.as_raw(), child.as_raw_handle() as HANDLE)
+            };
+            if assigned == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            resume(child.id())
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
+
+        /// End this group's whole tree.
+        pub fn terminate(&self, _scratch: &Path) -> usize {
+            let pids = pids_in(self.job.as_raw());
+            // SAFETY: the job is one this group owns; failure is reported
+            // through the return value.
+            if unsafe { TerminateJobObject(self.job.as_raw(), 1) } == 0 {
+                return 0;
+            }
+            pids.len()
+        }
+    }
+
+    impl Drop for Group {
+        fn drop(&mut self) {
+            // The handle closing is what terminates the stragglers, so the
+            // record has to go first: a name still on disk after the job behind
+            // it is gone is one a sweeper would open and find nothing in.
+            let _ = std::fs::remove_file(&self.record);
+        }
+    }
+
+    /// The name of the job object a scratch directory's tree belongs to.
+    ///
+    /// Derived from the path rather than minted, so two processes reach the same
+    /// job without having to agree on anything but the directory — and digested
+    /// rather than spelled, because a path carries separators an object name
+    /// cannot and runs past the length one may be. `Local\` scopes it to this
+    /// logon session, which is as far as a run and a `cancel` for it ever are
+    /// from each other.
+    fn job_name(scratch: &Path) -> String {
+        let digest = Sha256::digest(scratch.display().to_string().as_bytes());
+        format!("Local\\{}{digest:x}", super::SCRATCH_PREFIX)
+    }
+
+    /// One string as the null-terminated wide buffer the Win32 API takes.
+    fn wide(text: &str) -> Vec<u16> {
+        std::ffi::OsStr::new(text)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    /// Every group recorded at or below `root`, opened for `access` and no more.
+    ///
+    /// The rights are the caller's to name because they are not the same:
+    /// enumerating a tree and ending one are different acts, and a handle that
+    /// could do both is one an enumeration could end a member's tree through.
+    ///
+    /// A record naming a job nothing holds open any more simply does not open,
+    /// which is the same answer as an empty group: that tree is gone.
+    ///
+    /// The name a group is opened under is **derived from the directory**, never
+    /// taken from the file. `owner.job` is a file in a scratch directory — a
+    /// trust boundary like any other, and one whose content would otherwise
+    /// decide what `TerminateJobObject` is aimed at, so a record somebody else
+    /// wrote would point a `cancel` at any job object this user can open. What
+    /// the file is for is saying *that* a group was recorded here and letting an
+    /// operator read which one; what it may not do is choose. A record that does
+    /// not match the name this directory computes is not this crate's, and is
+    /// skipped rather than opened.
+    fn groups_under(root: &Path, access: u32) -> Vec<Job> {
+        let mut found = Vec::new();
+        let mut walking = vec![(root.to_path_buf(), 0usize)];
+        while let Some((dir, depth)) = walking.pop() {
+            let expected = job_name(&dir);
+            if std::fs::read_to_string(dir.join(OWNER_JOB_FILE))
+                .is_ok_and(|recorded| recorded.trim() == expected)
+            {
+                let name = wide(&expected);
+                // SAFETY: `name` is a live, null-terminated wide string for the
+                // duration of the call; failure is reported with a null handle.
+                let job = unsafe { OpenJobObjectW(access, 0, name.as_ptr()) };
+                found.extend(Job::own(job));
+            }
+            if depth >= RECORD_DEPTH {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    walking.push((entry.path(), depth + 1));
+                }
+            }
+        }
+        found
+    }
+
+    /// Every process id one job holds.
+    fn pids_in(job: HANDLE) -> Vec<u32> {
+        // Room for a member's whole tree in one call; the loop below grows to
+        // whatever the kernel says it actually needs.
+        let mut capacity = 64usize;
+        for _ in 0..8 {
+            // A `usize` buffer rather than a byte one, because the structure
+            // this is read back as is pointer-aligned and a `Vec<u8>` is not.
+            let mut buffer: Vec<usize> = vec![0; 2 + capacity];
+            let bytes = u32::try_from(std::mem::size_of_val(buffer.as_slice())).unwrap_or(u32::MAX);
+            let list = buffer
+                .as_mut_ptr()
+                .cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>();
+            // SAFETY: `list` points at `bytes` bytes of live, zeroed, correctly
+            // aligned memory this frame owns, and the class named is the one the
+            // buffer is read back as.
+            let queried = unsafe {
+                QueryInformationJobObject(
+                    job,
+                    JobObjectBasicProcessIdList,
+                    list.cast(),
+                    bytes,
+                    std::ptr::null_mut(),
+                )
+            };
+            // SAFETY: the call fills the header even when it reports the buffer
+            // was too small, which is what the retry below reads.
+            let (assigned, listed) = unsafe {
+                (
+                    (*list).NumberOfAssignedProcesses as usize,
+                    (*list).NumberOfProcessIdsInList as usize,
+                )
+            };
+            // SAFETY: `listed` is the count the kernel wrote, which is bounded
+            // by the capacity it was given.
+            let pids = unsafe {
+                std::slice::from_raw_parts(
+                    (&raw const (*list).ProcessIdList).cast::<usize>(),
+                    listed,
+                )
+            };
+            let pids: Vec<u32> = pids
+                .iter()
+                .filter_map(|pid| u32::try_from(*pid).ok())
+                .collect();
+            if queried != 0 {
+                return pids;
+            }
+            // SAFETY: reading the thread-local last error borrows nothing.
+            if unsafe { GetLastError() } != ERROR_MORE_DATA {
+                return Vec::new();
+            }
+            capacity = assigned.max(capacity * 2) + 8;
+        }
+        Vec::new()
+    }
+
+    /// Let a suspended process run.
+    ///
+    /// A process created suspended has exactly one thread, but it is reached
+    /// through the thread table rather than through the [`Child`] — std does not
+    /// keep the thread handle `CreateProcess` returned, and the alternative is
+    /// not spawning through std at all.
+    fn resume(pid: u32) -> std::io::Result<()> {
+        // A snapshot of every thread on the host races the host: a thread table
+        // that changed while it was being copied answers `ERROR_BAD_LENGTH`,
+        // which is "ask again" rather than a failure. This process starts many
+        // members at once, which is exactly when that happens.
+        let mut snapshot = INVALID_HANDLE_VALUE;
+        for _ in 0..16 {
+            // SAFETY: the snapshot is a kernel handle this frame owns; failure
+            // is reported with `INVALID_HANDLE_VALUE`.
+            snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+            if snapshot != INVALID_HANDLE_VALUE {
+                break;
+            }
+        }
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut entry: THREADENTRY32 = unsafe { std::mem::zeroed() };
+        entry.dwSize = u32::try_from(std::mem::size_of::<THREADENTRY32>()).unwrap_or(u32::MAX);
+        let mut resumed = false;
+        // SAFETY: `entry` is a live structure of the size it declares, and the
+        // walk stops when the enumerator says there is nothing more.
+        unsafe {
+            let mut more = Thread32First(snapshot, &raw mut entry) != 0;
+            while more {
+                if entry.th32OwnerProcessID == pid {
+                    let thread = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !thread.is_null() {
+                        resumed |= ResumeThread(thread) != u32::MAX;
+                        CloseHandle(thread);
+                    }
+                }
+                more = Thread32Next(snapshot, &raw mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+        }
+        if resumed {
+            Ok(())
+        } else {
+            Err(std::io::Error::other(format!(
+                "the member started suspended and could not be resumed (pid {pid})"
+            )))
+        }
+    }
+
+    /// One job object handle, closed when it goes out of scope.
+    ///
+    /// Closing is not bookkeeping here: the job is `KILL_ON_JOB_CLOSE`, so the
+    /// last handle going away is what ends the tree.
+    #[derive(Debug)]
+    struct Job(OwnedHandle);
+
+    impl Job {
+        /// Take ownership of a handle a Win32 call returned, if it returned one.
+        fn own(handle: HANDLE) -> Option<Self> {
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                return None;
+            }
+            // SAFETY: the handle came straight from a call that returns
+            // ownership of it, and nothing else holds it.
+            Some(Self(unsafe { OwnedHandle::from_raw_handle(handle.cast()) }))
+        }
+
+        fn as_raw(&self) -> HANDLE {
+            self.0.as_raw_handle().cast::<c_void>()
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 mod platform {
     use std::fs::File;
 
     use super::ProcessIdentity;
 
-    /// Without `flock` there is no kernel answer to "is anything still using
+    /// Without a kernel lock there is no answer to "is anything still using
     /// this?", so the claim degrades to the directory's own existence and a
     /// sweeper is told to keep it.
     pub fn try_lock_exclusive(_file: &File) -> bool {
         true
     }
 
-    /// A pid with no start token: this platform has no cheap one, so an identity
-    /// here is only ever compared against another taken the same way.
-    pub fn own_identity() -> ProcessIdentity {
-        ProcessIdentity {
-            pid: std::process::id() as i32,
-            start_token: 0,
-        }
+    /// No start token to be had here, so every identity carries `0` and none is
+    /// ever reported live — which retains a directory rather than removing one
+    /// still in use, the safe direction.
+    pub fn start_token(_pid: i32) -> Option<u64> {
+        None
     }
 
-    /// Nothing can be proven live, so nothing is reported live — which retains
-    /// rather than removes, the safe direction.
-    pub fn is_live(_identity: ProcessIdentity) -> bool {
-        false
-    }
-
-    /// No procfs, so no stamped descendants can be enumerated. Reaping falls
-    /// back to the child this process holds directly.
+    /// No way to enumerate a member's tree here, so reaping falls back to the
+    /// child the supervisor holds directly.
     pub fn stamped_for(_stamp: &str) -> Vec<ProcessIdentity> {
         Vec::new()
     }
 
-    /// Nothing is signalled through an unproven handle.
-    pub fn signal(_identity: ProcessIdentity, _sig: i32) -> bool {
-        false
+    /// Nothing is torn down through an unproven handle.
+    pub fn terminate(_scratch: &std::path::Path, _targets: &[ProcessIdentity]) -> usize {
+        0
     }
 
     /// Taking the lock here proves nothing: [`try_lock_exclusive`] always
@@ -573,25 +1325,75 @@ mod platform {
     /// directory's own existence, and a sweeper is told to keep it.
     pub const LOCK_PROVES_OWNERSHIP: bool = false;
 
-    /// Placeholder signal numbers; nothing reaches [`signal`] on this platform.
-    pub const TERM: i32 = 15;
-    /// Placeholder signal numbers; nothing reaches [`signal`] on this platform.
-    pub const KILL: i32 = 9;
+    /// Nothing groups a process tree here, so a group is the child alone.
+    #[derive(Debug)]
+    pub struct Group;
+
+    impl Group {
+        /// Nothing to open.
+        pub fn open(_scratch: &std::path::Path) -> Result<Self, crate::error::Error> {
+            Ok(Self)
+        }
+
+        /// Nothing to configure: there is no group to put the child in.
+        pub fn prepare(&self, _command: &mut std::process::Command) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing to adopt either, for the same reason.
+        pub fn adopt(&self, _child: &std::process::Child) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing provable to terminate.
+        pub fn terminate(&self, _scratch: &std::path::Path) -> usize {
+            0
+        }
+    }
 }
 
-pub use platform::{is_live, own_identity, stamped_for};
-use platform::{signal, try_lock_exclusive, KILL, LOCK_PROVES_OWNERSHIP, TERM};
+pub use platform::stamped_for;
+use platform::{try_lock_exclusive, LOCK_PROVES_OWNERSHIP};
 
-/// How long a proven descendant is given to shut itself down before it is
-/// killed. Short, because everything here has already been asked to stop.
-const GRACE: std::time::Duration = std::time::Duration::from_millis(200);
-
-/// Terminate every live process still stamped for `scratch`.
+/// This process's own identity.
 ///
-/// Returns how many were signalled. `SIGTERM` first, one grace period, then
-/// `SIGKILL` for whatever is still itself — and each signal revalidates the
-/// identity, so a member that shut itself down on the first is never sent a
-/// second, and a number its exit released is never signalled at all.
+/// Written once rather than per platform: what differs between them is only how
+/// a start token is read. A platform that cannot read one leaves the `0` below,
+/// which no real token ever equals — so an identity taken there is never
+/// mistaken for a live process.
+#[must_use]
+pub fn own_identity() -> ProcessIdentity {
+    // A pid past `i32::MAX` is reachable on Windows and would wrap to a negative
+    // number, which [`recorded_identity`] rejects on the way back in. `0` names
+    // no process on either platform, so such a run is judged by its lock alone
+    // rather than by a number that would read as somebody else's.
+    let pid = i32::try_from(std::process::id()).unwrap_or(0);
+    ProcessIdentity {
+        pid,
+        start_token: platform::start_token(pid).unwrap_or(0),
+    }
+}
+
+/// Whether `identity` still names the process it was taken from.
+///
+/// A platform that cannot answer for a token answers `None` here, which is never
+/// equal to a recorded token — so an identity is reported live only where it can
+/// be *proven* live, and a sweeper on such a platform falls back to the lock,
+/// which is the independent half of the same proof.
+#[must_use]
+pub fn is_live(identity: ProcessIdentity) -> bool {
+    platform::start_token(identity.pid).is_some_and(|token| token == identity.start_token)
+}
+
+/// Terminate every live process this scratch still holds — the member's own
+/// process and everything it started, whether or not their parents are still
+/// alive.
+///
+/// Returns how many were signalled. What "signalled" means is the platform's:
+/// POSIX asks with `SIGTERM`, waits out a short grace period, and `SIGKILL`s
+/// whatever declined; Windows has no signal to decline, so its job object is
+/// terminated in one step. Both end with the same guarantee — nothing stamped
+/// for this scratch is still running — which is the property the rule is for.
 pub fn reap(scratch: &Path) -> usize {
     let stamp = scratch.display().to_string();
     let owned = stamped_for(&stamp);
@@ -603,17 +1405,7 @@ pub fn reap(scratch: &Path) -> usize {
     if targets.is_empty() {
         return 0;
     }
-    let mut signalled = 0;
-    for identity in &targets {
-        if signal(*identity, TERM) {
-            signalled += 1;
-        }
-    }
-    std::thread::sleep(GRACE);
-    for identity in &targets {
-        signal(*identity, KILL);
-    }
-    signalled
+    platform::terminate(scratch, &targets)
 }
 
 #[cfg(test)]
@@ -633,9 +1425,9 @@ mod tests {
         // Retained on every platform, for reasons that are not the same one: a
         // kernel lock is proof a sweeper can act on, and a platform without one
         // has none to offer — so it keeps the directory rather than guessing.
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         assert!(retained.contains("still locked by its owner"), "{retained}");
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         assert!(retained.contains("cannot be proven unused"), "{retained}");
         drop(owned);
         assert!(!path.exists(), "a released claim left its scratch behind");
@@ -659,7 +1451,12 @@ mod tests {
 
     /// Two claims on one directory cannot both be granted, so a second run
     /// cannot adopt scratch a live one is working in.
-    #[cfg(unix)]
+    ///
+    /// Held wherever the kernel backs the lock — an `flock` on POSIX, a
+    /// `LockFileEx` byte range on Windows — and both refuse a second acquisition
+    /// even from the process already holding the first, which is what makes this
+    /// assertable in one process.
+    #[cfg(any(unix, windows))]
     #[test]
     fn a_second_claim_on_one_directory_is_refused() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -685,15 +1482,15 @@ mod tests {
 
     /// A lock recorded by a process that is still itself pins the directory,
     /// even once the lock has been released — the two proofs are independent.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn a_live_recorded_identity_pins_the_directory() {
         let root = tempfile::tempdir().expect("tempdir");
         let own = own_identity();
 
         // Each case gets its own directory rather than rewriting one lock file
-        // in place. `flock` is held by an *open file description*, and rewriting
-        // a file this process has already opened and closed makes the second
+        // in place. A kernel lock is held by an *open handle*, and rewriting a
+        // file this process has already opened and closed makes the second
         // acquisition depend on the first's close having been observed — which
         // is a race the test would lose occasionally and the code never runs.
         let recorded = |name: &str, record: &str| {
@@ -716,6 +1513,53 @@ mod tests {
         // is the only proof left — and it is free.
         let torn = recorded("torn", "not a record\n");
         assert_eq!(reclaimable(&torn), Ok(()));
+    }
+
+    /// A lock file is external input, so a record this crate would never have
+    /// written is refused at the boundary rather than carried into a platform
+    /// call.
+    ///
+    /// The direction matters as much as the refusal. A rejected record leaves the
+    /// kernel lock as the only proof, and here that lock is free — so these are
+    /// reclaimable, which is the answer for a directory nothing can be shown to
+    /// be using. What must never happen is the other reading: a non-positive pid
+    /// treated as an identity, which is `kill`'s whole-process-group address on
+    /// POSIX and widens into an unrelated live pid on Windows.
+    #[test]
+    fn a_lock_recording_no_identity_this_crate_would_write_is_refused() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for (name, record) in [
+            ("negative", "-1 1\n"),
+            ("group", "-4242 1\n"),
+            ("zero", "0 1\n"),
+            // The shape, not just the number: `claim` writes two fields, so a
+            // third is a file somebody else wrote.
+            ("trailing", "4242 99 someone-elses-record\n"),
+            ("second-line", "4242 99\n7 7\n"),
+        ] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(&path).expect("mkdir");
+            std::fs::write(path.join(OWNER_LOCK_FILE), record).expect("write");
+            assert_eq!(
+                recorded_identity(&path.join(OWNER_LOCK_FILE)),
+                None,
+                "{record:?}"
+            );
+            assert_eq!(reclaimable(&path), Ok(()), "{record:?}");
+        }
+
+        // And the boundary is a check, not a blanket refusal: the record `claim`
+        // actually writes still reads back as the identity it names.
+        let path = root.path().join("positive");
+        std::fs::create_dir_all(&path).expect("mkdir");
+        std::fs::write(path.join(OWNER_LOCK_FILE), "4242 99\n").expect("write");
+        assert_eq!(
+            recorded_identity(&path.join(OWNER_LOCK_FILE)),
+            Some(ProcessIdentity {
+                pid: 4242,
+                start_token: 99
+            })
+        );
     }
 
     /// A scratch that cannot be created, or whose lock cannot be opened, is a
@@ -741,7 +1585,7 @@ mod tests {
 
     /// This process's own identity is live by construction; a pid that cannot
     /// exist is not.
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     #[test]
     fn an_identity_answers_for_the_process_it_was_taken_from() {
         assert!(is_live(own_identity()));

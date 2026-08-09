@@ -981,6 +981,7 @@ dependencies = [
  "thiserror 2.0.19",
  "toml_edit",
  "ureq",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1006,9 +1007,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.3.5"
+version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32eabec78dfe721972abd1c8427a88f06e8fd7c37dc4bdfb982a2091c196bc15"
+checksum = "bb23767a1553205000c690f2706ac692e77f0230daf6fe0f0ed7494e63e5f01a"
 dependencies = [
  "clap",
  "oneharness-core",

@@ -60,11 +60,11 @@ one NDJSON stream.
 - **Cross-repo dependencies: every one is a published version, and there is no
   git ref anywhere in the graph.** `cargo deny`'s `unknown-git = "deny"` with no
   `allow-git` beside it is what holds that, so the tree resolves from crates.io
-  alone rather than from whichever host has a checkout. `onejudge >= 0.3.5` is a
-  floor rather than a preference: 0.3.5 is the first release carrying the typed
-  streaming sink and the `RunFailure` telemetry this crate's watchdogs and
-  `fallback-advanced` are built on, and `Cargo.toml` records the whole list at
-  the dependency itself.
+  alone rather than from whichever host has a checkout. The `onejudge` floor is a
+  floor rather than a preference — each bump of it buys a seam this crate's
+  supervision is built on, and dropping below it stops compiling. The number and
+  the reason for it live at the dependency in `Cargo.toml`, which is also where
+  the next one goes; do not copy either here.
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so
@@ -78,8 +78,9 @@ one NDJSON stream.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-`deps-check` and `msrv` sit outside both because one needs a network advisory
-database and the other a second toolchain; CI runs them as their own jobs.
+`deps-check`, `msrv`, and `lint-windows` sit outside both because each needs
+something a clean clone does not have — a network advisory database, a second
+toolchain, a cross compiler; CI covers all three as jobs of their own.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop

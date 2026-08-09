@@ -55,7 +55,7 @@ use crate::invoke::{Invocation, Launch};
 use crate::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
 };
-use crate::scratch::SCRATCH_ENV;
+use crate::scratch::Group;
 
 /// How often this supervisor refreshes a live member's heartbeat.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
@@ -297,12 +297,42 @@ fn spawned(
         .env_remove(crate::invoke::PROCESS_WIDE_HARNESS_ENV)
         .envs(env)
         .envs(member_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
-        .env(SCRATCH_ENV, scratch.display().to_string())
+        // The ownership stamp is deliberately *not* set here: `Group::spawn`
+        // applies it as it spawns, so the one place a command joins a group is
+        // the group itself — which is also the only way the commands this
+        // process does not spawn, the ones onejudge starts for a two-party
+        // member, could be stamped the same way.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let child = match command.spawn() {
+    // The group is opened before the spawn because it is what the spawn goes
+    // *into*: a member is `onejudge`, which starts `oneharness`, which starts the
+    // paid provider, and the child this supervisor holds is only the first of
+    // the three. Everything a cancel or a watchdog has to reach is reached
+    // through the group, not through the child.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
+    // because no input a user can give reaches it. Opening a group is a no-op on
+    // POSIX — the stamp is applied by the `Command` below — so the arm cannot be
+    // taken there at all, and on Windows it is taken only when the kernel
+    // refuses a job object or the scratch this run created moments earlier has
+    // become unwritable underneath it. Both are host failures, not requests, and
+    // the journeys that *can* be driven — grouping, cancel, the killed launcher,
+    // the forged record — are in tests/e2e/liveness.rs. What matters about this
+    // arm is the direction it fails in, and that is decided here rather than
+    // observed: a member that could not be grouped is a member no cancel could
+    // ever reach, so it is refused rather than started.
+    let group = match Group::open(scratch) {
+        Ok(group) => group,
+        Err(err) => {
+            let reason = err.to_string();
+            emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+            return Outcome::Unstartable(reason);
+        }
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    let child = match group.spawn(&mut command) {
         Ok(child) => child,
         Err(err) => {
             let reason = format!("cannot start {program}: {err}");
@@ -313,7 +343,7 @@ fn spawned(
             return Outcome::Unstartable(reason);
         }
     };
-    supervise(child, kind, emitter, bounds, scratch)
+    supervise(child, &group, kind, emitter, bounds, scratch)
 }
 
 /// The death of a member that could not be started at all.
@@ -333,6 +363,7 @@ pub(crate) fn unstartable(reason: &str) -> MemberDied {
 /// Supervise a spawned member: read what it publishes, watch it live, and settle.
 fn supervise(
     mut child: Child,
+    group: &Group,
     kind: Kind,
     emitter: &Emitter,
     bounds: Bounds,
@@ -398,6 +429,7 @@ fn supervise(
         if now.duration_since(last_heartbeat) > bounds.heartbeat {
             return kill_and_report(
                 &mut child,
+                group,
                 emitter,
                 Rule::Heartbeat,
                 &tail,
@@ -414,6 +446,7 @@ fn supervise(
         if Duration::from_millis(quiet) > bounds.stall {
             return kill_and_report(
                 &mut child,
+                group,
                 emitter,
                 Rule::Activity,
                 &tail,
@@ -736,6 +769,7 @@ fn process_died(
 /// Kill a member a watchdog condemned, then report it.
 fn kill_and_report(
     child: &mut Child,
+    group: &Group,
     emitter: &Emitter,
     rule: Rule,
     tail: &Arc<Mutex<String>>,
@@ -750,6 +784,13 @@ fn kill_and_report(
     // `member-died` is for is which of those happened, so it is recorded rather
     // than inferred from a status that spells both the same way.
     let settled_first = child.try_wait().ok().flatten();
+    // The whole tree, and the child only after it. A condemned member is
+    // `onejudge` with `oneharness` and a paid provider still running under it,
+    // and those two are the ones holding the pipes the two readers below are
+    // waiting on — killing the child alone leaves this supervisor blocked on a
+    // stream a process it just condemned is still keeping open, which is the
+    // condemnation never being reported at all.
+    let _ = group.terminate();
     let _ = child.kill();
     let status = child.wait().ok();
     let _ = reader.join();

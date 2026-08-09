@@ -146,9 +146,23 @@ _crate-test:
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run the same suite through this instead of `test`.
+#
+# `--no-fail-fast` because this is the leg whose failures are hardest to
+# reproduce: a round trip to a hosted macOS or Windows runner. Stopping at the
+# first failure cancelled 54 of 224 tests once and reported four, which reads as
+# "four broke" when the honest answer was unknown. The whole picture costs one
+# run's wall clock and saves a round trip per hidden failure.
+#
+# llmlint: ignore-block[changed_behavior_has_e2e] this recipe has no test because
+# it *is* the test run. What `--no-fail-fast` changes is how much of the suite
+# reports when part of it fails, and a journey for it would have to make the
+# suite fail on purpose and then read its own runner's summary — a test whose
+# subject is the harness executing it. The product behaviour under this recipe is
+# covered by every journey the recipe runs.
 # Full test suite without coverage instrumentation.
 test-quick:
-    @cargo nextest run --locked --all-features --status-level fail
+    @cargo nextest run --locked --all-features --status-level fail --no-fail-fast
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`).
@@ -185,6 +199,30 @@ deps-check:
 msrv:
     @RUSTFLAGS="-D warnings" cargo +{{msrv-version}} check --locked --all-targets --quiet \
       || { echo "the {{msrv-version}} floor no longer builds — install that toolchain, or raise rust-version in Cargo.toml (and clippy.toml)" >&2; exit 1; }
+
+# `src/scratch.rs` carries this crate's one large `cfg(windows)` body — the job
+# objects the liveness rules rest on there — and a Linux or macOS `check` never
+# compiles a line of it. Outside `check` for the reason `msrv` is: it needs a
+# target and a cross compiler a clean clone does not have. The gnu target rather
+# than msvc because clippy only has to *check*, and gnu is the one a Linux host
+# can provision.
+#
+# llmlint: ignore-block[changed_behavior_has_e2e] this recipe has no test because
+# it is a shortcut to a check that is already gated elsewhere, not a behaviour of
+# the product. What it runs — clippy over the `cfg(windows)` body — is exactly
+# what the required `cross (windows-latest)` job runs on a real Windows host, so
+# the thing being asserted is asserted there; this only saves the round trip. Its
+# two guards are refusals to run at all when the target or the cross compiler is
+# absent, and a test for them would have to uninstall a toolchain the rest of the
+# suite needs. `msrv` and `deps-check` sit outside the gate on the same terms.
+# Reproduce the `cross (windows-latest)` leg here instead of waiting for CI.
+lint-windows:
+    @rustup target list --installed | grep -qx x86_64-pc-windows-gnu \
+      || { echo "the Windows target is missing — run 'rustup target add x86_64-pc-windows-gnu'" >&2; exit 1; }
+    @command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 \
+      || { echo "no cross compiler for the Windows target — install mingw-w64 (a dependency's build script needs one)" >&2; exit 1; }
+    @cargo clippy --target x86_64-pc-windows-gnu --all-targets --all-features --locked -- -D warnings
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # Ensures `just`, verifies the rest, then runs setup-llmlint. Runs automatically
 # via the Claude Code SessionStart hook; this is the manual entry point.

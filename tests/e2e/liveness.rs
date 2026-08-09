@@ -2,11 +2,12 @@
 //! `test_oneharness_timeout_e2e.py`, and the dispatch-scratch and leak-guard
 //! halves of `test_scratch_e2e.py` / `test_leak_guard_e2e.py`.
 //!
-//! What is being held here is the contract's own sentence: "heartbeat wrapper
-//! (default deadline 60s, `ONEAGENTGRAPH_HEARTBEAT_TIMEOUT`), activity watchdog
-//! (default 600s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via
-//! `owner.lock` flock + pid-with-start-token, descendant reaping, successor
-//! contract for processes meant to outlive their launcher."
+//! What is being held here is `docs/contract.md`'s liveness sentence — the
+//! heartbeat wrapper, the activity watchdog, scratch ownership, descendant
+//! reaping, and the successor contract. It is cited rather than copied: the
+//! bounds and names it fixes are gated against this crate's constants by
+//! `tests/contract.rs`, and a second prose copy here would only be free to drift
+//! from both.
 //!
 //! Every one of these was learned from an incident, so each journey drives the
 //! failure rather than the happy path: a member that stops publishing, one that
@@ -14,27 +15,28 @@
 //! whose parent is already gone.
 
 // llmlint: ignore-file[e2e_not_mocked, live_tier_compiles_and_requires_credential, tests_mirror_real_usage] see tests/e2e/support.rs for the single sanctioned double; three
-// journeys here are `#[cfg(unix)]` because their *subject* is a kernel
-// facility: an `flock` on `owner.lock`, a `/proc` environment stamp no process
-// can shed, and a signal to a proven identity. `src/scratch.rs` documents the
-// degraded contract on a platform without them, and compiling these there would
-// assert behaviour this crate deliberately does not promise. They also read
+// journeys here are platform-gated because their *subject* is a facility only
+// that platform has, not because the rule is weaker elsewhere: a descendant
+// declining `SIGTERM` is POSIX-only, since Windows has no signal to decline, and
+// the forged `owner.job` and the killed launcher are Windows-only, since both
+// rest on the job object that stands in there for the environment stamp.
+// `src/scratch.rs` documents every one of those mappings, including which
+// direction each differs in. Every other journey runs on all three platforms.
+// They also read
 // `oneagentgraph::scratch` directly, because scratch ownership is a liveness rule
 // the contract gives no CLI verb of its own — the sweep a future operator runs is
 // this same library call, so this is the interface, not a reach past one. Where a
 // verb does answer — `cancel --kill` reporting what it signalled — the journey
 // asserts on that instead.
 
-// The scratch-ownership journeys below are Unix-only, and so is everything that
-// exists only to serve them: on a platform without those facilities they compile
-// away, and an import or helper left behind is a `-D warnings` build failure
-// rather than dead weight.
-#[cfg(unix)]
 use std::path::Path;
 
-use crate::support::{as_env, fake_harness, labels, Workspace};
+use crate::support::{as_env, bounds, fake_harness, labels, until, Workspace};
+// The one Unix-only journey's own helper: on a platform without `SIGTERM` it
+// compiles away, and an import left behind is a `-D warnings` build failure
+// rather than dead weight.
 #[cfg(unix)]
-use crate::support::{two_party_graph, until};
+use crate::support::two_party_graph;
 
 /// A member that publishes nothing is condemned by the activity watchdog, and
 /// the death says which rule fired and what the process left behind.
@@ -225,6 +227,83 @@ fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
     assert_eq!(died[0]["payload"]["cause"], serde_json::json!("cancelled"));
 }
 
+/// A member the **activity watchdog** condemns takes its descendants with it.
+///
+/// The `member-died` event above is the supervisor's *decision*; this is the
+/// outcome an operator is actually promised. A member is `onejudge` with
+/// `oneharness` under it and the paid provider under that, and condemning the
+/// one this supervisor holds leaves the other two running — still billing
+/// whoever owns the subscription, with nothing left watching them.
+///
+/// **What this journey and its heartbeat twin can and cannot isolate.** They
+/// *cover* the guarantee on every platform, and that is what they are for; they
+/// cannot be made to fail by compiling the Windows platform layer out, and no
+/// reader should spend an afternoon trying. The reason is structural rather
+/// than a weakness in the journeys: a condemnation kills the member this
+/// supervisor holds, and the chain below it — `onejudge`, then `oneharness`,
+/// then the provider — tears itself down from that alone, so the tree dies
+/// whether or not a job object also reached it. The guarantee the *group* adds
+/// on top is only observable where that containment cannot apply, which is a
+/// descendant with nothing above it left to end it. That case has its own
+/// journey — [`a_group_reaps_a_descendant_whose_parent_has_already_exited`] —
+/// and *that* one does fail with the layer removed. So: these two for coverage,
+/// that one for isolation. Do not contort these into failing, and do not delete
+/// them for failing to.
+#[test]
+fn a_member_the_activity_watchdog_condemns_leaves_no_descendant_running() {
+    // The stall bound is wider than the 2s the journey above uses, and the
+    // difference is the point: that one asserts on the *event*, which needs only
+    // the member, while this one asserts on the *tree*, which has to have
+    // launched by the time the rule fires.
+    a_condemned_member_leaves_no_descendant_running(
+        Some(&single_sided_graph()),
+        "activity",
+        "60",
+        "5",
+    );
+}
+
+/// The same guarantee for the **heartbeat** rule, which condemns on its own
+/// terms and through its own branch of the supervisor.
+///
+/// Two rules, two `kill_and_report` call sites: a teardown wired into one and
+/// not the other is a real regression, and one journey cannot see it.
+///
+/// It covers rather than isolates, for the reason spelled out on the journey
+/// above.
+#[test]
+fn a_member_the_heartbeat_rule_condemns_leaves_no_descendant_running() {
+    a_condemned_member_leaves_no_descendant_running(
+        Some(&single_sided_graph()),
+        "heartbeat",
+        "0.05",
+        "600",
+    );
+}
+
+/// The shallowest real member this crate builds: one agent, no judge, so the
+/// doubled provider is the member's own child rather than its grandchild.
+///
+/// Both condemnation journeys use it, and that is forced rather than chosen. A
+/// condemnation races process startup: the rule fires on a clock that starts
+/// with the member, and the tree has to be up by then. The heartbeat rule leaves
+/// half a second — it is only reachable below the supervisor's refresh cadence —
+/// and the two-party chain, three real CLIs deep, did not reach its provider
+/// inside fifteen *seconds* under this suite's own load on a CI runner. The
+/// two-party tree is condemned by the journeys above and torn down by the cancel
+/// journeys below; what these two need is a tree that is reliably *there*.
+fn single_sided_graph() -> String {
+    format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  worker:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        fake = fake_harness(),
+    )
+}
+
 /// A bound nobody meant refuses the run rather than supervising under it — and
 /// the refusal names the variable, so an operator knows which one to fix.
 #[test]
@@ -263,7 +342,6 @@ fn an_unusable_liveness_bound_refuses_the_run_by_name() {
 /// A run holds an exclusive `owner.lock` on its scratch for as long as it is
 /// live, which is the proof a sweeper asks for — and the pid-with-start-token
 /// beside it is what stops a recycled number from pinning it forever.
-#[cfg(unix)]
 #[test]
 fn a_live_run_holds_its_scratch_against_a_sweep() {
     let workspace = Workspace::new();
@@ -333,13 +411,77 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
     );
 }
 
+/// A two-party member puts **every process its engine spawns** into the group its
+/// own scratch names — both sides of the conversation, in the same group.
+///
+/// This is what the three cancel journeys below rest on, and it stopped being
+/// free when a two-party member stopped being a child process. While a member
+/// *was* `onejudge run`, this crate spawned one process into a group and
+/// everything below joined by inheritance. In-process, the `oneharness run` for
+/// each side is spawned by the supervisor itself — so unless it hands onejudge
+/// the group, a worker and a judge sit in whatever group the supervisor is in,
+/// and `cancel --kill` has no tree to name. On Windows that is not a degradation
+/// but an absence: membership there *is* the job object, so an ungrouped member
+/// is one nothing can reap.
+///
+/// Asserted on the report rather than on a process table because that is where
+/// the answer is honest on every platform: onejudge records the group a hook
+/// named, and names none when no hook ran. So a member whose engine was handed no
+/// group fails here on Linux and macOS too, rather than only on the platform the
+/// consequence bites.
+#[test]
+fn a_two_party_member_groups_both_sides_of_its_conversation() {
+    let workspace = Workspace::new();
+    let run = workspace.run_task("fake:complete-now: group both sides");
+    run.expect_code(0);
+
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    let path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("the stored report"))
+            .expect("the stored report is JSON");
+    let processes = report["processes"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !processes.is_empty(),
+        "the engine reported spawning nothing: {report}"
+    );
+
+    // The group is the member's own scratch, which is exactly the string
+    // `cancel --kill` and the end-of-run reap are given.
+    let scratch = member_scratch(&workspace.state()).expect("a member scratch");
+    let group = scratch.display().to_string();
+    for process in &processes {
+        assert_eq!(
+            process["group"].as_str(),
+            Some(group.as_str()),
+            "a spawned process outside the member's group: {process}"
+        );
+    }
+
+    // Both sides, not just the one under evaluation: onejudge installs the hook
+    // on both backends of a `split`, and a worker reaped without its judge is
+    // half a leaked tree.
+    let roles: std::collections::BTreeSet<&str> = processes
+        .iter()
+        .filter_map(|process| process["role"].as_str())
+        .collect();
+    assert_eq!(
+        roles,
+        ["agent", "judge"].into_iter().collect(),
+        "only one side of the conversation was grouped: {processes:?}"
+    );
+}
+
 /// `cancel RUN --kill`, with no member named, reaps every process stamped for
 /// the run — including one stamped for a member below it.
 ///
 /// The whole-run reap is rooted at the run directory rather than a member's, so
 /// it is a different walk from the named-member one below, and the failure it
 /// guards against is a live member surviving the cancel of its own run.
-#[cfg(unix)]
 #[test]
 fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
     let workspace = Workspace::new();
@@ -411,7 +553,6 @@ fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
 /// A member's descendants carry the run's scratch stamp, and `cancel --kill`
 /// reaps exactly those — the evidence the kernel fixes at `exec`, which reaches
 /// a descendant whose parent has already exited.
-#[cfg(unix)]
 #[test]
 fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
     let workspace = Workspace::new();
@@ -472,6 +613,65 @@ fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
     assert!(
         output.status.code().is_some(),
         "the cancelled run never exited"
+    );
+}
+
+/// A cancelled run reaps a member that published **nothing at all**, and the
+/// run itself then returns.
+///
+/// The other cancel journeys reach a member mid-turn, which is a member whose
+/// tree has already announced itself up the pipe. This one never writes a byte:
+/// its provider parks on its first turn and stays there, so the only thing that
+/// can end the tree is the reap, and the only thing that can end the *run* is
+/// the tree's pipes closing when it does. That is one failure on POSIX and two
+/// on Windows, where a descendant inherits its launcher's pipe handles outright
+/// — a cancel that reached the member alone would leave this supervisor blocked
+/// forever on a stream a process it just cancelled is still holding open.
+#[test]
+fn a_cancelled_run_reaps_a_member_that_published_nothing() {
+    let workspace = Workspace::new();
+    let state = workspace.state();
+
+    let mut member = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:hang and publish nothing at all",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    until("the member's own scratch to be stamped", || {
+        member_scratch(&state).is_some_and(|scratch| {
+            !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+        })
+    });
+    let scratch = member_scratch(&state).expect("a member scratch");
+
+    let run_id = run_id(&state);
+    let cancelled = workspace.run(&["cancel", &run_id, "--kill"]);
+    cancelled.expect_code(0);
+    // The count, not just the word: `0 process(es) signalled` carries it too,
+    // and a cancel that found nothing to reap is exactly the failure here.
+    assert!(
+        cancelled.stdout.contains("signalled") && !cancelled.stdout.contains("0 process(es)"),
+        "a cancel of a silent member signalled nothing: {}",
+        cancelled.stdout
+    );
+
+    until("the stamped processes to be gone", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+
+    // Nothing releases this member, so a run that returns is one whose reap
+    // reached every process holding its streams open.
+    let status = member.wait().expect("the run exits");
+    assert!(
+        status.code().is_some(),
+        "the cancelled run never exited: its member's tree still holds its streams"
     );
 }
 
@@ -541,9 +741,84 @@ fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
     assert!(status.code().is_some(), "the cancelled run never exited");
 }
 
+/// A group reaps a descendant **whose parent has already exited** — the process
+/// no walk from the member's own pid would ever reach.
+///
+/// This is the case the whole grouping rule exists for, and the one the two
+/// condemnation journeys above turn out not to reach. Measured, not assumed:
+/// with the Windows layer compiled out, both of those still passed, because the
+/// chain a member is contains its own tree — kill `onejudge` and it ends
+/// `oneharness`, which ends the provider, and a detached grandchild goes with
+/// them. So the guarantee the *group* adds is only visible where that
+/// containment cannot apply: an orphan, with nothing above it left to end it.
+///
+/// Which makes this the one journey that **fails without the platform layer**
+/// and passes with it — the isolating test for the job object, where the two
+/// above are covering ones. Keep it that way: if a change here makes it pass
+/// with the layer removed, it has stopped testing the layer.
+///
+/// Driven at [`Group`] rather than through a verb because no graph can produce
+/// one on demand — the real CLIs decline to leak. The double is still a real
+/// subprocess, the orphan is a real detached process, and the group is the same
+/// one `run` puts every member in.
+#[test]
+fn a_group_reaps_a_descendant_whose_parent_has_already_exited() {
+    use oneagentgraph::scratch::{Group, SCRATCH_ENV};
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let scratch = root.path().join("oneagentgraph-orphaning");
+    std::fs::create_dir_all(&scratch).expect("the scratch");
+    let ticks = root.path().join("descendant.ticks");
+
+    let group = Group::open(&scratch).expect("a group");
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args([
+            "-p",
+            &format!("fake:hang fake:spawn-ticker={}", ticks.display()),
+        ])
+        // The stamp the POSIX half of a group *is*, applied here the way
+        // `member::run` applies it. On Windows the job the spawn goes into
+        // carries the same membership, and neither platform needs the other's.
+        .env(SCRATCH_ENV, &scratch)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = group.spawn(&mut parked).expect("the parked process starts");
+
+    until("the detached ticker to start", || {
+        tick_bytes_written(&ticks) > 0
+    });
+
+    // Orphaned on purpose: the process that started the ticker goes first, so
+    // nothing above the ticker is left to end it.
+    child.kill().expect("the parked process is killed");
+    child.wait().expect("the parked process is reaped");
+    let orphaned = tick_bytes_written(&ticks);
+    std::thread::sleep(SETTLE);
+    assert!(
+        tick_bytes_written(&ticks) > orphaned,
+        "the ticker stopped when its parent did, so this journey never reached the orphan it \
+         asserts on"
+    );
+
+    // The group is the only thing that can still reach it.
+    let reaped = group.terminate();
+    assert!(
+        reaped > 0,
+        "the group reported reaping nothing, so an orphaned descendant is beyond it"
+    );
+    let ended = tick_bytes_written(&ticks);
+    std::thread::sleep(SETTLE);
+    assert_eq!(
+        tick_bytes_written(&ticks),
+        ended,
+        "the group reported reaping {reaped} process(es), but the orphan is still running"
+    );
+}
+
 /// A finished run leaves nothing of its own running: the reap on the way out is
 /// what stops one run's leavings from polluting the next.
-#[cfg(unix)]
 #[test]
 fn a_finished_run_leaves_nothing_stamped_for_it() {
     let workspace = Workspace::new();
@@ -554,6 +829,138 @@ fn a_finished_run_leaves_nothing_stamped_for_it() {
     assert!(
         oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty(),
         "a finished run left processes carrying its stamp"
+    );
+}
+
+/// A run killed outright still takes its member's tree with it.
+///
+/// Every other teardown here runs *through* this binary: a watchdog condemns a
+/// member, or a `cancel` reaps one. This is the case where none of that can
+/// happen — the supervisor is gone before it can do anything — and it is the one
+/// that costs money, because a paid harness nobody is watching keeps billing.
+///
+/// Windows-only, and a strengthening rather than a rule POSIX also holds: a job
+/// object is created `KILL_ON_JOB_CLOSE`, so the kernel ends the tree when the
+/// last handle to it goes, and a killed process's handles go with it. There is
+/// no POSIX equivalent — a `SIGKILL`ed launcher cannot reap, and its descendants
+/// are reparented and left running — so asserting this on Unix would assert a
+/// guarantee `src/scratch.rs` does not claim there.
+#[cfg(windows)]
+#[test]
+fn a_run_killed_outright_does_not_leak_its_member_s_tree() {
+    let workspace = Workspace::new();
+    let state = workspace.state();
+
+    // Nothing releases this member and no bound is shortened, so the only thing
+    // that can end its tree is the run process going away.
+    let mut run = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:hang until this run is killed under it",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    until("the member's own scratch to be stamped", || {
+        member_scratch(&state).is_some_and(|scratch| {
+            !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+        })
+    });
+    let scratch = member_scratch(&state).expect("a member scratch");
+
+    // Killed, not cancelled: no signal file, no reap, no chance to clean up.
+    run.kill().expect("the run is killed");
+    run.wait().expect("the killed run is reaped");
+
+    until("the member's tree to die with its supervisor", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+}
+
+/// A forged `owner.job` cannot aim a reap at somebody else's process tree, and
+/// the real group beside it still tears down.
+///
+/// On Windows a scratch directory records the job object its tree belongs to, so
+/// that a second process — an operator's `cancel --kill` — can find it. That
+/// record is a file, which makes it external input: read as the name to open,
+/// its content would choose what `TerminateJobObject` is aimed at, and a record
+/// written by anything else would point a cancel at any job object this user can
+/// open. So the name is derived from the directory and the record is only
+/// honoured when it agrees.
+///
+/// Both halves are asserted, because either alone passes for the wrong reason: a
+/// reap that refused everything would satisfy the first, and one that trusted
+/// the file would satisfy the second.
+#[cfg(windows)]
+#[test]
+fn a_forged_group_record_cannot_redirect_a_reap() {
+    use oneagentgraph::scratch::Group;
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let legitimate = root.path().join("oneagentgraph-legitimate");
+    let forged = root.path().join("oneagentgraph-forged");
+    std::fs::create_dir_all(&legitimate).expect("the real scratch");
+    std::fs::create_dir_all(&forged).expect("the forged scratch");
+
+    // A real group with a real process parked in it: the doubled harness, driven
+    // straight rather than through a run, because the subject here is the group
+    // rather than anything a graph does with one.
+    let group = Group::open(&legitimate).expect("a group");
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args(["-p", "fake:hang so the group has something to hold"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = group.spawn(&mut parked).expect("the parked process starts");
+
+    let stamp = legitimate.display().to_string();
+    until("the parked process to join its group", || {
+        !oneagentgraph::scratch::stamped_for(&stamp).is_empty()
+    });
+
+    // The forgery: the real group's name, in a directory that has no claim to
+    // it. This is the record `cancel --kill` would read on its way to a reap.
+    let stolen =
+        std::fs::read_to_string(legitimate.join("owner.job")).expect("the group recorded itself");
+    std::fs::write(forged.join("owner.job"), &stolen).expect("plant the forged record");
+
+    assert_eq!(
+        oneagentgraph::scratch::reap(&forged),
+        0,
+        "a forged record was honoured, so a reap reached a tree it does not own"
+    );
+    assert!(
+        !oneagentgraph::scratch::stamped_for(&stamp).is_empty(),
+        "a reap of {} killed the tree {} owns",
+        forged.display(),
+        legitimate.display()
+    );
+    assert!(
+        child
+            .try_wait()
+            .expect("the parked process is waitable")
+            .is_none(),
+        "the parked process was terminated through a directory that never launched it"
+    );
+
+    // And the directory that does own the group still tears it down, so what the
+    // check refuses is the forgery rather than the mechanism.
+    assert!(
+        oneagentgraph::scratch::reap(&legitimate) > 0,
+        "the real record was refused along with the forged one"
+    );
+    until("the real group's processes to be gone", || {
+        oneagentgraph::scratch::stamped_for(&stamp).is_empty()
+    });
+    let status = child.wait().expect("the parked process is reaped");
+    assert!(
+        !status.success(),
+        "a terminated process reported a clean exit: {status:?}"
     );
 }
 
@@ -570,8 +977,121 @@ fn the_documented_defaults_are_what_a_run_supervises_under() {
     assert!(!fake_harness().is_empty());
 }
 
+/// How long a reaped descendant is watched for a tick it should no longer be
+/// writing.
+///
+/// Thirty times the double's own 50ms cadence, so a descendant that survived has
+/// had every chance to say so — the assertion below is an *absence*, and a
+/// window near the cadence would read a slow host as a successful teardown.
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// How long may be spent *reaching* a live descendant before the journey gives
+/// up and says it never saw one.
+///
+/// A budget rather than a count, because the two rules below cost very different
+/// amounts per attempt — a stall bound is waited out and a heartbeat one fires
+/// in half a second — and what should be shared is the patience, not the number.
+const REACH_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Condemn a member by `rule` and hold that its descendant stopped running.
+///
+/// The witness is a **detached** descendant, and both halves of that are load
+/// bearing.
+///
+/// *Detached*, because the chain tears itself down without any help: kill
+/// `onejudge` and it ends `oneharness`, which ends the double. A journey watching
+/// those goes green whether or not this supervisor did anything, which is a test
+/// that proves nothing — measured, not assumed: the first version of this one
+/// watched the double and passed with the whole Windows layer compiled out. What
+/// no cascade reaches is a process whose parent has already exited, so the double
+/// leaves one behind, and that is also the real hazard — a harness that forks a
+/// background worker and dies.
+///
+/// *A descendant*, because the alternatives cannot answer. A pid is not reachable
+/// from outside the run, and this crate's own `stamped_for` is the facility under
+/// test — on the platform this is newest on it answered "nothing is running"
+/// whether or not anything was, so an assertion resting on it goes green against
+/// exactly the leak it is written to catch. So the descendant answers for itself:
+/// it appends to a file while it lives, and a file that stops growing once the
+/// run returns is a tree that is gone.
+///
+/// The retry is how the *precondition* is reached, not tolerance for a flaky
+/// assertion. A condemnation is a race against process startup by construction:
+/// the rule fires on a clock that starts when the member does, and the tree this
+/// watches has to exist by then. An attempt where it did not is an attempt that
+/// never reached the state under test, so it is retried rather than passed —
+/// quietly passing on one is exactly the vacuous green this journey exists to
+/// avoid, and running out of budget says so instead of going green.
+fn a_condemned_member_leaves_no_descendant_running(
+    graph: Option<&str>,
+    rule: &str,
+    heartbeat: &str,
+    stall: &str,
+) {
+    let give_up_at = std::time::Instant::now() + REACH_BUDGET;
+    for attempt in 1.. {
+        let workspace = Workspace::new();
+        if let Some(document) = graph {
+            workspace.graph(document);
+        }
+        let ticks = workspace.at("descendant.ticks");
+        let env = bounds(heartbeat, stall);
+        let run = workspace.run_with(
+            &[
+                "run",
+                "./graph.yaml",
+                "--task",
+                &format!("fake:hang fake:spawn-ticker={}", ticks.display()),
+                "--dir",
+                &workspace.dir().display().to_string(),
+            ],
+            &as_env(&env),
+        );
+        run.expect_code(1);
+
+        let died = run.of_kind("member-died");
+        assert_eq!(died.len(), 1, "{:?}", run.kinds());
+        assert_eq!(
+            died[0]["payload"]["rule"],
+            serde_json::json!(rule),
+            "a {rule} bound condemned by another rule: {}",
+            died[0]["payload"]
+        );
+
+        // Nothing to hold against the teardown: the descendant never launched
+        // inside the window this rule condemns in, so this run is not evidence.
+        let ticked = tick_bytes_written(&ticks);
+        if ticked == 0 {
+            assert!(
+                std::time::Instant::now() < give_up_at,
+                "no descendant was live when the {rule} rule fired, across {attempt} runs — this \
+                 journey asserts on a tree that was running, and never saw one"
+            );
+            continue;
+        }
+
+        std::thread::sleep(SETTLE);
+        assert_eq!(
+            tick_bytes_written(&ticks),
+            ticked,
+            "attempt {attempt}: the {rule} rule condemned the member and reported it, but its \
+             descendant is still running — the provider under a condemned member keeps billing \
+             with nothing left watching it\n--- stdout ---\n{}",
+            run.stdout
+        );
+        return;
+    }
+}
+
+/// How many bytes of ticks the descendant has written so far, or zero when it
+/// never wrote. A byte count rather than a tick count on purpose: every caller
+/// asks only whether the file *grew*, and growth is what proves the descendant is
+/// still running without this having to know a tick's size.
+fn tick_bytes_written(path: &Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
 /// The first `owner.lock` under a state directory, once a run has claimed one.
-#[cfg(unix)]
 fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
     let lock = std::fs::read_dir(state)
         .ok()?
@@ -582,7 +1102,6 @@ fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// The `worker` member's own scratch under a state directory.
-#[cfg(unix)]
 fn member_scratch(state: &Path) -> Option<std::path::PathBuf> {
     std::fs::read_dir(state)
         .ok()?
@@ -592,7 +1111,6 @@ fn member_scratch(state: &Path) -> Option<std::path::PathBuf> {
 }
 
 /// The one run a state directory holds.
-#[cfg(unix)]
 fn run_id(state: &Path) -> String {
     std::fs::read_dir(state)
         .expect("state")

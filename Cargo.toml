@@ -95,7 +95,16 @@ test-doubles = []
 #      off a run that produced **no** report, and is the only route to
 #      `fallback-advanced` for a failed two-party member — precisely when an
 #      operator needs to know which subscription refused.
-onejudge = { version = "0.3.5", features = ["cli"] }
+#
+# 0.3.7 raises that floor for a fourth, and the reason is the same shape: driving
+# onejudge in-process silently took away the OS grouping a subprocess hop gave
+# for free, because the harnesses are now spawned by *this* process. 0.3.7 is the
+# first release where `Plan::with_spawn_hook` reaches that seam from the plan this
+# crate actually drives — 0.3.6 exposed it only on a provider built by hand — so
+# it is what lets `crate::judge` put both sides of a two-party member into the
+# group `cancel --kill` terminates. Below 0.3.7 that call does not exist, and a
+# Windows two-party member has no job object for a cancel to find.
+onejudge = { version = "0.3.7", features = ["cli"] }
 # oneharness's own typed report/stream contract. Everything this crate reads back
 # from an `oneharness run` — the fallback chain, the per-candidate accounting,
 # the normalized failure kind — is parsed into oneharness's declarations rather
@@ -144,6 +153,22 @@ toml_edit = "0.23"
 # are kernel facilities with no safe-Rust equivalent in std.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The same four facilities on Windows, which has none of the POSIX ones: the
+# ownership lock is `LockFileEx`, the start token is `GetProcessTimes`, and both
+# the grouping and the teardown of a member's process tree are a job object —
+# the only thing on this platform that holds a descendant whose parent has
+# already exited. `src/scratch.rs` documents the mapping and what differs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_IO",
+  "Win32_System_JobObjects",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 assert_cmd = "2"
