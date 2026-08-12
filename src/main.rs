@@ -11,11 +11,15 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use oneagentgraph::cli::{
-    CancelArgs, Cli, Command, HistoryArgs, HistoryCommand, MemberArgs, OutputFormat, PersonaArgs,
-    PersonaCommand, RunArgs, SmokeArgs, SweepArgs, ValidateArgs,
+    CancelArgs, Cli, Command, HistoryArgs, HistoryCommand, InterruptArgs, MemberArgs, OutputFormat,
+    PersonaArgs, PersonaCommand, RunArgs, SmokeArgs, SweepArgs, ValidateArgs,
 };
 use oneagentgraph::config::GraphConfig;
-use oneagentgraph::error::{Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_SUCCESS};
+use oneagentgraph::control::{Delivery, Turn};
+use oneagentgraph::error::{
+    Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
+};
+use oneagentgraph::event::{Emitter, EventKind, Labels, TurnInterrupted};
 use oneagentgraph::persona::{Persona, PERSONA_TEMPLATE};
 use oneagentgraph::render::Text;
 use oneagentgraph::resolve::Resolver;
@@ -72,6 +76,7 @@ fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Err
         Command::Trigger(args) => signal(&args, env, Signal::Trigger),
         Command::ResetTimer(args) => signal(&args, env, Signal::Reset),
         Command::Cancel(args) => cancel(&args, env),
+        Command::Interrupt(args) => interrupt(&args, env),
         Command::History(args) => show_history(&args, env),
         Command::Health => {
             let report = health::read(&oneharness_bin(env))?;
@@ -409,6 +414,139 @@ fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Erro
         }
     );
     Ok(EXIT_SUCCESS)
+}
+
+/// `oneagentgraph interrupt`: redirect a member's in-flight turn.
+///
+/// `cancel`'s sibling, addressed the same way and through the same plumbing — the
+/// run record says which members exist, and the member's own scratch is where the
+/// run wrote down where its turn is addressed. What differs is the intent: `cancel`
+/// ends a turn and the worker's accumulated context goes with it, and this
+/// redirects one that keeps running.
+///
+/// Every outcome publishes one `turn-interrupted`, including the ones that did not
+/// land: a verb that stayed quiet unless it worked would leave "the lever was
+/// pulled and nothing happened" visible only in an exit code.
+fn interrupt(args: &InterruptArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let member = member_name(&args.member)?;
+    let input = redirection(args)?;
+    let state = state_dir(env);
+    let record = history::show(&state, &args.run)?;
+    belongs_to_run(&record, &args.run, &args.member)?;
+    // Derived from the run's *id*, exactly as `cancel` derives the directory it
+    // reaps: `events_path` is a string this crate wrote into a file it reads
+    // back, and following it would let a record point this verb at any directory
+    // the process can reach.
+    let scratch = state.join(&record.run_id).join("members").join(member);
+
+    let bytes = input.as_ref().map_or(0, |text| text.len() as u64);
+    let delivery = match oneagentgraph::control::read(&scratch) {
+        // An ask that was refused is the permanent fact and beats every other
+        // answer: a member on a harness with no lever has none whether it is
+        // running, between turns, or long settled.
+        Ok(Turn::Unavailable { reason }) => Delivery::NoTurn(reason),
+        Ok(Turn::Open { address }) => {
+            if settled(&record, member) {
+                Delivery::NoTurn(
+                    "the member has already settled, so its turn is over".to_string(),
+                )
+            } else {
+                oneagentgraph::control::deliver(&oneharness_bin(env), &address, input.as_deref())
+            }
+        }
+        Err(reason) => Delivery::NoTurn(reason),
+    };
+
+    // A redirection oneharness would not take is an argument this caller got
+    // wrong, and nothing was ever delivered — so it refuses like every other bad
+    // argument, before any event claims a lever was pulled.
+    if let Delivery::Invalid(reason) = &delivery {
+        return Err(Error::InvalidConfig(format!("--input: {reason}")));
+    }
+    let (code, reason) = match &delivery {
+        Delivery::Delivered => (EXIT_SUCCESS, None),
+        Delivery::NoTurn(reason) => (EXIT_NO_CONTROLLABLE_TURN, Some(reason.clone())),
+        Delivery::Failed(reason) => (EXIT_MEMBER_FAILED, Some(reason.clone())),
+        Delivery::Invalid(_) => unreachable!("an invalid redirection refused above"),
+    };
+    publish(&record.run_id, member, bytes, reason.clone());
+    // Exit 3 is a fact rather than an error, so it says so on stdout with the
+    // event; only a delivery that was attempted and failed is a diagnostic.
+    if code == EXIT_MEMBER_FAILED {
+        eprintln!(
+            "oneagentgraph: {}: could not interrupt member {member}: {}",
+            args.run,
+            reason.unwrap_or_default()
+        );
+    }
+    Ok(code)
+}
+
+/// The redirection this invocation carries, from whichever flag names it.
+fn redirection(args: &InterruptArgs) -> Result<Option<String>, Error> {
+    let text = match (&args.input, &args.input_file) {
+        (Some(_), Some(_)) => {
+            return Err(Error::InvalidConfig(
+                "--input and --input-file both name the redirection; give at most one".into(),
+            ))
+        }
+        (Some(text), None) => text.clone(),
+        (None, Some(path)) => std::fs::read_to_string(path).map_err(|err| {
+            Error::InvalidConfig(format!("cannot read --input-file {}: {err}", path.display()))
+        })?,
+        (None, None) => return Ok(None),
+    };
+    // Refused here rather than passed on: a blank redirection stops the turn and
+    // says nothing, which is `cancel` spelled the long way round and not what the
+    // caller asked for.
+    if text.trim().is_empty() {
+        return Err(Error::InvalidConfig(
+            "--input is blank, so it would redirect the turn at nothing; send no --input to only \
+             stop it"
+                .into(),
+        ));
+    }
+    Ok(Some(text))
+}
+
+/// Whether this run already recorded an outcome for `member`.
+///
+/// The record is the run's own evidence, so a member it has settled needs no
+/// socket asked: `members` fills in as members settle, and a finished run has an
+/// exit code of its own.
+fn settled(record: &run::Record, member: &str) -> bool {
+    record.exit_code.is_some() || record.members.contains_key(member)
+}
+
+/// Publish this interrupt as the contract's event, on this process's own stream.
+///
+/// Its own stream id and its own `seq`, because the envelope's `stream` is "a
+/// unique id per producing process" and this *is* one — the run holds its events
+/// file open and writes at its own offset, so a second writer appending there
+/// would overwrite the line the run wrote next.
+fn publish(run_id: &run::RunId, member: &str, input_bytes: u64, reason: Option<String>) {
+    let emitter = Emitter::new(
+        format!("{run_id}-interrupt-{}", std::process::id()),
+        Box::new(std::io::stdout()),
+    )
+    .with_labels(Labels {
+        run_id: Some(run_id.to_string()),
+        member: Some(member.to_string()),
+        ..Labels::default()
+    });
+    let payload = TurnInterrupted {
+        member: member.to_string(),
+        delivered: reason.is_none(),
+        input_bytes,
+        reason,
+    };
+    emitter.emit(
+        EventKind::TurnInterrupted,
+        match serde_json::to_value(&payload) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        },
+    );
 }
 
 /// One `MEMBER` argument, checked against the shape a graph's own member names

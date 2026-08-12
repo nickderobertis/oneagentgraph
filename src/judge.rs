@@ -130,6 +130,23 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         }
     };
 
+    // Before the plan is driven, because the turn an operator wants to redirect
+    // is the one in flight and onejudge reports `control` only on the *finished*
+    // run. Every value here is this crate's own — see [`crate::control`] — and
+    // the report replaces it with oneharness's authoritative answer at
+    // [`finish`], which is also where an ask that was refused becomes the reason
+    // `interrupt` reports.
+    crate::control::write(
+        scratch,
+        &crate::control::Turn::Open {
+            address: crate::control::Address {
+                session: agent_session(&launch.session),
+                session_dir: None,
+                cwd: launch.worktree.display().to_string(),
+            },
+        },
+    );
+
     let activity = Arc::new(AtomicU64::new(0));
     let abort = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
@@ -312,6 +329,7 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             // chain records every candidate it stepped past whether or not a
             // later one ran.
             advance(emitter, summary.report.telemetry.as_ref());
+            record_control(&summary.report, scratch);
             let completed = onejudge::cli::exit_code(&summary) == 0;
             let document = serde_json::to_value(&summary.report).unwrap_or(Value::Null);
             settle_report(emitter, &document, completed, scratch)
@@ -330,6 +348,48 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             )
         }
     }
+}
+
+/// The handle the **agent** side's turns are threaded under.
+///
+/// A member names one session and onejudge's engine gives each party its own
+/// under it — `<base>-skill` for the side that does the work and `<base>-user`
+/// for the one that supervises it, "always", per `onejudge::cli::Settings`. Only
+/// the agent side opens a controllable turn, so only its handle addresses one.
+///
+/// This is the single place that derivation is written down here, and it is a
+/// *provisional* answer with a gate under it: the report replaces the whole
+/// address at [`record_control`] with the handle oneharness actually bound, and
+/// `tests/e2e/interrupt.rs` asserts the two name the same session — so a rename
+/// upstream fails a journey rather than silently addressing nothing.
+fn agent_session(member_session: &str) -> String {
+    format!("{member_session}-skill")
+}
+
+/// Replace this member's provisional control record with what its report says.
+///
+/// This is the first moment the process learns whether the ask was honored at
+/// all: onejudge reports `control` only on the finished run, so a member that
+/// spent its whole life on a harness with no lever looked addressable until now.
+/// The address is taken *from the report* rather than kept, because that is the
+/// one that names oneharness's own store directory — and a `control: null` is the
+/// contract's exit-3 case, carrying the reason `control_unavailable` gave.
+fn record_control(report: &onejudge::Report, scratch: &Path) {
+    let turn = match &report.control {
+        Some(address) => crate::control::Turn::Open {
+            address: crate::control::Address {
+                session: address.session.clone(),
+                session_dir: Some(address.session_dir.clone()),
+                cwd: address.cwd.clone(),
+            },
+        },
+        None => crate::control::Turn::Unavailable {
+            reason: report.control_unavailable.clone().unwrap_or_else(|| {
+                "this member's report named no controllable turn".to_string()
+            }),
+        },
+    };
+    crate::control::write(scratch, &turn);
 }
 
 /// The classified cause of a failed run.
@@ -501,6 +561,7 @@ mod tests {
             config,
             task: "do the thing".to_string(),
             worktree: dir.path().to_path_buf(),
+            session: "run-1-worker".to_string(),
         };
         (dir, launch)
     }

@@ -13,6 +13,7 @@
 //! after the thing that once broke.
 
 mod dispatch;
+mod interrupt;
 mod liveness;
 mod origin;
 mod remote;

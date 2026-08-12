@@ -175,6 +175,15 @@ impl Workspace {
             .current_dir(self.path())
             .env("ONEAGENTGRAPH_STATE_DIR", self.state())
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", oneharness_bin())
+            // oneharness's own per-user state — its session store, and the
+            // `control/<session>.sock` an `interrupt` addresses inside it. Put in
+            // the workspace so a journey drives its own store rather than the
+            // host's, and so the run and the `interrupt` that reaches it resolve
+            // the same one: `run --session-dir` has no config or environment
+            // layer, so this variable is what moves both. The name is short on
+            // purpose — a unix socket path has a hard length bound, and the
+            // session handle at the end of it carries a run id.
+            .env("XDG_STATE_HOME", self.at("xs"))
             // A journey must never inherit an enclosing dispatch's selection:
             // this suite runs inside one, and a leaked value would put the run
             // on an identity — and a bill — nobody in this test chose.
@@ -296,17 +305,26 @@ pub fn fake_provider() -> String {
 /// onejudge engine, so there is nothing on `PATH` for that half of the chain to
 /// be shadowed by — the version it runs is the one `Cargo.lock` pins.
 ///
-/// Probed for nothing beyond running, because that is all these journeys have
-/// established they need: they reach oneharness through its own long-standing
-/// `ONEHARNESS_BIN_<ID>` override. `just`'s `oneharness-version` pin governs
-/// what provisioning *installs*; asserting it here too would be a second copy
-/// of that number, free to drift from the one that matters.
+/// Probed for the `interrupt` verb rather than for merely running, because that
+/// is the newest contract these journeys depend on: the turn-control pair
+/// (`run --control` / `interrupt`) is what `interrupt.rs` drives, and a CLI
+/// without it answers `--version` perfectly well before failing one layer down
+/// as a bare `expected exit 0`. Everything else they need, they reach through
+/// oneharness's own long-standing `ONEHARNESS_BIN_<ID>` override. `just`'s
+/// `oneharness-version` pin governs what provisioning *installs*; asserting it
+/// here too would be a second copy of that number, free to drift from the one
+/// that matters.
 pub fn oneharness_bin() -> String {
     required(
         "ONEAGENTGRAPH_TEST_ONEHARNESS",
         "oneharness",
-        "a working binary",
-        |program| Command::new(program).arg("--version").output().is_ok(),
+        "the `interrupt` verb these journeys drive",
+        |program| {
+            Command::new(program)
+                .args(["interrupt", "--help"])
+                .output()
+                .is_ok_and(|output| output.status.success())
+        },
     )
 }
 

@@ -104,14 +104,21 @@ test-doubles = []
 # it is what lets `crate::judge` put both sides of a two-party member into the
 # group `cancel --kill` terminates. Below 0.3.7 that call does not exist, and a
 # Windows two-party member has no job object for a cancel to find.
-onejudge = { version = "0.3.7", features = ["cli"] }
+#
+# 0.3.8 raises it a fifth time, for `interrupt`: it is the first release that can
+# *ask* for a controllable agent turn (`provider.control`) and the first whose
+# report carries `control: {session, session_dir, cwd}` — the address an
+# `oneharness interrupt` process redirects that turn through, and the `null` that
+# tells a supervisor there is no lever. Below 0.3.8 the config key is rejected and
+# `Report::control` does not exist, so `crate::control` does not compile.
+onejudge = { version = "0.3.8", features = ["cli"] }
 # oneharness's own typed report/stream contract. Everything this crate reads back
 # from an `oneharness run` — the fallback chain, the per-candidate accounting,
 # the normalized failure kind — is parsed into oneharness's declarations rather
 # than guessed by field name, so an upstream change is a compile error here
 # instead of a silently-absent field. Already in the graph via onejudge, which
 # parses the same boundary the same way.
-oneharness-core = "0.6.9"
+oneharness-core = "0.6.13"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

@@ -33,6 +33,16 @@
 //! | `fake:complete-now` | the agent finishes on its first turn |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
+//! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
+//! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
+//! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
+//!
+//! The last three answer only inside a controlled turn, and that is load-bearing
+//! rather than tidy: a judge side's prompt embeds the *transcript*, so every
+//! sentinel the operator's task carried arrives there a second time. A
+//! `fake:did-work` that fired on it would report work the agent never did, and a
+//! `fake:park` would stall the judge on an interrupt only the agent side can be
+//! sent.
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
@@ -54,7 +64,9 @@
 // harness CLI, and a harness CLI answers on those two streams.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use std::io::Write as _;
+use std::io::{BufRead as _, Write as _};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 
@@ -120,19 +132,29 @@ fn main() -> std::process::ExitCode {
     // `--append-system-prompt` claude-code takes a system prompt on. A double
     // that read only the first would report the agent side as having been given
     // no role at all.
-    let task = flag(&argv, "-p")
-        .or_else(|| flag(&argv, "--prompt"))
-        .unwrap_or_default();
+    //
+    // A **controlled** turn is the exception: `oneharness run --control` selects
+    // claude-code's streamed input protocol, so there is no `-p` positional at
+    // all — the prompt is the first frame on this process's stdin, and stdin
+    // stays open so an `oneharness interrupt` can abort the turn through it.
     let system = flag(&argv, "--append-system-prompt")
         .or_else(|| flag(&argv, "--system"))
         .unwrap_or_default();
+    let task = if controlled(&argv) {
+        String::new()
+    } else {
+        flag(&argv, "-p")
+            .or_else(|| flag(&argv, "--prompt"))
+            .unwrap_or_default()
+    };
     let prompt = format!("{system}\n{task}");
 
-    record(&prompt, "record-prompt", &prompt);
-    record(&prompt, "record-env", &selection_environment());
-    // The argv is where a model reaches a harness, so it is where a journey can
-    // see that the side it was written on is the side that got it.
-    record(&prompt, "record-argv", &argv.join(" "));
+    // A controlled turn has none of the task yet — it arrives on stdin — so its
+    // recordings are made per turn, in [`turn`], against the prompt that turn was
+    // really given. Doing both would record the same launch twice.
+    if !controlled(&argv) {
+        recordings(&prompt, &argv);
+    }
 
     // Before anything that could block: a turn asked to refuse `SIGTERM` has to
     // be refusing it by the time a journey can reach it.
@@ -206,18 +228,145 @@ fn main() -> std::process::ExitCode {
         None => {}
     }
 
+    if controlled(&argv) {
+        return control_stream(&system, &argv);
+    }
+
     if steers(&prompt, "hang") {
         // Never answer. The heartbeat and activity watchdogs are what ends this.
         return hang(sentinel_path(&prompt, "tick").as_deref());
     }
-    if let Some(path) = sentinel_path(&prompt, "hold") {
-        while !path.exists() {
+    turn(&prompt, None);
+    exit(0)
+}
+
+/// Everything a journey can ask this launch to write down about itself.
+///
+/// One function for both paths, because what a journey asserts on must not depend
+/// on whether the turn happened to be a controlled one: the prompt it was given,
+/// the selection-shaped environment it inherited, and the argv a model reaches a
+/// harness on.
+fn recordings(prompt: &str, argv: &[String]) {
+    record(prompt, "record-prompt", prompt);
+    record(prompt, "record-env", &selection_environment());
+    record(prompt, "record-argv", &argv.join(" "));
+}
+
+/// Whether `oneharness run --control` selected claude-code's streamed input
+/// protocol for this turn.
+///
+/// The flag pair is the whole tell, and it is oneharness's own: a controlled turn
+/// is `-p --input-format stream-json` with **no** positional prompt, so a double
+/// that read `-p`'s next argument as the task would take `--input-format` for
+/// one.
+fn controlled(argv: &[String]) -> bool {
+    flag(argv, "--input-format").as_deref() == Some("stream-json")
+}
+
+/// Serve turns off stdin until it closes, aborting the one in flight whenever a
+/// control frame asks.
+///
+/// This is the mechanism `oneagentgraph interrupt` rides all the way down: a
+/// `{"type":"user"}` frame opens a turn, a `{"type":"control_request"}` frame
+/// with subtype `interrupt` ends the one running, and oneharness delivers the
+/// operator's redirection as the *next* user frame the moment it sees this turn's
+/// terminal `result`. Nothing here is a shortcut around that: the turn really
+/// stops where it was, and the replacement really is a second turn.
+fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let mut running: Option<std::thread::JoinHandle<()>> = None;
+    let argv = Arc::new(argv.to_vec());
+    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        match frame.get("type").and_then(Value::as_str) {
+            Some("user") => {
+                let text = frame
+                    .pointer("/message/content/0/text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let prompt = format!("{system}\n{text}");
+                let flag = Arc::clone(&interrupted);
+                let argv = Arc::clone(&argv);
+                // On a thread of its own so this loop keeps reading: the frame
+                // that aborts the turn arrives *while* it runs, which is the
+                // whole point of the mechanism.
+                running = std::thread::Builder::new()
+                    .spawn(move || {
+                        recordings(&prompt, &argv);
+                        turn(&prompt, Some(&flag));
+                    })
+                    .ok();
+            }
+            Some("control_request") => {
+                emit(&json!({
+                    "type": "control_response",
+                    "response": {"subtype": "success",
+                                 "request_id": frame.get("request_id").cloned()},
+                }));
+                interrupted.store(true, Ordering::SeqCst);
+            }
+            _ => {}
+        }
+    }
+    // stdin closed, which is how oneharness says the run is over. The turn in
+    // flight is still this process's to finish reporting on.
+    if let Some(handle) = running {
+        let _ = handle.join();
+    }
+    exit(0)
+}
+
+/// One turn: hold if the prompt asked it to, then answer.
+///
+/// `interrupted` is the control channel's flag, and it is what makes a held turn
+/// *stoppable*: the hold ends the moment it is set, the turn reports a terminal
+/// result having done none of its work, and the flag is cleared so the redirected
+/// turn that follows is not aborted by the same request.
+fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
+    let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
+    // Written before any wait, so a journey can wait for a turn that is really
+    // in flight rather than for a process that has merely started.
+    if interrupted.is_some() {
+        if let Some(path) = sentinel_path(prompt, "started") {
+            let _ = std::fs::write(path, "started");
+        }
+    }
+    let stopped = || interrupted.is_some_and(|flag| flag.load(Ordering::SeqCst));
+    if let Some(path) = sentinel_path(prompt, "hold") {
+        while !path.exists() && !stopped() {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
-
-    let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
+    // A turn with nothing to do but wait to be redirected. Bounded rather than
+    // endless for the reason `hang`'s tick is: reaching the bound *is* a journey
+    // failing, and a double left parked forever would outlive the suite that
+    // failed to interrupt it.
+    if interrupted.is_some() && steers(prompt, "park") {
+        let deadline = std::time::Instant::now() + PARK_FOR;
+        while std::time::Instant::now() < deadline && !stopped() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
     emit(&json!({"type": "system", "subtype": "init", "session_id": session}));
+    if stopped() {
+        if let Some(flag) = interrupted {
+            flag.store(false, Ordering::SeqCst);
+        }
+        emit(&json!({
+            "type": "result", "subtype": "success", "is_error": false, "duration_ms": 1,
+            "num_turns": 1, "result": "", "session_id": session,
+            "usage": {"input_tokens": 1, "output_tokens": 0}, "total_cost_usd": 0.0,
+        }));
+        return;
+    }
+    // Past the wait and past the abort, so this line is the proof that *this*
+    // turn did its work — a turn an interrupt stopped never reaches it.
+    if interrupted.is_some() {
+        record(prompt, "did-work", prompt);
+    }
     emit(&json!({
         "type": "assistant", "session_id": session,
         "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
@@ -225,16 +374,23 @@ fn main() -> std::process::ExitCode {
     }));
     emit(&json!({
         "type": "result", "subtype": "success", "is_error": false, "duration_ms": 5,
-        "num_turns": 1, "result": answer(&prompt), "session_id": session,
+        "num_turns": 1, "result": answer(prompt), "session_id": session,
         "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 4,
                   "cache_creation_input_tokens": 1},
         "total_cost_usd": 0.002,
     }));
-    exit(0)
 }
 
 /// How often a hanging turn proves it is still alive.
 const TICK_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// How long a parked turn waits to be redirected before answering anyway.
+///
+/// Far longer than the journey that drives it needs, and bounded for the same
+/// reason [`TICK_FOR`] is: a turn nothing ever interrupted is a journey failing,
+/// and one that waited forever would leave a double running on a CI host after
+/// the run that started it had gone.
+const PARK_FOR: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// How long it keeps doing so before giving up and exiting.
 ///

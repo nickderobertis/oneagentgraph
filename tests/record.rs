@@ -10,6 +10,9 @@
 //! * `record.v1.json` — the shape written before the version field existed. It
 //!   must keep reading, unchanged, forever, or upgrading loses history.
 //! * `record.v2.json` — what this build writes, byte for byte.
+//! * `control.v1.json` — the three shapes of `control.json`, the turn-control
+//!   record a run writes into a member's scratch and a *separate*
+//!   `oneagentgraph interrupt` process reads back, possibly from a later build.
 //! * `member-died.json` — the two shapes of the one *event* payload that
 //!   changed when onejudge became a library. It is not in `record.json`, but it
 //!   is in the `events.jsonl` a record points at, which outlives the run exactly
@@ -29,6 +32,9 @@
 
 use std::collections::BTreeMap;
 
+use oneagentgraph::control::{
+    Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION,
+};
 use oneagentgraph::event::{Cause, Disposition, MemberDied, ENVELOPE_VERSION};
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
@@ -209,6 +215,70 @@ fn the_member_died_goldens_are_exactly_what_this_build_writes() {
 
     let read: Vec<MemberDied> = serde_json::from_str(golden).expect("the golden reads");
     assert_eq!(read, golden_deaths(), "the golden did not round-trip");
+}
+
+/// The three turn-control records this build writes, in the order the golden
+/// commits them: an address whose store the report named, one that left
+/// oneharness's own default, and an ask that was refused.
+fn golden_controls() -> Vec<ControlRecord> {
+    let session = "node-scope-1786171301679-1447994-worker".to_string();
+    let cwd = "/state/node-scope-1786171301679-1447994/members/worker".to_string();
+    vec![
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session: session.clone(),
+                    session_dir: Some("/state/oneharness/sessions".into()),
+                    cwd: cwd.clone(),
+                },
+            },
+        },
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session,
+                    session_dir: None,
+                    cwd,
+                },
+            },
+        },
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Unavailable {
+                reason: "harness `qwen` has no out-of-band turn control, so --control cannot be \
+                         honored"
+                    .into(),
+            },
+        },
+    ]
+}
+
+/// `control.json`'s three shapes are byte-for-byte the committed golden.
+///
+/// It is a persisted contract like the record beside it: a run writes it and a
+/// *different* process — `oneagentgraph interrupt`, minutes or hours later, and
+/// possibly a different build — reads it back. So the shape is versioned and
+/// committed rather than described, and `session_dir` is absent when the run left
+/// oneharness's own default, because an `interrupt` that says nothing resolves
+/// the same store and a written `null` would claim otherwise.
+#[test]
+fn the_control_goldens_are_exactly_what_this_build_writes() {
+    let golden = include_str!("golden/control.v1.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_controls()).expect("the records serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "control.json's shape changed. If that was deliberate, bump \
+         CONTROL_SCHEMA_VERSION and commit a new golden *beside* control.v1.json — a run in \
+         flight was written by the build before this one."
+    );
+
+    let read: Vec<ControlRecord> = serde_json::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_controls(), "the golden did not round-trip");
 }
 
 /// The three fields only a child process has are omitted when it had none, and

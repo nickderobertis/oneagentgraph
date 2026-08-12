@@ -1,0 +1,30 @@
+[
+  {
+    "schema_version": 1,
+    "turn": {
+      "state": "open",
+      "address": {
+        "session": "node-scope-1786171301679-1447994-worker",
+        "session_dir": "/state/oneharness/sessions",
+        "cwd": "/state/node-scope-1786171301679-1447994/members/worker"
+      }
+    }
+  },
+  {
+    "schema_version": 1,
+    "turn": {
+      "state": "open",
+      "address": {
+        "session": "node-scope-1786171301679-1447994-worker",
+        "cwd": "/state/node-scope-1786171301679-1447994/members/worker"
+      }
+    }
+  },
+  {
+    "schema_version": 1,
+    "turn": {
+      "state": "unavailable",
+      "reason": "harness `qwen` has no out-of-band turn control, so --control cannot be honored"
+    }
+  }
+]

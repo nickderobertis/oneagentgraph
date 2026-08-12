@@ -36,3 +36,11 @@ pub const EXIT_MEMBER_FAILED: i32 = 1;
 
 /// The graph config is invalid.
 pub const EXIT_INVALID_CONFIG: i32 = 2;
+
+/// `interrupt` found no controllable turn in flight.
+///
+/// A fact, not an error — the member may be between turns, already settled, or
+/// running on a harness with no out-of-band turn control — so it is a code of its
+/// own rather than [`EXIT_MEMBER_FAILED`], which an operator's script would read
+/// as "the lever broke". The answer says which of them applies.
+pub const EXIT_NO_CONTROLLABLE_TURN: i32 = 3;
