@@ -178,6 +178,20 @@ impl Workspace {
             .expect("the binary starts")
     }
 
+    /// Start the binary with an input pipe deliberately held open by the test.
+    pub fn spawn_with_open_stdin(
+        &self,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> std::process::Child {
+        self.command(args, env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the binary starts")
+    }
+
     /// The binary, armed with this workspace's directories and environment.
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_oneagentgraph"));

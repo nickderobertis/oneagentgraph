@@ -49,7 +49,6 @@
 // the classification, is the closed `Reason` set above.
 
 use std::path::Path;
-use std::process::Command;
 
 use serde_json::Value;
 
@@ -221,7 +220,7 @@ fn after_attempts(error: Error) -> Error {
 
 /// Spend one turn in `dir`, once.
 fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
-    let output = Command::new(oneharness_bin)
+    let output = crate::harness_process::command(oneharness_bin)
         .args(["run", "--cwd"])
         .arg(dir)
         .args(["--compact", "--prompt", PROMPT])
@@ -257,12 +256,13 @@ fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
             .and_then(|fallback| fallback.get("ran"))
             .and_then(Value::as_str)
             .unwrap_or("no candidate");
+        let record = failed_record(&report, ran);
         return Err(Refusal {
             error: Error::MemberFailed {
                 member: MEMBER.into(),
                 reason: format!(
                     "{oneharness_bin} exited {} having run {ran}: the turn was attempted and did \
-                     not succeed, so this launch path is not proven — {}",
+                     not succeed, so this launch path is not proven{record} — {}",
                     output
                         .status
                         .code()
@@ -284,6 +284,39 @@ fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
         // exhausts it twice more.
         spent_nothing: false,
     })
+}
+
+/// The selected provider's actionable fields, retained from oneharness's report.
+fn failed_record(report: &Value, ran: &str) -> String {
+    let Some(result) = report
+        .get("results")
+        .and_then(Value::as_array)
+        .and_then(|results| {
+            results
+                .iter()
+                .find(|result| result.get("harness").and_then(Value::as_str) == Some(ran))
+        })
+    else {
+        return String::new();
+    };
+    let mut fields = Vec::new();
+    for (label, key) in [
+        ("status", "status"),
+        ("failure", "failure_kind"),
+        ("error", "error"),
+    ] {
+        if let Some(value) = result.get(key).and_then(Value::as_str) {
+            fields.push(format!("{label} {value}"));
+        }
+    }
+    if let Some(code) = result.get("exit_code").and_then(Value::as_i64) {
+        fields.push(format!("exit {code}"));
+    }
+    if fields.is_empty() {
+        String::new()
+    } else {
+        format!(" (provider record: {})", fields.join(", "))
+    }
 }
 
 /// Whether this report proves the attempt spent nothing.

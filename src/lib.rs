@@ -17,6 +17,7 @@
 #![warn(missing_docs)]
 
 mod clock;
+mod harness_process;
 
 pub mod cli;
 pub mod config;

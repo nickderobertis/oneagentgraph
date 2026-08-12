@@ -41,7 +41,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -285,7 +285,7 @@ fn spawned(
         ]),
     );
 
-    let mut command = Command::new(program);
+    let mut command = crate::harness_process::command(program);
     command
         .args(args)
         .current_dir(cwd)
@@ -302,7 +302,6 @@ fn spawned(
         // the group itself — which is also the only way the commands this
         // process does not spawn, the ones onejudge starts for a two-party
         // member, could be stamped the same way.
-        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
