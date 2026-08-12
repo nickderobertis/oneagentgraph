@@ -130,7 +130,7 @@ fn a_failed_downstream_member_suppresses_its_dependant_in_that_cron_iteration() 
     .replace(
         "members:\n",
         &format!(
-            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\n  FAKE_HARNESS_FAIL_IDENTITY: codex\nmembers:\n",
+            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\nmembers:\n",
             fake = fake_harness(),
             marker = marker.display()
         ),
@@ -227,7 +227,7 @@ fn a_failed_later_cron_firing_suppresses_that_iterations_chain() {
     .replace(
         "members:\n",
         &format!(
-            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\n  FAKE_HARNESS_FAIL_IDENTITY: codex\nmembers:\n",
+            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\nmembers:\n",
             fake = fake_harness(),
             marker = marker.display()
         ),
@@ -371,7 +371,7 @@ fn a_failed_initial_scheduled_run_can_fire_again_while_non_cron_work_is_live() {
     .replace(
         "members:\n",
         &format!(
-            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_ONCE_MARKER: {failed_once}\n  FAKE_HARNESS_FAIL_ONCE_IDENTITY: codex\nmembers:\n",
+            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_ONCE_MARKER: {failed_once}\nmembers:\n",
             fake = fake_harness(),
             failed_once = failed_once.display(),
         ),
