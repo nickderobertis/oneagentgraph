@@ -981,9 +981,9 @@ fn run_wave(
 /// operator cannot quietly defer a member whose author said its cadence is
 /// fixed.
 // Every parameter is one thing a firing needs and none is derivable from
-// another: the schedule, the member's name and invocation, where its events go,
-// its environment and bounds, its scratch, the signal directory, and the outcome
-// so far. Bundling them into a struct would name the same nine values twice.
+// another: its schedule, identity and invocation, event sink, environment,
+// bounds, scratch and signals, plus the liveness gate and successful-chain
+// callback. Bundling them would name the same values twice.
 #[allow(clippy::too_many_arguments)]
 fn cron(
     schedule: &crate::config::Schedule,

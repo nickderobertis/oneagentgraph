@@ -27,8 +27,8 @@ An actual `member::Outcome` failure makes the graph exit 1. A skip does not add
 another failure: it is the consequence recorded beside the member, while the
 failed ancestor remains the cause of exit 1. Thus the stream and record
 distinguish “failed” from “not attempted”, without inventing an exit code outside
-the contract's 0/1/2 surface. `MemberOutcome`'s new serialized spelling makes
-run records schema version 3 (`run::RECORD_SCHEMA_VERSION`).
+the contract's 0/1/2 surface. `MemberOutcome`'s new serialized spelling advances
+the version named by `run::RECORD_SCHEMA_VERSION`.
 
 ## Scheduled members
 

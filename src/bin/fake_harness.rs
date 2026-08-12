@@ -178,9 +178,13 @@ fn main() -> std::process::ExitCode {
         std::env::var("FAKE_HARNESS_FAIL_AFTER_MARKER"),
         std::env::var("FAKE_HARNESS_FAIL_MEMBER"),
     ) {
+        if member != "codex" || marker.is_empty() || marker.contains('\0') {
+            eprintln!("fake-harness: fail-after needs member codex and a non-empty marker path");
+            return exit(2);
+        }
         let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_default();
-        let selected = session.contains(&format!("-{member}"))
-            || (member == "codex" && argv.iter().any(|arg| arg == "exec"));
+        let selected =
+            session.contains(&format!("-{member}")) || argv.iter().any(|arg| arg == "exec");
         if selected {
             if std::path::Path::new(&marker).exists() {
                 eprintln!("fake-harness: later launch for {member} failed");
