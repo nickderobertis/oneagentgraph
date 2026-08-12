@@ -110,7 +110,7 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
 }
 
 #[test]
-fn a_failed_cron_firing_never_starts_that_iterations_chain() {
+fn a_failed_downstream_member_suppresses_its_dependant_in_that_cron_iteration() {
     let workspace = Workspace::new();
     let release = workspace.at("failure-release");
     let marker = workspace.at("ticker-first-run");
@@ -204,6 +204,91 @@ fn a_failed_cron_firing_never_starts_that_iterations_chain() {
             .count(),
         1,
         "the failed downstream member started its dependant: {stream}"
+    );
+    std::fs::write(&release, "release").expect("release keeper");
+    let output = child.wait_with_output().expect("run finishes");
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn a_failed_later_cron_firing_suppresses_that_iterations_chain() {
+    let workspace = Workspace::new();
+    let release = workspace.at("root-failure-release");
+    let marker = workspace.at("ticker-first-run");
+    workspace.write(
+        "ticker.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let graph = scheduled_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        "./ticker.toml",
+    )
+    .replace(
+        "members:\n",
+        &format!(
+            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\n  FAKE_HARNESS_FAIL_IDENTITY: codex\nmembers:\n",
+            fake = fake_harness(),
+            marker = marker.display()
+        ),
+    );
+    workspace.graph(&graph);
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: scheduled root failure",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events_path = || {
+        std::fs::read_dir(workspace.state())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .next()
+            .map(|entry| entry.path().join("events.jsonl"))
+    };
+    until("the initial chain to settle", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.lines().any(|line| {
+                    line.contains("\"kind\":\"member-settled\"")
+                        && line.contains("\"member\":\"publish\"")
+                })
+            })
+    });
+    let id = workspace.record()["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    workspace.run(&["trigger", &id, "ticker"]).expect_code(0);
+    until("the later cron firing to fail", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.contains("\"kind\":\"cron-fired\"")
+                    && stream.lines().any(|line| {
+                        line.contains("\"kind\":\"member-died\"")
+                            && line.contains("\"member\":\"ticker\"")
+                    })
+            })
+    });
+    let stream = std::fs::read_to_string(events_path().expect("events")).expect("stream");
+    assert_eq!(
+        stream
+            .lines()
+            .filter(|line| {
+                line.contains("\"kind\":\"member-started\"")
+                    && line.contains("\"member\":\"report\"")
+            })
+            .count(),
+        1,
+        "the failed cron firing started its chain: {stream}"
     );
     std::fs::write(&release, "release").expect("release keeper");
     let output = child.wait_with_output().expect("run finishes");

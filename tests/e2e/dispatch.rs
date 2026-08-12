@@ -974,7 +974,7 @@ fn a_dependant_member_starts_only_after_its_dependency_settles() {
 fn a_failed_dependency_skips_and_propagates_through_its_chain() {
     let workspace = Workspace::new();
     workspace.graph(
-        "version: 1\nname: node-scope\nmembers:\n  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [build]\n  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [report]\n",
+        "version: 1\nname: node-scope\nmembers:\n  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n  report:\n    kind: onejudge\n    base_config: ./base.yaml\n    persona: engineer\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      oneharness_config: ./oneharness.judge.toml\n    mode: bypass\n    deps: [build]\n  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [report]\n",
     );
     let run = workspace.run_with(
         &[
