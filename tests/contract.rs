@@ -980,6 +980,32 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     assert_eq!(reparsed, graph, "the graph schema must round-trip");
 }
 
+/// The contract defines `deps` once as members whose settle precedes a first
+/// run. Both member variants use that same field and meaning; this drives the
+/// contract's own graph through each rather than restating a second definition.
+#[test]
+fn the_documented_dependency_field_round_trips_on_both_member_kinds() {
+    assert!(
+        CONTRACT.contains("deps: []")
+            && CONTRACT.contains("members whose settle precedes this member's first run"),
+        "docs/contract.md no longer carries the dependency field this test proves"
+    );
+    let mut document: serde_json::Value =
+        serde_norway::from_str(&fenced_block("yaml")).expect("documented graph parses as a value");
+    document["members"]["worker"]["deps"] = serde_json::json!(["reporter"]);
+    let graph: GraphConfig = serde_norway::from_value(
+        serde_norway::to_value(&document).expect("document converts to Norway value"),
+    )
+    .expect("the contract dependency field parses on onejudge");
+    let Member::Onejudge(worker) = &graph.members["worker"] else {
+        panic!("worker is onejudge")
+    };
+    assert_eq!(worker.deps, ["reporter"]);
+    let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    assert_eq!(reparsed, graph);
+}
+
 #[test]
 fn a_graph_with_an_unknown_field_is_rejected() {
     let yaml = format!("{}\nnodes: []\n", fenced_block("yaml").trim_end());
