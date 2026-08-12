@@ -17,11 +17,13 @@ use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
     Schedule,
 };
-use oneagentgraph::error::{Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_SUCCESS};
+use oneagentgraph::error::{
+    Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
+};
 use oneagentgraph::event::{
     Artifact, Cause, Disposition, Envelope, EventKind, FallbackAdvanced, MemberDied, Role, Source,
-    TurnActivity, TurnCompleted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS,
-    MAX_PAYLOAD_TEXT_BYTES,
+    TurnActivity, TurnCompleted, TurnInterrupted, Usage, ENVELOPE_VERSION,
+    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES,
 };
 use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
@@ -42,6 +44,7 @@ const ALL_EVENT_KINDS: &[EventKind] = &[
     EventKind::TurnStarted,
     EventKind::TurnActivity,
     EventKind::TurnCompleted,
+    EventKind::TurnInterrupted,
     EventKind::MemberHeartbeat,
     EventKind::FallbackAdvanced,
     EventKind::MemberDied,
@@ -407,6 +410,96 @@ fn a_turn_completed_payload_carries_the_documented_usage() {
     );
 }
 
+/// `turn-interrupted` carries the four fields the contract names, and `reason`
+/// is present exactly when the redirection did not land — a served interrupt that
+/// carried one would let a consumer read a success as a refusal.
+#[test]
+fn a_turn_interrupted_payload_names_the_member_and_whether_it_landed() {
+    assert!(
+        CONTRACT.contains(
+            "(`member`, `delivered`, `input_bytes`, and the `reason` a delivery that did not land \
+             names)"
+        ),
+        "the contract no longer describes the turn-interrupted payload this test pins"
+    );
+
+    let delivered = TurnInterrupted {
+        member: "worker".to_string(),
+        delivered: true,
+        input_bytes: 31,
+        reason: None,
+    };
+    let serialized = serde_json::to_value(&delivered).expect("serializes");
+    assert_eq!(
+        serialized,
+        json!({"member": "worker", "delivered": true, "input_bytes": 31})
+    );
+    assert_eq!(
+        serde_json::from_value::<TurnInterrupted>(serialized).expect("parses"),
+        delivered
+    );
+
+    let refused = TurnInterrupted {
+        member: "worker".to_string(),
+        delivered: false,
+        input_bytes: 0,
+        reason: Some("the member is between turns".to_string()),
+    };
+    let serialized = serde_json::to_value(&refused).expect("serializes");
+    assert_eq!(serialized["reason"], json!("the member is between turns"));
+    assert_eq!(
+        serde_json::from_value::<TurnInterrupted>(serialized).expect("parses"),
+        refused
+    );
+}
+
+/// The four exit codes `interrupt` assigns, and the one that is a *fact* rather
+/// than an error — the distinction the whole verb rests on, since an operator's
+/// script reads anything else as a lever that broke.
+#[test]
+fn the_documented_interrupt_exit_codes_are_the_ones_the_crate_declares() {
+    let sentence = CONTRACT
+        .lines()
+        .find(|line| line.contains("Its exit codes:"))
+        .expect("the contract no longer states what `interrupt` exits with");
+    for (code, meaning) in [
+        (EXIT_SUCCESS, "delivered"),
+        (
+            EXIT_NO_CONTROLLABLE_TURN,
+            "the member has no controllable turn in flight",
+        ),
+        (EXIT_INVALID_CONFIG, "invalid arguments"),
+        (
+            EXIT_MEMBER_FAILED,
+            "a delivery that was attempted and failed",
+        ),
+    ] {
+        assert!(
+            sentence.contains(&format!("`{code}` {meaning}")),
+            "the contract's `interrupt` exit codes no longer say `{code}` {meaning}"
+        );
+    }
+    assert!(
+        CONTRACT.contains(&format!(
+            "Exit `{EXIT_NO_CONTROLLABLE_TURN}` is **a fact, not an error**"
+        )),
+        "the contract no longer states that exit {EXIT_NO_CONTROLLABLE_TURN} is a fact"
+    );
+    // And every cause it can be, so an answer that says only "no turn" is a
+    // document edit away from failing here.
+    for cause in [
+        "between turns",
+        "already settled",
+        "no out-of-band turn control",
+        "opens no controllable turn at all",
+    ] {
+        assert!(
+            CONTRACT.contains(cause),
+            "the contract no longer names `{cause}` as an exit-{EXIT_NO_CONTROLLABLE_TURN} cause"
+        );
+    }
+}
+
 #[test]
 fn a_fallback_advanced_payload_names_the_identity_and_the_classified_reason() {
     assert!(
@@ -675,6 +768,16 @@ fn every_restatement_of_the_exit_codes_matches_the_crate() {
     assert!(
         readme.contains(&sentence),
         "README.md no longer states the exit codes the crate declares — expected: {sentence}"
+    );
+    // `interrupt`'s own code is restated there too, and it is the one a reader
+    // most needs to be told is not a failure.
+    let interrupted = format!(
+        "Exit `{EXIT_NO_CONTROLLABLE_TURN}` means there was no controllable turn in flight, and \
+         says which — a fact, not an error."
+    );
+    assert!(
+        readme.contains(&interrupted),
+        "README.md no longer states the exit code `interrupt` declares — expected: {interrupted}"
     );
 
     // The published smoke's only exit-code comparison is against the contract's
@@ -957,6 +1060,7 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "trigger",
         "reset-timer",
         "cancel",
+        "interrupt",
         "history",
         "health",
         "smoke",
@@ -979,6 +1083,8 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "--kill",
         "--dry-run",
         "--min-age-hours",
+        "--input",
+        "--input-file",
     ] {
         assert!(
             usage.contains(flag),

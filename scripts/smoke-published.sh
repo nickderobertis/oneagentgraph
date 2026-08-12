@@ -80,7 +80,7 @@ fi
 help="$(oneagentgraph --help 2>"$probe_stderr" | tr -d '\r')" || fail \
   "'--help' failed: $(cat "$probe_stderr")" \
   "the installed binary runs but cannot print its own surface — reinstall this version and re-run"
-for command in run validate trigger reset-timer cancel history health smoke sweep persona; do
+for command in run validate trigger reset-timer cancel interrupt history health smoke sweep persona; do
   case "$help" in
     *"$command"*) ;;
     *) fail "'--help' does not list the '$command' command" \

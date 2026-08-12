@@ -33,6 +33,27 @@ pub fn line(envelope: &Envelope) -> String {
                 .join(" ")
         }
         EventKind::TurnCompleted => usage(envelope),
+        EventKind::TurnInterrupted => {
+            let delivered = envelope
+                .payload
+                .get("delivered")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let bytes = field(envelope, "input_bytes");
+            // The reason only for a delivery that did not land, which is the one
+            // that has one — a served interrupt says how much redirection it
+            // carried instead.
+            if delivered {
+                format!("delivered ({bytes} bytes)")
+            } else {
+                let reason = field(envelope, "reason");
+                if reason.is_empty() {
+                    "not delivered".to_string()
+                } else {
+                    format!("not delivered: {reason}")
+                }
+            }
+        }
         EventKind::MemberHeartbeat => "alive".to_string(),
         EventKind::FallbackAdvanced => format!(
             "{} ({})",
@@ -238,6 +259,17 @@ mod tests {
                 "turn-completed in=10 out=5 cache_r=4 cache_w=- cost=0.002",
             ),
             (
+                EventKind::TurnInterrupted,
+                json!({"member": "worker", "delivered": true, "input_bytes": 31}),
+                "turn-interrupted delivered (31 bytes)",
+            ),
+            (
+                EventKind::TurnInterrupted,
+                json!({"member": "worker", "delivered": false, "input_bytes": 0,
+                       "reason": "the member is between turns"}),
+                "turn-interrupted not delivered: the member is between turns",
+            ),
+            (
                 EventKind::MemberHeartbeat,
                 json!({}),
                 "member-heartbeat alive",
@@ -332,6 +364,17 @@ mod tests {
             json!({"usage": "not an object"}),
         ));
         assert!(usage.ends_with("turn-completed"), "{usage}");
+
+        // A refusal a producer left unexplained still renders as the refusal it
+        // is, rather than as a line ending in a colon.
+        let unexplained = line(&envelope(
+            EventKind::TurnInterrupted,
+            json!({"member": "worker", "delivered": false, "input_bytes": 0}),
+        ));
+        assert!(
+            unexplained.ends_with("turn-interrupted not delivered"),
+            "{unexplained}"
+        );
     }
 
     /// The text writer renders what came through it, forwards anything that is

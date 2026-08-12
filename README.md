@@ -27,9 +27,9 @@ Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every [release], with `sha256` checksums.
 
 [onejudge] is a **library dependency**, linked into this binary — there is
-nothing to install for it. `run`, `smoke`, and `health` drive the [oneharness]
-CLI, so that has to be on `PATH`; `validate`, `history`, `persona`, `trigger`,
-`reset-timer`, `cancel`, and `sweep` need nothing at all.
+nothing to install for it. `run`, `smoke`, `health`, and `interrupt` drive the
+[oneharness] CLI, so that has to be on `PATH`; `validate`, `history`, `persona`,
+`trigger`, `reset-timer`, `cancel`, and `sweep` need nothing at all.
 `ONEAGENTGRAPH_ONEHARNESS_BIN` names a pinned install instead.
 
 ## What it does
@@ -55,6 +55,11 @@ members:
 
 `run` streams one envelope per line. Exit `0` means every member settled, `1`
 that one failed or died, `2` that the config is invalid.
+
+When a member's turn goes the wrong way, `oneagentgraph interrupt RUN MEMBER
+--input "do this instead"` redirects it in place instead of discarding it the way
+`cancel` does. Exit `3` means there was no controllable turn in flight, and says
+which — a fact, not an error.
 
 Under disk pressure, `oneagentgraph sweep --dry-run` says what scratch exists,
 what is reclaimable, and what it could not examine; without `--dry-run` it

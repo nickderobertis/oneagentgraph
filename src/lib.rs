@@ -20,6 +20,7 @@ mod clock;
 
 pub mod cli;
 pub mod config;
+pub mod control;
 pub mod error;
 pub mod event;
 pub mod health;

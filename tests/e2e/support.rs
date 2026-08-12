@@ -29,6 +29,10 @@ use serde_json::Value;
 /// One journey's directories and the graph inside them.
 pub struct Workspace {
     root: tempfile::TempDir,
+    /// oneharness's own per-user state for this journey — see
+    /// [`Workspace::session_store`] for why it is not simply a directory inside
+    /// [`root`](Self::root).
+    session_store: tempfile::TempDir,
 }
 
 /// What one `oneagentgraph` invocation produced.
@@ -96,6 +100,7 @@ impl Workspace {
     pub fn new() -> Self {
         let workspace = Self {
             root: tempfile::tempdir().expect("a workspace"),
+            session_store: session_store(),
         };
         std::fs::create_dir_all(workspace.dir()).expect("work dir");
         std::fs::create_dir_all(workspace.state()).expect("state dir");
@@ -109,6 +114,12 @@ impl Workspace {
     /// The directory the graph and its configs live in.
     pub fn path(&self) -> &Path {
         self.root.path()
+    }
+
+    /// oneharness's session store for this journey, which is where the control
+    /// socket a turn is interrupted through is bound.
+    pub fn session_store(&self) -> &Path {
+        self.session_store.path()
     }
 
     /// The directory members work in.
@@ -175,6 +186,13 @@ impl Workspace {
             .current_dir(self.path())
             .env("ONEAGENTGRAPH_STATE_DIR", self.state())
             .env("ONEAGENTGRAPH_ONEHARNESS_BIN", oneharness_bin())
+            // oneharness's own per-user state — its session store, and the
+            // `control/<session>.sock` an `interrupt` addresses inside it. Its
+            // own directory so a journey drives its own store rather than the
+            // host's, and named here so the run and the `interrupt` that reaches
+            // it resolve the same one: `run --session-dir` has no config or
+            // environment layer, so this variable is what moves both.
+            .env("XDG_STATE_HOME", self.session_store.path())
             // A journey must never inherit an enclosing dispatch's selection:
             // this suite runs inside one, and a leaked value would put the run
             // on an identity — and a bill — nobody in this test chose.
@@ -223,6 +241,31 @@ impl Workspace {
         let raw = std::fs::read_to_string(run.join("record.json")).expect("a record");
         serde_json::from_str(&raw).expect("the record is JSON")
     }
+}
+
+/// A journey's own oneharness session store, kept **short** and outside the
+/// workspace on purpose.
+///
+/// A controlled turn is addressed through a unix domain socket at
+/// `<store>/oneharness/sessions/control/<session>.sock`, and a unix socket path
+/// has a hard kernel bound near 104 bytes. The session handle at the end of it is
+/// `<run id>-<member>-skill`, which is around fifty of those on its own, and a
+/// workspace tempdir on macOS lives under `/var/folders/…/T/` — so a store inside
+/// the workspace put the socket past the bound, oneharness refused `--control`
+/// for a run it could not bind one for, and every parked-turn journey timed out
+/// waiting for a turn that was never controllable. `/tmp` keeps the prefix to a
+/// dozen bytes on both unix platforms; nothing else needs it, so the fallback is
+/// the platform's own temp directory.
+fn session_store() -> tempfile::TempDir {
+    let root = Path::new("/tmp");
+    let mut builder = tempfile::Builder::new();
+    let builder = builder.prefix("oag");
+    if root.is_dir() {
+        builder.tempdir_in(root)
+    } else {
+        builder.tempdir()
+    }
+    .expect("a session store")
 }
 
 /// A one-identity `claude-code` fallback chain — the only shape that keeps the
@@ -296,17 +339,26 @@ pub fn fake_provider() -> String {
 /// onejudge engine, so there is nothing on `PATH` for that half of the chain to
 /// be shadowed by — the version it runs is the one `Cargo.lock` pins.
 ///
-/// Probed for nothing beyond running, because that is all these journeys have
-/// established they need: they reach oneharness through its own long-standing
-/// `ONEHARNESS_BIN_<ID>` override. `just`'s `oneharness-version` pin governs
-/// what provisioning *installs*; asserting it here too would be a second copy
-/// of that number, free to drift from the one that matters.
+/// Probed for the `interrupt` verb rather than for merely running, because that
+/// is the newest contract these journeys depend on: the turn-control pair
+/// (`run --control` / `interrupt`) is what `interrupt.rs` drives, and a CLI
+/// without it answers `--version` perfectly well before failing one layer down
+/// as a bare `expected exit 0`. Everything else they need, they reach through
+/// oneharness's own long-standing `ONEHARNESS_BIN_<ID>` override. `just`'s
+/// `oneharness-version` pin governs what provisioning *installs*; asserting it
+/// here too would be a second copy of that number, free to drift from the one
+/// that matters.
 pub fn oneharness_bin() -> String {
     required(
         "ONEAGENTGRAPH_TEST_ONEHARNESS",
         "oneharness",
-        "a working binary",
-        |program| Command::new(program).arg("--version").output().is_ok(),
+        "the `interrupt` verb these journeys drive",
+        |program| {
+            Command::new(program)
+                .args(["interrupt", "--help"])
+                .output()
+                .is_ok_and(|output| output.status.success())
+        },
     )
 }
 

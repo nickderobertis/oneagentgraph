@@ -39,6 +39,8 @@ pub enum Command {
     ResetTimer(MemberArgs),
     /// Cancel a run, or one member of it.
     Cancel(CancelArgs),
+    /// Redirect a member's in-flight turn instead of ending it.
+    Interrupt(InterruptArgs),
     /// List past runs, or show one record.
     History(HistoryArgs),
     /// Per-identity binding, utilization, and reset, read from oneharness data.
@@ -118,6 +120,27 @@ pub struct CancelArgs {
     /// Terminate rather than asking the member to stop.
     #[arg(long)]
     pub kill: bool,
+}
+
+/// `oneagentgraph interrupt`.
+///
+/// The same addressing as [`CancelArgs`] — a run and a member of it — because the
+/// two verbs reach the same live member and differ only in intent. `MEMBER` is
+/// required here where `cancel` leaves it optional: there is no whole-run turn to
+/// redirect.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct InterruptArgs {
+    /// The run.
+    pub run: String,
+    /// The member within it.
+    pub member: String,
+    /// What the turn should do instead, delivered with the stop as one
+    /// operation. Omit to only stop the turn.
+    #[arg(long)]
+    pub input: Option<String>,
+    /// Read that redirection from a file instead.
+    #[arg(long)]
+    pub input_file: Option<PathBuf>,
 }
 
 /// `oneagentgraph history`.

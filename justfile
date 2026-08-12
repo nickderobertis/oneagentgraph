@@ -24,7 +24,7 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # The one CLI this crate still spawns, pinned here because the e2e suite drives
 # it for real. onejudge has no entry: it is a library dependency now, pinned by
 # `Cargo.lock`, so there is nothing to install and nothing on `PATH` to shadow.
-oneharness-version := "0.6.9"
+oneharness-version := "0.6.15"
 
 # Keep the gate's own output to signal: successes are silent, failures are not.
 export CARGO_TERM_QUIET := "true"

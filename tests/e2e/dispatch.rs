@@ -605,8 +605,14 @@ fn the_members_mode_reaches_the_harness_process() {
         "not every side reached the double: {recorded}"
     );
     for line in &lines {
+        // oneharness's own spelling of the posture, and it is oneharness's to
+        // change: a read-only claude-code turn is now the *allowlist*
+        // `--tools <the tools that only read>` rather than a denylist. What this
+        // journey holds is that the member's `mode` reached the process at all,
+        // so the assertion tracks the spelling rather than pinning a flag name
+        // this crate does not own.
         assert!(
-            line.contains("--disallowedTools"),
+            line.contains("--tools Read Grep Glob"),
             "a side ran without the member's read-only posture: {line}"
         );
     }

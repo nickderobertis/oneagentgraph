@@ -13,6 +13,7 @@
 //! after the thing that once broke.
 
 mod dispatch;
+mod interrupt;
 mod liveness;
 mod origin;
 mod remote;
@@ -147,6 +148,26 @@ fn no_arguments_at_all_is_a_usage_error_that_shows_the_surface() {
         .assert()
         .code(USAGE_ERROR)
         .stderr(predicate::str::contains("Usage:"));
+}
+
+/// `interrupt`'s own surface, which differs from its sibling's in exactly two
+/// places: the member is required — there is no whole-run turn to redirect — and
+/// the redirection comes from one of two flags.
+#[test]
+fn interrupt_requires_a_member_and_takes_the_redirection_either_way() {
+    oneagentgraph()
+        .args(["interrupt", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("MEMBER"))
+        .stdout(predicate::str::contains("--input <INPUT>"))
+        .stdout(predicate::str::contains("--input-file <INPUT_FILE>"));
+
+    oneagentgraph()
+        .args(["interrupt", "run-1"])
+        .assert()
+        .code(USAGE_ERROR)
+        .stderr(predicate::str::contains("MEMBER"));
 }
 
 #[test]

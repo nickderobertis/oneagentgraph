@@ -132,6 +132,17 @@ pub struct JudgeLaunch {
     /// a working directory: this process has one of those and shares it with
     /// every other member.
     pub worktree: PathBuf,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the handle is a
+    // `String` for the reason [`crate::control::Address::session`] records: what
+    // a session handle may be is oneharness's rule, applied by it on both ends,
+    // and a type here would either restate rules this crate does not own or
+    // refuse a value oneharness accepts. It is written verbatim into the member's
+    // onejudge config as `session:`, which is a YAML string either way.
+    /// The session handle threaded across this member's turns, which is also
+    /// how an `oneagentgraph interrupt` addresses the turn in flight — see
+    /// [`crate::control`].
+    pub session: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// One member, ready to start.
@@ -297,6 +308,7 @@ fn onejudge(
             // was placed and oneharness discovers a project config upward from the
             // directory the harness will run in.
             worktree: context.scratch.to_path_buf(),
+            session: context.session.to_string(),
         })),
         persona: label,
         // Nothing: this member starts no child process of its own, so it has no
@@ -344,6 +356,18 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
     );
 }
 
+/// Every two-party member's agent side asks for a controllable turn, so
+/// `oneagentgraph interrupt` has a lever whenever the harness under it has one.
+///
+/// Unconditional rather than a graph field, because the ask costs nothing where
+/// it cannot be honored: onejudge retries the same call once without `--control`
+/// and records the refusal as a stated reason, so a harness with no control
+/// mechanism runs exactly as it did before and `interrupt` reports the reason
+/// instead of a lever that silently did nothing. Only the *agent* side asks — a
+/// judge turn is short and has nothing to redirect, and giving it a socket would
+/// put two runs on one address.
+const ASK_FOR_CONTROL: bool = true;
+
 /// The onejudge `provider` block for a two-party member.
 ///
 /// A harness-backed judge is one `kind: oneharness` provider carrying both
@@ -376,6 +400,7 @@ fn provider_block(
                 "bin": context.oneharness_bin,
                 "judge_config": path.display().to_string(),
                 "stream": agent.stream,
+                "control": ASK_FOR_CONTROL,
             }))
         }
         JudgeSide::Command(command) => {
@@ -390,6 +415,7 @@ fn provider_block(
                     "kind": "oneharness",
                     "bin": context.oneharness_bin,
                     "stream": agent.stream,
+                    "control": ASK_FOR_CONTROL,
                 },
                 "judge": {"kind": "command", "command": command.command},
             }))

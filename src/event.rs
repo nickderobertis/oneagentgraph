@@ -91,6 +91,9 @@ pub enum EventKind {
     TurnActivity,
     /// A turn finished; see [`TurnCompleted`].
     TurnCompleted,
+    /// An operator asked a member's in-flight turn to do something else; see
+    /// [`TurnInterrupted`].
+    TurnInterrupted,
     /// A member is alive but has produced nothing since the last heartbeat.
     MemberHeartbeat,
     /// An identity chain moved past a candidate; see [`FallbackAdvanced`].
@@ -189,6 +192,31 @@ pub struct Usage {
     pub cost: f64,
     /// How long the turn took.
     pub duration: f64,
+}
+
+/// The payload of an [`EventKind::TurnInterrupted`] event.
+///
+/// Published for every `interrupt`, delivered or not, because "the lever was
+/// pulled and nothing happened" is exactly what an operator watching a run needs
+/// to see — a verb that stayed silent unless it worked would leave the three
+/// not-delivered cases visible only in an exit code somebody has to be watching
+/// for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnInterrupted {
+    /// The member whose turn was addressed. On the payload as well as in the
+    /// labels, because that is what `docs/contract.md` names for this event.
+    pub member: String,
+    /// Whether the run took ownership of the redirection.
+    pub delivered: bool,
+    /// How many bytes of redirection were offered; `0` for an interrupt that
+    /// only asks the turn to stop.
+    pub input_bytes: u64,
+    /// Why the delivery did not land — present exactly when
+    /// [`delivered`](Self::delivered) is false, and never otherwise, so a
+    /// consumer can never read a served interrupt as having had a reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// The payload of an [`EventKind::FallbackAdvanced`] event.
