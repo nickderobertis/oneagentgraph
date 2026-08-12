@@ -41,7 +41,7 @@ How a member is launched, and why the two kinds differ:
 Graph config (YAML, by path or URL):
 
 ```yaml
-version: 1
+version: 2
 name: node-scope
 env:                                  # exported to every member process; values may reference ${HOME}
   MY_VAR: value

@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
-    Schedule,
+    Schedule, SCHEMA_VERSION,
 };
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
@@ -926,7 +926,8 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     let graph: GraphConfig =
         serde_norway::from_str(&yaml).expect("the documented graph does not parse");
 
-    assert_eq!(graph.version, 1);
+    assert_eq!(graph.version, SCHEMA_VERSION);
+    oneagentgraph::config::validate(&graph).expect("the documented graph must validate");
     assert_eq!(graph.name, "node-scope");
     assert_eq!(graph.env.get("MY_VAR").map(String::as_str), Some("value"));
     assert_eq!(
@@ -1000,6 +1001,10 @@ fn the_documented_dependency_field_round_trips_on_both_member_kinds() {
     };
     assert!(reporter.deps.is_empty());
     let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    assert!(
+        !round_trip.contains("deps:"),
+        "empty dependencies must remain omitted for older consumers: {round_trip}"
+    );
     let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
     assert_eq!(reparsed, graph);
 }

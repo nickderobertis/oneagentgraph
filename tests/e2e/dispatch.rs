@@ -629,7 +629,7 @@ fn a_command_judge_supervises_through_the_split_provider() {
     let workspace = Workspace::new();
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -859,7 +859,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     // spells the two typed fields out, which the default one leaves unset.
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -974,7 +974,7 @@ fn a_dependant_member_starts_only_after_its_dependency_settles() {
 fn a_failed_dependency_skips_and_propagates_through_its_chain() {
     let workspace = Workspace::new();
     workspace.graph(
-        "version: 1\nname: node-scope\nmembers:\n  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n  report:\n    kind: onejudge\n    base_config: ./base.yaml\n    persona: engineer\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      oneharness_config: ./oneharness.judge.toml\n    mode: bypass\n    deps: [build]\n  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [report]\n",
+        "version: 2\nname: node-scope\nmembers:\n  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n  report:\n    kind: onejudge\n    base_config: ./base.yaml\n    persona: engineer\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      oneharness_config: ./oneharness.judge.toml\n    mode: bypass\n    deps: [build]\n  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [report]\n",
     );
     let run = workspace.run_with(
         &[
@@ -1007,7 +1007,7 @@ fn a_two_party_member_can_depend_on_a_worker() {
     let workspace = Workspace::new();
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n",
             "  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
@@ -1038,7 +1038,7 @@ fn a_two_party_member_refuses_missing_and_cyclic_dependencies() {
     let workspace = Workspace::new();
     let graph = format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  worker:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",

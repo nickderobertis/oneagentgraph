@@ -11,7 +11,7 @@ use crate::support::{fake_harness, until, Workspace};
 fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
     format!(
         concat!(
-            "version: 1\nname: scheduled-chain\n",
+            "version: 2\nname: scheduled-chain\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",

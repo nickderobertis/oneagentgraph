@@ -31,7 +31,10 @@ fn validate_reads_every_ref_the_graph_names() {
 fn validate_refuses_a_graph_that_could_never_run() {
     let workspace = Workspace::new();
     for (document, expected) in [
-        ("version: 2\nname: g\nmembers: {}\n", "it reads version 1"),
+        (
+            "version: 3\nname: g\nmembers: {}\n",
+            "reads versions 1 through 2",
+        ),
         ("version: 1\nname: g\nmembers: {}\n", "has no members"),
         (
             concat!(
@@ -85,6 +88,15 @@ fn validate_refuses_a_graph_that_could_never_run() {
                 "    oneharness_config: ./oneharness.toml\n    schedule: {every: 0}\n",
             ),
             "never stops firing",
+        ),
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n    mode: bypass\n    deps: [build]\n",
+                "    agent: {oneharness_config: ./oneharness.toml}\n",
+                "    judge: {oneharness_config: ./oneharness.judge.toml}\n",
+            ),
+            "requires graph schema version 2",
         ),
         (
             concat!(
@@ -1287,7 +1299,7 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
     let release = workspace.at("cron-keeper-release");
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
@@ -1375,7 +1387,7 @@ fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
     let release = workspace.at("member-cancel-keeper-release");
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n",
             "  reporter:\n    kind: oneharness\n",
@@ -1578,7 +1590,7 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
     let workspace = Workspace::new();
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
@@ -1803,7 +1815,7 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
     let release = workspace.at("reset-keeper-release");
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
