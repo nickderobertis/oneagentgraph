@@ -1150,27 +1150,20 @@ fn smoke_refuses_a_turn_that_was_spent_and_failed() {
     );
 }
 
-/// A failed oneharness launch cannot keep a smoke waiting for more caller
-/// input, and its own diagnostic survives on the command's stderr.
-#[cfg(unix)]
+/// A failed paid harness cannot keep the real oneharness launch waiting for
+/// more caller input, and its diagnostic survives on the command's stderr.
 #[test]
 fn a_failing_smoke_closes_stdin_and_returns_an_actionable_error() {
     let workspace = Workspace::new();
     let dir = workspace.at("smoke");
     std::fs::create_dir_all(&dir).expect("smoke dir");
     std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
-    let waiting = workspace.write(
-        "wait-for-input.sh",
-        "#!/bin/sh\necho 'provider refused this launch' >&2\nread more\necho not-json\nexit 1\n",
-    );
-    executable(&waiting);
-
     let mut child = workspace.spawn_with_open_stdin(
         &["smoke", "--dir", &dir.display().to_string()],
-        &[(
-            "ONEAGENTGRAPH_ONEHARNESS_BIN",
-            &waiting.display().to_string(),
-        )],
+        &[
+            ("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness()),
+            ("FAKE_HARNESS_REFUSAL", "rate_limit"),
+        ],
     );
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let status = loop {
@@ -1186,12 +1179,13 @@ fn a_failing_smoke_closes_stdin_and_returns_an_actionable_error() {
     };
     assert_eq!(
         status.code(),
-        Some(2),
-        "a malformed report is invalid input"
+        Some(1),
+        "a spent, failed turn fails the smoke"
     );
     let output = child.wait_with_output().expect("smoke output");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("provider refused this launch"), "{stderr}");
+    assert!(stderr.contains("did not succeed"), "{stderr}");
+    assert!(stderr.contains("rate_limit"), "{stderr}");
 }
 
 /// A candidate that never ran the turn is the chain doing its job: `smoke` names
