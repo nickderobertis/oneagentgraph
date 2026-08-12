@@ -625,6 +625,7 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
     };
     std::fs::create_dir_all(&dir)
         .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
+    ensure_git_worktree(&dir)?;
     let verdict = smoke::run(&oneharness_bin(env), &dir)?;
     for candidate in &verdict.fell_through {
         println!(
@@ -645,6 +646,49 @@ fn run_smoke(args: &SmokeArgs, env: &BTreeMap<String, String>) -> Result<i32, Er
         println!("smoke: passed via {}", verdict.ran);
     }
     Ok(EXIT_SUCCESS)
+}
+
+/// Make the smoke's working directory acceptable to harnesses which require a
+/// trusted repository.
+///
+/// An existing worktree, including a caller-supplied subdirectory of one, is
+/// left alone. A standalone directory becomes its own empty repository. Doing
+/// this at the shared working-directory boundary keeps harness-specific flags
+/// out of a command whose chain may select any identity.
+fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
+    let inside = std::process::Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| {
+            Error::InvalidConfig(format!("cannot inspect {} with git: {err}", dir.display()))
+        })?;
+    if inside.status.success() && inside.stdout == b"true\n" {
+        return Ok(());
+    }
+
+    let initialized = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| {
+            Error::InvalidConfig(format!(
+                "cannot initialize {} as a git repository: {err}",
+                dir.display()
+            ))
+        })?;
+    if initialized.status.success() {
+        Ok(())
+    } else {
+        Err(Error::InvalidConfig(format!(
+            "cannot initialize {} as a git repository: {}",
+            dir.display(),
+            String::from_utf8_lossy(&initialized.stderr).trim()
+        )))
+    }
 }
 
 /// `oneagentgraph sweep`.

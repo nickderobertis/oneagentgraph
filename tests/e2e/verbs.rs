@@ -450,6 +450,44 @@ fn smoke_makes_its_own_throwaway_directory() {
     );
 }
 
+/// Every smoke directory is a git worktree, without nesting a repository when
+/// the caller supplied a directory already inside one.
+#[test]
+fn smoke_prepares_standalone_directories_and_preserves_existing_worktrees() {
+    let standalone = Workspace::new();
+    let plain = standalone.at("plain");
+    std::fs::create_dir_all(&plain).expect("plain smoke dir");
+    std::fs::write(plain.join("oneharness.toml"), CHAIN).expect("chain");
+    let run = standalone.run_with(
+        &["smoke", "--dir", &plain.display().to_string()],
+        &[("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness())],
+    );
+    run.expect_code(0);
+    assert!(
+        plain.join(".git").is_dir(),
+        "a standalone --dir was not initialized"
+    );
+
+    let existing = Workspace::new();
+    let initialized = std::process::Command::new("git")
+        .arg("init")
+        .arg("--quiet")
+        .arg(existing.path())
+        .status()
+        .expect("git runs");
+    assert!(initialized.success(), "git init failed");
+    let nested = existing.at("nested/smoke");
+    let run = existing.run_with(
+        &["smoke", "--dir", &nested.display().to_string()],
+        &[("ONEHARNESS_BIN_CLAUDE_CODE", &fake_harness())],
+    );
+    run.expect_code(0);
+    assert!(
+        !nested.join(".git").exists(),
+        "smoke nested a repository inside the caller's existing worktree"
+    );
+}
+
 /// `sweep` reports what it would reclaim and removes nothing while it does, and
 /// the floor keeps a run's own record until an operator asks past it.
 ///
@@ -1110,6 +1148,50 @@ fn smoke_refuses_a_turn_that_was_spent_and_failed() {
         "a spent, failed turn was reported as a pass: {}",
         run.stdout
     );
+}
+
+/// A failed oneharness launch cannot keep a smoke waiting for more caller
+/// input, and its own diagnostic survives on the command's stderr.
+#[cfg(unix)]
+#[test]
+fn a_failing_smoke_closes_stdin_and_returns_an_actionable_error() {
+    let workspace = Workspace::new();
+    let dir = workspace.at("smoke");
+    std::fs::create_dir_all(&dir).expect("smoke dir");
+    std::fs::write(dir.join("oneharness.toml"), CHAIN).expect("chain");
+    let waiting = workspace.write(
+        "wait-for-input.sh",
+        "#!/bin/sh\necho 'provider refused this launch' >&2\nread more\necho not-json\nexit 1\n",
+    );
+    executable(&waiting);
+
+    let mut child = workspace.spawn_with_open_stdin(
+        &["smoke", "--dir", &dir.display().to_string()],
+        &[(
+            "ONEAGENTGRAPH_ONEHARNESS_BIN",
+            &waiting.display().to_string(),
+        )],
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("smoke status") {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("a failed smoke remained blocked on its caller's open stdin");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "a malformed report is invalid input"
+    );
+    let output = child.wait_with_output().expect("smoke output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("provider refused this launch"), "{stderr}");
 }
 
 /// A candidate that never ran the turn is the chain doing its job: `smoke` names

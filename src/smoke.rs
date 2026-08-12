@@ -49,7 +49,7 @@
 // the classification, is the closed `Reason` set above.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -226,6 +226,10 @@ fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
         .arg(dir)
         .args(["--compact", "--prompt", PROMPT])
         .current_dir(dir)
+        // A smoke is one self-contained turn. Inheriting the caller's stdin
+        // lets oneharness wait for another prompt after that turn has already
+        // failed, wedging every caller that keeps its input open.
+        .stdin(Stdio::null())
         .output()
         .map_err(|err| Refusal {
             error: Error::InvalidConfig(format!("cannot run {oneharness_bin}: {err}")),
