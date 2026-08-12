@@ -53,6 +53,11 @@ pub const CONTROL_FILE: &str = "control.json";
 /// written by a build that knew something this one does not.
 pub const CONTROL_SCHEMA_VERSION: u32 = 1;
 
+/// The oldest shape this build can read, which is also the first this file ever
+/// had — there is no unversioned `control.json`, so anything below it is a value
+/// no build of this crate wrote.
+const FIRST_CONTROL_SCHEMA_VERSION: u32 = 1;
+
 /// Where an `oneharness interrupt` process addresses a member's controllable
 /// turn.
 ///
@@ -82,7 +87,7 @@ pub struct Address {
 /// second carries the reason an operator needs — a harness with no lever, a
 /// platform with no unix sockets, a run shape oneharness will not control.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "lowercase")]
+#[serde(tag = "state", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Turn {
     /// The member's agent side asked for a controllable turn, addressed here.
     Open {
@@ -143,10 +148,14 @@ pub fn read(scratch: &Path) -> Result<Turn, String> {
             path.display()
         )
     })?;
-    if record.schema_version > CONTROL_SCHEMA_VERSION {
+    // Both directions, and there is no default: `1` is the first shape this file
+    // ever had, so a record claiming `0` was written by nothing — it is a value
+    // somebody typed or a field that was zeroed, and acting on the address under
+    // it would be acting on a document whose shape is unknown.
+    if !(FIRST_CONTROL_SCHEMA_VERSION..=CONTROL_SCHEMA_VERSION).contains(&record.schema_version) {
         return Err(format!(
-            "the turn-control record at {} was written under schema version {} and this build \
-             reads {CONTROL_SCHEMA_VERSION}",
+            "the turn-control record at {} names schema version {}, and this build reads \
+             {FIRST_CONTROL_SCHEMA_VERSION} to {CONTROL_SCHEMA_VERSION}",
             path.display(),
             record.schema_version
         ));
@@ -154,7 +163,8 @@ pub fn read(scratch: &Path) -> Result<Turn, String> {
     Ok(record.turn)
 }
 
-/// Where one member's record lives.
+/// One place both the run and the `interrupt` process compose the record's
+/// location, so a rename cannot leave one of them reading a file nothing writes.
 fn path(scratch: &Path) -> PathBuf {
     scratch.join(CONTROL_FILE)
 }
@@ -234,7 +244,7 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
 /// error here rather than a refusal this verb reports without saying which.
 fn explain(reason: ControlReason) -> String {
     match reason {
-        // llmlint: ignore[changed_behavior_has_e2e] this arm has no journey
+        // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
         // because nothing this suite can build reaches it. oneharness answers
         // `no_active_turn` only from a mechanism that *drives* its turn over a
         // protocol — the HTTP and JSON-RPC ones — and the single seam these
@@ -248,6 +258,7 @@ fn explain(reason: ControlReason) -> String {
             "the member is between turns: its run is alive but nothing is in flight to redirect"
                 .to_string()
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         ControlReason::NotRunning => {
             "nothing is listening on the member's control socket, so its turn has already ended"
                 .to_string()
@@ -305,14 +316,47 @@ mod tests {
     #[test]
     fn an_unreadable_record_is_refused_rather_than_guessed_at() {
         let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(path(dir.path()), "{\"schema_version\":99,\"turn\":{\"state\":\"open\",\"address\":{\"session\":\"s\",\"cwd\":\"/w\"}}}")
+        // Both ends of the range: a build that knew more, and a version no build
+        // of this crate ever wrote.
+        for version in [0, 99] {
+            std::fs::write(
+                path(dir.path()),
+                format!(
+                    "{{\"schema_version\":{version},\"turn\":{{\"state\":\"open\",\"address\":\
+                     {{\"session\":\"s\",\"cwd\":\"/w\"}}}}}}"
+                ),
+            )
             .expect("write");
-        assert!(read(dir.path()).unwrap_err().contains("schema version 99"));
+            assert!(
+                read(dir.path())
+                    .unwrap_err()
+                    .contains(&format!("schema version {version}")),
+                "version {version} was acted on"
+            );
+        }
 
         std::fs::write(path(dir.path()), "not a record").expect("write");
         assert!(read(dir.path())
             .unwrap_err()
             .contains("not one this build can read"));
+
+        // A field this build does not know is refused rather than dropped, at
+        // every level of the record: the file is external input like any other,
+        // and a typo silently ignored is an address that is not the one the
+        // writer meant.
+        for hostile in [
+            "{\"schema_version\":1,\"turn\":{\"state\":\"open\",\"address\":{\"session\":\"s\",\"cwd\":\"/w\"}},\"extra\":1}",
+            "{\"schema_version\":1,\"turn\":{\"state\":\"open\",\"addres\":{\"session\":\"s\",\"cwd\":\"/w\"},\"address\":{\"session\":\"s\",\"cwd\":\"/w\"}}}",
+            "{\"schema_version\":1,\"turn\":{\"state\":\"unavailable\",\"reason\":\"no lever\",\"why\":\"no lever\"}}",
+        ] {
+            std::fs::write(path(dir.path()), hostile).expect("write");
+            assert!(
+                read(dir.path())
+                    .unwrap_err()
+                    .contains("not one this build can read"),
+                "{hostile} was accepted"
+            );
+        }
     }
 
     /// Every refusal oneharness can answer with says which of the exit-3 causes

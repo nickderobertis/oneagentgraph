@@ -1,9 +1,11 @@
 //! The `oneagentgraph` binary.
 //!
-//! Every verb `docs/contract.md` lists, and the three exit codes it assigns: `0`
+//! Every verb `docs/contract.md` lists, and the exit codes it assigns them: `0`
 //! every member settled successfully, `1` a member failed or died, `2` invalid
-//! config. Nothing here does the work — each verb parses its arguments, resolves
-//! where the run state lives, and hands off to the library.
+//! config — plus `3`, which only `interrupt` answers with and which is a *fact*
+//! rather than a failure (there was no controllable turn in flight). Nothing here
+//! does the work — each verb parses its arguments, resolves where the run state
+//! lives, and hands off to the library.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
