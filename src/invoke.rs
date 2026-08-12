@@ -132,10 +132,17 @@ pub struct JudgeLaunch {
     /// a working directory: this process has one of those and shares it with
     /// every other member.
     pub worktree: PathBuf,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the handle is a
+    // `String` for the reason [`crate::control::Address::session`] records: what
+    // a session handle may be is oneharness's rule, applied by it on both ends,
+    // and a type here would either restate rules this crate does not own or
+    // refuse a value oneharness accepts. It is written verbatim into the member's
+    // onejudge config as `session:`, which is a YAML string either way.
     /// The session handle threaded across this member's turns, which is also
     /// how an `oneagentgraph interrupt` addresses the turn in flight — see
     /// [`crate::control`].
     pub session: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// One member, ready to start.

@@ -68,16 +68,25 @@ const FIRST_CONTROL_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Address {
+    // llmlint: ignore-block[invalid_states_unrepresentable] a handle newtype
+    // would promise a guarantee this crate cannot hold. The shape a handle must
+    // have is oneharness's — it sanitizes the value on the way in and again when
+    // it resolves a socket — and this field carries *its* answer, read back from
+    // the report. A type validating it here would either restate rules this crate
+    // does not own, or reject the very value the producer says it bound; the same
+    // reasoning `src/cli.rs` records for the arguments it parses. The two fields
+    // that *are* paths carry `PathBuf`, which is where the rule does apply.
     /// The caller-owned session handle the turn is addressed by.
     pub session: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// The session store holding the handle and its control socket; absent when
     /// the run left oneharness's own default, which an `interrupt` that says
     /// nothing resolves the same way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_dir: Option<String>,
+    pub session_dir: Option<PathBuf>,
     /// The working directory the turn runs in, which is how `interrupt` reports
     /// which project's session the handle belongs to.
-    pub cwd: String,
+    pub cwd: PathBuf,
 }
 
 /// What a run recorded about one member's turn control.
@@ -200,9 +209,9 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
     let mut command = std::process::Command::new(bin);
     command.args(["interrupt", "--session", &address.session]);
     if let Some(dir) = &address.session_dir {
-        command.args(["--session-dir", dir]);
+        command.arg("--session-dir").arg(dir);
     }
-    command.args(["--cwd", &address.cwd, "--compact"]);
+    command.arg("--cwd").arg(&address.cwd).arg("--compact");
     if let Some(text) = input {
         command.args(["--input", text]);
     }

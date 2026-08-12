@@ -219,8 +219,8 @@ fn the_member_died_goldens_are_exactly_what_this_build_writes() {
 /// commits them: an address whose store the report named, one that left
 /// oneharness's own default, and an ask that was refused.
 fn golden_controls() -> Vec<ControlRecord> {
-    let session = "node-scope-1786171301679-1447994-worker".to_string();
-    let cwd = "/state/node-scope-1786171301679-1447994/members/worker".to_string();
+    let session = "node-scope-1786171301679-1447994-worker-skill".to_string();
+    let cwd = std::path::PathBuf::from("/state/node-scope-1786171301679-1447994/members/worker");
     vec![
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,

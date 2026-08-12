@@ -43,7 +43,7 @@ fn parked(workspace: &Workspace, task: &str) -> Parked {
         let workspace_dir = workspace.path().to_path_buf();
         let state = workspace.state();
         let dir = workspace.dir();
-        let xdg = workspace.at("xs");
+        let xdg = workspace.session_store().to_path_buf();
         let task = task.to_string();
         std::thread::spawn(move || {
             std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
@@ -69,7 +69,15 @@ fn parked(workspace: &Workspace, task: &str) -> Parked {
         })
     };
     let started = workspace.at("turn-started");
-    until("the member's turn to be in flight", || started.exists());
+    // Only a *controlled* turn writes this, which makes the wait a check on the
+    // control ask as well as on the turn: an oneharness that could not bind the
+    // socket refuses `--control`, onejudge retries without it, and the member
+    // runs on uncontrolled — so a timeout here is that, and the message says so.
+    until(
+        "the member's turn to be in flight — only a controlled turn writes this, so a timeout \
+         means oneharness refused `--control` and the turn ran without a lever",
+        || started.exists(),
+    );
     Parked {
         run,
         id: workspace.record()["run_id"]

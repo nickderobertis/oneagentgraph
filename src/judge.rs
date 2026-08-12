@@ -46,7 +46,7 @@
 //!    condemned, which is the failure the watchdog exists to prevent.
 
 use std::ops::ControlFlow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -142,7 +142,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             address: crate::control::Address {
                 session: agent_session(&launch.session),
                 session_dir: None,
-                cwd: launch.worktree.display().to_string(),
+                cwd: launch.worktree.clone(),
             },
         },
     );
@@ -379,8 +379,8 @@ fn record_control(report: &onejudge::Report, scratch: &Path) {
         Some(address) => crate::control::Turn::Open {
             address: crate::control::Address {
                 session: address.session.clone(),
-                session_dir: Some(address.session_dir.clone()),
-                cwd: address.cwd.clone(),
+                session_dir: Some(PathBuf::from(&address.session_dir)),
+                cwd: PathBuf::from(&address.cwd),
             },
         },
         None => crate::control::Turn::Unavailable {

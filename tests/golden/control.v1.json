@@ -4,7 +4,7 @@
     "turn": {
       "state": "open",
       "address": {
-        "session": "node-scope-1786171301679-1447994-worker",
+        "session": "node-scope-1786171301679-1447994-worker-skill",
         "session_dir": "/state/oneharness/sessions",
         "cwd": "/state/node-scope-1786171301679-1447994/members/worker"
       }
@@ -15,7 +15,7 @@
     "turn": {
       "state": "open",
       "address": {
-        "session": "node-scope-1786171301679-1447994-worker",
+        "session": "node-scope-1786171301679-1447994-worker-skill",
         "cwd": "/state/node-scope-1786171301679-1447994/members/worker"
       }
     }
