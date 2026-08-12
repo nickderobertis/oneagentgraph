@@ -294,3 +294,37 @@ fn a_failed_later_cron_firing_suppresses_that_iterations_chain() {
     let output = child.wait_with_output().expect("run finishes");
     assert_eq!(output.status.code(), Some(1));
 }
+
+#[test]
+fn a_cron_only_graph_quiesces_after_its_initial_firing() {
+    let workspace = Workspace::new();
+    workspace.graph(&format!(
+        concat!(
+            "version: 1\nname: cron-only\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  ticker:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {{every: 3600}}\n",
+            "  report:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
+        ),
+        fake = fake_harness(),
+    ));
+    let started = Instant::now();
+    let run = workspace.run_task("fake:complete-now: cron only");
+    run.expect_code(0);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(run.of_kind("cron-fired").is_empty());
+    assert_eq!(
+        run.of_kind("member-started")
+            .iter()
+            .filter(|event| {
+                crate::support::labels(event)
+                    .get("member")
+                    .map(String::as_str)
+                    == Some("report")
+            })
+            .count(),
+        1
+    );
+}
