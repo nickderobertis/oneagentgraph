@@ -12,9 +12,15 @@
 //! answer that protocol: it parks, it is aborted, and the redirection arrives as
 //! the next turn.
 
+// The parked-turn fixture below serves the journeys that drive a *live* control
+// socket, and those are `cfg(unix)` because that is what a unix domain socket is.
+// On Windows the fixture is still compiled — so it is still type-checked and
+// still linted — with nothing calling it, which is what this allows.
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
-use crate::support::{as_env, until, Workspace};
+use crate::support::{until, Workspace};
 
 /// One run whose member is parked on a controllable turn, and the run id an
 /// operator addresses it by.
@@ -425,7 +431,7 @@ fn a_delivery_that_could_not_be_attempted_is_a_failure_rather_than_an_absent_tur
         "ONEAGENTGRAPH_ONEHARNESS_BIN",
         "oneagentgraph-no-such-oneharness".to_string(),
     )];
-    let broken = as_env(&missing);
+    let broken = crate::support::as_env(&missing);
     let failed = workspace.run_with(
         &["interrupt", &run_id, "worker", "--input", "do this instead"],
         &broken,
