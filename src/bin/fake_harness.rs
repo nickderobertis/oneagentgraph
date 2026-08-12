@@ -36,7 +36,7 @@
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
-//! | `FAKE_HARNESS_FAIL_AFTER_MARKER`, `FAKE_HARNESS_FAIL_MEMBER` | let the named member run once, then crash later launches |
+//! | `FAKE_HARNESS_FAIL_AFTER_MARKER`, `FAKE_HARNESS_FAIL_IDENTITY` | let the codex identity run once, then crash later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
@@ -87,6 +87,30 @@ enum Refusal {
     Quota,
     /// The same shape after billed work, which a chain does not step past.
     RateLimit,
+}
+
+/// A validated request to fail the codex identity after its first launch.
+struct FailAfter {
+    marker: std::path::PathBuf,
+}
+
+impl FailAfter {
+    fn from_env() -> Result<Option<Self>, ()> {
+        let marker = std::env::var("FAKE_HARNESS_FAIL_AFTER_MARKER").ok();
+        let identity = std::env::var("FAKE_HARNESS_FAIL_IDENTITY").ok();
+        match (marker, identity) {
+            (None, None) => Ok(None),
+            (Some(named), Some(identity)) if identity == "codex" => {
+                named_path(&named, "FAKE_HARNESS_FAIL_AFTER_MARKER")
+                    .map(|marker| Some(Self { marker }))
+                    .ok_or(())
+            }
+            _ => {
+                eprintln!("fake-harness: fail-after needs both a marker and identity codex");
+                Err(())
+            }
+        }
+    }
 }
 
 impl Refusal {
@@ -174,24 +198,21 @@ fn main() -> std::process::ExitCode {
         return exit_code;
     }
 
-    if let (Ok(marker), Ok(member)) = (
-        std::env::var("FAKE_HARNESS_FAIL_AFTER_MARKER"),
-        std::env::var("FAKE_HARNESS_FAIL_MEMBER"),
-    ) {
-        if member != "codex" || marker.is_empty() || marker.contains('\0') {
-            eprintln!("fake-harness: fail-after needs member codex and a non-empty marker path");
-            return exit(2);
-        }
-        let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_default();
-        let selected =
-            session.contains(&format!("-{member}")) || argv.iter().any(|arg| arg == "exec");
-        if selected {
-            if std::path::Path::new(&marker).exists() {
-                eprintln!("fake-harness: later launch for {member} failed");
+    let fail_after = match FailAfter::from_env() {
+        Ok(control) => control,
+        Err(()) => return exit(2),
+    };
+    if let Some(control) = fail_after {
+        if argv.iter().any(|arg| arg == "exec") {
+            if control.marker.exists() {
+                eprintln!("fake-harness: later launch for codex failed");
                 return exit(1);
             }
-            if std::fs::write(&marker, "first launch completed").is_err() {
-                eprintln!("fake-harness: cannot write fail-after marker {marker}");
+            if std::fs::write(&control.marker, "first launch completed").is_err() {
+                eprintln!(
+                    "fake-harness: cannot write fail-after marker {}",
+                    control.marker.display()
+                );
                 return exit(2);
             }
         }

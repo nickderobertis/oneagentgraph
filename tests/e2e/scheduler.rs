@@ -17,14 +17,18 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  ticker:\n    kind: oneharness\n    oneharness_config: {ticker_config}\n",
             "    schedule: {{every: 3600}}\n",
+            "  bridge:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    deps: [anchor]\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
             "    task: 'fake:complete-now fake:hold={hold}'\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
-            "    mode: bypass\n    deps: [anchor]\n",
+            "    mode: bypass\n    deps: [bridge]\n",
             "  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "    deps: [ticker]\n",
+            "  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    deps: [report]\n",
         ),
         fake = fake,
         hold = hold,
@@ -111,18 +115,22 @@ fn a_failed_cron_firing_never_starts_that_iterations_chain() {
     let release = workspace.at("failure-release");
     let marker = workspace.at("ticker-first-run");
     workspace.write(
-        "ticker.toml",
+        "report.toml",
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
     );
     let graph = scheduled_graph(
         &fake_harness(),
         &release.display().to_string(),
-        "./ticker.toml",
+        "./oneharness.toml",
+    )
+    .replace(
+        "report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml",
+        "report:\n    kind: oneharness\n    oneharness_config: ./report.toml",
     )
     .replace(
         "members:\n",
         &format!(
-            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\n  FAKE_HARNESS_FAIL_MEMBER: codex\nmembers:\n",
+            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\n  FAKE_HARNESS_FAIL_IDENTITY: codex\nmembers:\n",
             fake = fake_harness(),
             marker = marker.display()
         ),
@@ -151,7 +159,11 @@ fn a_failed_cron_firing_never_starts_that_iterations_chain() {
         events_path()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .is_some_and(|stream| {
-                stream.contains("\"member\":\"keeper\"") && stream.contains("\"member\":\"report\"")
+                stream.contains("\"member\":\"keeper\"")
+                    && stream.lines().any(|line| {
+                        line.contains("\"kind\":\"member-settled\"")
+                            && line.contains("\"member\":\"publish\"")
+                    })
             })
     });
     let id = workspace.record()["run_id"]
@@ -159,14 +171,14 @@ fn a_failed_cron_firing_never_starts_that_iterations_chain() {
         .expect("run id")
         .to_string();
     workspace.run(&["trigger", &id, "ticker"]).expect_code(0);
-    until("the later ticker firing to fail", || {
+    until("the later report to fail", || {
         events_path()
             .and_then(|path| std::fs::read_to_string(path).ok())
             .is_some_and(|stream| {
                 stream.contains("\"kind\":\"cron-fired\"")
                     && stream.lines().any(|line| {
                         line.contains("\"kind\":\"member-died\"")
-                            && line.contains("\"member\":\"ticker\"")
+                            && line.contains("\"member\":\"report\"")
                     })
             })
     });
@@ -179,8 +191,19 @@ fn a_failed_cron_firing_never_starts_that_iterations_chain() {
                     && line.contains("\"member\":\"report\"")
             })
             .count(),
+        2,
+        "the later firing never reached the failing downstream member: {stream}"
+    );
+    assert_eq!(
+        stream
+            .lines()
+            .filter(|line| {
+                line.contains("\"kind\":\"member-started\"")
+                    && line.contains("\"member\":\"publish\"")
+            })
+            .count(),
         1,
-        "the failed later firing started its chain: {stream}"
+        "the failed downstream member started its dependant: {stream}"
     );
     std::fs::write(&release, "release").expect("release keeper");
     let output = child.wait_with_output().expect("run finishes");
