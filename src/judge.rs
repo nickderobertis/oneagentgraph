@@ -384,9 +384,10 @@ fn record_control(report: &onejudge::Report, scratch: &Path) {
             },
         },
         None => crate::control::Turn::Unavailable {
-            reason: report.control_unavailable.clone().unwrap_or_else(|| {
-                "this member's report named no controllable turn".to_string()
-            }),
+            reason: report
+                .control_unavailable
+                .clone()
+                .unwrap_or_else(|| "this member's report named no controllable turn".to_string()),
         },
     };
     crate::control::write(scratch, &turn);

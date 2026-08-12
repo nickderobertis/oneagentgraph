@@ -469,7 +469,10 @@ fn the_documented_interrupt_exit_codes_are_the_ones_the_crate_declares() {
             "the member has no controllable turn in flight",
         ),
         (EXIT_INVALID_CONFIG, "invalid arguments"),
-        (EXIT_MEMBER_FAILED, "a delivery that was attempted and failed"),
+        (
+            EXIT_MEMBER_FAILED,
+            "a delivery that was attempted and failed",
+        ),
     ] {
         assert!(
             sentence.contains(&format!("`{code}` {meaning}")),
@@ -477,7 +480,9 @@ fn the_documented_interrupt_exit_codes_are_the_ones_the_crate_declares() {
         );
     }
     assert!(
-        CONTRACT.contains(&format!("Exit `{EXIT_NO_CONTROLLABLE_TURN}` is **a fact, not an error**")),
+        CONTRACT.contains(&format!(
+            "Exit `{EXIT_NO_CONTROLLABLE_TURN}` is **a fact, not an error**"
+        )),
         "the contract no longer states that exit {EXIT_NO_CONTROLLABLE_TURN} is a fact"
     );
     // And every cause it can be, so an answer that says only "no turn" is a

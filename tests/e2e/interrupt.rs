@@ -93,6 +93,30 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
             .expect("the control record is JSON");
     assert_eq!(live["turn"]["state"], "open", "{live}");
 
+    // A redirection oneharness will not take is refused *before* the lever is
+    // pulled: exit 2 like every other bad argument, nothing on stdout, and the
+    // turn still there for the interrupt below. Driven through the real refusal
+    // rather than a restatement of it — a control character is not message text,
+    // because it reaches a harness inside a protocol frame.
+    let unusable = workspace.run(&[
+        "interrupt",
+        &run_id,
+        "worker",
+        "--input",
+        "do this\u{1b}[2Kinstead",
+    ]);
+    unusable.expect_code(2);
+    assert!(
+        unusable.stderr.contains("not message text"),
+        "{}",
+        unusable.stderr
+    );
+    assert!(
+        unusable.stdout.is_empty(),
+        "a redirection that was never delivered published an event: {}",
+        unusable.stdout
+    );
+
     let redirection = format!(
         "fake:complete-now fake:did-work={} stop and write the summary instead",
         redirected_work.display()
@@ -154,6 +178,19 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
         settled["turn"]["address"]["session_dir"].is_string(),
         "the report's own store directory did not replace the default: {settled}"
     );
+
+    // And the same lever on the same member, now that it is over: the run's own
+    // record says it settled, so the answer is that fact rather than a socket
+    // asked about a turn nobody is running.
+    let late = workspace.run(&["interrupt", &run_id, "worker", "--input", "one more thing"]);
+    late.expect_code(3);
+    assert!(
+        late.of_kind("turn-interrupted")[0]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("already settled")),
+        "{}",
+        late.stdout
+    );
 }
 
 /// A member on a harness with no out-of-band turn control is a **fact**, not a
@@ -178,7 +215,8 @@ fn a_member_with_no_control_mechanism_is_reported_as_a_fact_rather_than_a_failur
         .expect("the run recorded its id")
         .to_string();
 
-    let interrupted = workspace.run(&["interrupt", &run_id, "worker", "--input", "do this instead"]);
+    let interrupted =
+        workspace.run(&["interrupt", &run_id, "worker", "--input", "do this instead"]);
     interrupted.expect_code(3);
     let events = interrupted.of_kind("turn-interrupted");
     assert_eq!(events.len(), 1, "{}", interrupted.stdout);
@@ -388,10 +426,78 @@ fn a_delivery_that_could_not_be_attempted_is_a_failure_rather_than_an_absent_tur
     // And the turn is still there to be redirected by an install that works,
     // which is the point of telling the two answers apart.
     workspace
-        .run(&["interrupt", &run_id, "worker", "--input", "fake:complete-now: go"])
+        .run(&[
+            "interrupt",
+            &run_id,
+            "worker",
+            "--input",
+            "fake:complete-now: go",
+        ])
         .expect_code(0);
     let output = run.join().expect("the run thread");
     assert_eq!(output.status.code(), Some(0));
+}
+
+/// An interrupt aimed at a run that is no longer listening reports which fact
+/// applies rather than failing.
+///
+/// The record is planted, because that is the only way to reach the subject: what
+/// this verb does with a run that recorded an open turn and then went away — a
+/// killed launcher, a host that rebooted, a torn write — which is the state an
+/// operator meets after exactly the incident they reach for `interrupt` during.
+/// Real `oneharness` is what answers, and its own refusal is what this asserts on.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_aimed_at_a_run_that_is_gone_says_so_rather_than_failing() {
+    let workspace = Workspace::new();
+    let run_id = "node-scope-1786171301679-1447994";
+    let member = workspace
+        .state()
+        .join(run_id)
+        .join("members")
+        .join("worker");
+    std::fs::create_dir_all(&member).expect("the member's scratch");
+    std::fs::write(
+        workspace.state().join(run_id).join("record.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "run_id": run_id,
+            "graph": "./graph.yaml",
+            "name": "node-scope",
+            "started_ms": 1_786_171_301_679_u64,
+            "declared_members": ["worker"],
+            "refs": [],
+            "events_path": format!("/state/{run_id}/events.jsonl"),
+        })
+        .to_string(),
+    )
+    .expect("a run record with no outcome yet");
+    std::fs::write(
+        member.join("control.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "turn": {"state": "open", "address": {
+                "session": format!("{run_id}-worker-skill"),
+                "cwd": member.display().to_string(),
+            }},
+        })
+        .to_string(),
+    )
+    .expect("a control record for a turn that has gone");
+
+    // With no `--input` at all, which the contract allows: an interrupt that only
+    // asks the turn to stop. It carries no redirection, and says so.
+    let interrupted = workspace.run(&["interrupt", run_id, "worker"]);
+    interrupted.expect_code(3);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events[0]["payload"]["input_bytes"], 0);
+    assert!(
+        events[0]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("already ended")),
+        "{}",
+        interrupted.stdout
+    );
 }
 
 /// A one-identity `qwen` chain: the harness with no out-of-band turn control that

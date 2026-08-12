@@ -447,9 +447,7 @@ fn interrupt(args: &InterruptArgs, env: &BTreeMap<String, String>) -> Result<i32
         Ok(Turn::Unavailable { reason }) => Delivery::NoTurn(reason),
         Ok(Turn::Open { address }) => {
             if settled(&record, member) {
-                Delivery::NoTurn(
-                    "the member has already settled, so its turn is over".to_string(),
-                )
+                Delivery::NoTurn("the member has already settled, so its turn is over".to_string())
             } else {
                 oneagentgraph::control::deliver(&oneharness_bin(env), &address, input.as_deref())
             }
@@ -457,17 +455,16 @@ fn interrupt(args: &InterruptArgs, env: &BTreeMap<String, String>) -> Result<i32
         Err(reason) => Delivery::NoTurn(reason),
     };
 
-    // A redirection oneharness would not take is an argument this caller got
-    // wrong, and nothing was ever delivered — so it refuses like every other bad
-    // argument, before any event claims a lever was pulled.
-    if let Delivery::Invalid(reason) = &delivery {
-        return Err(Error::InvalidConfig(format!("--input: {reason}")));
-    }
-    let (code, reason) = match &delivery {
+    let (code, reason) = match delivery {
         Delivery::Delivered => (EXIT_SUCCESS, None),
-        Delivery::NoTurn(reason) => (EXIT_NO_CONTROLLABLE_TURN, Some(reason.clone())),
-        Delivery::Failed(reason) => (EXIT_MEMBER_FAILED, Some(reason.clone())),
-        Delivery::Invalid(_) => unreachable!("an invalid redirection refused above"),
+        Delivery::NoTurn(reason) => (EXIT_NO_CONTROLLABLE_TURN, Some(reason)),
+        Delivery::Failed(reason) => (EXIT_MEMBER_FAILED, Some(reason)),
+        // A redirection oneharness would not take is an argument this caller got
+        // wrong, and nothing was ever delivered — so it refuses like every other
+        // bad argument, before any event claims a lever was pulled.
+        Delivery::Invalid(reason) => {
+            return Err(Error::InvalidConfig(format!("--input: {reason}")))
+        }
     };
     publish(&record.run_id, member, bytes, reason.clone());
     // Exit 3 is a fact rather than an error, so it says so on stdout with the
@@ -492,7 +489,10 @@ fn redirection(args: &InterruptArgs) -> Result<Option<String>, Error> {
         }
         (Some(text), None) => text.clone(),
         (None, Some(path)) => std::fs::read_to_string(path).map_err(|err| {
-            Error::InvalidConfig(format!("cannot read --input-file {}: {err}", path.display()))
+            Error::InvalidConfig(format!(
+                "cannot read --input-file {}: {err}",
+                path.display()
+            ))
         })?,
         (None, None) => return Ok(None),
     };

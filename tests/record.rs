@@ -32,9 +32,7 @@
 
 use std::collections::BTreeMap;
 
-use oneagentgraph::control::{
-    Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION,
-};
+use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{Cause, Disposition, MemberDied, ENVELOPE_VERSION};
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;

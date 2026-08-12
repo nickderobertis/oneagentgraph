@@ -221,11 +221,10 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
         Err(_) if output.status.code() == Some(crate::error::EXIT_INVALID_CONFIG) => {
             Delivery::Invalid(stderr)
         }
-        Err(err) => Delivery::Failed(if stderr.is_empty() {
-            format!("`{bin} interrupt` answered nothing this build could read: {err}")
-        } else {
-            stderr
-        }),
+        Err(err) => Delivery::Failed(format!(
+            "`{bin} interrupt` answered nothing this build could read ({err}); its standard error \
+             said: {stderr}"
+        )),
     }
 }
 
@@ -270,17 +269,10 @@ mod tests {
             .unwrap_err()
             .contains("opened no controllable turn"));
 
-        write(
-            dir.path(),
-            &Turn::Open {
-                address: address(),
-            },
-        );
+        write(dir.path(), &Turn::Open { address: address() });
         assert_eq!(
             read(dir.path()).expect("a record"),
-            Turn::Open {
-                address: address()
-            }
+            Turn::Open { address: address() }
         );
 
         // The second write is the report's answer, and it replaces the first:
@@ -291,10 +283,11 @@ mod tests {
                 reason: "harness `qwen` has no out-of-band turn control".into(),
             },
         );
-        let Turn::Unavailable { reason } = read(dir.path()).expect("a record") else {
-            panic!("the refusal did not replace the address");
-        };
-        assert!(reason.contains("no out-of-band turn control"));
+        assert!(
+            matches!(read(dir.path()).expect("a record"), Turn::Unavailable { reason }
+                if reason.contains("no out-of-band turn control")),
+            "the refusal did not replace the address"
+        );
     }
 
     /// A record from a build that knew more is refused by version, and one that
@@ -324,16 +317,28 @@ mod tests {
     /// A delivery to a binary that is not there is a failure naming the binary,
     /// not a turn that was found to be absent — the two are different exit codes
     /// and an operator acts on them differently.
+    ///
+    /// Driven for both shapes of address, because the store directory is the one
+    /// part of it that is only sometimes on the command line: absent while the
+    /// run left oneharness's own default, and named once the report says which
+    /// store it bound.
     #[test]
     fn a_missing_oneharness_is_a_failed_delivery_rather_than_an_absent_turn() {
-        let delivery = deliver(
-            "oneagentgraph-no-such-oneharness",
-            &address(),
-            Some("do this instead"),
-        );
-        let Delivery::Failed(reason) = delivery else {
-            panic!("a binary that is not there was not reported as a failed delivery");
+        let named = Address {
+            session_dir: Some("/state/oneharness/sessions".into()),
+            ..address()
         };
-        assert!(reason.contains("oneagentgraph-no-such-oneharness"), "{reason}");
+        for target in [address(), named] {
+            let delivery = deliver(
+                "oneagentgraph-no-such-oneharness",
+                &target,
+                Some("do this instead"),
+            );
+            assert!(
+                matches!(&delivery, Delivery::Failed(reason)
+                    if reason.contains("oneagentgraph-no-such-oneharness")),
+                "a binary that is not there was not reported as a failed delivery: {delivery:?}"
+            );
+        }
     }
 }
