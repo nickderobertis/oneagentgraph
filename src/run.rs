@@ -415,9 +415,11 @@ const RESERVED_LABELS: &[&str] = &["run_id", "member", "persona"];
 ///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when a path names nothing the document has.
+/// [`Error::InvalidConfig`] when a path names nothing in the schema, an
+/// intermediate parent is absent, or the value does not have the field's type.
 pub fn apply_overrides(document: &mut Value, overrides: &[Override]) -> Result<(), Error> {
     for Override { path, value } in overrides {
+        let before = document.clone();
         let mut cursor = &mut *document;
         let segments: Vec<&str> = path.split('.').collect();
         let (last, parents) = segments.split_last().ok_or_else(|| {
@@ -428,23 +430,72 @@ pub fn apply_overrides(document: &mut Value, overrides: &[Override]) -> Result<(
                 Error::InvalidConfig(format!("--set {path}=…: this graph has no {segment}"))
             })?;
         }
-        let slot = cursor
-            .as_object_mut()
-            .and_then(|map| map.get_mut(*last))
-            .ok_or_else(|| {
-                Error::InvalidConfig(format!("--set {path}=…: this graph has no {last}"))
+        let object = cursor.as_object_mut().ok_or_else(|| {
+            Error::InvalidConfig(format!("--set {path}=…: this graph has no {last}"))
+        })?;
+        if let Some(slot) = object.get_mut(*last) {
+            *slot = match slot {
+                Value::Number(_) => value.parse::<u64>().map(Value::from).map_err(|_| {
+                    Error::InvalidConfig(format!("--set {path}={value:?}: not a number"))
+                })?,
+                Value::Bool(_) => value.parse::<bool>().map(Value::from).map_err(|_| {
+                    Error::InvalidConfig(format!("--set {path}={value:?}: not a boolean"))
+                })?,
+                _ => Value::String(value.clone()),
+            };
+        } else {
+            // An override may add an optional leaf, but it may not repair an
+            // otherwise invalid graph by supplying a required field.
+            graph_from_value(&before).map_err(|err| {
+                Error::InvalidConfig(format!(
+                    "--set {path}=…: the graph must satisfy the schema before an absent field can be populated: {err}"
+                ))
             })?;
-        *slot = match slot {
-            Value::Number(_) => value.parse::<u64>().map(Value::from).map_err(|_| {
-                Error::InvalidConfig(format!("--set {path}={value:?}: not a number"))
-            })?,
-            Value::Bool(_) => value.parse::<bool>().map(Value::from).map_err(|_| {
-                Error::InvalidConfig(format!("--set {path}={value:?}: not a boolean"))
-            })?,
-            _ => Value::String(value.clone()),
-        };
+            // The document cannot tell an absent optional leaf's type. Let the
+            // same deny-unknown-fields schema that reads graph files decide
+            // both whether the field exists and which textual shape it accepts.
+            // String comes first so a string field keeps CLI text such as
+            // `true`; YAML parsing supplies numbers, booleans, lists, and maps.
+            let parsed = serde_norway::from_str::<Value>(value).ok();
+            let mut candidates = vec![Value::String(value.clone())];
+            if let Some(parsed) = parsed.filter(|parsed| parsed != &candidates[0]) {
+                candidates.push(parsed);
+            }
+            let mut accepted = None;
+            for candidate in candidates {
+                let mut candidate_document = before.clone();
+                insert_leaf(&mut candidate_document, parents, last, candidate);
+                if graph_from_value(&candidate_document).is_ok() {
+                    accepted = Some(candidate_document);
+                    break;
+                }
+            }
+            let candidate_document = accepted.ok_or_else(|| {
+                Error::InvalidConfig(format!(
+                    "--set {path}={value:?}: the schema has no field at this path, or the value does not parse as that field's type"
+                ))
+            })?;
+            *document = candidate_document;
+        }
     }
     Ok(())
+}
+
+fn graph_from_value(document: &Value) -> Result<GraphConfig, serde_norway::Error> {
+    serde_norway::from_value(serde_norway::to_value(document)?)
+}
+
+fn insert_leaf(document: &mut Value, parents: &[&str], last: &str, value: Value) {
+    let mut cursor = document;
+    for segment in parents {
+        cursor = cursor
+            .get_mut(segment)
+            .expect("parents were found in the source document");
+    }
+    cursor
+        .as_object_mut()
+        .expect("the leaf's parent was an object in the source document")
+        .insert(last.to_string(), value);
 }
 
 /// The order members may start in, or the reason there is none.
@@ -961,7 +1012,16 @@ mod tests {
     #[test]
     fn set_overrides_reach_the_field_they_name() {
         let mut document: Value = serde_json::json!({
-            "members": {"worker": {"agent": {"model": Value::Null, "stream": true}, "max_turns": 4}}
+            "version": 1,
+            "name": "g",
+            "members": {"worker": {
+                "kind": "onejudge",
+                "base_config": "base.yaml",
+                "agent": {"oneharness_config": "agent.toml", "model": Value::Null, "stream": true},
+                "judge": {"oneharness_config": "judge.toml"},
+                "mode": "bypass",
+                "max_turns": 4
+            }}
         });
         let set = |raw: &str| parse_set(raw).expect("a parsed override");
         apply_overrides(
@@ -986,12 +1046,26 @@ mod tests {
             Value::from(9u64)
         );
 
+        apply_overrides(
+            &mut document,
+            &[
+                set("members.worker.persona=engineer"),
+                set("members.worker.task=true"),
+            ],
+        )
+        .expect("schema-known optional string leaves can be absent");
+        assert_eq!(document["members"]["worker"]["persona"], "engineer");
+        assert_eq!(document["members"]["worker"]["task"], "true");
+
         for (path, expected) in [
             ("members.ghost.model", "this graph has no ghost"),
-            ("members.worker.ghost", "this graph has no ghost"),
+            ("members.worker.ghost", "schema has no field"),
         ] {
             let err = apply_overrides(&mut document, &[set(&format!("{path}=x"))]).unwrap_err();
-            assert!(err.to_string().contains(expected), "{path}: {err}");
+            assert!(
+                err.to_string().contains(path) && err.to_string().contains(expected),
+                "{path}: {err}"
+            );
         }
         let err =
             apply_overrides(&mut document, &[set("members.worker.max_turns=many")]).unwrap_err();
@@ -999,6 +1073,22 @@ mod tests {
         let err =
             apply_overrides(&mut document, &[set("members.worker.agent.stream=yes")]).unwrap_err();
         assert!(err.to_string().contains("not a boolean"), "{err}");
+
+        let err =
+            apply_overrides(&mut document, &[set("members.worker.schedule.every=3")]).unwrap_err();
+        assert!(
+            err.to_string().contains("members.worker.schedule.every"),
+            "{err}"
+        );
+
+        let mut missing_required = document.clone();
+        missing_required["members"]["worker"]
+            .as_object_mut()
+            .expect("member object")
+            .remove("mode");
+        let err = apply_overrides(&mut missing_required, &[set("members.worker.mode=bypass")])
+            .unwrap_err();
+        assert!(err.to_string().contains("members.worker.mode"), "{err}");
     }
 
     /// `--set` and `--label` say what they expected when they are given

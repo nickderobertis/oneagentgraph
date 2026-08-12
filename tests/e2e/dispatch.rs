@@ -741,6 +741,9 @@ fn an_incomplete_base_config_refuses_the_run() {
 #[test]
 fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     let workspace = Workspace::new();
+    // `persona` is optional and deliberately absent from this real graph. Two
+    // flags also prove the established left-to-right, last-one-wins ordering.
+    workspace.graph(&two_party_graph(&fake_harness(), "").replace("    persona: engineer\n", ""));
     let run = workspace.run(&[
         "run",
         "./graph.yaml",
@@ -750,8 +753,16 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
         &workspace.dir().display().to_string(),
         "--set",
         "members.worker.mode=read-only",
+        "--set",
+        "members.worker.persona=reviewer",
+        "--set",
+        "members.worker.persona=engineer",
     ]);
     run.expect_code(0);
+    assert_eq!(
+        labels(&run.of_kind("member-started")[0])["persona"],
+        "engineer"
+    );
 
     let refused = workspace.run(&[
         "run",
