@@ -278,8 +278,19 @@ fn a_member_with_no_control_mechanism_is_reported_as_a_fact_rather_than_a_failur
     let reason = events[0]["payload"]["reason"]
         .as_str()
         .expect("a delivery that did not land names why");
+    // Which refusal reaches the report depends on which one comes first, and
+    // that is oneharness's ordering rather than this crate's: where there are no
+    // unix domain sockets at all, no harness has a lever and the platform is the
+    // honest answer — a member on `qwen` would be told the same thing on a
+    // platform that does. Either way the answer names the fact, which is the
+    // property under test.
+    let expected = if cfg!(unix) {
+        "no out-of-band turn control"
+    } else {
+        "unix domain socket"
+    };
     assert!(
-        reason.contains("no out-of-band turn control"),
+        reason.contains(expected),
         "exit 3 did not say which of its causes applied: {reason}"
     );
     assert!(
