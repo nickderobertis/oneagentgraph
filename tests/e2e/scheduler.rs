@@ -355,6 +355,80 @@ fn a_failed_initial_scheduled_run_skips_its_chain_and_settles() {
 }
 
 #[test]
+fn a_failed_initial_scheduled_run_can_fire_again_while_non_cron_work_is_live() {
+    let workspace = Workspace::new();
+    let release = workspace.at("initial-failure-release");
+    let failed_once = workspace.at("ticker-failed-once");
+    workspace.write(
+        "ticker.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let graph = scheduled_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        "./ticker.toml",
+    )
+    .replace(
+        "members:\n",
+        &format!(
+            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_ONCE_MARKER: {failed_once}\n  FAKE_HARNESS_FAIL_ONCE_IDENTITY: codex\nmembers:\n",
+            fake = fake_harness(),
+            failed_once = failed_once.display(),
+        ),
+    );
+    workspace.graph(&graph);
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: initial scheduled failure recovers",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events_path = || {
+        std::fs::read_dir(workspace.state())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .next()
+            .map(|entry| entry.path().join("events.jsonl"))
+    };
+    until("the initial ticker failure and live keeper", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.contains("\"member\":\"keeper\"")
+                    && stream.lines().any(|line| {
+                        line.contains("\"kind\":\"member-died\"")
+                            && line.contains("\"member\":\"ticker\"")
+                    })
+            })
+    });
+    let id = workspace.record()["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    workspace.run(&["trigger", &id, "ticker"]).expect_code(0);
+    until("the recovered firing to run its chain", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.contains("\"kind\":\"cron-fired\"")
+                    && stream.lines().any(|line| {
+                        line.contains("\"kind\":\"member-started\"")
+                            && line.contains("\"member\":\"report\"")
+                    })
+            })
+    });
+    std::fs::write(&release, "release").expect("release keeper");
+    let output = child.wait_with_output().expect("run finishes");
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
 fn cron_iterations_keep_failed_independent_dependencies_blocked() {
     let workspace = Workspace::new();
     let release = workspace.at("independent-failure-release");

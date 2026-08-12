@@ -736,7 +736,7 @@ pub fn run(
             if outcome.is_success() {
                 successful_members
                     .lock()
-                    .expect("successful-member set is not poisoned")
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(name.clone());
             }
             if !solely_cron_descended(name, &graph, &mut BTreeMap::new()) {
@@ -869,6 +869,10 @@ fn spawn_cron(
             &root.join(SIGNAL_DIR),
             &live,
             || {
+                successful
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(name.clone());
                 run_cron_chain(
                     &descendants,
                     &graph,
@@ -927,7 +931,7 @@ fn run_cron_chain(
     };
     let mut successful = settled_successes
         .lock()
-        .expect("successful-member set is not poisoned")
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
     successful.retain(|name| !descendants.contains(name));
     for wave in waves {

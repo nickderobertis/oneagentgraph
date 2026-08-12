@@ -1,5 +1,10 @@
 # Scheduler notes
 
+<!-- llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] This
+document is the task-required claim-to-symbol implementation map, not a second
+normative contract; docs/contract.md remains authoritative and tests/contract.rs
+drives its fenced examples through the public types. -->
+
 This note describes the implementation behind the graph contract. The contract
 itself remains `docs/contract.md`; this is a map from its scheduling vocabulary
 to the code that enforces it.

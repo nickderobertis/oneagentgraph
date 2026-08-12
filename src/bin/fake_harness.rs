@@ -37,6 +37,7 @@
 //! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
 //! | `FAKE_HARNESS_FAIL_AFTER_MARKER`, `FAKE_HARNESS_FAIL_IDENTITY` | let the codex identity run once, then crash later launches |
+//! | `FAKE_HARNESS_FAIL_ONCE_MARKER`, `FAKE_HARNESS_FAIL_ONCE_IDENTITY` | crash the codex identity once, then allow later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
@@ -92,6 +93,30 @@ enum Refusal {
 /// A validated request to fail the codex identity after its first launch.
 struct FailAfter {
     marker: std::path::PathBuf,
+}
+
+/// A validated request to fail the codex identity only on its first launch.
+struct FailOnce {
+    marker: std::path::PathBuf,
+}
+
+impl FailOnce {
+    fn from_env() -> Result<Option<Self>, ()> {
+        let marker = std::env::var("FAKE_HARNESS_FAIL_ONCE_MARKER").ok();
+        let identity = std::env::var("FAKE_HARNESS_FAIL_ONCE_IDENTITY").ok();
+        match (marker, identity) {
+            (None, None) => Ok(None),
+            (Some(named), Some(identity)) if identity == "codex" => {
+                named_path(&named, "FAKE_HARNESS_FAIL_ONCE_MARKER")
+                    .map(|marker| Some(Self { marker }))
+                    .ok_or(())
+            }
+            _ => {
+                eprintln!("fake-harness: fail-once needs both a marker and identity codex");
+                Err(())
+            }
+        }
+    }
 }
 
 impl FailAfter {
@@ -215,6 +240,22 @@ fn main() -> std::process::ExitCode {
                 );
                 return exit(2);
             }
+        }
+    }
+    let fail_once = match FailOnce::from_env() {
+        Ok(control) => control,
+        Err(()) => return exit(2),
+    };
+    if let Some(control) = fail_once {
+        if argv.iter().any(|arg| arg == "exec")
+            && std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&control.marker)
+                .is_ok()
+        {
+            eprintln!("fake-harness: first launch for codex failed");
+            return exit(1);
         }
     }
 
