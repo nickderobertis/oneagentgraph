@@ -35,6 +35,8 @@ use serde_json::{json, Value};
 
 /// The approved contract itself.
 const CONTRACT: &str = include_str!("../docs/contract.md");
+/// The package-front example must name the same current graph schema.
+const README: &str = include_str!("../README.md");
 
 /// Every variant of [`EventKind`], so the doc-derived list below is checked in
 /// both directions: a kind the document forgets, and a kind the crate forgets.
@@ -979,6 +981,15 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     let reparsed: GraphConfig =
         serde_norway::from_str(&reserialized).expect("the serialized graph does not parse back");
     assert_eq!(reparsed, graph, "the graph schema must round-trip");
+}
+
+#[test]
+fn the_readme_graph_uses_the_current_schema_version() {
+    let expected = format!("```yaml\nversion: {SCHEMA_VERSION}\n");
+    assert!(
+        README.contains(&expected),
+        "the README graph example must begin with {expected:?}"
+    );
 }
 
 /// The contract documents `deps` on both member variants and both round-trip.
