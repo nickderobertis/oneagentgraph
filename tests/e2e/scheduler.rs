@@ -113,7 +113,7 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
 fn a_failed_downstream_member_suppresses_its_dependant_in_that_cron_iteration() {
     let workspace = Workspace::new();
     let release = workspace.at("failure-release");
-    let marker = workspace.at("ticker-first-run");
+    let marker = workspace.at("report-first-run");
     workspace.write(
         "report.toml",
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
