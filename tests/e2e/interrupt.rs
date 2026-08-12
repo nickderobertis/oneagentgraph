@@ -12,39 +12,39 @@
 //! answer that protocol: it parks, it is aborted, and the redirection arrives as
 //! the next turn.
 
+use std::path::PathBuf;
+
 use crate::support::{as_env, until, Workspace};
 
-/// The one journey the verb exists for: an in-flight turn stops what it was
-/// doing and does the new work instead.
-///
-/// The two files are the whole assertion. `did-work` is appended by a controlled
-/// turn *after* it is past its park and past any abort, so the first turn's copy
-/// proves it never got there and the redirected turn's proves it did — and the
-/// second is the operator's own prose, delivered with the stop as one operation.
-/// A member that had merely been cancelled and restarted would have written
-/// neither: there would be no second turn on that session at all.
-///
-/// Unix-only because oneharness's turn-control socket is a unix domain socket,
-/// which is also why a Windows member reports no controllable turn — the journey
-/// below drives that answer.
-#[cfg(unix)]
-#[test]
-fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
-    let workspace = Workspace::new();
-    let started = workspace.at("turn-started");
-    let original_work = workspace.at("did-original-work");
-    let redirected_work = workspace.at("did-redirected-work");
+/// One run whose member is parked on a controllable turn, and the run id an
+/// operator addresses it by.
+struct Parked {
+    /// The run process, still going.
+    run: std::thread::JoinHandle<std::process::Output>,
+    /// The run an `interrupt` names.
+    id: String,
+}
 
-    let task = format!(
-        "fake:park fake:started={} fake:did-work={}",
-        started.display(),
-        original_work.display()
-    );
+impl Parked {
+    /// What the run exited with, once it is over.
+    fn settled(self) -> std::process::Output {
+        self.run.join().expect("the run thread")
+    }
+}
+
+/// Start the default graph on a task that parks its agent turn, and wait until
+/// that turn is really in flight.
+///
+/// The wait is on a marker only a *controlled* turn writes, so what follows is
+/// addressed at a turn oneharness has already opened a socket for — waiting for
+/// the process instead would race the bind.
+fn parked(workspace: &Workspace, task: &str) -> Parked {
     let run = {
         let workspace_dir = workspace.path().to_path_buf();
         let state = workspace.state();
         let dir = workspace.dir();
         let xdg = workspace.at("xs");
+        let task = task.to_string();
         std::thread::spawn(move || {
             std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
                 .args([
@@ -68,12 +68,52 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
                 .expect("the run finishes")
         })
     };
-
+    let started = workspace.at("turn-started");
     until("the member's turn to be in flight", || started.exists());
-    let run_id = workspace.record()["run_id"]
-        .as_str()
-        .expect("the run recorded its id")
-        .to_string();
+    Parked {
+        run,
+        id: workspace.record()["run_id"]
+            .as_str()
+            .expect("the run recorded its id")
+            .to_string(),
+    }
+}
+
+/// The task that parks a member's agent turn, writing the marker [`parked`]
+/// waits for.
+fn parking_task(workspace: &Workspace, did_work: Option<&PathBuf>) -> String {
+    let mut task = format!(
+        "fake:park fake:started={}",
+        workspace.at("turn-started").display()
+    );
+    if let Some(path) = did_work {
+        task.push_str(&format!(" fake:did-work={}", path.display()));
+    }
+    task
+}
+
+/// The one journey the verb exists for: an in-flight turn stops what it was
+/// doing and does the new work instead.
+///
+/// The two files are the whole assertion. `did-work` is appended by a controlled
+/// turn *after* it is past its park and past any abort, so the first turn's copy
+/// proves it never got there and the redirected turn's proves it did — and the
+/// second is the operator's own prose, delivered with the stop as one operation.
+/// A member that had merely been cancelled and restarted would have written
+/// neither: there would be no second turn on that session at all.
+///
+/// Unix-only because oneharness's turn-control socket is a unix domain socket,
+/// which is also why a Windows member reports no controllable turn — the journey
+/// below drives that answer.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
+    let workspace = Workspace::new();
+    let original_work = workspace.at("did-original-work");
+    let redirected_work = workspace.at("did-redirected-work");
+
+    let member = parked(&workspace, &parking_task(&workspace, Some(&original_work)));
+    let run_id = member.id.clone();
 
     // The address the run wrote down while the turn is live. It is this crate's
     // own answer — the report that carries oneharness's cannot arrive until the
@@ -141,7 +181,7 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
     );
     assert_eq!(events[0]["labels"]["run_id"], run_id.as_str());
 
-    let output = run.join().expect("the run thread");
+    let output = member.settled();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
         output.status.code(),
@@ -360,50 +400,18 @@ fn every_unusable_interrupt_is_refused_by_name() {
 }
 
 /// A delivery that was attempted and failed is exit 1 — the lever broke, which is
-/// not the same answer as a turn that was simply not there.
+/// not the same answer as a turn that was simply not there. The turn survives it,
+/// and a **stop-only** interrupt then ends it without redirecting it at anything.
 ///
-/// Driven at the one seam a journey can reach it through: the `oneharness` the
-/// verb shells out to is named by the environment, and one that is not there is
-/// the same failure a host with a broken install has.
+/// The failure is driven at the one seam a journey can reach it through: the
+/// `oneharness` the verb shells out to is named by the environment, and one that
+/// is not there is the same failure a host with a broken install has.
 #[cfg(unix)]
 #[test]
 fn a_delivery_that_could_not_be_attempted_is_a_failure_rather_than_an_absent_turn() {
     let workspace = Workspace::new();
-    let started = workspace.at("turn-started");
-    let task = format!("fake:park fake:started={}", started.display());
-    let run = {
-        let workspace_dir = workspace.path().to_path_buf();
-        let state = workspace.state();
-        let dir = workspace.dir();
-        let xdg = workspace.at("xs");
-        std::thread::spawn(move || {
-            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
-                .args([
-                    "run",
-                    "./graph.yaml",
-                    "--task",
-                    &task,
-                    "--dir",
-                    &dir.display().to_string(),
-                ])
-                .current_dir(&workspace_dir)
-                .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env(
-                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
-                    crate::support::oneharness_bin(),
-                )
-                .env("XDG_STATE_HOME", &xdg)
-                .env_remove("ONEHARNESS_HARNESSES")
-                .env_remove("ONEHARNESS_MODEL")
-                .output()
-                .expect("the run finishes")
-        })
-    };
-    until("the member's turn to be in flight", || started.exists());
-    let run_id = workspace.record()["run_id"]
-        .as_str()
-        .expect("the run recorded its id")
-        .to_string();
+    let member = parked(&workspace, &parking_task(&workspace, None));
+    let run_id = member.id.clone();
 
     let missing = [(
         "ONEAGENTGRAPH_ONEHARNESS_BIN",
@@ -423,32 +431,81 @@ fn a_delivery_that_could_not_be_attempted_is_a_failure_rather_than_an_absent_tur
     let events = failed.of_kind("turn-interrupted");
     assert_eq!(events[0]["payload"]["delivered"], false);
 
-    // And the turn is still there to be redirected by an install that works,
-    // which is the point of telling the two answers apart.
-    workspace
-        .run(&[
-            "interrupt",
-            &run_id,
-            "worker",
-            "--input",
-            "fake:complete-now: go",
-        ])
-        .expect_code(0);
-    let output = run.join().expect("the run thread");
-    assert_eq!(output.status.code(), Some(0));
+    // And the turn is still there for an install that works, which is the point
+    // of telling the two answers apart. With no `--input`, which the contract
+    // allows: the turn stops and nothing takes its place.
+    let stopped = workspace.run(&["interrupt", &run_id, "worker"]);
+    stopped.expect_code(0);
+    let events = stopped.of_kind("turn-interrupted");
+    assert_eq!(events[0]["payload"]["delivered"], true);
+    assert_eq!(
+        events[0]["payload"]["input_bytes"], 0,
+        "an interrupt that only stops the turn carried a redirection: {}",
+        stopped.stdout
+    );
+    assert_eq!(member.settled().status.code(), Some(0));
 }
 
-/// An interrupt aimed at a run that is no longer listening reports which fact
-/// applies rather than failing.
-///
-/// The record is planted, because that is the only way to reach the subject: what
-/// this verb does with a run that recorded an open turn and then went away — a
-/// killed launcher, a host that rebooted, a torn write — which is the state an
-/// operator meets after exactly the incident they reach for `interrupt` during.
-/// Real `oneharness` is what answers, and its own refusal is what this asserts on.
+/// The redirection may come from a file, which is how an operator sends one too
+/// long or too shell-hostile to type on an argv.
 #[cfg(unix)]
 #[test]
-fn an_interrupt_aimed_at_a_run_that_is_gone_says_so_rather_than_failing() {
+fn a_redirection_read_from_a_file_reaches_the_turn_the_same_way() {
+    let workspace = Workspace::new();
+    let redirected_work = workspace.at("did-redirected-work");
+    let member = parked(&workspace, &parking_task(&workspace, None));
+
+    let redirection = format!(
+        "fake:complete-now fake:did-work={}\nwrite the summary instead\n",
+        redirected_work.display()
+    );
+    let file = workspace.write("redirect.md", &redirection);
+    let interrupted = workspace.run(&[
+        "interrupt",
+        &member.id,
+        "worker",
+        "--input-file",
+        &file.display().to_string(),
+    ]);
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events[0]["payload"]["delivered"], true);
+    assert_eq!(
+        events[0]["payload"]["input_bytes"],
+        redirection.len() as u64,
+        "the file's own bytes are what was delivered: {}",
+        interrupted.stdout
+    );
+
+    assert_eq!(member.settled().status.code(), Some(0));
+    let did = std::fs::read_to_string(&redirected_work)
+        .expect("the redirected turn never did the new work");
+    assert!(
+        did.contains("write the summary instead"),
+        "the turn that ran after the interrupt did not do what the file asked: {did:?}"
+    );
+}
+
+/// An interrupt aimed at a run whose state this build cannot act on reports which
+/// fact applies rather than failing: a turn that has gone, a record torn in half,
+/// and one a later build wrote.
+///
+/// The records are planted, because that is the only way to reach the subject —
+/// exactly as `tests/record.rs` plants a run record for the same reason. What
+/// this verb does with a run that recorded an open turn and then went away is the
+/// state an operator meets *after* the incident they reach for `interrupt`
+/// during: a killed launcher, a host that rebooted, a torn write, or a run
+/// started by the version they are about to upgrade past. No sequence of commands
+/// produces those, and a journey that only drove healthy runs would leave the
+/// answers an operator meets in anger unproven. Real `oneharness` is what answers
+/// the first of them, and its own refusal is what this asserts on.
+///
+/// llmlint: ignore-block[tests_mirror_real_usage] see the paragraph above: the
+/// planted files are the *subject*, not a shortcut around one — every command
+/// under test is still the compiled binary reached the way a user reaches it.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_aimed_at_a_run_this_build_cannot_act_on_says_so_rather_than_failing() {
     let workspace = Workspace::new();
     let run_id = "node-scope-1786171301679-1447994";
     let member = workspace
@@ -472,33 +529,45 @@ fn an_interrupt_aimed_at_a_run_that_is_gone_says_so_rather_than_failing() {
         .to_string(),
     )
     .expect("a run record with no outcome yet");
-    std::fs::write(
-        member.join("control.json"),
-        serde_json::json!({
-            "schema_version": 1,
-            "turn": {"state": "open", "address": {
-                "session": format!("{run_id}-worker-skill"),
-                "cwd": member.display().to_string(),
-            }},
-        })
-        .to_string(),
-    )
-    .expect("a control record for a turn that has gone");
 
-    // With no `--input` at all, which the contract allows: an interrupt that only
-    // asks the turn to stop. It carries no redirection, and says so.
-    let interrupted = workspace.run(&["interrupt", run_id, "worker"]);
-    interrupted.expect_code(3);
-    let events = interrupted.of_kind("turn-interrupted");
-    assert_eq!(events[0]["payload"]["input_bytes"], 0);
-    assert!(
-        events[0]["payload"]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("already ended")),
-        "{}",
-        interrupted.stdout
-    );
+    let gone = serde_json::json!({
+        "schema_version": 1,
+        "turn": {"state": "open", "address": {
+            "session": format!("{run_id}-worker-skill"),
+            "cwd": member.display().to_string(),
+        }},
+    })
+    .to_string();
+    let from_a_later_build = serde_json::json!({
+        "schema_version": 99,
+        "turn": {"state": "open", "address": {
+            "session": format!("{run_id}-worker-skill"),
+            "cwd": member.display().to_string(),
+        }},
+    })
+    .to_string();
+    for (record, expected) in [
+        (gone.as_str(), "already ended"),
+        ("{ torn in half", "not one this build can read"),
+        (from_a_later_build.as_str(), "schema version 99"),
+    ] {
+        std::fs::write(member.join("control.json"), record).expect("a control record");
+        // With no `--input` at all, which the contract allows: an interrupt that
+        // only asks the turn to stop. It carries no redirection, and says so.
+        let interrupted = workspace.run(&["interrupt", run_id, "worker"]);
+        interrupted.expect_code(3);
+        let events = interrupted.of_kind("turn-interrupted");
+        assert_eq!(events[0]["payload"]["input_bytes"], 0);
+        assert!(
+            events[0]["payload"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains(expected)),
+            "{record}: did not say {expected:?}: {}",
+            interrupted.stdout
+        );
+    }
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A one-identity `qwen` chain: the harness with no out-of-band turn control that
 /// takes the same wire shape the double already speaks, so a member on it runs

@@ -769,6 +769,16 @@ fn every_restatement_of_the_exit_codes_matches_the_crate() {
         readme.contains(&sentence),
         "README.md no longer states the exit codes the crate declares — expected: {sentence}"
     );
+    // `interrupt`'s own code is restated there too, and it is the one a reader
+    // most needs to be told is not a failure.
+    let interrupted = format!(
+        "Exit `{EXIT_NO_CONTROLLABLE_TURN}` means there was no controllable turn in flight, and \
+         says which — a fact, not an error."
+    );
+    assert!(
+        readme.contains(&interrupted),
+        "README.md no longer states the exit code `interrupt` declares — expected: {interrupted}"
+    );
 
     // The published smoke's only exit-code comparison is against the contract's
     // invalid-config code: it refuses graphs, it never runs one.

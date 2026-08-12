@@ -234,6 +234,16 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
 /// error here rather than a refusal this verb reports without saying which.
 fn explain(reason: ControlReason) -> String {
     match reason {
+        // llmlint: ignore[changed_behavior_has_e2e] this arm has no journey
+        // because nothing this suite can build reaches it. oneharness answers
+        // `no_active_turn` only from a mechanism that *drives* its turn over a
+        // protocol — the HTTP and JSON-RPC ones — and the single seam these
+        // journeys may fake is a claude-code stand-in, whose control frame rides
+        // the run's own stdin and is always deliverable while the run is
+        // listening. The two refusals that suite *can* produce are both driven in
+        // `tests/e2e/interrupt.rs`; this arm exists because the match over
+        // oneharness's taxonomy is total, which is what makes a reason added
+        // upstream a compile error here rather than an answer that says nothing.
         ControlReason::NoActiveTurn => {
             "the member is between turns: its run is alive but nothing is in flight to redirect"
                 .to_string()

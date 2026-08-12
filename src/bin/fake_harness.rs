@@ -36,13 +36,6 @@
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
-//!
-//! The last three answer only inside a controlled turn, and that is load-bearing
-//! rather than tidy: a judge side's prompt embeds the *transcript*, so every
-//! sentinel the operator's task carried arrives there a second time. A
-//! `fake:did-work` that fired on it would report work the agent never did, and a
-//! `fake:park` would stall the judge on an interrupt only the agent side can be
-//! sent.
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
@@ -56,6 +49,13 @@
 //! | `FAKE_HARNESS_ATTEMPT_LOG=<path>` | append a line per launch, so a journey can count starts |
 //! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
 //! | `FAKE_HARNESS_IGNORE_TERM=1` | refuse `SIGTERM`, so only a `SIGKILL` stops this turn |
+//!
+//! The three marked *controlled turn only* answer nowhere else, and that is
+//! load-bearing rather than tidy: a judge side's prompt embeds the **transcript**,
+//! so every sentinel the operator's task carried arrives there a second time. A
+//! `fake:did-work` that fired on it would report work the agent never did, and a
+//! `fake:park` would stall the judge waiting for an interrupt only the agent side
+//! can be sent.
 //!
 //! Keep it deterministic and dependency-free beyond what the crate already
 //! carries: it is spawned as a subprocess, many times per journey.
@@ -282,11 +282,18 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
         };
         match frame.get("type").and_then(Value::as_str) {
             Some("user") => {
-                let text = frame
+                // The text is what makes it a turn, so a frame carrying none is
+                // one this process cannot act on — running it as an empty prompt
+                // would answer a request nobody made, and every sentinel a
+                // journey steers with would silently be absent.
+                let Some(text) = frame
                     .pointer("/message/content/0/text")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                    .map(str::to_string)
+                else {
+                    eprintln!("fake-harness: a user frame carried no message text: {line}");
+                    continue;
+                };
                 let prompt = format!("{system}\n{text}");
                 let flag = Arc::clone(&interrupted);
                 let argv = Arc::clone(&argv);
@@ -300,13 +307,23 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
                     })
                     .ok();
             }
-            Some("control_request") => {
+            // `interrupt` is the only subtype this double answers, and it is
+            // checked rather than assumed: a control protocol can carry verbs
+            // that do *not* end a turn, and acknowledging one of those as an
+            // abort would report a turn as stopped that is still running.
+            Some("control_request")
+                if frame.pointer("/request/subtype").and_then(Value::as_str)
+                    == Some("interrupt") =>
+            {
                 emit(&json!({
                     "type": "control_response",
                     "response": {"subtype": "success",
                                  "request_id": frame.get("request_id").cloned()},
                 }));
                 interrupted.store(true, Ordering::SeqCst);
+            }
+            Some("control_request") => {
+                eprintln!("fake-harness: a control frame this double does not answer: {line}");
             }
             _ => {}
         }
