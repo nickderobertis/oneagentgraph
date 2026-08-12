@@ -353,3 +353,84 @@ fn a_failed_initial_scheduled_run_skips_its_chain_and_settles() {
         "skipped (ticker)"
     );
 }
+
+#[test]
+fn cron_iterations_keep_failed_independent_dependencies_blocked() {
+    let workspace = Workspace::new();
+    let release = workspace.at("independent-failure-release");
+    workspace.write(
+        "failing.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let graph = scheduled_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        "./oneharness.toml",
+    )
+    .replace(
+        "members:\n",
+        "members:\n  gate:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n",
+    )
+    .replace("deps: [ticker]", "deps: [ticker, gate]");
+    workspace.graph(&graph);
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: independent failure",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events_path = || {
+        std::fs::read_dir(workspace.state())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .next()
+            .map(|entry| entry.path().join("events.jsonl"))
+    };
+    until("the failed gate and live keeper", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.contains("\"member\":\"keeper\"")
+                    && stream.lines().any(|line| {
+                        line.contains("\"kind\":\"member-died\"")
+                            && line.contains("\"member\":\"gate\"")
+                    })
+            })
+    });
+    let id = workspace.record()["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    workspace.run(&["trigger", &id, "ticker"]).expect_code(0);
+    until("the triggered ticker to settle", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.contains("\"kind\":\"cron-fired\"")
+                    && stream
+                        .lines()
+                        .filter(|line| {
+                            line.contains("\"kind\":\"member-settled\"")
+                                && line.contains("\"member\":\"ticker\"")
+                        })
+                        .count()
+                        >= 2
+            })
+    });
+    let stream = std::fs::read_to_string(events_path().expect("events")).expect("stream");
+    assert!(
+        stream.lines().all(|line| {
+            !line.contains("\"kind\":\"member-started\"") || !line.contains("\"member\":\"report\"")
+        }),
+        "the cron iteration ignored its failed independent dependency: {stream}"
+    );
+    std::fs::write(&release, "release").expect("release keeper");
+    let output = child.wait_with_output().expect("run finishes");
+    assert_eq!(output.status.code(), Some(1));
+}

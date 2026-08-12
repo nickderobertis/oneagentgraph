@@ -729,12 +729,20 @@ pub fn run(
             }
         }
         let outcomes = run_wave(&runnable, &invocations, &emitter, &member_env, bounds);
-        for (name, outcome) in outcomes {
-            record.members.insert(name.clone(), describe(&outcome));
+        for (name, outcome) in &outcomes {
+            record.members.insert(name.clone(), describe(outcome));
             failed |= !outcome.is_success();
-            if !solely_cron_descended(&name, &graph, &mut BTreeMap::new()) {
+            if !solely_cron_descended(name, &graph, &mut BTreeMap::new()) {
                 non_cron_live.fetch_sub(1, Ordering::SeqCst);
             }
+        }
+        let successful: BTreeSet<String> = record
+            .members
+            .iter()
+            .filter(|(_, outcome)| **outcome == MemberOutcome::Settled)
+            .map(|(name, _)| name.clone())
+            .collect();
+        for (name, _) in outcomes {
             if let Some(schedule) = schedule(&graph.members[&name]) {
                 cron_threads.push(spawn_cron(
                     schedule,
@@ -747,6 +755,7 @@ pub fn run(
                     root.to_path_buf(),
                     Arc::clone(&non_cron_live),
                     cron_tx.clone(),
+                    successful.clone(),
                 ));
             }
         }
@@ -838,6 +847,7 @@ fn spawn_cron(
     root: PathBuf,
     live: Arc<AtomicUsize>,
     outcomes: mpsc::Sender<(String, Outcome)>,
+    successful: BTreeSet<String>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let (invocation, scratch) = &invocations[&name];
@@ -866,6 +876,7 @@ fn spawn_cron(
                     &env,
                     bounds,
                     &outcomes,
+                    &successful,
                 );
             },
         );
@@ -897,6 +908,9 @@ fn descendants_of(root: &str, graph: &GraphConfig) -> BTreeSet<String> {
     }
 }
 
+// The chain reuses the same immutable run resources as its clock, plus the
+// descendant and prior-success sets that define this iteration's eligibility.
+#[allow(clippy::too_many_arguments)]
 fn run_cron_chain(
     descendants: &BTreeSet<String>,
     graph: &GraphConfig,
@@ -905,11 +919,12 @@ fn run_cron_chain(
     env: &BTreeMap<String, String>,
     bounds: Bounds,
     outcomes: &mpsc::Sender<(String, Outcome)>,
+    initially_successful: &BTreeSet<String>,
 ) {
     let Ok(waves) = ready_order(graph) else {
         return;
     };
-    let mut successful = BTreeSet::new();
+    let mut successful = initially_successful.clone();
     for wave in waves {
         let runnable: Vec<String> = wave
             .into_iter()
@@ -917,7 +932,6 @@ fn run_cron_chain(
             .filter(|name| {
                 deps(&graph.members[name])
                     .iter()
-                    .filter(|dep| descendants.contains(*dep))
                     .all(|dep| successful.contains(dep))
             })
             .collect();
