@@ -1033,6 +1033,32 @@ fn a_two_party_member_can_depend_on_a_worker() {
     assert!(at("build", "member-settled") < at("supervisor", "member-started"));
 }
 
+#[test]
+fn a_two_party_member_refuses_missing_and_cyclic_dependencies() {
+    let workspace = Workspace::new();
+    let graph = format!(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  worker:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [DEPENDENCY]\n",
+        ),
+        fake = fake_harness(),
+    );
+    workspace.graph(&graph.replace("DEPENDENCY", "ghost"));
+    let missing = workspace.run(&["validate", "./graph.yaml"]);
+    missing.expect_code(2);
+    assert!(missing.stderr.contains("ghost"), "{}", missing.stderr);
+
+    workspace.graph(&graph.replace("DEPENDENCY", "worker"));
+    let cyclic = workspace.run(&["validate", "./graph.yaml"]);
+    cyclic.expect_code(2);
+    assert!(cyclic.stderr.contains("cycle"), "{}", cyclic.stderr);
+}
+
 /// A run under a base config the member cannot even read refuses with the path,
 /// not a parse trace.
 #[test]
