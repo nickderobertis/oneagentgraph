@@ -60,6 +60,7 @@ members:
       model: null
     mode: bypass                      # onejudge approval mode
     max_turns: null
+    deps: []                          # members whose settle precedes this member's first run
   reporter:
     kind: oneharness                  # single-sided: one agent, no judge
     oneharness_config: ./oneharness.toml
