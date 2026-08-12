@@ -1284,6 +1284,7 @@ fn a_shipped_persona_is_reachable_by_name() {
 #[test]
 fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
     let workspace = Workspace::new();
+    let release = workspace.at("cron-keeper-release");
     workspace.graph(&format!(
         concat!(
             "version: 1\nname: node-scope\n",
@@ -1291,8 +1292,15 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
             "    schedule: {{every: 3600, resettable: true}}\n",
+            "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n    task: 'fake:complete-now fake:hold={release}'\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [anchor]\n",
         ),
         fake = fake_harness(),
+        release = release.display(),
     ));
     let state = workspace.state();
     let handle = {
@@ -1339,7 +1347,8 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
         std::fs::read_to_string(&events).is_ok_and(|s| s.contains("cron-fired"))
     });
 
-    workspace.run(&["cancel", &id]).expect_code(0);
+    workspace.run(&["cancel", &id, "reporter"]).expect_code(0);
+    std::fs::write(&release, "release").expect("release keeper");
     let output = handle.join().expect("the run thread");
     assert!(
         output.status.code().is_some(),
@@ -1363,6 +1372,7 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
 #[test]
 fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
     let workspace = Workspace::new();
+    let release = workspace.at("member-cancel-keeper-release");
     workspace.graph(&format!(
         concat!(
             "version: 1\nname: node-scope\n",
@@ -1374,8 +1384,15 @@ fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
             "  auditor:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
             "    schedule: {{every: 3600, resettable: true}}\n",
+            "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n    task: 'fake:complete-now fake:hold={release}'\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [anchor]\n",
         ),
         fake = fake_harness(),
+        release = release.display(),
     ));
     let state = workspace.state();
     let handle = {
@@ -1474,7 +1491,8 @@ fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
     }
 
     // And the run is still the run: the whole-run cancel is what ends it.
-    workspace.run(&["cancel", &id]).expect_code(0);
+    workspace.run(&["cancel", &id, "auditor"]).expect_code(0);
+    std::fs::write(&release, "release").expect("release keeper");
     let output = handle.join().expect("the run thread");
     assert!(
         output.status.code().is_some(),
@@ -1782,6 +1800,7 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
 #[test]
 fn reset_timer_leaves_a_non_resettable_schedule_counting() {
     let workspace = Workspace::new();
+    let release = workspace.at("reset-keeper-release");
     workspace.graph(&format!(
         concat!(
             "version: 1\nname: node-scope\n",
@@ -1789,8 +1808,15 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
             "    schedule: {{every: 3600, resettable: false}}\n",
+            "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n    task: 'fake:complete-now fake:hold={release}'\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [anchor]\n",
         ),
         fake = fake_harness(),
+        release = release.display(),
     ));
     let state = workspace.state();
     let handle = {
@@ -1836,7 +1862,8 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
         std::fs::read_to_string(&events).is_ok_and(|s| s.contains("cron-fired"))
     });
 
-    workspace.run(&["cancel", &id]).expect_code(0);
+    workspace.run(&["cancel", &id, "reporter"]).expect_code(0);
+    std::fs::write(&release, "release").expect("release keeper");
     handle.join().expect("the run thread");
 
     let stream = std::fs::read_to_string(&events).expect("the stream");

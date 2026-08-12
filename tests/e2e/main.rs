@@ -17,6 +17,7 @@ mod interrupt;
 mod liveness;
 mod origin;
 mod remote;
+mod scheduler;
 mod selection;
 mod support;
 mod verbs;

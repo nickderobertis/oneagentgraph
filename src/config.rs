@@ -73,6 +73,9 @@ pub struct OnejudgeMember {
     /// Turn ceiling for the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// Members whose successful settle precedes this member's first run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
 }
 
 /// A `kind: oneharness` member.
@@ -87,7 +90,7 @@ pub struct OneharnessMember {
     /// Present on a cron member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
-    /// Members whose settle precedes this member's first run.
+    /// Members whose successful settle precedes this member's first run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
 }

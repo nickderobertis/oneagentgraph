@@ -954,6 +954,7 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
             }),
             mode: "bypass".to_string(),
             max_turns: None,
+            deps: Vec::new(),
         }
     );
 
