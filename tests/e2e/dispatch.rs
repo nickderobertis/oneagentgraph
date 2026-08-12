@@ -777,6 +777,81 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     refused.expect_code(2);
     assert!(refused.stderr.contains("no ghost"), "{}", refused.stderr);
 
+    // The same schema probe supplies an absent optional number's type.
+    let numeric = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "fake:complete-now: retuned",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--set",
+        "members.worker.max_turns=3",
+        "--set",
+        "members.worker.persona=engineer",
+        "--set",
+        "members.worker.agent.stream=false",
+    ]);
+    numeric.expect_code(0);
+
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let list = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "fake:complete-now: list override",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--set",
+        "members.reporter.deps=[]",
+    ]);
+    list.expect_code(0);
+
+    workspace.graph(&two_party_graph(&fake_harness(), "").replace("    persona: engineer\n", ""));
+
+    for assignment in [
+        "members.worker.max_turns=soon",
+        "members.worker.ghost=x",
+        "members.worker.schedule.every=3",
+    ] {
+        let refused = workspace.run(&[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: never",
+            "--dir",
+            &workspace.dir().display().to_string(),
+            "--set",
+            assignment,
+        ]);
+        refused.expect_code(2);
+        assert!(
+            refused
+                .stderr
+                .contains(assignment.split('=').next().unwrap()),
+            "{assignment}: {}",
+            refused.stderr
+        );
+    }
+
+    workspace.graph(&two_party_graph(&fake_harness(), "").replace("    mode: bypass\n", ""));
+    let missing_required = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "fake:complete-now: never",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--set",
+        "members.worker.mode=bypass",
+    ]);
+    missing_required.expect_code(2);
+    assert!(
+        missing_required.stderr.contains("members.worker.mode"),
+        "{}",
+        missing_required.stderr
+    );
+
     // A `--set` value arrives as text, but the field it lands on has a type in
     // the graph document. Overriding a number with a quoted string would change
     // the document's shape rather than its value, and the schema would then
