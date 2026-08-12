@@ -41,7 +41,7 @@ How a member is launched, and why the two kinds differ:
 Graph config (YAML, by path or URL):
 
 ```yaml
-version: 1
+version: 2
 name: node-scope
 env:                                  # exported to every member process; values may reference ${HOME}
   MY_VAR: value
@@ -60,6 +60,7 @@ members:
       model: null
     mode: bypass                      # onejudge approval mode
     max_turns: null
+    deps: []                          # members whose settle precedes this member's first run
   reporter:
     kind: oneharness                  # single-sided: one agent, no judge
     oneharness_config: ./oneharness.toml

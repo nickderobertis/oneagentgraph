@@ -9,7 +9,8 @@
 //!
 //! * `record.v1.json` — the shape written before the version field existed. It
 //!   must keep reading, unchanged, forever, or upgrading loses history.
-//! * `record.v2.json` — what this build writes, byte for byte.
+//! * `record.v2.json` — the first version that declared every member up front.
+//! * `record.v3.json` — what this build writes, byte for byte.
 //! * `control.v1.json` — the three shapes of `control.json`, the turn-control
 //!   record a run writes into a member's scratch and a *separate*
 //!   `oneagentgraph interrupt` process reads back, possibly from a later build.
@@ -18,7 +19,7 @@
 //!   is in the `events.jsonl` a record points at, which outlives the run exactly
 //!   as the record does, and onepipeline compiles against it.
 //!
-//! Regenerating `record.v2.json` to make a failure go away is the mistake this
+//! Regenerating an old record golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
 //! case it is a version bump and a new golden beside the old one — or it was not.
 //!
@@ -66,7 +67,7 @@ fn golden_record() -> Record {
 /// back gives the same record.
 #[test]
 fn the_current_golden_is_exactly_what_this_build_writes() {
-    let golden = include_str!("golden/record.v2.json");
+    let golden = include_str!("golden/record.v3.json");
     let written = format!(
         "{}\n",
         serde_json::to_string_pretty(&golden_record()).expect("a record serializes")
@@ -74,13 +75,21 @@ fn the_current_golden_is_exactly_what_this_build_writes() {
     assert_eq!(
         written, golden,
         "record.json's shape changed. If that was deliberate, bump \
-         RECORD_SCHEMA_VERSION and commit a new golden *beside* record.v2.json — do not \
+         RECORD_SCHEMA_VERSION and commit a new golden beside the old one — do not \
          overwrite it, or nothing proves the old shape still reads."
     );
 
     let read: Record = serde_json::from_str(golden).expect("the golden reads");
     assert_eq!(read, golden_record(), "the golden did not round-trip");
     assert_eq!(read.schema_version, RECORD_SCHEMA_VERSION);
+}
+
+#[test]
+fn a_version_two_record_still_reads() {
+    let record: Record = serde_json::from_str(include_str!("golden/record.v2.json"))
+        .expect("a version 2 record still reads");
+    assert_eq!(record.schema_version, 2);
+    assert_eq!(record.members["worker"], MemberOutcome::Settled);
 }
 
 /// A record written before the version field existed still reads, as version 1.

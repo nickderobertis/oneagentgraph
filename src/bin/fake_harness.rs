@@ -36,6 +36,8 @@
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
+//! | `FAKE_HARNESS_FAIL_AFTER_MARKER` | let an `exec`-shaped provider run once, then crash later launches |
+//! | `FAKE_HARNESS_FAIL_ONCE_MARKER` | crash an `exec`-shaped provider once, then allow later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
@@ -86,6 +88,38 @@ enum Refusal {
     Quota,
     /// The same shape after billed work, which a chain does not step past.
     RateLimit,
+}
+
+/// A validated request to fail `exec`-shaped launches after the first one.
+struct FailAfter {
+    marker: std::path::PathBuf,
+}
+
+/// A validated request to fail an `exec`-shaped launch only once.
+struct FailOnce {
+    marker: std::path::PathBuf,
+}
+
+impl FailOnce {
+    fn from_env() -> Result<Option<Self>, ()> {
+        let marker = std::env::var("FAKE_HARNESS_FAIL_ONCE_MARKER").ok();
+        marker.map_or(Ok(None), |named| {
+            named_path(&named, "FAKE_HARNESS_FAIL_ONCE_MARKER")
+                .map(|marker| Some(Self { marker }))
+                .ok_or(())
+        })
+    }
+}
+
+impl FailAfter {
+    fn from_env() -> Result<Option<Self>, ()> {
+        let marker = std::env::var("FAKE_HARNESS_FAIL_AFTER_MARKER").ok();
+        marker.map_or(Ok(None), |named| {
+            named_path(&named, "FAKE_HARNESS_FAIL_AFTER_MARKER")
+                .map(|marker| Some(Self { marker }))
+                .ok_or(())
+        })
+    }
 }
 
 impl Refusal {
@@ -171,6 +205,42 @@ fn main() -> std::process::ExitCode {
     // attempts that failed as much as on the one that worked.
     if let Some(exit_code) = unavailable_launch() {
         return exit_code;
+    }
+
+    let fail_after = match FailAfter::from_env() {
+        Ok(control) => control,
+        Err(()) => return exit(2),
+    };
+    if let Some(control) = fail_after {
+        if argv.iter().any(|arg| arg == "exec") {
+            if control.marker.exists() {
+                eprintln!("fake-harness: later launch for codex failed");
+                return exit(1);
+            }
+            if std::fs::write(&control.marker, "first launch completed").is_err() {
+                eprintln!(
+                    "fake-harness: cannot write fail-after marker {}",
+                    control.marker.display()
+                );
+                return exit(2);
+            }
+        }
+    }
+    let fail_once = match FailOnce::from_env() {
+        Ok(control) => control,
+        Err(()) => return exit(2),
+    };
+    if let Some(control) = fail_once {
+        if argv.iter().any(|arg| arg == "exec")
+            && std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&control.marker)
+                .is_ok()
+        {
+            eprintln!("fake-harness: first launch for codex failed");
+            return exit(1);
+        }
     }
 
     // These two variables are how a journey steers this double, and a value it

@@ -629,7 +629,7 @@ fn a_command_judge_supervises_through_the_split_provider() {
     let workspace = Workspace::new();
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -859,7 +859,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     // spells the two typed fields out, which the default one leaves unset.
     workspace.graph(&format!(
         concat!(
-            "version: 1\nname: node-scope\n",
+            "version: 2\nname: node-scope\n",
             "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -965,6 +965,98 @@ fn a_dependant_member_starts_only_after_its_dependency_settles() {
         position("build", "member-settled") < position("report", "member-started"),
         "the dependant started before its dependency settled"
     );
+}
+
+/// An unsuccessful dependency blocks the whole chain behind it. The skipped
+/// members never publish `member-started`; their distinct outcomes are carried
+/// by `graph-settled` and the durable run record.
+#[test]
+fn a_failed_dependency_skips_and_propagates_through_its_chain() {
+    let workspace = Workspace::new();
+    workspace.graph(
+        "version: 2\nname: node-scope\nmembers:\n  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n  report:\n    kind: onejudge\n    base_config: ./base.yaml\n    persona: engineer\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      oneharness_config: ./oneharness.judge.toml\n    mode: bypass\n    deps: [build]\n  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [report]\n",
+    );
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: blocked",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[("ONEAGENTGRAPH_ONEHARNESS_BIN", "missing-oneharness")],
+    );
+    run.expect_code(1);
+    let started: Vec<String> = run
+        .of_kind("member-started")
+        .iter()
+        .filter_map(|event| labels(event).get("member").cloned())
+        .collect();
+    assert_eq!(started, ["build"]);
+    let settled = &run.of_kind("graph-settled")[0]["payload"]["members"];
+    assert_eq!(settled["report"], "skipped (build)");
+    assert_eq!(settled["publish"], "skipped (report)");
+    let record = workspace.record();
+    assert_eq!(record["members"]["report"], "skipped (build)");
+    assert_eq!(record["members"]["publish"], "skipped (report)");
+}
+
+#[test]
+fn a_two_party_member_can_depend_on_a_worker() {
+    let workspace = Workspace::new();
+    workspace.graph(&format!(
+        concat!(
+            "version: 2\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n",
+            "  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  supervisor:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [build]\n",
+        ),
+        fake = fake_harness(),
+    ));
+    let run = workspace.run_task("fake:complete-now: supervised after build");
+    run.expect_code(0);
+    let events = run.events();
+    let at = |member: &str, kind: &str| {
+        events
+            .iter()
+            .position(|event| {
+                event["kind"] == kind && labels(event).get("member").is_some_and(|m| m == member)
+            })
+            .unwrap_or_else(|| panic!("no {kind} for {member}"))
+    };
+    assert!(at("build", "member-settled") < at("supervisor", "member-started"));
+}
+
+#[test]
+fn a_two_party_member_refuses_missing_and_cyclic_dependencies() {
+    let workspace = Workspace::new();
+    let graph = format!(
+        concat!(
+            "version: 2\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n  worker:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [DEPENDENCY]\n",
+        ),
+        fake = fake_harness(),
+    );
+    workspace.graph(&graph.replace("DEPENDENCY", "ghost"));
+    let missing = workspace.run(&["validate", "./graph.yaml"]);
+    missing.expect_code(2);
+    assert!(missing.stderr.contains("ghost"), "{}", missing.stderr);
+
+    workspace.graph(&graph.replace("DEPENDENCY", "worker"));
+    let cyclic = workspace.run(&["validate", "./graph.yaml"]);
+    cyclic.expect_code(2);
+    assert!(cyclic.stderr.contains("cycle"), "{}", cyclic.stderr);
 }
 
 /// A run under a base config the member cannot even read refuses with the path,

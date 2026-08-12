@@ -14,6 +14,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
@@ -52,13 +56,15 @@ pub const RECORD_FILE: &str = "record.json";
 /// * **2** — adds `declared_members`, the graph's member list, so `trigger`,
 ///   `reset-timer`, and `cancel` can tell a member of the run from a typo while
 ///   it is still in flight.
+/// * **3** — records `skipped (...)` when unsuccessful dependencies prevent a
+///   member from starting.
 ///
 /// A record with no version reads as 1, and every field added since is optional
 /// and omitted when empty, so a 1 still reads exactly as it did. A version
 /// *above* this one is refused by name instead of parsed: those records were
 /// written by a build that knew something this one does not, and `deny_unknown_fields`
 /// would otherwise reject them with a message about a key rather than a version.
-pub const RECORD_SCHEMA_VERSION: u32 = 2;
+pub const RECORD_SCHEMA_VERSION: u32 = 3;
 
 /// The version a record that names none was written under.
 fn unversioned_record() -> u32 {
@@ -142,6 +148,21 @@ pub enum MemberOutcome {
     Died(crate::member::Rule),
     /// The member could not be started at all.
     Unstartable(String),
+    /// The member was not started because these dependencies did not succeed.
+    Skipped(SkippedDeps),
+}
+
+/// The non-empty, validated dependency list carried by a skipped outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedDeps(Vec<String>);
+
+impl SkippedDeps {
+    fn new(deps: Vec<String>) -> Result<Self, String> {
+        if deps.is_empty() || deps.iter().any(|dep| !crate::config::is_member_name(dep)) {
+            return Err("a skipped outcome needs one or more valid dependency names".into());
+        }
+        Ok(Self(deps))
+    }
 }
 
 impl From<MemberOutcome> for String {
@@ -151,6 +172,7 @@ impl From<MemberOutcome> for String {
             MemberOutcome::Incomplete => "incomplete".into(),
             MemberOutcome::Died(rule) => format!("died ({})", rule.as_str()),
             MemberOutcome::Unstartable(reason) => format!("unstartable ({reason})"),
+            MemberOutcome::Skipped(deps) => format!("skipped ({})", deps.0.join(", ")),
         }
     }
 }
@@ -178,6 +200,13 @@ impl TryFrom<String> for MemberOutcome {
             .and_then(|rest| rest.strip_suffix(')'))
         {
             return Ok(MemberOutcome::Unstartable(reason.to_string()));
+        }
+        if let Some(deps) = recorded
+            .strip_prefix("skipped (")
+            .and_then(|rest| rest.strip_suffix(')'))
+        {
+            return SkippedDeps::new(deps.split(", ").map(str::to_string).collect())
+                .map(MemberOutcome::Skipped);
         }
         Err(format!("{recorded:?} is not an outcome this build records"))
     }
@@ -510,7 +539,7 @@ pub fn ready_order(graph: &GraphConfig) -> Result<Vec<Vec<String>>, Error> {
     for (name, member) in &graph.members {
         let deps: &[String] = match member {
             Member::Oneharness(member) => &member.deps,
-            Member::Onejudge(_) => &[],
+            Member::Onejudge(member) => &member.deps,
         };
         for dep in deps {
             if !graph.members.contains_key(dep) {
@@ -666,21 +695,79 @@ pub fn run(
         .collect::<Map<String, Value>>(),
     );
 
+    let non_cron_live = Arc::new(AtomicUsize::new(
+        graph
+            .members
+            .keys()
+            .filter(|name| !solely_cron_descended(name, &graph, &mut BTreeMap::new()))
+            .count(),
+    ));
+    let (cron_tx, cron_rx) = mpsc::channel();
+    let successful_members = Arc::new(Mutex::new(BTreeSet::new()));
+    let mut cron_threads = Vec::new();
     let mut failed = false;
     for wave in waves {
-        let outcomes = run_wave(
-            &wave,
-            &graph,
-            &invocations,
-            &emitter,
-            &member_env,
-            bounds,
-            &root,
-        );
-        for (name, outcome) in outcomes {
-            record.members.insert(name, describe(&outcome));
-            failed |= !outcome.is_success();
+        let mut runnable = Vec::new();
+        for name in wave {
+            let unsuccessful: Vec<String> = deps(&graph.members[&name])
+                .iter()
+                .filter(|dep| record.members.get(*dep) != Some(&MemberOutcome::Settled))
+                .cloned()
+                .collect();
+            if unsuccessful.is_empty() {
+                runnable.push(name);
+            } else {
+                record.members.insert(
+                    name.clone(),
+                    MemberOutcome::Skipped(
+                        SkippedDeps::new(unsuccessful)
+                            .expect("eligibility found validated graph dependencies"),
+                    ),
+                );
+                if !solely_cron_descended(&name, &graph, &mut BTreeMap::new()) {
+                    non_cron_live.fetch_sub(1, Ordering::SeqCst);
+                }
+            }
         }
+        let outcomes = run_wave(&runnable, &invocations, &emitter, &member_env, bounds);
+        for (name, outcome) in &outcomes {
+            record.members.insert(name.clone(), describe(outcome));
+            failed |= !outcome.is_success();
+            if outcome.is_success() {
+                successful_members
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(name.clone());
+            }
+            if !solely_cron_descended(name, &graph, &mut BTreeMap::new()) {
+                non_cron_live.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        for (name, _) in outcomes {
+            if let Some(schedule) = schedule(&graph.members[&name]) {
+                cron_threads.push(spawn_cron(
+                    schedule,
+                    name,
+                    graph.clone(),
+                    invocations.clone(),
+                    emitter.clone(),
+                    member_env.clone(),
+                    bounds,
+                    root.to_path_buf(),
+                    Arc::clone(&non_cron_live),
+                    cron_tx.clone(),
+                    Arc::clone(&successful_members),
+                ));
+            }
+        }
+    }
+    drop(cron_tx);
+    for thread in cron_threads {
+        let _ = thread.join();
+    }
+    for (name, outcome) in cron_rx {
+        failed |= !outcome.is_success();
+        record.members.insert(name, describe(&outcome));
     }
 
     let exit = if failed {
@@ -715,15 +802,164 @@ pub fn run(
     Ok(exit)
 }
 
-/// Run one wave of members concurrently, and every cron member's later firings.
-fn run_wave(
-    wave: &[String],
+fn deps(member: &Member) -> &[String] {
+    match member {
+        Member::Oneharness(member) => &member.deps,
+        Member::Onejudge(member) => &member.deps,
+    }
+}
+
+fn schedule(member: &Member) -> Option<crate::config::Schedule> {
+    match member {
+        Member::Oneharness(member) => member.schedule,
+        Member::Onejudge(_) => None,
+    }
+}
+
+fn solely_cron_descended(
+    name: &str,
+    graph: &GraphConfig,
+    memo: &mut BTreeMap<String, bool>,
+) -> bool {
+    if let Some(answer) = memo.get(name) {
+        return *answer;
+    }
+    let member = &graph.members[name];
+    let answer = schedule(member).is_some()
+        || (!deps(member).is_empty()
+            && deps(member)
+                .iter()
+                .all(|dep| solely_cron_descended(dep, graph, memo)));
+    memo.insert(name.to_string(), answer);
+    answer
+}
+
+// These are the immutable run resources a detached clock and its chain need;
+// bundling them would only move the same fields into a single-use struct.
+#[allow(clippy::too_many_arguments)]
+fn spawn_cron(
+    schedule: crate::config::Schedule,
+    name: String,
+    graph: GraphConfig,
+    invocations: BTreeMap<String, (Invocation, PathBuf)>,
+    emitter: Emitter,
+    env: BTreeMap<String, String>,
+    bounds: Bounds,
+    root: PathBuf,
+    live: Arc<AtomicUsize>,
+    outcomes: mpsc::Sender<(String, Outcome)>,
+    successful: Arc<Mutex<BTreeSet<String>>>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let (invocation, scratch) = &invocations[&name];
+        let member_emitter = emitter.with_labels(member::labels(
+            emitter.stream(),
+            &name,
+            invocation.persona.as_deref(),
+        ));
+        let descendants = descendants_of(&name, &graph);
+        let outcome = cron(
+            &schedule,
+            &name,
+            invocation,
+            &member_emitter,
+            &env,
+            bounds,
+            scratch,
+            &root.join(SIGNAL_DIR),
+            &live,
+            || {
+                successful
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(name.clone());
+                run_cron_chain(
+                    &descendants,
+                    &graph,
+                    &invocations,
+                    &emitter,
+                    &env,
+                    bounds,
+                    &outcomes,
+                    &successful,
+                );
+            },
+        );
+        if let Some(outcome) = outcome {
+            let _ = outcomes.send((name, outcome));
+        }
+    })
+}
+
+fn descendants_of(root: &str, graph: &GraphConfig) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    loop {
+        let added: Vec<String> = graph
+            .members
+            .iter()
+            .filter(|(name, member)| {
+                *name != root
+                    && !found.contains(*name)
+                    && deps(member)
+                        .iter()
+                        .any(|dep| dep == root || found.contains(dep))
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        if added.is_empty() {
+            return found;
+        }
+        found.extend(added);
+    }
+}
+
+// The chain reuses the same immutable run resources as its clock, plus the
+// descendant and prior-success sets that define this iteration's eligibility.
+#[allow(clippy::too_many_arguments)]
+fn run_cron_chain(
+    descendants: &BTreeSet<String>,
     graph: &GraphConfig,
     invocations: &BTreeMap<String, (Invocation, PathBuf)>,
     emitter: &Emitter,
     env: &BTreeMap<String, String>,
     bounds: Bounds,
-    root: &Path,
+    outcomes: &mpsc::Sender<(String, Outcome)>,
+    settled_successes: &Mutex<BTreeSet<String>>,
+) {
+    let Ok(waves) = ready_order(graph) else {
+        return;
+    };
+    let mut successful = settled_successes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
+    successful.retain(|name| !descendants.contains(name));
+    for wave in waves {
+        let runnable: Vec<String> = wave
+            .into_iter()
+            .filter(|name| descendants.contains(name))
+            .filter(|name| {
+                deps(&graph.members[name])
+                    .iter()
+                    .all(|dep| successful.contains(dep))
+            })
+            .collect();
+        for (name, outcome) in run_wave(&runnable, invocations, emitter, env, bounds) {
+            if outcome.is_success() {
+                successful.insert(name.clone());
+            }
+            let _ = outcomes.send((name, outcome));
+        }
+    }
+}
+
+/// Run one wave of members concurrently.
+fn run_wave(
+    wave: &[String],
+    invocations: &BTreeMap<String, (Invocation, PathBuf)>,
+    emitter: &Emitter,
+    env: &BTreeMap<String, String>,
+    bounds: Bounds,
 ) -> Vec<(String, Outcome)> {
     let (tx, rx) = mpsc::channel();
     let mut running = 0;
@@ -731,39 +967,21 @@ fn run_wave(
         let Some((invocation, scratch)) = invocations.get(name) else {
             continue;
         };
-        let schedule = match graph.members.get(name) {
-            Some(Member::Oneharness(member)) => member.schedule,
-            _ => None,
-        };
         let member_emitter = emitter.with_labels(member::labels(
             emitter.stream(),
             name,
             invocation.persona.as_deref(),
         ));
-        let (name, invocation, scratch, env, tx, signals) = (
+        let (name, invocation, scratch, env, tx) = (
             name.clone(),
             invocation.clone(),
             scratch.clone(),
             env.clone(),
             tx.clone(),
-            root.join(SIGNAL_DIR),
         );
         running += 1;
         std::thread::spawn(move || {
-            let mut outcome = member::run(&invocation, &member_emitter, &env, bounds, &scratch);
-            if let Some(schedule) = schedule {
-                outcome = cron(
-                    &schedule,
-                    &name,
-                    &invocation,
-                    &member_emitter,
-                    &env,
-                    bounds,
-                    &scratch,
-                    &signals,
-                    outcome,
-                );
-            }
+            let outcome = member::run(&invocation, &member_emitter, &env, bounds, &scratch);
             let _ = tx.send((name, outcome));
         });
     }
@@ -786,9 +1004,9 @@ fn run_wave(
 /// operator cannot quietly defer a member whose author said its cadence is
 /// fixed.
 // Every parameter is one thing a firing needs and none is derivable from
-// another: the schedule, the member's name and invocation, where its events go,
-// its environment and bounds, its scratch, the signal directory, and the outcome
-// so far. Bundling them into a struct would name the same nine values twice.
+// another: its schedule, identity and invocation, event sink, environment,
+// bounds, scratch and signals, plus the liveness gate and successful-chain
+// callback. Bundling them would name the same values twice.
 #[allow(clippy::too_many_arguments)]
 fn cron(
     schedule: &crate::config::Schedule,
@@ -799,8 +1017,9 @@ fn cron(
     bounds: Bounds,
     scratch: &Path,
     signals: &Path,
-    first: Outcome,
-) -> Outcome {
+    live: &AtomicUsize,
+    mut on_success: impl FnMut(),
+) -> Option<Outcome> {
     let stop = signals.join("stop");
     // A member-scoped `cancel` stops this member alone; the whole-run `stop`
     // above stops every one of them.
@@ -808,15 +1027,18 @@ fn cron(
     let trigger = signals.join(format!("{name}.trigger"));
     let reset = signals.join(format!("{name}.reset"));
     let stopped = || stop.exists() || own_stop.exists();
-    let mut last = first;
+    let mut last = None;
     let mut due = Instant::now() + Duration::from_secs(schedule.every);
-    while !stopped() {
+    loop {
         std::thread::sleep(TICK);
         // Again, after the sleep: a cancel that landed while this member slept
         // has to beat a trigger that landed beside it. Read only at the top, a
         // `cancel` and a `trigger` arriving inside the same tick let the trigger
         // win, and the member spent a paid turn *after* an operator stopped it.
         if stopped() {
+            break;
+        }
+        if live.load(Ordering::SeqCst) == 0 {
             break;
         }
         if schedule.resettable && reset.exists() {
@@ -835,7 +1057,11 @@ fn cron(
             continue;
         }
         emitter.emit(EventKind::CronFired, Map::new());
-        last = member::run(invocation, emitter, env, bounds, scratch);
+        let outcome = member::run(invocation, emitter, env, bounds, scratch);
+        if outcome.is_success() {
+            on_success();
+        }
+        last = Some(outcome);
         due = Instant::now() + Duration::from_secs(schedule.every);
     }
     last
@@ -1241,6 +1467,12 @@ mod tests {
                 describe(&Outcome::Unstartable("no such".into())),
                 "unstartable (no such)",
             ),
+            (
+                MemberOutcome::Skipped(
+                    SkippedDeps::new(vec!["build".into(), "lint".into()]).expect("valid deps"),
+                ),
+                "skipped (build, lint)",
+            ),
         ];
         for (outcome, expected) in cases {
             let rendered = serde_json::to_value(&outcome).expect("a record value");
@@ -1253,6 +1485,9 @@ mod tests {
         // A record from a build that spelled an outcome differently is a record
         // this one cannot read, and says so rather than guessing.
         assert!(serde_json::from_value::<MemberOutcome>(Value::from("vanished")).is_err());
+        for invalid in ["skipped ()", "skipped (../build)"] {
+            assert!(serde_json::from_value::<MemberOutcome>(Value::from(invalid)).is_err());
+        }
         assert_eq!(refusal_exit(), EXIT_INVALID_CONFIG);
     }
 }

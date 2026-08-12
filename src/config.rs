@@ -73,6 +73,9 @@ pub struct OnejudgeMember {
     /// Turn ceiling for the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// Members whose successful settle precedes this member's first run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deps: Vec<String>,
 }
 
 /// A `kind: oneharness` member.
@@ -87,7 +90,7 @@ pub struct OneharnessMember {
     /// Present on a cron member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
-    /// Members whose settle precedes this member's first run.
+    /// Members whose successful settle precedes this member's first run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
 }
@@ -156,8 +159,11 @@ fn default_stream() -> bool {
     true
 }
 
-/// The schema version this crate reads.
-pub const SCHEMA_VERSION: u32 = 1;
+/// The first graph schema version this crate still reads.
+pub const FIRST_SCHEMA_VERSION: u32 = 1;
+
+/// The latest graph schema version this crate reads and writes in examples.
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Whether `name` is one a member may have.
 ///
@@ -184,9 +190,10 @@ pub fn is_member_name(name: &str) -> bool {
 /// graph's author wrote it.
 pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
     use crate::error::Error;
-    if graph.version != SCHEMA_VERSION {
+    if !(FIRST_SCHEMA_VERSION..=SCHEMA_VERSION).contains(&graph.version) {
         return Err(Error::InvalidConfig(format!(
-            "version {} is not a graph schema this build reads; it reads version {SCHEMA_VERSION}",
+            "version {} is not a graph schema this build reads; it reads versions \
+             {FIRST_SCHEMA_VERSION} through {SCHEMA_VERSION}",
             graph.version
         )));
     }
@@ -225,6 +232,13 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
         }
     }
     for (name, member) in &graph.members {
+        if graph.version == 1
+            && matches!(member, Member::Onejudge(member) if !member.deps.is_empty())
+        {
+            return Err(Error::InvalidConfig(format!(
+                "member {name:?} uses onejudge `deps`, which requires graph schema version 2"
+            )));
+        }
         // A member's name becomes a *path component* — its scratch directory,
         // and the file `trigger` and `reset-timer` leave for it — so a name
         // carrying a separator or a parent reference would put a member's
@@ -289,8 +303,29 @@ mod tests {
     #[test]
     fn a_graph_of_another_version_is_refused_by_version() {
         assert!(validate(&parse(ONE_MEMBER)).is_ok());
-        let err = validate(&parse(&ONE_MEMBER.replace("version: 1", "version: 2"))).unwrap_err();
-        assert!(err.to_string().contains("it reads version 1"), "{err}");
+        assert!(validate(&parse(&ONE_MEMBER.replace("version: 1", "version: 2"))).is_ok());
+        let err = validate(&parse(&ONE_MEMBER.replace("version: 1", "version: 3"))).unwrap_err();
+        assert!(err.to_string().contains("versions 1 through 2"), "{err}");
+    }
+
+    #[test]
+    fn onejudge_dependencies_require_version_two_without_breaking_version_one_graphs() {
+        let version_one = concat!(
+            "version: 1\nname: g\nmembers:\n",
+            "  build:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+            "  w:\n    kind: onejudge\n",
+            "    base_config: ./b.yaml\n    mode: bypass\n",
+            "    agent: {oneharness_config: ./a.toml}\n",
+            "    judge: {oneharness_config: ./j.toml}\n",
+        );
+        assert!(validate(&parse(version_one)).is_ok());
+
+        let with_deps = format!("{version_one}    deps: [build]\n");
+        let error = validate(&parse(&with_deps)).expect_err("version 1 predates onejudge deps");
+        assert!(error
+            .to_string()
+            .contains("requires graph schema version 2"));
+        assert!(validate(&parse(&with_deps.replace("version: 1", "version: 2"))).is_ok());
     }
 
     /// A member's name is a directory this run creates and a signal file an

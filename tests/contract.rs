@@ -15,7 +15,7 @@ use std::collections::BTreeSet;
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
-    Schedule,
+    Schedule, SCHEMA_VERSION,
 };
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
@@ -35,6 +35,8 @@ use serde_json::{json, Value};
 
 /// The approved contract itself.
 const CONTRACT: &str = include_str!("../docs/contract.md");
+/// The package-front example must name the same current graph schema.
+const README: &str = include_str!("../README.md");
 
 /// Every variant of [`EventKind`], so the doc-derived list below is checked in
 /// both directions: a kind the document forgets, and a kind the crate forgets.
@@ -926,7 +928,8 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     let graph: GraphConfig =
         serde_norway::from_str(&yaml).expect("the documented graph does not parse");
 
-    assert_eq!(graph.version, 1);
+    assert_eq!(graph.version, SCHEMA_VERSION);
+    oneagentgraph::config::validate(&graph).expect("the documented graph must validate");
     assert_eq!(graph.name, "node-scope");
     assert_eq!(graph.env.get("MY_VAR").map(String::as_str), Some("value"));
     assert_eq!(
@@ -954,6 +957,7 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
             }),
             mode: "bypass".to_string(),
             max_turns: None,
+            deps: Vec::new(),
         }
     );
 
@@ -977,6 +981,43 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     let reparsed: GraphConfig =
         serde_norway::from_str(&reserialized).expect("the serialized graph does not parse back");
     assert_eq!(reparsed, graph, "the graph schema must round-trip");
+}
+
+#[test]
+fn the_readme_graph_uses_the_current_schema_version() {
+    let expected = format!("```yaml\nversion: {SCHEMA_VERSION}\n");
+    assert!(
+        README.contains(&expected),
+        "the README graph example must begin with {expected:?}"
+    );
+}
+
+/// The contract documents `deps` on both member variants and both round-trip.
+#[test]
+fn the_documented_dependency_field_round_trips_on_both_member_kinds() {
+    let document = fenced_block("yaml");
+    assert_eq!(
+        document.matches("deps: []").count(),
+        2,
+        "the documented graph must carry deps on both member variants"
+    );
+    let graph: GraphConfig =
+        serde_norway::from_str(&document).expect("the documented graph parses");
+    let Member::Onejudge(worker) = &graph.members["worker"] else {
+        panic!("worker is onejudge")
+    };
+    assert!(worker.deps.is_empty());
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert!(reporter.deps.is_empty());
+    let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    assert!(
+        !round_trip.contains("deps:"),
+        "empty dependencies must remain omitted for older consumers: {round_trip}"
+    );
+    let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    assert_eq!(reparsed, graph);
 }
 
 #[test]
