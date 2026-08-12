@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.4](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.3...v0.2.4) - 2026-08-12
+
+### Fixed
+
+- let --set populate an absent schema-known optional field ([#18](https://github.com/nickderobertis/oneagentgraph/pull/18))
+
 ## [0.2.3](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.2...v0.2.3) - 2026-08-12
 
 ### Added
