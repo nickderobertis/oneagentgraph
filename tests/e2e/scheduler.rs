@@ -434,3 +434,77 @@ fn cron_iterations_keep_failed_independent_dependencies_blocked() {
     let output = child.wait_with_output().expect("run finishes");
     assert_eq!(output.status.code(), Some(1));
 }
+
+#[test]
+fn cron_iterations_observe_independent_dependencies_settled_in_later_waves() {
+    let workspace = Workspace::new();
+    let release = workspace.at("later-success-release");
+    let graph = scheduled_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        "./oneharness.toml",
+    )
+    .replace(
+        "  keeper:\n",
+        "  prerequisite:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [bridge]\n  keeper:\n",
+    )
+    .replace("mode: bypass\n    deps: [bridge]", "mode: bypass\n    deps: [prerequisite]")
+    .replace("deps: [ticker]", "deps: [ticker, prerequisite]");
+    workspace.graph(&graph);
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: later independent success",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events_path = || {
+        std::fs::read_dir(workspace.state())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .next()
+            .map(|entry| entry.path().join("events.jsonl"))
+    };
+    until(
+        "the later prerequisite and initial report to settle",
+        || {
+            events_path()
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .is_some_and(|stream| {
+                    ["prerequisite", "report"].iter().all(|member| {
+                        stream.lines().any(|line| {
+                            line.contains("\"kind\":\"member-settled\"")
+                                && line.contains(&format!("\"member\":\"{member}\""))
+                        })
+                    })
+                })
+        },
+    );
+    let id = workspace.record()["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    workspace.run(&["trigger", &id, "ticker"]).expect_code(0);
+    until("the cron chain to use the later success", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream
+                    .lines()
+                    .filter(|line| {
+                        line.contains("\"kind\":\"member-started\"")
+                            && line.contains("\"member\":\"report\"")
+                    })
+                    .count()
+                    >= 2
+            })
+    });
+    std::fs::write(&release, "release").expect("release keeper");
+    let output = child.wait_with_output().expect("run finishes");
+    assert_eq!(output.status.code(), Some(0));
+}

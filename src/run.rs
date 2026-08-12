@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant, SystemTime};
 
@@ -703,6 +703,7 @@ pub fn run(
             .count(),
     ));
     let (cron_tx, cron_rx) = mpsc::channel();
+    let successful_members = Arc::new(Mutex::new(BTreeSet::new()));
     let mut cron_threads = Vec::new();
     let mut failed = false;
     for wave in waves {
@@ -732,16 +733,16 @@ pub fn run(
         for (name, outcome) in &outcomes {
             record.members.insert(name.clone(), describe(outcome));
             failed |= !outcome.is_success();
+            if outcome.is_success() {
+                successful_members
+                    .lock()
+                    .expect("successful-member set is not poisoned")
+                    .insert(name.clone());
+            }
             if !solely_cron_descended(name, &graph, &mut BTreeMap::new()) {
                 non_cron_live.fetch_sub(1, Ordering::SeqCst);
             }
         }
-        let successful: BTreeSet<String> = record
-            .members
-            .iter()
-            .filter(|(_, outcome)| **outcome == MemberOutcome::Settled)
-            .map(|(name, _)| name.clone())
-            .collect();
         for (name, _) in outcomes {
             if let Some(schedule) = schedule(&graph.members[&name]) {
                 cron_threads.push(spawn_cron(
@@ -755,7 +756,7 @@ pub fn run(
                     root.to_path_buf(),
                     Arc::clone(&non_cron_live),
                     cron_tx.clone(),
-                    successful.clone(),
+                    Arc::clone(&successful_members),
                 ));
             }
         }
@@ -847,7 +848,7 @@ fn spawn_cron(
     root: PathBuf,
     live: Arc<AtomicUsize>,
     outcomes: mpsc::Sender<(String, Outcome)>,
-    successful: BTreeSet<String>,
+    successful: Arc<Mutex<BTreeSet<String>>>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let (invocation, scratch) = &invocations[&name];
@@ -919,12 +920,16 @@ fn run_cron_chain(
     env: &BTreeMap<String, String>,
     bounds: Bounds,
     outcomes: &mpsc::Sender<(String, Outcome)>,
-    initially_successful: &BTreeSet<String>,
+    settled_successes: &Mutex<BTreeSet<String>>,
 ) {
     let Ok(waves) = ready_order(graph) else {
         return;
     };
-    let mut successful = initially_successful.clone();
+    let mut successful = settled_successes
+        .lock()
+        .expect("successful-member set is not poisoned")
+        .clone();
+    successful.retain(|name| !descendants.contains(name));
     for wave in waves {
         let runnable: Vec<String> = wave
             .into_iter()
