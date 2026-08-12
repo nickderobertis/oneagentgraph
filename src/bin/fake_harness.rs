@@ -36,6 +36,7 @@
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
+//! | `FAKE_HARNESS_FAIL_AFTER_MARKER`, `FAKE_HARNESS_FAIL_MEMBER` | let the named member run once, then crash later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
@@ -171,6 +172,25 @@ fn main() -> std::process::ExitCode {
     // attempts that failed as much as on the one that worked.
     if let Some(exit_code) = unavailable_launch() {
         return exit_code;
+    }
+
+    if let (Ok(marker), Ok(member)) = (
+        std::env::var("FAKE_HARNESS_FAIL_AFTER_MARKER"),
+        std::env::var("FAKE_HARNESS_FAIL_MEMBER"),
+    ) {
+        let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_default();
+        let selected = session.contains(&format!("-{member}"))
+            || (member == "codex" && argv.iter().any(|arg| arg == "exec"));
+        if selected {
+            if std::path::Path::new(&marker).exists() {
+                eprintln!("fake-harness: later launch for {member} failed");
+                return exit(1);
+            }
+            if std::fs::write(&marker, "first launch completed").is_err() {
+                eprintln!("fake-harness: cannot write fail-after marker {marker}");
+                return exit(2);
+            }
+        }
     }
 
     // These two variables are how a journey steers this double, and a value it

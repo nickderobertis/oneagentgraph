@@ -997,6 +997,9 @@ fn a_failed_dependency_skips_and_propagates_through_its_chain() {
     let settled = &run.of_kind("graph-settled")[0]["payload"]["members"];
     assert_eq!(settled["report"], "skipped (build)");
     assert_eq!(settled["publish"], "skipped (report)");
+    let record = workspace.record();
+    assert_eq!(record["members"]["report"], "skipped (build)");
+    assert_eq!(record["members"]["publish"], "skipped (report)");
 }
 
 #[test]

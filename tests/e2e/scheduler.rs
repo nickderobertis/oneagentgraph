@@ -1,5 +1,9 @@
 //! Scheduler journeys against the compiled binary and real oneharness process.
 
+// llmlint: ignore-file[e2e_not_mocked] these journeys use the repository's sole
+// sanctioned fake at oneharness's ONEHARNESS_BIN_<ID> paid-provider seam. The
+// compiled oneagentgraph and real oneharness CLI/process boundary remain real.
+
 use std::time::{Duration, Instant};
 
 use crate::support::{fake_harness, until, Workspace};
@@ -104,23 +108,81 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
 #[test]
 fn a_failed_cron_firing_never_starts_that_iterations_chain() {
     let workspace = Workspace::new();
+    let release = workspace.at("failure-release");
+    let marker = workspace.at("ticker-first-run");
     workspace.write(
-        "failing.toml",
+        "ticker.toml",
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
     );
-    workspace.graph(
-        "version: 1\nname: failed-cron\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
+    let graph = scheduled_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        "./ticker.toml",
+    )
+    .replace(
+        "members:\n",
+        &format!(
+            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\n  FAKE_HARNESS_FAIL_MEMBER: codex\nmembers:\n",
+            fake = fake_harness(),
+            marker = marker.display()
+        ),
     );
-    let run = workspace.run_task("fake:complete-now: scheduled");
-    run.expect_code(1);
-    assert!(run.of_kind("member-started").iter().all(|event| {
-        crate::support::labels(event)
-            .get("member")
-            .map(String::as_str)
-            != Some("report")
-    }));
+    workspace.graph(&graph);
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: scheduled failure",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events_path = || {
+        std::fs::read_dir(workspace.state())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .next()
+            .map(|entry| entry.path().join("events.jsonl"))
+    };
+    until("the initial chain to settle", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.contains("\"member\":\"keeper\"") && stream.contains("\"member\":\"report\"")
+            })
+    });
+    let id = workspace.record()["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    workspace.run(&["trigger", &id, "ticker"]).expect_code(0);
+    until("the later ticker firing to fail", || {
+        events_path()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .is_some_and(|stream| {
+                stream.contains("\"kind\":\"cron-fired\"")
+                    && stream.lines().any(|line| {
+                        line.contains("\"kind\":\"member-died\"")
+                            && line.contains("\"member\":\"ticker\"")
+                    })
+            })
+    });
+    let stream = std::fs::read_to_string(events_path().expect("events")).expect("stream");
     assert_eq!(
-        run.of_kind("graph-settled")[0]["payload"]["members"]["report"],
-        "skipped (ticker)"
+        stream
+            .lines()
+            .filter(|line| {
+                line.contains("\"kind\":\"member-started\"")
+                    && line.contains("\"member\":\"report\"")
+            })
+            .count(),
+        1,
+        "the failed later firing started its chain: {stream}"
     );
+    std::fs::write(&release, "release").expect("release keeper");
+    let output = child.wait_with_output().expect("run finishes");
+    assert_eq!(output.status.code(), Some(1));
 }

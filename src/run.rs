@@ -149,7 +149,20 @@ pub enum MemberOutcome {
     /// The member could not be started at all.
     Unstartable(String),
     /// The member was not started because these dependencies did not succeed.
-    Skipped(Vec<String>),
+    Skipped(SkippedDeps),
+}
+
+/// The non-empty, validated dependency list carried by a skipped outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedDeps(Vec<String>);
+
+impl SkippedDeps {
+    fn new(deps: Vec<String>) -> Result<Self, String> {
+        if deps.is_empty() || deps.iter().any(|dep| !crate::config::is_member_name(dep)) {
+            return Err("a skipped outcome needs one or more valid dependency names".into());
+        }
+        Ok(Self(deps))
+    }
 }
 
 impl From<MemberOutcome> for String {
@@ -159,7 +172,7 @@ impl From<MemberOutcome> for String {
             MemberOutcome::Incomplete => "incomplete".into(),
             MemberOutcome::Died(rule) => format!("died ({})", rule.as_str()),
             MemberOutcome::Unstartable(reason) => format!("unstartable ({reason})"),
-            MemberOutcome::Skipped(deps) => format!("skipped ({})", deps.join(", ")),
+            MemberOutcome::Skipped(deps) => format!("skipped ({})", deps.0.join(", ")),
         }
     }
 }
@@ -192,9 +205,8 @@ impl TryFrom<String> for MemberOutcome {
             .strip_prefix("skipped (")
             .and_then(|rest| rest.strip_suffix(')'))
         {
-            return Ok(MemberOutcome::Skipped(
-                deps.split(", ").map(str::to_string).collect(),
-            ));
+            return SkippedDeps::new(deps.split(", ").map(str::to_string).collect())
+                .map(MemberOutcome::Skipped);
         }
         Err(format!("{recorded:?} is not an outcome this build records"))
     }
@@ -704,9 +716,13 @@ pub fn run(
             if unsuccessful.is_empty() {
                 runnable.push(name);
             } else {
-                record
-                    .members
-                    .insert(name.clone(), MemberOutcome::Skipped(unsuccessful));
+                record.members.insert(
+                    name.clone(),
+                    MemberOutcome::Skipped(
+                        SkippedDeps::new(unsuccessful)
+                            .expect("eligibility found validated graph dependencies"),
+                    ),
+                );
                 if !solely_cron_descended(&name, &graph, &mut BTreeMap::new()) {
                     non_cron_live.fetch_sub(1, Ordering::SeqCst);
                 }
@@ -808,6 +824,8 @@ fn solely_cron_descended(
     answer
 }
 
+// These are the immutable run resources a detached clock and its chain need;
+// bundling them would only move the same fields into a single-use struct.
 #[allow(clippy::too_many_arguments)]
 fn spawn_cron(
     schedule: crate::config::Schedule,
@@ -1427,7 +1445,9 @@ mod tests {
                 "unstartable (no such)",
             ),
             (
-                MemberOutcome::Skipped(vec!["build".into(), "lint".into()]),
+                MemberOutcome::Skipped(
+                    SkippedDeps::new(vec!["build".into(), "lint".into()]).expect("valid deps"),
+                ),
                 "skipped (build, lint)",
             ),
         ];
@@ -1442,6 +1462,9 @@ mod tests {
         // A record from a build that spelled an outcome differently is a record
         // this one cannot read, and says so rather than guessing.
         assert!(serde_json::from_value::<MemberOutcome>(Value::from("vanished")).is_err());
+        for invalid in ["skipped ()", "skipped (../build)"] {
+            assert!(serde_json::from_value::<MemberOutcome>(Value::from(invalid)).is_err());
+        }
         assert_eq!(refusal_exit(), EXIT_INVALID_CONFIG);
     }
 }
