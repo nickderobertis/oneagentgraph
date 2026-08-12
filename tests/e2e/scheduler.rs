@@ -328,3 +328,28 @@ fn a_cron_only_graph_quiesces_after_its_initial_firing() {
         1
     );
 }
+
+#[test]
+fn a_failed_initial_scheduled_run_skips_its_chain_and_settles() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "failing.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    workspace.graph(
+        "version: 1\nname: failed-initial-cron\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
+    );
+    let run = workspace.run_task("fake:complete-now: failed initial schedule");
+    run.expect_code(1);
+    assert!(run.of_kind("cron-fired").is_empty());
+    assert!(run.of_kind("member-started").iter().all(|event| {
+        crate::support::labels(event)
+            .get("member")
+            .map(String::as_str)
+            != Some("report")
+    }));
+    assert_eq!(
+        run.of_kind("graph-settled")[0]["payload"]["members"]["report"],
+        "skipped (ticker)"
+    );
+}
