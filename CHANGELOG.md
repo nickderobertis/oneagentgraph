@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.7](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.6...v0.2.7) - 2026-08-13
+
+### Changed
+
+- call oneharness as a library, drop the hand-rolled fake ([#24](https://github.com/nickderobertis/oneagentgraph/pull/24))
+
 ## [0.2.6](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.5...v0.2.6) - 2026-08-12
 
 ### Fixed
