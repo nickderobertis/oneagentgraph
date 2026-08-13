@@ -381,27 +381,18 @@ fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Erro
         belongs_to_run(&record, &args.run, named)?;
     }
     let root = state.join(&record.run_id);
-    std::fs::create_dir_all(root.join(run::SIGNAL_DIR))
-        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", root.display())))?;
-    // Scoped to the member when one is named. The whole-run `stop` is what every
-    // scheduled member watches, so writing it for a member-scoped cancel stopped
-    // the rest of the run along with the one the operator named.
-    let stop = match &member {
-        Some(member) => root.join(run::SIGNAL_DIR).join(format!("{member}.stop")),
-        None => root.join(run::SIGNAL_DIR).join("stop"),
-    };
-    std::fs::write(&stop, "stop")
-        .map_err(|err| Error::InvalidConfig(format!("cannot signal run {:?}: {err}", args.run)))?;
-    let reaped = if args.kill {
-        // Only a proven process is signalled: every live process still carrying
-        // this run's scratch stamp, and nothing derived from a remembered number.
-        match member {
-            Some(member) => oneagentgraph::scratch::reap(&root.join("members").join(member)),
-            None => oneagentgraph::scratch::reap(&root),
-        }
+    // One implementation serves this command and the live library handle, so a
+    // change to signal scope or process-tree reaping cannot land on only one.
+    let mode = if args.kill {
+        run::CancelMode::Kill
     } else {
-        0
+        run::CancelMode::Stop
     };
+    let scope = match member {
+        Some(member) => run::CancelScope::member(member)?,
+        None => run::CancelScope::run(),
+    };
+    let reaped = run::cancel(&root, &record.run_id, &scope, mode)?;
     println!(
         "{}: cancelled{}{}",
         args.run,
