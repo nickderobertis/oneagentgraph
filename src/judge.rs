@@ -339,7 +339,16 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             // at all: a run that produced no report used to reach a supervisor
             // with nothing said about which identity refused.
             advance(emitter, failure.telemetry.as_ref());
-            let cause = provider_cause(&failure);
+            // The stop files are the supervisor's authoritative cancellation
+            // request. Do not infer it from the provider process's exit shape:
+            // POSIX reports a signal while Windows job termination reports an
+            // ordinary nonzero exit, and onejudge consequently classifies the
+            // same operator action differently on the two platforms.
+            let cause = if cancellation_requested(scratch) {
+                Cause::Cancelled
+            } else {
+                provider_cause(&failure)
+            };
             died(
                 emitter,
                 Rule::ProviderFailure,
@@ -348,6 +357,21 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             )
         }
     }
+}
+
+/// Whether this member's run or the member itself was explicitly stopped.
+fn cancellation_requested(scratch: &Path) -> bool {
+    let Some(name) = scratch.file_name() else {
+        return false;
+    };
+    let Some(root) = scratch.parent().and_then(Path::parent) else {
+        return false;
+    };
+    let signals = root.join(crate::run::SIGNAL_DIR);
+    signals.join("stop").exists()
+        || signals
+            .join(format!("{}.stop", name.to_string_lossy()))
+            .exists()
 }
 
 /// The handle the **agent** side's turns are threaded under.
