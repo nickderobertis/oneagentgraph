@@ -470,8 +470,16 @@ mod platform {
         Some(user.saturating_add(system))
     }
 
-    /// The same reading from `libproc`, in nanoseconds, for the platform with no
-    /// `/proc` to read it out of.
+    /// The same reading from `libproc`, reduced to the scheduler-scale ticks the
+    /// Linux reading exposes, for the platform with no `/proc` to read it out
+    /// of.
+    ///
+    /// `proc_taskinfo` reports nanoseconds precise enough to count the tiny
+    /// bookkeeping wake-ups of an otherwise parked harness as work. Linux CPU
+    /// accounting does not, and that difference made the same idle member evade
+    /// the watchdog on macOS until its provider timeout. Ten-millisecond buckets
+    /// retain a CPU-bound child's unmistakable progress while treating that
+    /// polling noise as the idleness the rule is meant to recognize.
     #[cfg(target_vendor = "apple")]
     pub fn consumed(pid: i32) -> Option<u64> {
         let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
@@ -491,7 +499,8 @@ mod platform {
         if written != size {
             return None;
         }
-        Some(info.pti_total_user.saturating_add(info.pti_total_system))
+        const NANOS_PER_TICK: u64 = 10_000_000;
+        Some(info.pti_total_user.saturating_add(info.pti_total_system) / NANOS_PER_TICK)
     }
 
     /// No CPU accounting to be had here, so a member's silence is judged by its

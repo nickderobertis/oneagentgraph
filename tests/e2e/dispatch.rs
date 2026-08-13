@@ -239,8 +239,12 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
             "members:\n",
             "  check_in:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    task: \"fake:complete-now write one status update, and nothing else. \
-             fake:record-prompt={own} fake:record-cwd={own_cwd}\"\n",
+            // Single-quoted for the same reason command-provider paths below
+            // are: Windows paths contain backslashes, and YAML double quotes
+            // interpret sequences such as `\x` instead of preserving them for
+            // the harness.
+            "    task: 'fake:complete-now write one status update, and nothing else. \
+             fake:record-prompt={own} fake:record-cwd={own_cwd}'\n",
             "    dir: ./api\n",
             "  worker:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
@@ -374,8 +378,8 @@ fn a_graph_whose_members_carry_their_own_jobs_needs_no_task_of_its_own() {
         dir = elsewhere.display(),
     );
     let with_own_task = format!(
-        "{graph}    task: \"fake:complete-now write one status update. \
-         fake:record-prompt={recorded} fake:record-cwd={cwd}\"\n",
+        "{graph}    task: 'fake:complete-now write one status update. \
+         fake:record-prompt={recorded} fake:record-cwd={cwd}'\n",
         recorded = recorded.display(),
         cwd = where_it_ran.display(),
     );
