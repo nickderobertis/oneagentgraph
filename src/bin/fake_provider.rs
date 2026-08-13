@@ -20,8 +20,9 @@
 //! onejudge --features fake-provider` in `bootstrap` and in CI, which puts a
 //! second pin on a crate `Cargo.lock` already pins and a second `onejudge` build
 //! on `PATH` to shadow — the outage `tests/e2e/support.rs::required` exists to
-//! diagnose, and one this host already has (a 0.3.4 `onejudge-echo-provider` in
-//! the cargo bin directory against the 0.3.8 engine this binary links).
+//! diagnose, and one this development host already had: an
+//! `onejudge-echo-provider` in the cargo bin directory built from a release older
+//! than the engine `Cargo.lock` links.
 //!
 //! What would close this: `pub` access to that responder from the onejudge
 //! *library* under the same feature, which would make this file three lines. That

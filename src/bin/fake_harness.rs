@@ -66,8 +66,8 @@
 //!
 //! oneharness ships a deterministic responder for exactly this seam, and it is
 //! the right thing to use the moment it can answer these journeys. Measured
-//! against oneharness 0.6.15, it cannot, and the blocker is one property rather
-//! than a list:
+//! against the `oneharness` the justfile's `oneharness-version` installs, it
+//! cannot, and the blocker is one property rather than a list:
 //!
 //! **The `MOCK_*` contract fixes a response per process environment; a member
 //! needs several from one binary.** Every side of every member reaches
