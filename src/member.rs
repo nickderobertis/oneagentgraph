@@ -228,11 +228,12 @@ impl Bounds {
 /// shape that made silence alone the wrong rule — clears the clock on the child's
 /// progress and is left alone.
 ///
-/// What counts as progress is [`crate::scratch::work`]: a process starting or
-/// ending under this member's stamp, or one of them being charged for CPU.
-/// Deliberately not "a live child exists" — a wedged member has one of those too,
-/// which is precisely why its harness never answers — so the rule that keeps a
-/// working member alive is not one that keeps a dead one alive with it.
+/// What counts as progress is [`crate::scratch::work`]: the CPU charged to the
+/// processes stamped for this member, which changes when one of them runs and
+/// when one arrives or leaves. Deliberately not "a live child exists" — a wedged
+/// member has one of those too, which is precisely why its harness never answers
+/// — so the rule that keeps a working member alive is not one that keeps a dead
+/// one alive with it.
 ///
 /// Two consequences worth stating plainly, because they are the cost of the
 /// trade:

@@ -1484,23 +1484,28 @@ pub fn is_live(identity: ProcessIdentity) -> bool {
     platform::start_token(identity.pid).is_some_and(|token| token == identity.start_token)
 }
 
-/// One observation of the work under a scratch: every live process stamped for
-/// it, and how much CPU each has been charged where the platform can say.
+/// One observation of the work under a scratch: how much CPU every live process
+/// stamped for it has been charged between them.
 ///
 /// Compared, never read. Two observations that differ are a tree that did
-/// something in between — a process started or ended, or one of them was charged
-/// for CPU — and two that are identical are a tree that did nothing at all. That
-/// is the whole of what [`work`] is for, and it is why the CPU reading is left in
-/// each platform's own units.
+/// something in between; two that are identical are a tree that did nothing at
+/// all. That is the whole of what [`work`] is for, and it is why the reading is
+/// left in whatever unit the platform counts in — a conversion nobody performs
+/// is a conversion nobody can get wrong on three of them.
 ///
-/// Opaque on purpose, and that is the invariant rather than a preference: the
-/// comparison is only meaningful between two snapshots taken the same way, in
-/// the same order, of the same stamp. A caller that could assemble one out of
-/// arbitrary pairs could make an idle tree compare as a busy one, which is the
-/// direction that gets a wedged member spared forever. [`work`] is the only way
-/// to obtain one.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Work(Vec<(ProcessIdentity, Option<u64>)>);
+/// One number rather than a process-by-process record, because the question is
+/// about the tree rather than about any process in it, and a second signal is a
+/// second thing to be sure of. A process that starts, or ends, is not tracked as
+/// membership — it registers here as the CPU it was charged arriving in the
+/// total or leaving it.
+///
+/// Opaque on purpose, and that is the invariant rather than a preference: a
+/// comparison is only meaningful between two readings taken the same way of the
+/// same stamp, and a caller that could name its own number could make an idle
+/// tree compare as a busy one — the direction that spares a wedged member
+/// forever. [`work`] is the only way to obtain one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Work(u64);
 
 /// Observe the work under `scratch` as it stands right now.
 ///
@@ -1515,14 +1520,15 @@ pub struct Work(Vec<(ProcessIdentity, Option<u64>)>);
 /// so it never reads as a change.
 #[must_use]
 pub fn work(scratch: &Path) -> Work {
-    // In `stamped_for`'s own order, which every platform sorts, so two snapshots
-    // of an unchanged tree compare equal rather than depending on the order a
-    // process table was walked in.
     Work(
         stamped_for(&scratch.display().to_string())
             .into_iter()
-            .map(|identity| (identity, platform::consumed(identity.pid)))
-            .collect(),
+            // A process this build cannot read counts as nothing, which is the
+            // same answer a platform with no accounting at all gives: it makes a
+            // tree look *less* busy, and the direction that errs is the one that
+            // still condemns a wedged member.
+            .filter_map(|identity| platform::consumed(identity.pid))
+            .fold(0u64, u64::saturating_add),
     )
 }
 
