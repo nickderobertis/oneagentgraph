@@ -1581,7 +1581,8 @@ impl Work {
     /// `over` a window of wall-clock time.
     ///
     /// The comparison is a rate — CPU charged against wall time elapsed — held
-    /// against [`WORKING_SHARE_OF_A_CORE`]. It is the *magnitude* of the change
+    /// against one hundredth of a core, for the reasons recorded on
+    /// `WORKING_SHARE_OF_A_CORE`. It is the *magnitude* of the change
     /// rather than its sign, because a process leaving the tree takes its whole
     /// lifetime's CPU out of the total: a member whose child just finished a
     /// second of work is a member that was working, and a total that fell says
