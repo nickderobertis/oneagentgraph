@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use oneagentgraph::config::ConfigRef;
 use oneagentgraph::control::{self, Delivery};
 use oneagentgraph::event::{Envelope, EventKind};
-use oneagentgraph::run::{self, MemberName, Request, RunId, Signal};
+use oneagentgraph::run::{self, MemberName, Request, Signal};
 
 use crate::support::{fake_harness, oneharness_bin, until, Workspace};
 
@@ -235,16 +235,17 @@ fn a_library_caller_redirects_a_members_in_flight_turn() {
     let run_id = running.started().run_id.clone();
     let member = MemberName::parse("worker").expect("a member name");
 
-    // Only a *controlled* turn writes this marker, so waiting on it is a check
-    // on the control ask as well as on the turn: a timeout here means oneharness
-    // refused `--control` and the turn ran with no lever to pull.
+    // The double's own marker, which is the whole synchronization — nothing here
+    // waits on a file inside the run's state. A run writes down where a member's
+    // turn is addressed *before* it drives the conversation, so a turn that has
+    // begun is one this call can already reach; and only a **controlled** turn
+    // writes this marker, which makes the wait a check on the control ask too. A
+    // timeout here means oneharness refused `--control` and the turn ran with no
+    // lever to pull.
     until(
         "the member's turn to be in flight — only a controlled turn writes this",
         || started.exists(),
     );
-    until("the run to record where its turn is addressed", || {
-        control_record(&workspace, &run_id).exists()
-    });
 
     let redirection = format!(
         "fake:complete-now fake:did-work={} stop and write the summary instead",
@@ -309,16 +310,6 @@ fn a_library_caller_redirects_a_members_in_flight_turn() {
         refused.to_string().contains("has no member \"ghost\""),
         "{refused}"
     );
-}
-
-/// Where the run wrote down how to reach one member's turn.
-fn control_record(workspace: &Workspace, run_id: &RunId) -> std::path::PathBuf {
-    workspace
-        .state()
-        .join(run_id.as_str())
-        .join("members")
-        .join("worker")
-        .join("control.json")
 }
 
 /// A caller restarts a scheduled member's clock, and the live run publishes the
