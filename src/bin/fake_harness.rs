@@ -34,6 +34,7 @@
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
+//! | `fake:entered=<path>` | write `<path>` the moment any turn begins |
 //! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
 //! | `FAKE_HARNESS_FAIL_AFTER_MARKER` | let an `exec`-shaped provider run once, then crash later launches |
@@ -455,6 +456,12 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
     let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
     // Written before any wait, so a journey can wait for a turn that is really
     // in flight rather than for a process that has merely started.
+    if let Some(path) = sentinel_path(prompt, "entered") {
+        let _ = std::fs::write(path, "entered");
+    }
+    // Unlike `entered`, `started` proves the turn has an out-of-band control
+    // channel. Windows has no Unix-domain turn-control socket, so journeys that
+    // only need an in-flight turn use `entered` on every platform.
     if interrupted.is_some() {
         if let Some(path) = sentinel_path(prompt, "started") {
             let _ = std::fs::write(path, "started");

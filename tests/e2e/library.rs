@@ -26,7 +26,7 @@ fn a_library_caller_watches_cancels_and_waits_for_a_live_graph() {
     let began = workspace.at("began");
     let release = workspace.at("release");
     let task = format!(
-        "fake:complete-now fake:started={} fake:hold={}",
+        "fake:complete-now fake:entered={} fake:hold={}",
         began.display(),
         release.display()
     );
