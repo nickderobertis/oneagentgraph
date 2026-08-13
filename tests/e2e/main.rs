@@ -14,6 +14,7 @@
 
 mod dispatch;
 mod interrupt;
+mod library;
 mod liveness;
 mod origin;
 mod remote;

@@ -11,7 +11,8 @@
 //! settle, and `trigger` / `reset-timer` are how an operator moves that clock
 //! from outside the run.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::{
@@ -241,6 +242,221 @@ pub struct Started {
     pub events_path: String,
     /// The process producing it.
     pub pid: u32,
+}
+
+/// A graph run in progress.
+///
+/// Obtain one with [`start`]. Envelopes are delivered in the same order and at
+/// the same flush boundary as [`run`] writes them, [`Running::cancel`] performs
+/// the whole-run equivalent of `oneagentgraph cancel --kill`, and
+/// [`Running::wait`] returns the result the blocking entry point would return.
+pub struct Running {
+    started: Started,
+    events: mpsc::Receiver<crate::event::Envelope>,
+    pending: Mutex<VecDeque<crate::event::Envelope>>,
+    result: mpsc::Receiver<Result<i32, Error>>,
+    thread: std::thread::JoinHandle<()>,
+    root: PathBuf,
+}
+
+/// Whether cancellation only leaves a stop signal or also reaps live processes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelMode {
+    /// Write the stop signal and let the member observe it.
+    Stop,
+    /// Write the stop signal and reap the addressed process tree.
+    Kill,
+}
+
+/// The validated scope of a cancellation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CancelScope(Option<String>);
+
+impl CancelScope {
+    /// Address the whole run.
+    #[must_use]
+    pub fn run() -> Self {
+        Self(None)
+    }
+
+    /// Address one member by its validated name.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] when `name` is not a safe member name.
+    pub fn member(name: &str) -> Result<Self, Error> {
+        if !crate::config::is_member_name(name) {
+            return Err(Error::InvalidConfig(format!(
+                "{name:?} is not a member name: use letters, digits, hyphens, and underscores"
+            )));
+        }
+        Ok(Self(Some(name.to_string())))
+    }
+
+    fn member_name(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+impl Running {
+    /// The stable description of this run.
+    #[must_use]
+    pub fn started(&self) -> &Started {
+        &self.started
+    }
+
+    /// Wait up to `timeout` for the next envelope.
+    ///
+    /// `Ok(None)` means the timeout elapsed. A disconnected channel means the
+    /// run has stopped producing events; [`Running::wait`] still supplies its
+    /// final result.
+    ///
+    /// # Errors
+    ///
+    /// [`mpsc::RecvTimeoutError::Disconnected`] when the run has stopped
+    /// producing envelopes.
+    pub fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Option<crate::event::Envelope>, mpsc::RecvTimeoutError> {
+        if let Some(envelope) = self
+            .pending
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .pop_front()
+        {
+            return Ok(Some(envelope));
+        }
+        match self.events.recv_timeout(timeout) {
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Cancel the whole run and reap its live member process trees.
+    ///
+    /// This is the library form of `oneagentgraph cancel RUN --kill`: it writes
+    /// the same stop signal and calls the same scratch-tree reaper. The return
+    /// value is the number of processes signalled.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] when the stop signal cannot be written.
+    pub fn cancel(&self) -> Result<usize, Error> {
+        cancel(
+            &self.root,
+            &self.started.run_id,
+            &CancelScope::run(),
+            CancelMode::Kill,
+        )
+    }
+
+    /// Wait for the graph to end and return the blocking scheduler's result.
+    ///
+    /// # Errors
+    ///
+    /// The same errors as [`run`], or [`Error::InvalidConfig`] if the scheduler
+    /// thread panicked before reporting its result.
+    pub fn wait(self) -> Result<i32, Error> {
+        let result = self.result.recv().unwrap_or_else(|_| {
+            Err(Error::InvalidConfig(
+                "the graph scheduler stopped without a result".into(),
+            ))
+        });
+        let _ = self.thread.join();
+        result
+    }
+}
+
+/// Cancel a run, using the same signal and optional process-tree reap as the
+/// CLI's `cancel` command.
+///
+/// `root` is the already-resolved state directory for `run_id`. `scope` selects
+/// the whole run or one validated member. `mode` selects the CLI's `--kill`
+/// behavior.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when the stop signal cannot be written.
+pub fn cancel(
+    root: &Path,
+    run_id: &RunId,
+    scope: &CancelScope,
+    mode: CancelMode,
+) -> Result<usize, Error> {
+    let member = scope.member_name();
+    let signals = root.join(SIGNAL_DIR);
+    std::fs::create_dir_all(&signals).map_err(|err| {
+        Error::InvalidConfig(format!("cannot create {}: {err}", signals.display()))
+    })?;
+    let stop = match member {
+        Some(member) => signals.join(format!("{member}.stop")),
+        None => signals.join("stop"),
+    };
+    std::fs::write(&stop, "stop")
+        .map_err(|err| Error::InvalidConfig(format!("cannot signal run {run_id:?}: {err}")))?;
+    Ok(if mode == CancelMode::Kill {
+        match member {
+            Some(member) => crate::scratch::reap(&root.join("members").join(member)),
+            None => crate::scratch::reap(root),
+        }
+    } else {
+        0
+    })
+}
+
+/// A writer that turns the scheduler's flushed NDJSON back into typed events.
+///
+/// Going through [`run`] is deliberate: this adapter is only an observer of the
+/// public blocking path, so there is one scheduler and one ordering decision.
+struct EventWriter {
+    events: mpsc::Sender<crate::event::Envelope>,
+    buffered: Vec<u8>,
+}
+
+impl Write for EventWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.buffered.extend_from_slice(bytes);
+        while let Some(end) = self.buffered.iter().position(|byte| *byte == b'\n') {
+            let line: Vec<u8> = self.buffered.drain(..=end).collect();
+            if let Ok(envelope) = serde_json::from_slice(&line[..line.len() - 1]) {
+                let _ = self.events.send(envelope);
+            }
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn describe_started(
+    envelope: &crate::event::Envelope,
+    state_dir: &Path,
+) -> Result<(Started, PathBuf), Error> {
+    if envelope.kind != EventKind::GraphStarted {
+        return Err(Error::InvalidConfig(format!(
+            "the graph began with {:?}, not graph-started",
+            envelope.kind
+        )));
+    }
+    let raw_run_id = envelope
+        .labels
+        .run_id
+        .as_deref()
+        .ok_or_else(|| Error::InvalidConfig("graph-started carried no run id".into()))?;
+    let run_id = RunId::parse(raw_run_id)?;
+    let root = state_dir.join(&run_id);
+    Ok((
+        Started {
+            run_id,
+            events_path: root.join(EVENTS_FILE).display().to_string(),
+            pid: std::process::id(),
+        },
+        root,
+    ))
 }
 
 /// A run id: sortable, unique on one host, and readable in a directory listing.
@@ -800,6 +1016,75 @@ pub fn run(
     write_record(&root, &record)?;
     let _ = crate::scratch::reap(&root);
     Ok(exit)
+}
+
+/// Start a graph on a scheduler thread and return a live handle.
+///
+/// This returns after the scheduler publishes `graph-started`, rather than
+/// after the graph settles. The first envelope remains available through the
+/// returned handle, so observing startup does not consume caller-visible data.
+/// The scheduler itself is [`run`]: this function supplies a channel-backed
+/// writer to that entry point and adds no scheduling path of its own.
+///
+/// # Errors
+///
+/// The same startup errors as [`run`]. Errors that occur after `graph-started`
+/// are returned by [`Running::wait`].
+pub fn start(request: &Request, env: &BTreeMap<String, String>) -> Result<Running, Error> {
+    let request = request.clone();
+    let state_dir = request.state_dir.clone();
+    let env = env.clone();
+    let (event_tx, event_rx) = mpsc::channel();
+    let (result_tx, result_rx) = mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        let writer = EventWriter {
+            events: event_tx,
+            buffered: Vec::new(),
+        };
+        let result = run(&request, Box::new(writer), &env);
+        let _ = result_tx.send(result);
+    });
+
+    loop {
+        match event_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(envelope) => {
+                let (started, root) = describe_started(&envelope, &state_dir)?;
+                return Ok(Running {
+                    started,
+                    events: event_rx,
+                    pending: Mutex::new(VecDeque::from([envelope])),
+                    result: result_rx,
+                    thread,
+                    root,
+                });
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Ok(result) = result_rx.try_recv() {
+                    let _ = thread.join();
+                    return match result {
+                        Err(error) => Err(error),
+                        Ok(_) => Err(Error::InvalidConfig(
+                            "the graph ended without publishing graph-started".into(),
+                        )),
+                    };
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let result = result_rx.recv().unwrap_or_else(|_| {
+                    Err(Error::InvalidConfig(
+                        "the graph scheduler stopped without a result".into(),
+                    ))
+                });
+                let _ = thread.join();
+                return match result {
+                    Err(error) => Err(error),
+                    Ok(_) => Err(Error::InvalidConfig(
+                        "the graph ended without publishing graph-started".into(),
+                    )),
+                };
+            }
+        }
+    }
 }
 
 fn deps(member: &Member) -> &[String] {
@@ -1489,5 +1774,78 @@ mod tests {
             assert!(serde_json::from_value::<MemberOutcome>(Value::from(invalid)).is_err());
         }
         assert_eq!(refusal_exit(), EXIT_INVALID_CONFIG);
+    }
+
+    #[test]
+    fn the_live_writer_preserves_a_fragmented_envelope() {
+        let (tx, rx) = mpsc::channel();
+        let mut writer = EventWriter {
+            events: tx,
+            buffered: Vec::new(),
+        };
+        let line = serde_json::json!({
+            "v": 1,
+            "ts": "2026-01-01T00:00:00.000Z",
+            "stream": "s",
+            "seq": 0,
+            "source": "agentgraph",
+            "kind": "graph-started",
+            "labels": {},
+            "payload": {},
+            "artifacts": []
+        })
+        .to_string();
+        writer
+            .write_all(&line.as_bytes()[..20])
+            .expect("first fragment");
+        assert!(rx.try_recv().is_err(), "a partial line is not an envelope");
+        writer
+            .write_all(&[&line.as_bytes()[20..], b"\nnot-json\n"].concat())
+            .expect("remaining lines");
+        writer.flush().expect("flush");
+        let envelope = rx.recv().expect("typed envelope");
+        assert_eq!(envelope.kind, EventKind::GraphStarted);
+        assert!(rx.try_recv().is_err(), "invalid NDJSON was not forwarded");
+
+        let state = tempfile::tempdir().expect("state");
+        assert!(describe_started(&envelope, state.path())
+            .unwrap_err()
+            .to_string()
+            .contains("no run id"));
+        let mut wrong_kind = envelope;
+        wrong_kind.kind = EventKind::GraphSettled;
+        assert!(describe_started(&wrong_kind, state.path())
+            .unwrap_err()
+            .to_string()
+            .contains("not graph-started"));
+    }
+
+    #[test]
+    fn shared_cancellation_validates_scope_and_supports_stop_only() {
+        let state = tempfile::tempdir().expect("state");
+        let id = RunId::parse("run-1").expect("run id");
+        assert_eq!(
+            cancel(state.path(), &id, &CancelScope::run(), CancelMode::Stop).expect("stop"),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(state.path().join(SIGNAL_DIR).join("stop")).expect("signal"),
+            "stop"
+        );
+        assert_eq!(
+            cancel(
+                state.path(),
+                &id,
+                &CancelScope::member("worker").expect("member"),
+                CancelMode::Stop
+            )
+            .expect("member stop"),
+            0
+        );
+        assert!(state.path().join(SIGNAL_DIR).join("worker.stop").exists());
+        assert!(CancelScope::member("../escape").is_err());
+        let not_a_directory = state.path().join("file");
+        std::fs::write(&not_a_directory, "file").expect("plain file");
+        assert!(cancel(&not_a_directory, &id, &CancelScope::run(), CancelMode::Stop).is_err());
     }
 }
