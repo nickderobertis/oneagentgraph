@@ -81,7 +81,7 @@ fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Err
         Command::Interrupt(args) => interrupt(&args, env),
         Command::History(args) => show_history(&args, env),
         Command::Health => {
-            let report = health::read(&oneharness_bin(env))?;
+            let report = health::read()?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&report).unwrap_or_default()

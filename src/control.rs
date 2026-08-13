@@ -200,10 +200,42 @@ pub enum Delivery {
 /// Ask the run listening at `address` to stop what it is doing and do `input`
 /// instead.
 ///
-/// The whole delivery is `oneharness interrupt`, run as its own process — the
-/// same hop `run` and `health` take, and for the same reason: the socket, the
-/// protocol version, and the harness's own control mechanism are oneharness's,
-/// and nothing about them is rebuilt here.
+/// The whole delivery is `oneharness interrupt`, run as its own process. That is
+/// **not** the general "compose through the CLI" reflex — [`crate::health`] used
+/// to argue that way and was wrong: calling a sibling's library is more
+/// composition than spawning its binary, not less, and every piece of this
+/// delivery is in fact exposed as a library call
+/// ([`oneharness_core::domain::control::RedirectInput::new`],
+/// [`oneharness_core::io::session::resolve_dir`],
+/// [`oneharness_core::domain::control::socket_path`],
+/// [`oneharness_core::io::control::send`]).
+///
+/// The hop stays for one thing those calls cannot give a *separately versioned*
+/// process: **an interrupt client that speaks the listening run's protocol**.
+/// [`oneharness_core::domain::control::PROTOCOL_VERSION`] is checked for
+/// equality on the way in, deliberately — a frame carrying any other version is
+/// refused as `unsupported` rather than half-understood. The run that bound the
+/// socket is the operator's installed `oneharness`; spawning its `interrupt` verb
+/// makes both ends the same build by construction, so an operator upgrading
+/// oneharness moves them together. Linking `send` here would make the client
+/// whichever `oneharness-core` this crate's `Cargo.lock` pins, and the first
+/// upstream bump of that constant would refuse every `oneagentgraph interrupt`
+/// against a run that is perfectly interruptible — a break only a release of
+/// *this* crate could repair.
+///
+/// A second, smaller thing goes with it: the verb answers `unsupported` from the
+/// **session store** before it dials anything, by reading the record's harness
+/// and asking oneharness's registry whether that harness has a lever at all.
+/// That composition lives in the `oneharness` binary rather than in
+/// `oneharness-core`, and rebuilding it here would be this crate deciding which
+/// harnesses can be interrupted — the harness logic `AGENTS.md` forbids.
+///
+/// The second collapses when oneharness-core grows the whole verb as a call — an
+/// `io::control::interrupt(&InterruptRequest) -> ControlResponse` alongside
+/// [`oneharness_core::io::run::run`] and [`oneharness_core::io::usage::report`].
+/// The first collapses only if that protocol becomes negotiated rather than
+/// version-equal, because the process on the other end of the socket is started
+/// by a binary this build does not choose.
 #[must_use]
 pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
     let mut command = std::process::Command::new(bin);

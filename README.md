@@ -27,9 +27,10 @@ Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
 Windows (x86-64) are attached to every [release], with `sha256` checksums.
 
 [onejudge] is a **library dependency**, linked into this binary — there is
-nothing to install for it. `run`, `smoke`, `health`, and `interrupt` drive the
-[oneharness] CLI, so that has to be on `PATH`; `validate`, `history`, `persona`,
-`trigger`, `reset-timer`, `cancel`, and `sweep` need nothing at all.
+nothing to install for it. `run`, `smoke`, and `interrupt` drive the [oneharness]
+CLI, so that has to be on `PATH`; `health`, `validate`, `history`, `persona`,
+`trigger`, `reset-timer`, `cancel`, and `sweep` need nothing at all — `health`
+reads oneharness's own identity sweep through its library, in this process.
 `ONEAGENTGRAPH_ONEHARNESS_BIN` names a pinned install instead.
 
 ## What it does

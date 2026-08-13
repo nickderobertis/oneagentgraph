@@ -22,14 +22,17 @@ in-process, on a thread of this process, through onejudge's own config, plan, an
 streamed run driver. `oneharness run` is still a child process — its library
 surface prints its report to the process's stdout and returns only an exit code,
 and this process's stdout is the merged stream — and so are the agent harness and
-a `judge: {command: [...]}` provider. That hop collapses when oneharness grows a
-non-printing run entrypoint or an event-sink parameter. `health` is the same
-story one command over: `oneharness-core` probes one *named* identity, and
-enumerating a config's identities is the `oneharness` CLI's own, so `health`
-still runs `oneharness usage --format json` rather than rebuilding that
-enumeration here — which is the harness logic the paragraph above forbids. It
-collapses when oneharness-core grows an entrypoint that builds a whole
-`UsageReport` from a resolved config.
+a `judge: {command: [...]}` provider. A **supervised** `oneharness run` stays a
+child process whatever entrypoints appear upstream: the process group is what a
+cancel, a watchdog, and a reap all reach a member's tree through, and an
+in-process run has no tree to hold. `oneagentgraph interrupt` stays one too, and
+for a reason the others do not share — the control socket is version-*equal*, not
+negotiated, so the client has to be the same build as the run that bound it;
+`src/control.rs` records the whole argument. `health` used to be on that list and
+is not: `oneharness_core::io::usage::report` is the `usage` verb as a call, so the
+sweep runs in this process from oneharness's own code. **Prefer the library at
+every new site** — a hop that stays has to name what the library does not expose,
+in the code, at the site.
 
 Ships as a Rust library plus the `oneagentgraph` binary, distributed on
 crates.io, PyPI (`oneagentgraph-cli`), and npm (`oneagentgraph-cli`).

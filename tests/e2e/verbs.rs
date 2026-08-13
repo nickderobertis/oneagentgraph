@@ -682,88 +682,62 @@ fn sweep_names_the_family_it_could_not_examine() {
     );
 }
 
-/// `health` forwards what oneharness knows about each identity, and says why
+/// `health` forwards what oneharness knows about each identity — through
+/// oneharness's own library, with no `oneharness` process anywhere — and says why
 /// there is no answer when there is none.
-// A POSIX shell stands in for a provider here, which is a platform
-// capability like the others this suite gates on: the behaviour under test
-// needs one *identity* to answer differently from another, and a script is
-// how that is expressed without a second compiled binary per case.
-#[cfg(unix)]
 #[test]
-fn health_reads_oneharness_data_and_names_a_missing_binary() {
+fn health_reads_oneharness_data_without_spawning_oneharness() {
     let workspace = Workspace::new();
     let run = workspace.run(&["health"]);
     run.expect_code(0);
-    serde_json::from_str::<serde_json::Value>(&run.stdout).expect("health answers JSON");
+    let report: serde_json::Value = serde_json::from_str(&run.stdout).expect("health answers JSON");
+    // The document `oneharness usage --format json` prints, which is what this
+    // verb promises to forward: a report of identities, not a bare value a caller
+    // would read as an answer about its own.
+    assert!(
+        report["identities"].is_array(),
+        "health answered something that is not oneharness's report: {run}",
+        run = run.stdout
+    );
 
-    let missing = workspace.run_with(
+    // The same answer with the `oneharness` binary pointed at something that is
+    // not there. This is the proof the hop is gone: `run` and `interrupt` still
+    // reach that binary, so a `health` that needed it would fail here — and it
+    // used to, by design.
+    let unspawnable = workspace.run_with(
         &["health"],
         &[(
             "ONEAGENTGRAPH_ONEHARNESS_BIN",
             "oneharness-that-is-not-installed",
         )],
     );
-    missing.expect_code(2);
-    assert!(
-        missing.stderr.contains("has to be on PATH"),
-        "{}",
-        missing.stderr
+    unspawnable.expect_code(0);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&unspawnable.stdout)
+            .expect("health answers JSON")["identities"]
+            .as_array()
+            .map(Vec::len),
+        report["identities"].as_array().map(Vec::len),
+        "health answered a different fleet without a oneharness binary to spawn"
     );
 
-    // A binary that runs and refuses forwards its own diagnostic, and one that
-    // answers something that is not a report is refused rather than forwarded:
-    // a caller would read either as an answer about its identities.
-    let refusing = workspace.write(
-        "refuse.sh",
-        "#!/bin/sh\necho 'no identities configured' >&2\nexit 1\n",
-    );
-    executable(&refusing);
-    let refused = workspace.run_with(
-        &["health"],
-        &[(
-            "ONEAGENTGRAPH_ONEHARNESS_BIN",
-            &refusing.display().to_string(),
-        )],
-    );
+    // The one thing left that can refuse the sweep: configuration oneharness will
+    // not load. It is refused with oneharness's own diagnostic — naming the file —
+    // rather than reported as a host with no identities.
+    let broken = workspace.write("oneharness.toml", "harnesses = [\n");
+    let refused = workspace.run(&["health"]);
     refused.expect_code(2);
     assert!(
-        refused.stderr.contains("refused the probe"),
+        refused.stderr.contains("this host's identities")
+            && refused.stderr.contains(&broken.display().to_string()),
         "{}",
         refused.stderr
     );
-
-    let babbling = workspace.write("babble.sh", "#!/bin/sh\necho 'not a report'\n");
-    executable(&babbling);
-    let babbled = workspace.run_with(
-        &["health"],
-        &[(
-            "ONEAGENTGRAPH_ONEHARNESS_BIN",
-            &babbling.display().to_string(),
-        )],
+    assert!(
+        refused.stdout.is_empty(),
+        "a refusal must not read as a report: {}",
+        refused.stdout
     );
-    babbled.expect_code(2);
-    assert!(babbled.stderr.contains("not JSON"), "{}", babbled.stderr);
-
-    // JSON that parses but describes nothing is the harder half: `7` and
-    // `"none"` are valid documents, and forwarding one would let a caller read
-    // it as an answer about its identities.
-    for (name, script) in [
-        ("scalar.sh", "#!/bin/sh\necho 7\n"),
-        ("string.sh", "#!/bin/sh\necho '\"none\"'\n"),
-    ] {
-        let bare = workspace.write(name, script);
-        executable(&bare);
-        let answered = workspace.run_with(
-            &["health"],
-            &[("ONEAGENTGRAPH_ONEHARNESS_BIN", &bare.display().to_string())],
-        );
-        answered.expect_code(2);
-        assert!(
-            answered.stderr.contains("a bare value, not a report"),
-            "{name}: {}",
-            answered.stderr
-        );
-    }
 }
 
 /// `smoke` spends one turn through the real chain and names the identity that
@@ -1981,6 +1955,9 @@ fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
     let without = [("ONEAGENTGRAPH_ONEHARNESS_BIN", absent.as_str())];
     for args in [
         vec!["validate", "./graph.yaml"],
+        // `health` joined this list when its sweep stopped being a child
+        // process: it is oneharness's own `usage` verb, called as a library.
+        vec!["health"],
         vec!["history"],
         vec!["history", id.as_str()],
         // `persona validate` takes a path, per the contract; scaffolding one is
