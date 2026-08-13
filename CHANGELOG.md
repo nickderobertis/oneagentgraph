@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.8](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.7...v0.2.8) - 2026-08-13
+
+### Added
+
+- let a library caller start, watch and cancel a graph ([#27](https://github.com/nickderobertis/oneagentgraph/pull/27))
+
 ## [0.2.7](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.6...v0.2.7) - 2026-08-13
 
 ### Changed
