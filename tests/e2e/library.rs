@@ -8,11 +8,17 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use oneagentgraph::config::ConfigRef;
-use oneagentgraph::control::{self, Delivery};
 use oneagentgraph::event::{Envelope, EventKind};
 use oneagentgraph::run::{self, MemberName, Request, Signal};
 
-use crate::support::{fake_harness, oneharness_bin, until, Workspace};
+use crate::support::{fake_harness, oneharness_bin, Workspace};
+// The one Unix-only journey's own surface and helper: on a platform without a
+// unix domain socket it compiles away, and an import left behind is a
+// `-D warnings` build failure rather than dead weight.
+#[cfg(unix)]
+use crate::support::until;
+#[cfg(unix)]
+use oneagentgraph::control::{self, Delivery};
 
 static LIBRARY_RUN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
