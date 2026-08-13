@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use crate::support::{until, Workspace};
+use crate::support::{graph_with, until, Workspace};
 
 /// One run whose member is parked on a controllable turn, and the run id an
 /// operator addresses it by.
@@ -602,16 +602,16 @@ const QWEN_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"qwen\"]\n";
 /// The default two-party graph, on a chain whose harness has no control
 /// mechanism.
 fn uncontrollable_graph(fake: &str) -> String {
-    format!(
+    graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_QWEN: {fake}\n",
+            "env: {}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n",
         ),
-        fake = fake,
+        &[("env.ONEHARNESS_BIN_QWEN", fake)],
     )
 }

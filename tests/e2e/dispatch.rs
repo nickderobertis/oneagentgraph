@@ -12,7 +12,8 @@
 // `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
 
 use crate::support::{
-    fake_harness, fake_provider, labels, single_sided_graph, two_party_graph, Workspace, CHAIN,
+    fake_harness, fake_provider, graph_with, labels, single_sided_graph, two_party_graph,
+    Workspace, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// The whole happy path: a two-party member completes, and the stream carries
@@ -232,26 +233,29 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
     let own_cwd = workspace.at("check-in.cwd");
     let graph_wide_cwd = workspace.at("worker.cwd");
 
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 3\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n",
             "  check_in:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            // Single-quoted for the same reason command-provider paths below
-            // are: Windows paths contain backslashes, and YAML double quotes
-            // interpret sequences such as `\x` instead of preserving them for
-            // the harness.
-            "    task: 'fake:complete-now write one status update, and nothing else. \
-             fake:record-prompt={own} fake:record-cwd={own_cwd}'\n",
             "    dir: ./api\n",
             "  worker:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
         ),
-        fake = fake_harness(),
-        own = own.display(),
-        own_cwd = own_cwd.display(),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (
+                "members.check_in.task",
+                format!(
+                    "fake:complete-now write one status update, and nothing else. \
+                     fake:record-prompt={} fake:record-cwd={}",
+                    own.display(),
+                    own_cwd.display(),
+                ),
+            ),
+        ],
     ));
 
     let run = workspace.run(&[
@@ -364,23 +368,33 @@ fn a_graph_whose_members_carry_their_own_jobs_needs_no_task_of_its_own() {
     let recorded = workspace.at("pacemaker.prompt");
     let where_it_ran = workspace.at("pacemaker.cwd");
 
-    let graph = format!(
-        concat!(
-            "version: 3\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
-            "members:\n",
-            "  check_in:\n    kind: oneharness\n",
-            "    oneharness_config: ./oneharness.toml\n",
-            "    dir: {dir}\n",
-        ),
-        fake = fake_harness(),
-        dir = elsewhere.display(),
+    const SKELETON: &str = concat!(
+        "version: 3\nname: node-scope\n",
+        "env: {}\n",
+        "members:\n",
+        "  check_in:\n    kind: oneharness\n",
+        "    oneharness_config: ./oneharness.toml\n",
     );
-    let with_own_task = format!(
-        "{graph}    task: 'fake:complete-now write one status update. \
-         fake:record-prompt={recorded} fake:record-cwd={cwd}'\n",
-        recorded = recorded.display(),
-        cwd = where_it_ran.display(),
+    let job: &[(&str, String)] = &[
+        (FAKE_HARNESS_KEY, fake_harness()),
+        ("members.check_in.dir", elsewhere.display().to_string()),
+    ];
+    let graph = graph_with(SKELETON, job);
+    let with_own_task = graph_with(
+        SKELETON,
+        &[
+            job[0].clone(),
+            job[1].clone(),
+            (
+                "members.check_in.task",
+                format!(
+                    "fake:complete-now write one status update. \
+                     fake:record-prompt={} fake:record-cwd={}",
+                    recorded.display(),
+                    where_it_ran.display(),
+                ),
+            ),
+        ],
     );
 
     workspace.graph(&with_own_task);
@@ -423,6 +437,62 @@ fn a_graph_whose_members_carry_their_own_jobs_needs_no_task_of_its_own() {
         refused.stderr.contains("no task"),
         "a run with nothing to do was not refused by name: {}",
         refused.stderr
+    );
+}
+
+/// A member's `task` and `dir` carry a path **exactly**, including the two
+/// characters that made an ordinary Windows path unspellable.
+///
+/// The two journeys above are the ones this protects, and it is here because
+/// they could not protect themselves: they formatted a path into a double-quoted
+/// YAML scalar, and a Windows temporary directory is
+/// `C:\Users\runneradmin\AppData\Local\Temp\…`, where `\U` opens an eight-digit
+/// unicode escape. The parser demanded hexadecimal and refused the document, so
+/// both runs exited 2 having never reached the code under test — on the one
+/// platform this gate does not run.
+///
+/// So the path here is a Windows one whatever host is reading this, and the
+/// proof is on the two ends that matter: the real binary parses the document,
+/// and the value it parses to is the path character for character. Neither
+/// needs Windows, which is the point — the defect was a *serialization*
+/// question wearing a platform's clothes.
+#[test]
+fn a_composed_graph_carries_a_windows_path_exactly() {
+    let workspace = Workspace::new();
+    let windows = r"C:\Users\runneradmin\AppData\Local\Temp\.tmpQ1u9\check-in.prompt";
+    let task = format!("fake:complete-now write one update. fake:record-prompt={windows}");
+    let document = graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            ("members.check_in.task", task.clone()),
+            ("members.check_in.dir", windows.to_string()),
+        ],
+    );
+    workspace.graph(&document);
+
+    // The failure as it was observed: `oneagentgraph: invalid config:
+    // ./graph.yaml: did not find expected hexadecimal number`, exit 2.
+    workspace.run(&["validate", "./graph.yaml"]).expect_code(0);
+
+    // And through the same typed boundary the run itself reads it at: a member
+    // is handed the path that was written, not an escape of it.
+    let parsed: oneagentgraph::config::GraphConfig =
+        serde_norway::from_str(&document).expect("the composed document parses");
+    let Some(oneagentgraph::config::Member::Oneharness(member)) = parsed.members.get("check_in")
+    else {
+        panic!("the composed document lost its member: {document}");
+    };
+    assert_eq!(member.task.as_deref(), Some(task.as_str()));
+    assert_eq!(
+        member.dir.as_deref(),
+        Some(std::path::Path::new(windows)),
+        "a member's directory did not survive being written into a graph document"
     );
 }
 
@@ -731,7 +801,7 @@ fn the_base_preamble_and_the_persona_role_both_reach_the_agent() {
         ),
     );
     workspace.graph(
-        &two_party_graph(&fake_harness(), "")
+        &two_party_graph(&fake_harness(), NO_ENV)
             .replace("persona: engineer", "persona: ./roles/lead.yaml"),
     );
 
@@ -767,7 +837,7 @@ fn the_graphs_env_reaches_the_member_process_expanded() {
     let marker = workspace.at("marker");
     workspace.graph(&two_party_graph(
         &fake_harness(),
-        "  ONEAGENTGRAPH_TEST_MARKER: ${E2E_SOURCE}/leaf\n",
+        &[("ONEAGENTGRAPH_TEST_MARKER", "${E2E_SOURCE}/leaf")],
     ));
     let record = workspace.at("env.txt");
     let run = workspace.run_with(
@@ -810,8 +880,9 @@ fn the_graphs_env_reaches_the_member_process_expanded() {
 fn the_members_mode_reaches_the_harness_process() {
     let workspace = Workspace::new();
     let record = workspace.at("argv.txt");
-    workspace
-        .graph(&two_party_graph(&fake_harness(), "").replace("mode: bypass", "mode: read-only"));
+    workspace.graph(
+        &two_party_graph(&fake_harness(), NO_ENV).replace("mode: bypass", "mode: read-only"),
+    );
     workspace
         .run_task(&format!(
             "fake:complete-now: mode fake:record-argv={}",
@@ -848,22 +919,22 @@ fn the_members_mode_reaches_the_harness_process() {
 #[test]
 fn a_command_judge_supervises_through_the_split_provider() {
     let workspace = Workspace::new();
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
-            // Single-quoted, because this is a path and one of the three
-            // platforms spells paths with backslashes: in a double-quoted YAML
-            // scalar `C:\Users` is an unknown escape and the graph will not
-            // parse. A single-quoted scalar takes backslashes literally.
-            "    judge:\n      command: ['{provider}']\n",
+            "    judge:\n      command: [the provider below]\n",
             "    mode: bypass\n",
         ),
-        fake = fake_harness(),
-        provider = fake_provider(),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            // The one value here that is not a graph key: an element of a
+            // sequence, addressed by its index.
+            ("members.worker.judge.command.0", fake_provider()),
+        ],
     ));
     // A base carrying evals and an assessment reaches every operation the
     // protocol has, so the whole command-provider surface is driven rather than
@@ -935,7 +1006,7 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
     workspace.write("roles/typo.yaml", "agent:\n  instrucions: typo\n");
     for (reference, expected) in cases {
         workspace.graph(
-            &two_party_graph(&fake_harness(), "")
+            &two_party_graph(&fake_harness(), NO_ENV)
                 .replace("persona: engineer", &format!("persona: {reference}")),
         );
         let run = workspace.run_task("fake:complete-now: never gets here");
@@ -964,7 +1035,8 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     let workspace = Workspace::new();
     // `persona` is optional and deliberately absent from this real graph. Two
     // flags also prove the established left-to-right, last-one-wins ordering.
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("    persona: engineer\n", ""));
+    workspace
+        .graph(&two_party_graph(&fake_harness(), NO_ENV).replace("    persona: engineer\n", ""));
     let run = workspace.run(&[
         "run",
         "./graph.yaml",
@@ -1028,7 +1100,8 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     ]);
     list.expect_code(0);
 
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("    persona: engineer\n", ""));
+    workspace
+        .graph(&two_party_graph(&fake_harness(), NO_ENV).replace("    persona: engineer\n", ""));
 
     for assignment in [
         "members.worker.max_turns=soon",
@@ -1055,7 +1128,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
         );
     }
 
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("    mode: bypass\n", ""));
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace("    mode: bypass\n", ""));
     let missing_required = workspace.run(&[
         "run",
         "./graph.yaml",
@@ -1078,10 +1151,10 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
     // the document's shape rather than its value, and the schema would then
     // refuse a graph the caller thought they had only retuned. So the graph here
     // spells the two typed fields out, which the default one leaves unset.
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
             "    max_turns: 4\n",
@@ -1089,7 +1162,7 @@ fn a_set_override_reaches_the_member_and_a_bad_one_refuses() {
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
     let numeric = workspace.run(&[
         "run",
@@ -1159,16 +1232,16 @@ fn the_task_arrives_by_file_and_naming_both_ways_refuses() {
 #[test]
 fn a_dependant_member_starts_only_after_its_dependency_settles() {
     let workspace = Workspace::new();
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n",
             "  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "    deps: [build]\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
     let run = workspace.run_task("fake:complete-now: ordered");
     run.expect_code(0);
@@ -1226,10 +1299,10 @@ fn a_failed_dependency_skips_and_propagates_through_its_chain() {
 #[test]
 fn a_two_party_member_can_depend_on_a_worker() {
     let workspace = Workspace::new();
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n",
             "  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  supervisor:\n    kind: onejudge\n    base_config: ./base.yaml\n",
@@ -1238,7 +1311,7 @@ fn a_two_party_member_can_depend_on_a_worker() {
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n    deps: [build]\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
     let run = workspace.run_task("fake:complete-now: supervised after build");
     run.expect_code(0);
@@ -1257,17 +1330,17 @@ fn a_two_party_member_can_depend_on_a_worker() {
 #[test]
 fn a_two_party_member_refuses_missing_and_cyclic_dependencies() {
     let workspace = Workspace::new();
-    let graph = format!(
+    let graph = graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  worker:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n    deps: [DEPENDENCY]\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     );
     workspace.graph(&graph.replace("DEPENDENCY", "ghost"));
     let missing = workspace.run(&["validate", "./graph.yaml"]);
@@ -1285,7 +1358,8 @@ fn a_two_party_member_refuses_missing_and_cyclic_dependencies() {
 #[test]
 fn an_unreadable_ref_refuses_with_the_path_it_could_not_read() {
     let workspace = Workspace::new();
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", "./nowhere.yaml"));
+    workspace
+        .graph(&two_party_graph(&fake_harness(), NO_ENV).replace("./base.yaml", "./nowhere.yaml"));
     let run = workspace.run_task("fake:complete-now: unreadable");
     run.expect_code(2);
     assert!(run.stderr.contains("nowhere.yaml"), "{}", run.stderr);
@@ -1383,14 +1457,14 @@ fn every_config_a_run_read_is_recorded_content_addressed() {
 fn a_single_sided_member_runs_one_agent_with_no_judge() {
     let workspace = Workspace::new();
     workspace.write("oneharness.toml", CHAIN);
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
     let run = workspace.run_task("fake:complete-now: single sided");
     run.expect_code(0);

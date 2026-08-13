@@ -19,7 +19,7 @@
 // document to reach an agent at all.
 
 use crate::origin::{Origin, Trust};
-use crate::support::{fake_harness, two_party_graph, Workspace};
+use crate::support::{fake_harness, two_party_graph, Workspace, NO_ENV};
 
 /// The onejudge base one of these journeys serves instead of writing to disk.
 const SERVED_BASE: &str = concat!(
@@ -52,7 +52,7 @@ fn a_base_config_named_by_url_is_fetched_over_tls_and_recorded_by_digest() {
         Trust::Trusted,
     );
     let url = origin.url("/base.yaml");
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", &url));
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace("./base.yaml", &url));
 
     let prompts = workspace.at("prompts.txt");
     let run = workspace.run_with(
@@ -123,7 +123,7 @@ fn a_certificate_from_an_untrusted_authority_refuses_the_ref() {
         Trust::Untrusted,
     );
     let url = origin.url("/base.yaml");
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", &url));
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace("./base.yaml", &url));
 
     let run = workspace.run_with(
         &[
@@ -214,7 +214,7 @@ fn a_named_bundle_with_no_certificate_in_it_is_refused() {
         Trust::Trusted,
     );
     let url = origin.url("/base.yaml");
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", &url));
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace("./base.yaml", &url));
     let empty = workspace.write("not-a-bundle.pem", "no certificate lives here\n");
     // Both variables, because both contribute: a host with `SSL_CERT_DIR`
     // already set — which is most of them — would otherwise supply the whole
@@ -262,7 +262,7 @@ fn a_remote_answer_past_the_size_ceiling_is_refused_by_the_ceiling() {
     let oversized = vec![b'x'; oneagentgraph::resolve::MAX_REMOTE_BYTES + 1];
     let origin = Origin::start(vec![("/base.yaml".to_string(), oversized)], Trust::Trusted);
     let url = origin.url("/base.yaml");
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", &url));
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace("./base.yaml", &url));
 
     let run = workspace.run_with(
         &["validate", "./graph.yaml"],
@@ -287,7 +287,7 @@ fn a_remote_answer_that_is_not_text_is_refused() {
         Trust::Trusted,
     );
     let url = origin.url("/base.yaml");
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace("./base.yaml", &url));
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace("./base.yaml", &url));
 
     let run = workspace.run_with(
         &["validate", "./graph.yaml"],
