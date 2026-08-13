@@ -249,6 +249,14 @@ impl Bounds {
 ///   still answers for a supervisor that cannot confirm its member at all.
 #[derive(Debug)]
 pub struct Stall {
+    /// When the member started, which is the origin of the only clock this rule
+    /// counts in.
+    ///
+    /// Held here rather than passed in beside the member's last event, because
+    /// the two were the same bare millisecond count and reversing them at a call
+    /// site would invert the rule silently — a member that had just published
+    /// would read as one that never had.
+    started: Instant,
     /// How long a member may be quiet before this rule condemns it.
     bound: Duration,
     /// How often the tree is examined while a member is quiet enough to be
@@ -311,10 +319,12 @@ impl Observed {
 }
 
 impl Stall {
-    /// The clock for a member supervised under `bound`.
+    /// The clock for a member that started at `started`, supervised under
+    /// `bound`.
     #[must_use]
-    pub fn new(bound: Duration) -> Self {
+    pub fn new(bound: Duration, started: Instant) -> Self {
         Self {
+            started,
             bound,
             // A quarter of the window this rule watches in, so a member always
             // gets a baseline *and* a comparison before the bound expires, and
@@ -328,11 +338,12 @@ impl Stall {
         }
     }
 
-    /// Whether this member is condemned, `elapsed` milliseconds into its life,
-    /// having last published at `published`.
+    /// Whether this member is condemned, given that it last published
+    /// `published` milliseconds into its life — the count its supervisor keeps.
     ///
     /// `scratch` is the member's own, which is the stamp its tree carries.
-    pub fn condemns(&mut self, elapsed: u64, published: u64, scratch: &Path) -> bool {
+    pub fn condemns(&mut self, published: u64, scratch: &Path) -> bool {
+        let elapsed = elapsed_millis(self.started);
         let quiet = Duration::from_millis(elapsed.saturating_sub(published.max(self.cleared)));
         if quiet < self.bound / 2 {
             // Publishing normally: nothing to explain, and a tree examined
@@ -581,7 +592,7 @@ fn supervise(
     // that a reader notices the silence before the watchdog does.
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
     let mut published = Instant::now();
-    let mut stall = Stall::new(bounds.stall);
+    let mut stall = Stall::new(bounds.stall, started);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -607,11 +618,7 @@ fn supervise(
             published = now;
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
-        if stall.condemns(
-            elapsed_millis(started),
-            activity.load(Ordering::SeqCst),
-            scratch,
-        ) {
+        if stall.condemns(activity.load(Ordering::SeqCst), scratch) {
             return kill_and_report(
                 &mut child,
                 group,
@@ -1044,32 +1051,39 @@ mod tests {
     /// *gone* — the strongest form of "no live work". The member that has one and
     /// is working through it is a real process tree, and so is proven by a real
     /// run in `tests/e2e/liveness.rs` rather than here.
+    ///
+    /// The bound is a second, and the sleeps are real, because the probe cadence
+    /// is real time: the rule's whole subject is what happened *between* two
+    /// looks, so a clock this test supplied would be testing arithmetic rather
+    /// than the rule.
     #[test]
     fn the_activity_rule_needs_both_silence_and_an_idle_tree() {
         let scratch = tempfile::tempdir().expect("a scratch");
-        let mut stall = Stall::new(Duration::from_secs(2));
+        let bound = Duration::from_secs(1);
+        let mut stall = Stall::new(bound, Instant::now());
 
-        // Publishing inside the window: not condemned, and nothing examined.
-        assert!(!stall.condemns(1_000, 900, scratch.path()));
+        // Publishing right now: not condemned, and nothing examined.
+        assert!(!stall.condemns(elapsed_millis(stall.started), scratch.path()));
         assert!(
             matches!(stall.observed, Observed::Nothing),
             "a member publishing normally paid for a look at its own process tree"
         );
 
-        // Quiet past the bound, but this is the first look: a reading is not a
-        // change, so the bound is a floor rather than an exact deadline.
-        assert!(!stall.condemns(2_100, 0, scratch.path()));
+        // Quiet past half the bound, so the tree is examined — but one look is a
+        // reading rather than a change, so it is not condemned on it.
+        std::thread::sleep(bound / 2 + Duration::from_millis(100));
+        assert!(!stall.condemns(0, scratch.path()));
         assert!(matches!(stall.observed, Observed::Moving { .. }));
 
-        // A second look, agreeing with the first: nothing is running under this
-        // member and it has published nothing, which is the rule.
-        std::thread::sleep(HEARTBEAT_INTERVAL + Duration::from_millis(100));
-        assert!(stall.condemns(3_000, 0, scratch.path()));
+        // A second look, agreeing with the first, past the whole bound: nothing
+        // is running under this member and it has published nothing.
+        std::thread::sleep(bound / 2 + Duration::from_millis(100));
+        assert!(stall.condemns(0, scratch.path()));
 
         // And a member that publishes again is cleared, tree and all — the next
         // silence is judged from scratch rather than on the verdict this one
         // reached.
-        assert!(!stall.condemns(3_100, 3_100, scratch.path()));
+        assert!(!stall.condemns(elapsed_millis(stall.started), scratch.path()));
         assert!(matches!(stall.observed, Observed::Nothing));
     }
 
@@ -1084,7 +1098,7 @@ mod tests {
             Duration::from_secs(30),
             DEFAULT_STALL_TIMEOUT,
         ] {
-            let stall = Stall::new(bound);
+            let stall = Stall::new(bound, Instant::now());
             assert!(
                 stall.probe_every <= MAX_PROBE_INTERVAL,
                 "{bound:?}: a quiet member would go {:?} unexamined",

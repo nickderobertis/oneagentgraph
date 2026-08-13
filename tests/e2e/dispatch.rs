@@ -225,7 +225,6 @@ fn a_single_sided_member_reports_the_process_it_spawned() {
 #[test]
 fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
     let workspace = Workspace::new();
-    // Below the run's own `--dir`, which is what `dir: ./api` names.
     let elsewhere = workspace.dir().join("api");
     std::fs::create_dir_all(&elsewhere).expect("the member's own directory");
     let own = workspace.at("check-in.prompt");

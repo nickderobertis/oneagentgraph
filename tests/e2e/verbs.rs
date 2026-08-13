@@ -111,10 +111,27 @@ fn validate_refuses_a_graph_that_could_never_run() {
         ),
         (
             concat!(
+                "version: 2\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n    dir: ./api\n",
+            ),
+            "requires graph schema version 3",
+        ),
+        (
+            concat!(
                 "version: 3\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
                 "    oneharness_config: ./oneharness.toml\n    dir: ''\n",
             ),
             "names no directory",
+        ),
+        // Each field replaces what the graph supplies, so an empty one asks for
+        // nothing rather than for the graph's — and an empty task reached the
+        // harness as a `--prompt` with no value at all.
+        (
+            concat!(
+                "version: 3\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n    task: '   '\n",
+            ),
+            "an empty one is no job",
         ),
         (
             concat!(

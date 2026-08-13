@@ -218,9 +218,6 @@ pub fn build(
                 "--events".to_string(),
                 "--stream".to_string(),
                 "--prompt".to_string(),
-                // The member's own task beats the run's, on the same terms as a
-                // two-party member's: a member that carries one is asking for
-                // that task rather than for the graph's.
                 match member.task.as_deref() {
                     Some(own) => own.to_string(),
                     None => task(context)?,

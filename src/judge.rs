@@ -181,7 +181,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // it exists to carry.
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
     let mut published = Instant::now();
-    let mut stall = Stall::new(bounds.stall);
+    let mut stall = Stall::new(bounds.stall, started);
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
             Ok(answer) => return finish(answer, emitter, scratch),
@@ -208,11 +208,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             published = now;
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
-        if stall.condemns(
-            elapsed_millis(started),
-            activity.load(Ordering::SeqCst),
-            scratch,
-        ) {
+        if stall.condemns(activity.load(Ordering::SeqCst), scratch) {
             return condemn(&rx, &abort, emitter, Rule::Activity, scratch);
         }
     }

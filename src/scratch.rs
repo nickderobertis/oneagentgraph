@@ -1492,7 +1492,15 @@ pub fn is_live(identity: ProcessIdentity) -> bool {
 /// for CPU — and two that are identical are a tree that did nothing at all. That
 /// is the whole of what [`work`] is for, and it is why the CPU reading is left in
 /// each platform's own units.
-pub type Work = Vec<(ProcessIdentity, Option<u64>)>;
+///
+/// Opaque on purpose, and that is the invariant rather than a preference: the
+/// comparison is only meaningful between two snapshots taken the same way, in
+/// the same order, of the same stamp. A caller that could assemble one out of
+/// arbitrary pairs could make an idle tree compare as a busy one, which is the
+/// direction that gets a wedged member spared forever. [`work`] is the only way
+/// to obtain one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Work(Vec<(ProcessIdentity, Option<u64>)>);
 
 /// Observe the work under `scratch` as it stands right now.
 ///
@@ -1507,10 +1515,15 @@ pub type Work = Vec<(ProcessIdentity, Option<u64>)>;
 /// so it never reads as a change.
 #[must_use]
 pub fn work(scratch: &Path) -> Work {
-    stamped_for(&scratch.display().to_string())
-        .into_iter()
-        .map(|identity| (identity, platform::consumed(identity.pid)))
-        .collect()
+    // In `stamped_for`'s own order, which every platform sorts, so two snapshots
+    // of an unchanged tree compare equal rather than depending on the order a
+    // process table was walked in.
+    Work(
+        stamped_for(&scratch.display().to_string())
+            .into_iter()
+            .map(|identity| (identity, platform::consumed(identity.pid)))
+            .collect(),
+    )
 }
 
 /// Terminate every live process this scratch still holds — the member's own

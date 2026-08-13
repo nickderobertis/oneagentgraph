@@ -353,7 +353,7 @@ fn main() -> std::process::ExitCode {
     // pair with `fake:hang` is the point — both publish nothing, and only one of
     // them is a member the activity watchdog should condemn.
     if let Some(release) = sentinel_path(&prompt, "work") {
-        if !busy(&release) {
+        if !work_until_released(&release) {
             eprintln!("fake-harness: a working turn was never released, so nothing observed it");
             return exit(1);
         }
@@ -571,11 +571,12 @@ const WORK_FOR: std::time::Duration = std::time::Duration::from_secs(60);
 /// happens every few milliseconds, so the release is acted on promptly.
 const WORK_STEPS: u64 = 500_000;
 
-/// Consume CPU, publishing nothing, until `release` exists.
+/// Consume CPU, publishing nothing, until `release` exists — or until
+/// [`WORK_FOR`] runs out.
 ///
 /// Answers whether it was released, so a turn nothing ever released is a journey
 /// failing loudly rather than a turn that quietly answered anyway.
-fn busy(release: &std::path::Path) -> bool {
+fn work_until_released(release: &std::path::Path) -> bool {
     let deadline = std::time::Instant::now() + WORK_FOR;
     let mut spun: u64 = 0;
     while std::time::Instant::now() < deadline {
