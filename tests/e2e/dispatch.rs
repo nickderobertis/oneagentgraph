@@ -205,6 +205,227 @@ fn a_single_sided_member_reports_the_process_it_spawned() {
     );
 }
 
+/// A member is a **job**, not a copy of its graph: one carrying its own `task`
+/// and `dir` is given those, and the member beside it — carrying neither — is
+/// given the run's, unchanged.
+///
+/// Both halves in one run, because that is the shape the failure had. A graph
+/// whose scheduled `check_in` member exists to write one status update received
+/// the *orchestrator's* task verbatim — "drive run X to settlement" — since a
+/// single-sided member had nowhere to hold prose of its own; it never reported,
+/// and it acted on instructions addressed to somebody else. So what is asserted
+/// is not that the field parses but that the two members were handed different
+/// jobs, read back from the harness process each one actually started.
+///
+/// The directory here is **relative**, which is the form that has to be resolved
+/// rather than passed through: `./api` means one level inside the run's own
+/// `--dir`, and the child carrying it to oneharness is spawned in the member's
+/// scratch, so a path left as written would land somewhere nobody named. The
+/// absolute form is the journey below.
+#[test]
+fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
+    let workspace = Workspace::new();
+    let elsewhere = workspace.dir().join("api");
+    std::fs::create_dir_all(&elsewhere).expect("the member's own directory");
+    let own = workspace.at("check-in.prompt");
+    let graph_wide = workspace.at("worker.prompt");
+    let own_cwd = workspace.at("check-in.cwd");
+    let graph_wide_cwd = workspace.at("worker.cwd");
+
+    workspace.graph(&format!(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n",
+            "  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            // Single-quoted for the same reason command-provider paths below
+            // are: Windows paths contain backslashes, and YAML double quotes
+            // interpret sequences such as `\x` instead of preserving them for
+            // the harness.
+            "    task: 'fake:complete-now write one status update, and nothing else. \
+             fake:record-prompt={own} fake:record-cwd={own_cwd}'\n",
+            "    dir: ./api\n",
+            "  worker:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        fake = fake_harness(),
+        own = own.display(),
+        own_cwd = own_cwd.display(),
+    ));
+
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!(
+            "fake:complete-now drive this run to settlement. fake:record-prompt={} \
+             fake:record-cwd={}",
+            graph_wide.display(),
+            graph_wide_cwd.display()
+        ),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    // What each member's harness was really given. The member with its own task
+    // never sees the run's prose at all — which is the failure this closes: a
+    // pacemaker told to drive the run is a second writer to a ledger somebody
+    // else is already driving.
+    // Read leniently rather than expected: a member never given its own task
+    // never writes this file at all, and the absence is exactly the failure —
+    // said as the assertion below rather than as a missing path.
+    let carried = std::fs::read_to_string(&own).unwrap_or_default();
+    assert!(
+        carried.contains("write one status update"),
+        "a member carrying its own task was not given it: {carried:?}"
+    );
+    assert!(
+        !carried.contains("drive this run to settlement"),
+        "a member with its own task was still handed the run's: {carried}"
+    );
+    let inherited = std::fs::read_to_string(&graph_wide).expect("the worker member's prompt");
+    assert!(
+        inherited.contains("drive this run to settlement"),
+        "a member with no task of its own must still be given the run's: {inherited}"
+    );
+
+    // And where each one ran. `--cwd` is what this crate decides; the directory
+    // the harness process reports is what the harness actually did with it, and
+    // only the second is the guarantee an operator has — the member's persona
+    // says it runs in a scratch that is not a checkout, and a harness that
+    // started in the graph's directory instead would be a different member.
+    let reported_own = std::fs::read_to_string(&own_cwd)
+        .expect("the check-in member's own directory")
+        .trim()
+        .to_string();
+    assert_eq!(
+        std::path::Path::new(&reported_own)
+            .canonicalize()
+            .expect("the reported member directory"),
+        elsewhere.canonicalize().expect("canonical"),
+    );
+    let reported_graph = std::fs::read_to_string(&graph_wide_cwd)
+        .expect("the worker member's directory")
+        .trim()
+        .to_string();
+    assert_eq!(
+        std::path::Path::new(&reported_graph)
+            .canonicalize()
+            .expect("the reported graph directory"),
+        workspace.dir().canonicalize().expect("canonical"),
+        "a member with no directory of its own must still run in the graph's"
+    );
+
+    // The same answer in the stream, where a supervisor reads it: each member's
+    // argv names the directory it was told to work in.
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    for event in &started {
+        let told = event["payload"]["args"]
+            .as_array()
+            .and_then(|args| {
+                args.iter()
+                    .position(|arg| arg == "--cwd")
+                    .and_then(|at| args.get(at + 1))
+            })
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let expected = if labels(event)["member"] == "check_in" {
+            elsewhere.display().to_string()
+        } else {
+            workspace.dir().display().to_string()
+        };
+        assert_eq!(told, expected, "{}", event["payload"]);
+    }
+}
+
+/// A graph whose every member carries its own job runs with **no `--task` at
+/// all** — and the same graph without that job is refused, saying so.
+///
+/// The pacemaker's case, and the reason the field is required rather than
+/// convenient. A member that exists to write one status update on a schedule has
+/// no relationship to whatever prose the run was launched with; a graph of such
+/// members should not have to be handed a task it will never use, and until it
+/// could hold one there was no way to express that. The refusal is asserted
+/// beside it because it is what proves the member's own task is what satisfied
+/// the run, rather than a run that never needed one.
+///
+/// The directory here is **absolute**, the form used as written — the shape a
+/// member working in a scratch that is nowhere near the graph's own directory
+/// actually takes.
+#[test]
+fn a_graph_whose_members_carry_their_own_jobs_needs_no_task_of_its_own() {
+    let workspace = Workspace::new();
+    let elsewhere = workspace.at("pacemaker-scratch");
+    std::fs::create_dir_all(&elsewhere).expect("the member's own directory");
+    let recorded = workspace.at("pacemaker.prompt");
+    let where_it_ran = workspace.at("pacemaker.cwd");
+
+    let graph = format!(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n",
+            "  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    dir: {dir}\n",
+        ),
+        fake = fake_harness(),
+        dir = elsewhere.display(),
+    );
+    let with_own_task = format!(
+        "{graph}    task: 'fake:complete-now write one status update. \
+         fake:record-prompt={recorded} fake:record-cwd={cwd}'\n",
+        recorded = recorded.display(),
+        cwd = where_it_ran.display(),
+    );
+
+    workspace.graph(&with_own_task);
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+    assert!(
+        std::fs::read_to_string(&recorded)
+            .unwrap_or_default()
+            .contains("write one status update"),
+        "a member's own task did not reach its harness when the run supplied none"
+    );
+    let reported = std::fs::read_to_string(&where_it_ran)
+        .expect("the member's own directory")
+        .trim()
+        .to_string();
+    assert_eq!(
+        std::path::Path::new(&reported)
+            .canonicalize()
+            .expect("the reported member directory"),
+        elsewhere.canonicalize().expect("canonical"),
+        "an absolute member directory must be used exactly as written"
+    );
+
+    // The same graph with the member's job taken away: nothing supplies a task
+    // now, and the run says which two things could.
+    workspace.graph(&graph);
+    let refused = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("no task"),
+        "a run with nothing to do was not refused by name: {}",
+        refused.stderr
+    );
+}
+
 /// A single-sided member whose harness exits without publishing a report dies as
 /// a provider failure — and, because this member really *was* a process, its
 /// death carries the three facts one leaves behind alongside the typed cause.

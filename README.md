@@ -43,7 +43,7 @@ A graph is YAML — members, the oneharness config each side uses, personas,
 schedules, and dependencies:
 
 ```yaml
-version: 2
+version: 3
 name: node-scope
 members:
   worker:

@@ -40,9 +40,11 @@
 //! | `FAKE_HARNESS_FAIL_AFTER_MARKER` | let an `exec`-shaped provider run once, then crash later launches |
 //! | `FAKE_HARNESS_FAIL_ONCE_MARKER` | crash an `exec`-shaped provider once, then allow later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
+//! | `fake:work=<path>` | publish nothing and *consume CPU* until `<path>` exists, then take the turn |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
+//! | `fake:record-cwd=<path>` | append the directory this process was started in |
 //! | `fake:record-env=<path>` | append this process's selection-shaped environment |
 //! | `fake:record-argv=<path>` | append the argv this side was spawned with |
 //! | `FAKE_HARNESS_REFUSAL=quota` | a zero-work 429 the chain steps past |
@@ -346,6 +348,16 @@ fn main() -> std::process::ExitCode {
         // Never answer. The heartbeat and activity watchdogs are what ends this.
         return hang(sentinel_path(&prompt, "tick").as_deref());
     }
+    // A turn that is *working* rather than wedged: nothing is published for as
+    // long as the barrier holds, and the process is charged CPU throughout. The
+    // pair with `fake:hang` is the point — both publish nothing, and only one of
+    // them is a member the activity watchdog should condemn.
+    if let Some(release) = sentinel_path(&prompt, "work") {
+        if !work_until_released(&release) {
+            eprintln!("fake-harness: a working turn was never released, so nothing observed it");
+            return exit(1);
+        }
+    }
     turn(&prompt, None);
     exit(0)
 }
@@ -360,6 +372,16 @@ fn recordings(prompt: &str, argv: &[String]) {
     record(prompt, "record-prompt", prompt);
     record(prompt, "record-env", &selection_environment());
     record(prompt, "record-argv", &argv.join(" "));
+    // Where this process was *started*, which is the far end of `oneharness run
+    // --cwd`: a member is told a directory, and this is the only place the
+    // question "did the harness actually run there?" can be answered.
+    record(
+        prompt,
+        "record-cwd",
+        &std::env::current_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
+    );
 }
 
 /// Whether `oneharness run --control` selected claude-code's streamed input
@@ -532,6 +554,44 @@ const PARK_FOR: std::time::Duration = std::time::Duration::from_secs(180);
 /// outlived the run which caused it would go on writing on a CI host until the
 /// host went away.
 const TICK_FOR: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a working turn keeps working before giving up and exiting.
+///
+/// Bounded for the reason [`TICK_FOR`] is, and reached only when a journey never
+/// released it: a turn that spun forever would peg a core on a CI host after the
+/// run that started it had gone.
+const WORK_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How much arithmetic happens between two looks at the barrier.
+///
+/// The loop has to leave the kernel's own CPU accounting visibly moving, because
+/// that accounting is exactly what the supervisor reads to tell a member that is
+/// working from one that is wedged — a turn that *slept* here would publish
+/// nothing and consume nothing, which is the other journey. Sized so a check
+/// happens every few milliseconds, so the release is acted on promptly.
+const WORK_STEPS: u64 = 500_000;
+
+/// Consume CPU, publishing nothing, until `release` exists — or until
+/// [`WORK_FOR`] runs out.
+///
+/// Answers whether it was released, so a turn nothing ever released is a journey
+/// failing loudly rather than a turn that quietly answered anyway.
+fn work_until_released(release: &std::path::Path) -> bool {
+    let deadline = std::time::Instant::now() + WORK_FOR;
+    let mut spun: u64 = 0;
+    while std::time::Instant::now() < deadline {
+        if release.exists() {
+            return true;
+        }
+        for step in 0..WORK_STEPS {
+            spun = spun.wrapping_add(step ^ spun);
+        }
+        // So the loop above is work the process is charged for rather than
+        // something a release build is entitled to delete.
+        std::hint::black_box(spun);
+    }
+    false
+}
 
 /// Leave a ticker behind that outlives this process.
 ///

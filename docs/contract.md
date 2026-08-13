@@ -41,7 +41,7 @@ How a member is launched, and why the two kinds differ:
 Graph config (YAML, by path or URL):
 
 ```yaml
-version: 2
+version: 3
 name: node-scope
 env:                                  # exported to every member process; values may reference ${HOME}
   MY_VAR: value
@@ -65,11 +65,14 @@ members:
     kind: oneharness                  # single-sided: one agent, no judge
     oneharness_config: ./oneharness.toml
     persona: ./reporter.yaml
+    task: null                        # this member's own job; usually --task instead
+    dir: null                         # this member's own directory; default the run's --dir
     schedule: {every: 1800, resettable: true}   # cron member; seconds
     deps: []                          # members whose settle precedes this member's first run
 ```
 
 - A `kind: onejudge` member's judge side may instead be `judge: {command: ["..."]}` — a command provider.
+- A member is a **job**, not a copy of its graph. A `kind: oneharness` member may carry its own `task` and its own `dir`, and each beats the graph's: a scheduled member whose whole job is to write one status update receives its own prose rather than the run's `--task`, and works in its own directory rather than the run's `--dir`. Both are optional and both default to the graph's, so a document that omits them runs exactly as before; a relative `dir` resolves against the run's `--dir`, and an absolute one is used as written. Both require `version: 3`. There is no per-member `env`: a member's environment is its oneharness config's own `[env]` table, which a graph already names per member, and the graph's `env:` block stays one block for the whole graph.
 - A `model` override must be paired with a config whose declared chain is one harness family; validated pre-launch. The model value itself is forwarded unchecked.
 - Remote refs (https) are fetched, checksummed, and recorded content-addressed in the run record; replay/audit never depends on the URL staying stable.
 
@@ -109,3 +112,5 @@ Event kinds: `graph-started`, `member-started` (`runner: library|process`, plus 
 `sweep` is the liveness rules below, made invokable. It reports every **family** of scratch this crate creates — `runs`, the run state directory, and `temp`, the throwaway directories it leaves under `TMPDIR` — naming for each the directories it examined and what became of them, and naming every family it could **not** examine and why. Every family lands in exactly one of those two lists, so `reclaimed 0 bytes` can never hide a family that was never looked at; a family whose root does not exist yet is an examined zero, and one that cannot be read is unexamined with the reason. A directory is reclaimed only when nothing can still be using it: the `owner.lock` is free, the pid-with-start-token it records no longer names a live process, and no live process carries that directory as its scratch stamp — anything else is retained, with the reason, and ending a process a directory still names is `cancel --kill`'s job rather than this verb's. `--min-age-hours` (default 24, `0` to sweep whatever is provably dead) keeps a sweep run in anger from taking run records their operator is about to read; `--dry-run` reports without removing anything. Exit 0 whatever it finds — an unexamined family is a reported fact, not a refusal.
 
 Liveness (ported from ai-orchestrator intact): heartbeat wrapper (default deadline 60s, `ONEAGENTGRAPH_HEARTBEAT_TIMEOUT`), activity watchdog (default 600s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via a non-blocking kernel-exclusive lock on `owner.lock` + pid-with-start-token, descendant reaping, successor contract for processes meant to outlive their launcher.
+
+The activity watchdog condemns on **silence plus an idle process tree**, never on silence alone. A member is condemned when it has published nothing for the bound *and* the tree stamped for it — the same evidence a reap and a sweep rest on, so it reaches a descendant whose parent has already exited — did nothing in that time: nothing under it was charged any CPU between two observations. A member blocked on a child that is doing the work publishes nothing for far longer than the bound and is healthy, and condemning it destroys the live work underneath it; silence alone also made the verdict depend on whether an agent happened to drive its round by polling or by blocking, which is a choice it makes freely turn by turn. Two consequences follow and both are deliberate: the bound is a **floor** rather than an exact deadline, since establishing that a tree is idle takes two observations; and a member whose tree spins forever is left to `cancel` and to the heartbeat rule. A platform that can enumerate neither a tree nor its CPU is condemned on silence alone, as before.

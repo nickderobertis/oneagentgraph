@@ -969,6 +969,8 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
         &OneharnessMember {
             oneharness_config: ConfigRef("./oneharness.toml".to_string()),
             persona: Some(ConfigRef("./reporter.yaml".to_string())),
+            task: None,
+            dir: None,
             schedule: Some(Schedule {
                 every: 1800,
                 resettable: true,
@@ -1017,6 +1019,61 @@ fn the_documented_dependency_field_round_trips_on_both_member_kinds() {
         "empty dependencies must remain omitted for older consumers: {round_trip}"
     );
     let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    assert_eq!(reparsed, graph);
+}
+
+/// The contract documents a single-sided member's own `task` and `dir`, and a
+/// member that carries neither serializes without either — so a graph document
+/// written before they existed round-trips byte-identically.
+///
+/// The absence is the assertion that matters: these are optional fields on a
+/// schema older consumers already read, and one that serialized as `task: null`
+/// would be a document those consumers now reject.
+#[test]
+fn the_documented_member_job_fields_round_trip_and_stay_omitted_when_unset() {
+    let document = fenced_block("yaml");
+    for field in ["task: null", "dir: null"] {
+        assert!(
+            document.contains(field),
+            "the documented reporter must show `{field}`"
+        );
+    }
+    let graph: GraphConfig =
+        serde_norway::from_str(&document).expect("the documented graph parses");
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert_eq!(reporter.task, None);
+    assert_eq!(reporter.dir, None);
+
+    let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    assert!(
+        !round_trip.contains("task:") && !round_trip.contains("dir:"),
+        "a member with no job of its own must serialize without either field: {round_trip}"
+    );
+    let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    assert_eq!(reparsed, graph);
+
+    // And a member that *does* carry them keeps them across the round trip,
+    // which is what a consumer writing a graph document depends on.
+    let carried = document.replace(
+        "    task: null                        # this member's own job; usually --task instead\n",
+        "    task: send one status update\n",
+    );
+    let carried = carried.replace(
+        "    dir: null                         # this member's own directory; default the run's \
+         --dir\n",
+        "    dir: ./api\n",
+    );
+    let graph: GraphConfig = serde_norway::from_str(&carried).expect("the carried graph parses");
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert_eq!(reporter.task.as_deref(), Some("send one status update"));
+    assert_eq!(reporter.dir.as_deref(), Some(std::path::Path::new("./api")));
+    let reparsed: GraphConfig =
+        serde_norway::from_str(&serde_norway::to_string(&graph).expect("serializes"))
+            .expect("reparses");
     assert_eq!(reparsed, graph);
 }
 
