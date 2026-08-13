@@ -296,26 +296,25 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
     // only the second is the guarantee an operator has — the member's persona
     // says it runs in a scratch that is not a checkout, and a harness that
     // started in the graph's directory instead would be a different member.
+    let reported_own = std::fs::read_to_string(&own_cwd)
+        .expect("the check-in member's own directory")
+        .trim()
+        .to_string();
     assert_eq!(
-        std::fs::read_to_string(&own_cwd)
-            .expect("the check-in member's own directory")
-            .trim(),
-        elsewhere
+        std::path::Path::new(&reported_own)
             .canonicalize()
-            .expect("canonical")
-            .display()
-            .to_string(),
+            .expect("the reported member directory"),
+        elsewhere.canonicalize().expect("canonical"),
     );
+    let reported_graph = std::fs::read_to_string(&graph_wide_cwd)
+        .expect("the worker member's directory")
+        .trim()
+        .to_string();
     assert_eq!(
-        std::fs::read_to_string(&graph_wide_cwd)
-            .expect("the worker member's directory")
-            .trim(),
-        workspace
-            .dir()
+        std::path::Path::new(&reported_graph)
             .canonicalize()
-            .expect("canonical")
-            .display()
-            .to_string(),
+            .expect("the reported graph directory"),
+        workspace.dir().canonicalize().expect("canonical"),
         "a member with no directory of its own must still run in the graph's"
     );
 
@@ -398,15 +397,15 @@ fn a_graph_whose_members_carry_their_own_jobs_needs_no_task_of_its_own() {
             .contains("write one status update"),
         "a member's own task did not reach its harness when the run supplied none"
     );
+    let reported = std::fs::read_to_string(&where_it_ran)
+        .expect("the member's own directory")
+        .trim()
+        .to_string();
     assert_eq!(
-        std::fs::read_to_string(&where_it_ran)
-            .expect("the member's own directory")
-            .trim(),
-        elsewhere
+        std::path::Path::new(&reported)
             .canonicalize()
-            .expect("canonical")
-            .display()
-            .to_string(),
+            .expect("the reported member directory"),
+        elsewhere.canonicalize().expect("canonical"),
         "an absolute member directory must be used exactly as written"
     );
 
