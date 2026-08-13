@@ -208,6 +208,64 @@ fn a_member_whose_child_is_alive_but_idle_is_still_condemned() {
     );
 }
 
+/// The same guarantee for a **two-party** member, which is supervised by a
+/// different loop — and is the shape the production failure had.
+///
+/// The member condemned in anger was a two-party supervisor: its last act was a
+/// call that blocked for a whole round, so its own conversation published
+/// nothing while the work it had dispatched ran underneath it. `crate::judge`
+/// has its own copy of the stall check — a member driven in this process cannot
+/// be killed the way a child can — so a rule wired into one supervisor and not
+/// the other is a real regression that the single-sided pair above cannot see.
+///
+/// Its condemned twin is [`a_member_that_publishes_nothing_is_condemned_by_the_activity_watchdog`],
+/// which drives this same member kind onto a provider that does nothing at all.
+#[test]
+fn a_two_party_member_whose_conversation_is_working_is_not_condemned_for_its_silence() {
+    let workspace = Workspace::new();
+    let release = workspace.at("release");
+    let env = bounds("60", &STALL.as_secs_f64().to_string());
+
+    let releaser = {
+        let release = release.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(SILENT_FOR);
+            std::fs::write(&release, "go").expect("release");
+        })
+    };
+    let started = std::time::Instant::now();
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &format!(
+                "fake:complete-now hold the whole round open fake:work={}",
+                release.display()
+            ),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &as_env(&env),
+    );
+    releaser.join().expect("releaser");
+    run.expect_code(0);
+
+    assert!(
+        run.of_kind("member-died").is_empty(),
+        "a two-party member whose agent side was working was condemned anyway: {:?}",
+        run.of_kind("member-died")
+    );
+    assert!(
+        started.elapsed() > SILENT_FOR,
+        "the conversation answered before its silence outlasted the bound"
+    );
+    assert_eq!(
+        workspace.record()["members"]["worker"],
+        serde_json::json!("settled")
+    );
+}
+
 /// The stall bound both watchdog journeys above supervise under.
 ///
 /// Shortened from the contract's ten minutes, because what is under test is the

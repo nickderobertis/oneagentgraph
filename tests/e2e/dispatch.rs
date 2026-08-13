@@ -216,10 +216,17 @@ fn a_single_sided_member_reports_the_process_it_spawned() {
 /// and it acted on instructions addressed to somebody else. So what is asserted
 /// is not that the field parses but that the two members were handed different
 /// jobs, read back from the harness process each one actually started.
+///
+/// The directory here is **relative**, which is the form that has to be resolved
+/// rather than passed through: `./api` means one level inside the run's own
+/// `--dir`, and the child carrying it to oneharness is spawned in the member's
+/// scratch, so a path left as written would land somewhere nobody named. The
+/// absolute form is the journey below.
 #[test]
 fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
     let workspace = Workspace::new();
-    let elsewhere = workspace.at("check-in-scratch");
+    // Below the run's own `--dir`, which is what `dir: ./api` names.
+    let elsewhere = workspace.dir().join("api");
     std::fs::create_dir_all(&elsewhere).expect("the member's own directory");
     let own = workspace.at("check-in.prompt");
     let graph_wide = workspace.at("worker.prompt");
@@ -235,14 +242,13 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
             "    oneharness_config: ./oneharness.toml\n",
             "    task: \"fake:complete-now write one status update, and nothing else. \
              fake:record-prompt={own} fake:record-cwd={own_cwd}\"\n",
-            "    dir: {dir}\n",
+            "    dir: ./api\n",
             "  worker:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
         ),
         fake = fake_harness(),
         own = own.display(),
         own_cwd = own_cwd.display(),
-        dir = elsewhere.display(),
     ));
 
     let run = workspace.run(&[
@@ -332,6 +338,90 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
         };
         assert_eq!(told, expected, "{}", event["payload"]);
     }
+}
+
+/// A graph whose every member carries its own job runs with **no `--task` at
+/// all** — and the same graph without that job is refused, saying so.
+///
+/// The pacemaker's case, and the reason the field is required rather than
+/// convenient. A member that exists to write one status update on a schedule has
+/// no relationship to whatever prose the run was launched with; a graph of such
+/// members should not have to be handed a task it will never use, and until it
+/// could hold one there was no way to express that. The refusal is asserted
+/// beside it because it is what proves the member's own task is what satisfied
+/// the run, rather than a run that never needed one.
+///
+/// The directory here is **absolute**, the form used as written — the shape a
+/// member working in a scratch that is nowhere near the graph's own directory
+/// actually takes.
+#[test]
+fn a_graph_whose_members_carry_their_own_jobs_needs_no_task_of_its_own() {
+    let workspace = Workspace::new();
+    let elsewhere = workspace.at("pacemaker-scratch");
+    std::fs::create_dir_all(&elsewhere).expect("the member's own directory");
+    let recorded = workspace.at("pacemaker.prompt");
+    let where_it_ran = workspace.at("pacemaker.cwd");
+
+    let graph = format!(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "members:\n",
+            "  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    dir: {dir}\n",
+        ),
+        fake = fake_harness(),
+        dir = elsewhere.display(),
+    );
+    let with_own_task = format!(
+        "{graph}    task: \"fake:complete-now write one status update. \
+         fake:record-prompt={recorded} fake:record-cwd={cwd}\"\n",
+        recorded = recorded.display(),
+        cwd = where_it_ran.display(),
+    );
+
+    workspace.graph(&with_own_task);
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+    assert!(
+        std::fs::read_to_string(&recorded)
+            .unwrap_or_default()
+            .contains("write one status update"),
+        "a member's own task did not reach its harness when the run supplied none"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&where_it_ran)
+            .expect("the member's own directory")
+            .trim(),
+        elsewhere
+            .canonicalize()
+            .expect("canonical")
+            .display()
+            .to_string(),
+        "an absolute member directory must be used exactly as written"
+    );
+
+    // The same graph with the member's job taken away: nothing supplies a task
+    // now, and the run says which two things could.
+    workspace.graph(&graph);
+    let refused = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("no task"),
+        "a run with nothing to do was not refused by name: {}",
+        refused.stderr
+    );
 }
 
 /// A single-sided member whose harness exits without publishing a report dies as

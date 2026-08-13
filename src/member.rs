@@ -257,18 +257,57 @@ pub struct Stall {
     /// The member's own elapsed milliseconds at the last evidence of live work,
     /// which counts exactly as a published line does.
     cleared: u64,
-    /// The last observation of the tree, and when it was taken. Dropped whenever
-    /// the member is publishing normally, so the comparison is always against
-    /// something recent rather than against a tree from ten minutes ago.
-    probed: Option<(Instant, crate::scratch::Work)>,
-    /// Whether the two most recent observations found the tree unchanged.
-    ///
-    /// A verdict rather than a reading, and it is what condemnation rests on: a
-    /// single look at a process tree says what it *is*, and the question this
-    /// rule asks is whether it changed. Kept between probes so the answer does
-    /// not depend on which iteration of the supervisor's loop happens to land on
-    /// the bound.
-    idle: bool,
+    /// What the last look at this member's tree established.
+    observed: Observed,
+}
+
+/// What looking at a member's process tree established, which is a *verdict*
+/// rather than a reading.
+///
+/// One look says what a tree is; the question this rule asks is whether it
+/// changed, so an idle verdict cannot exist without the two observations that
+/// establish it — which is why the sample and the verdict are one value rather
+/// than a sample beside a flag.
+#[derive(Debug)]
+enum Observed {
+    /// Nothing has been looked at: the member is publishing normally, so there
+    /// is nothing to explain and nothing worth the cost of a look.
+    Nothing,
+    /// The tree was doing something — or this is the first look, which is a
+    /// baseline and no evidence of idleness at all.
+    Moving {
+        /// When the sample was taken, which is what the probe cadence counts.
+        at: Instant,
+        /// The sample itself, to compare the next one against.
+        work: crate::scratch::Work,
+    },
+    /// Two looks agreed: nothing under this member did anything between them.
+    Idle {
+        /// When the later sample was taken.
+        at: Instant,
+        /// That sample, which the next look is compared against in turn.
+        work: crate::scratch::Work,
+    },
+}
+
+impl Observed {
+    /// Whether it is time to look again.
+    fn due(&self, now: Instant, every: Duration) -> bool {
+        match self {
+            Observed::Nothing => true,
+            Observed::Moving { at, .. } | Observed::Idle { at, .. } => {
+                now.duration_since(*at) >= every
+            }
+        }
+    }
+
+    /// The sample the next one is compared against, when there is one.
+    fn sample(&self) -> Option<&crate::scratch::Work> {
+        match self {
+            Observed::Nothing => None,
+            Observed::Moving { work, .. } | Observed::Idle { work, .. } => Some(work),
+        }
+    }
 }
 
 impl Stall {
@@ -285,8 +324,7 @@ impl Stall {
             // any of this.
             probe_every: (bound / 8).clamp(HEARTBEAT_INTERVAL, MAX_PROBE_INTERVAL),
             cleared: 0,
-            probed: None,
-            idle: false,
+            observed: Observed::Nothing,
         }
     }
 
@@ -300,35 +338,32 @@ impl Stall {
             // Publishing normally: nothing to explain, and a tree examined
             // before this member's last event is not evidence about the silence
             // that follows it.
-            self.probed = None;
-            self.idle = false;
+            self.observed = Observed::Nothing;
             return false;
         }
         let now = Instant::now();
-        let due = self
-            .probed
-            .as_ref()
-            .is_none_or(|(at, _)| now.duration_since(*at) >= self.probe_every);
-        if due {
-            let observed = crate::scratch::work(scratch);
-            self.idle = match &self.probed {
-                // Unchanged since the last look: nothing under this member did
-                // anything in between.
-                Some((_, before)) => *before == observed,
-                // The first look is a baseline and nothing else. Condemning on
-                // one would be condemning on a reading rather than a change,
-                // which is the rule this replaces.
-                None => false,
-            };
-            if !self.idle && self.probed.is_some() {
+        if self.observed.due(now, self.probe_every) {
+            let work = crate::scratch::work(scratch);
+            // Decided before the assignment, so the comparison borrows the old
+            // sample and the new verdict replaces it.
+            let unchanged = self.observed.sample().map(|before| *before == work);
+            self.observed = match unchanged {
+                // Nothing under this member did anything since the last look.
+                Some(true) => Observed::Idle { at: now, work },
                 // Something moved, which counts exactly as a published line
                 // does: the member has live work under it, and its stall clock
                 // starts again from here.
-                self.cleared = elapsed;
-            }
-            self.probed = Some((now, observed));
+                Some(false) => {
+                    self.cleared = elapsed;
+                    Observed::Moving { at: now, work }
+                }
+                // The first look is a baseline and nothing else. Condemning on
+                // one would be condemning on a reading rather than on a change,
+                // which is the rule this replaces.
+                None => Observed::Moving { at: now, work },
+            };
         }
-        self.idle && quiet > self.bound
+        matches!(self.observed, Observed::Idle { .. }) && quiet > self.bound
     }
 }
 
@@ -1017,14 +1052,14 @@ mod tests {
         // Publishing inside the window: not condemned, and nothing examined.
         assert!(!stall.condemns(1_000, 900, scratch.path()));
         assert!(
-            stall.probed.is_none(),
+            matches!(stall.observed, Observed::Nothing),
             "a member publishing normally paid for a look at its own process tree"
         );
 
         // Quiet past the bound, but this is the first look: a reading is not a
         // change, so the bound is a floor rather than an exact deadline.
         assert!(!stall.condemns(2_100, 0, scratch.path()));
-        assert!(stall.probed.is_some());
+        assert!(matches!(stall.observed, Observed::Moving { .. }));
 
         // A second look, agreeing with the first: nothing is running under this
         // member and it has published nothing, which is the rule.
@@ -1035,7 +1070,7 @@ mod tests {
         // silence is judged from scratch rather than on the verdict this one
         // reached.
         assert!(!stall.condemns(3_100, 3_100, scratch.path()));
-        assert!(!stall.idle && stall.probed.is_none());
+        assert!(matches!(stall.observed, Observed::Nothing));
     }
 
     /// The probe cadence is derived from the bound, and bounded at both ends: a

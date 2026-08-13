@@ -314,11 +314,14 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                         )));
                     }
                 }
-                // An empty `dir` is not "the graph's directory" — it is a path
-                // that names nothing, and the member would run wherever the
-                // process that launched it happened to be. Saying so is what
-                // makes it the author's typo rather than a member working
-                // somewhere nobody chose.
+                // Neither field may be present and empty, and for the same
+                // reason: each one *replaces* what the graph supplies, so an
+                // empty one is a member asking for nothing rather than for the
+                // graph's. An empty `dir` would name wherever the launching
+                // process happened to be; an empty `task` becomes the value of
+                // this member's `--prompt`, which is a harness given no
+                // instruction at all. Refusing here is what makes either the
+                // author's typo rather than a member run on it.
                 if member
                     .dir
                     .as_ref()
@@ -327,6 +330,16 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                     return Err(Error::InvalidConfig(format!(
                         "member {name:?}: `dir` names no directory — omit it to work in the \
                          graph's own directory"
+                    )));
+                }
+                if member
+                    .task
+                    .as_ref()
+                    .is_some_and(|task| task.trim().is_empty())
+                {
+                    return Err(Error::InvalidConfig(format!(
+                        "member {name:?}: `task` is the job this member runs, and an empty one \
+                         is no job — omit it to run the task the graph was given"
                     )));
                 }
                 if let Some(schedule) = member.schedule {
@@ -423,11 +436,17 @@ mod tests {
             assert!(validate(&parse(&unchanged)).is_ok(), "{unchanged}");
         }
 
-        // An empty `dir` is a typo, not a request to work in the graph's own
-        // directory: unrefused it would name wherever the launching process
-        // happened to be.
-        let err = validate(&parse(&format!("{base}    dir: ''\n"))).unwrap_err();
-        assert!(err.to_string().contains("names no directory"), "{err}");
+        // An empty field of either kind is a typo, not a request for the
+        // graph's: unrefused, one names wherever the launching process happened
+        // to be and the other becomes a harness given no instruction at all.
+        for (given, expected) in [
+            ("    dir: ''\n", "names no directory"),
+            ("    task: ''\n", "an empty one is no job"),
+            ("    task: '   '\n", "an empty one is no job"),
+        ] {
+            let err = validate(&parse(&format!("{base}{given}"))).unwrap_err();
+            assert!(err.to_string().contains(expected), "{given}: {err}");
+        }
     }
 
     /// A member's name is a directory this run creates and a signal file an
