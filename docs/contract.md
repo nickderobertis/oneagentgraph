@@ -41,7 +41,7 @@ How a member is launched, and why the two kinds differ:
 Graph config (YAML, by path or URL):
 
 ```yaml
-version: 2
+version: 3
 name: node-scope
 env:                                  # exported to every member process; values may reference ${HOME}
   MY_VAR: value
@@ -65,11 +65,14 @@ members:
     kind: oneharness                  # single-sided: one agent, no judge
     oneharness_config: ./oneharness.toml
     persona: ./reporter.yaml
+    task: null                        # this member's own job; usually --task instead
+    dir: null                         # this member's own directory; default the run's --dir
     schedule: {every: 1800, resettable: true}   # cron member; seconds
     deps: []                          # members whose settle precedes this member's first run
 ```
 
 - A `kind: onejudge` member's judge side may instead be `judge: {command: ["..."]}` — a command provider.
+- A member is a **job**, not a copy of its graph. A `kind: oneharness` member may carry its own `task` and its own `dir`, and each beats the graph's: a scheduled member whose whole job is to write one status update receives its own prose rather than the run's `--task`, and works in its own directory rather than the run's `--dir`. Both are optional and both default to the graph's, so a document that omits them runs exactly as before; a relative `dir` resolves against the run's `--dir`, and an absolute one is used as written. Both require `version: 3`. There is no per-member `env`: a member's environment is its oneharness config's own `[env]` table, which a graph already names per member, and the graph's `env:` block stays one block for the whole graph.
 - A `model` override must be paired with a config whose declared chain is one harness family; validated pre-launch. The model value itself is forwarded unchecked.
 - Remote refs (https) are fetched, checksummed, and recorded content-addressed in the run record; replay/audit never depends on the URL staying stable.
 

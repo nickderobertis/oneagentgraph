@@ -32,8 +32,8 @@ fn validate_refuses_a_graph_that_could_never_run() {
     let workspace = Workspace::new();
     for (document, expected) in [
         (
-            "version: 3\nname: g\nmembers: {}\n",
-            "reads versions 1 through 2",
+            "version: 4\nname: g\nmembers: {}\n",
+            "reads versions 1 through 3",
         ),
         ("version: 1\nname: g\nmembers: {}\n", "has no members"),
         (
@@ -97,6 +97,24 @@ fn validate_refuses_a_graph_that_could_never_run() {
                 "    judge: {oneharness_config: ./oneharness.judge.toml}\n",
             ),
             "requires graph schema version 2",
+        ),
+        // A member's own job is the same shape of refusal one schema later: a
+        // document that declares version 2 and then gives a member a task of its
+        // own is told which schema has that field, rather than silently running
+        // that member on the graph's task instead.
+        (
+            concat!(
+                "version: 2\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n    task: its own job\n",
+            ),
+            "requires graph schema version 3",
+        ),
+        (
+            concat!(
+                "version: 3\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n    dir: ''\n",
+            ),
+            "names no directory",
         ),
         (
             concat!(

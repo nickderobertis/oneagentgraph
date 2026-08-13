@@ -212,11 +212,19 @@ pub fn build(
                 "--config".to_string(),
                 path.display().to_string(),
                 "--cwd".to_string(),
-                context.dir.display().to_string(),
+                member_dir(member.dir.as_deref(), context)
+                    .display()
+                    .to_string(),
                 "--events".to_string(),
                 "--stream".to_string(),
                 "--prompt".to_string(),
-                task(context)?,
+                // The member's own task beats the run's, on the same terms as a
+                // two-party member's: a member that carries one is asking for
+                // that task rather than for the graph's.
+                match member.task.as_deref() {
+                    Some(own) => own.to_string(),
+                    None => task(context)?,
+                },
             ];
             args.retain(|arg| !arg.is_empty());
             Ok(Invocation {
@@ -626,6 +634,31 @@ fn task(context: &Context<'_>) -> Result<String, Error> {
     })
 }
 
+/// The directory one member is told to work in: its own when it named one, and
+/// the graph's when it did not.
+///
+/// A member that named none gets `context.dir` **exactly as the run was given
+/// it**, relative or not, because that is what this crate has always passed to
+/// `oneharness run --cwd` and a member with no `dir` behaves as it did before.
+///
+/// A member's own `dir` is resolved rather than passed through, and the
+/// difference is not tidiness. The value goes to `--cwd` on a child spawned with
+/// its working directory set to the *member's scratch*, so a relative path left
+/// as written would resolve against a generated directory the graph's author has
+/// never seen — the graph-wide `--dir`'s own sharp edge, which a new field has no
+/// reason to inherit. So a relative `dir` is joined onto the graph's directory —
+/// `dir: ./api` is the member working one level inside the graph's own — and the
+/// result is made absolute against this process's working directory. Absolute
+/// rather than canonical: the directory need not exist yet, and no symlink an
+/// operator wrote is rewritten under them.
+fn member_dir(named: Option<&Path>, context: &Context<'_>) -> PathBuf {
+    let Some(named) = named else {
+        return context.dir.to_path_buf();
+    };
+    let joined = context.dir.join(named);
+    std::path::absolute(&joined).unwrap_or(joined)
+}
+
 /// Write one generated file, creating the directory that holds it.
 fn write(path: &Path, content: &str) -> Result<(), Error> {
     if let Some(parent) = path.parent() {
@@ -855,6 +888,96 @@ mod tests {
         taskless.task = None;
         let err = build(&member, &taskless, &mut Resolver::new()).unwrap_err();
         assert!(err.to_string().contains("no task"), "{err}");
+    }
+
+    /// A single-sided member's own `task` and `dir` are what oneharness is told,
+    /// and a member carrying neither is told the graph's — byte for byte what it
+    /// was told before either field existed.
+    ///
+    /// Asserted on the argv because that is the whole of what this crate decides
+    /// for a single-sided member: `--prompt` is the job it is given and `--cwd`
+    /// is where it does it, and a member whose job differs from its graph's is
+    /// one where these two differ from the run's.
+    #[test]
+    fn a_single_sided_member_is_told_its_own_task_and_directory() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let graph_wide: Member =
+            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+                .expect("a member");
+        let own: Member = serde_norway::from_str(concat!(
+            "kind: oneharness\noneharness_config: ./oneharness.toml\n",
+            "task: write one status update\ndir: ./api\n",
+        ))
+        .expect("a member");
+
+        let default = process_args(&graph_wide, &context(dir.path(), &scratch));
+        assert_eq!(flag(&default, "--prompt").as_deref(), Some("do the thing"));
+        assert_eq!(
+            flag(&default, "--cwd").as_deref(),
+            Some(dir.path().display().to_string().as_str()),
+            "a member with no directory of its own must be told the graph's, unchanged"
+        );
+
+        let job = process_args(&own, &context(dir.path(), &scratch));
+        assert_eq!(
+            flag(&job, "--prompt").as_deref(),
+            Some("write one status update"),
+            "a member carrying its own task was handed the graph's"
+        );
+        // Joined onto the graph's directory and made absolute, so the value
+        // reaches oneharness meaning the same thing wherever the child is
+        // spawned — its working directory is the member's scratch, not this one.
+        assert_eq!(
+            flag(&job, "--cwd").map(std::path::PathBuf::from),
+            Some(dir.path().join("api")),
+        );
+
+        // An absolute `dir` is used exactly as written: a member working
+        // somewhere that is not below the graph's directory at all is the case a
+        // scratch-dwelling member is.
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let absolute: Member = serde_norway::from_str(&format!(
+            "kind: oneharness\noneharness_config: ./oneharness.toml\ndir: {}\n",
+            elsewhere.path().display()
+        ))
+        .expect("a member");
+        assert_eq!(
+            flag(
+                &process_args(&absolute, &context(dir.path(), &scratch)),
+                "--cwd"
+            )
+            .map(std::path::PathBuf::from),
+            Some(elsewhere.path().to_path_buf()),
+        );
+
+        // And a member with its own task needs no `--task` from the run at all,
+        // which is the whole point: its job is not the graph's.
+        let mut taskless = context(dir.path(), &scratch);
+        taskless.task = None;
+        assert_eq!(
+            flag(&process_args(&own, &taskless), "--prompt").as_deref(),
+            Some("write one status update"),
+        );
+        let err = build(&graph_wide, &taskless, &mut Resolver::new()).unwrap_err();
+        assert!(err.to_string().contains("no task"), "{err}");
+    }
+
+    /// The argv a single-sided member is launched with.
+    fn process_args(member: &Member, context: &Context<'_>) -> Vec<String> {
+        let invocation = build(member, context, &mut Resolver::new()).expect("built");
+        match invocation.launch {
+            Launch::Process { args, .. } => args,
+            other => panic!("expected a child process, got {other:?}"),
+        }
+    }
+
+    /// One argv flag's value.
+    fn flag(args: &[String], name: &str) -> Option<String> {
+        args.iter()
+            .position(|arg| arg == name)
+            .and_then(|at| args.get(at + 1))
+            .cloned()
     }
 
     /// A command judge composes onejudge's `split` provider, and an empty

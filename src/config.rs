@@ -16,6 +16,7 @@
 // Narrow it when the contract enumerates them.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -87,6 +88,24 @@ pub struct OneharnessMember {
     /// The persona delta, by path or URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<ConfigRef>,
+    /// The task prose. Usually supplied by `--task` instead — the same field, on
+    /// the same terms, as [`OnejudgeMember::task`].
+    ///
+    /// A member whose job is not the graph's needs its own prose, and without
+    /// this a single-sided member had no way to hold any: it received the
+    /// graph-wide `--task` verbatim, and a scheduled member whose whole job is to
+    /// write one status update was handed the orchestrator's instructions to
+    /// drive the run instead. Requires graph schema version 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// The directory this member works in, when its job is not the graph's.
+    ///
+    /// Named to oneharness as `run --cwd`, exactly as the graph-wide `--dir` is,
+    /// and defaulting to it. A relative path is resolved against that graph-wide
+    /// directory, so `dir: ./api` is the member working one level inside the
+    /// graph's own. Requires graph schema version 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
     /// Present on a cron member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
@@ -163,7 +182,15 @@ fn default_stream() -> bool {
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
+
+/// The first graph schema version in which a single-sided member may carry its
+/// own [`task`](OneharnessMember::task) and [`dir`](OneharnessMember::dir).
+///
+/// Both are optional and both default to the graph's own, so a version 1 or 2
+/// document keeps parsing and running exactly as before; what the gate buys is
+/// that a document *using* one says which schema it was written against.
+pub const FIRST_MEMBER_JOB_VERSION: u32 = 3;
 
 /// Whether `name` is one a member may have.
 ///
@@ -272,6 +299,36 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                 }
             }
             Member::Oneharness(member) => {
+                // A member's own job, gated the way `deps` is: a document that
+                // declares an older schema and then uses a field that schema
+                // never had is refused by the field's name, rather than running
+                // under a graph-wide task or directory the author did not mean.
+                for (field, given) in [
+                    ("task", member.task.is_some()),
+                    ("dir", member.dir.is_some()),
+                ] {
+                    if given && graph.version < FIRST_MEMBER_JOB_VERSION {
+                        return Err(Error::InvalidConfig(format!(
+                            "member {name:?} uses oneharness `{field}`, which requires graph \
+                             schema version {FIRST_MEMBER_JOB_VERSION}"
+                        )));
+                    }
+                }
+                // An empty `dir` is not "the graph's directory" — it is a path
+                // that names nothing, and the member would run wherever the
+                // process that launched it happened to be. Saying so is what
+                // makes it the author's typo rather than a member working
+                // somewhere nobody chose.
+                if member
+                    .dir
+                    .as_ref()
+                    .is_some_and(|dir| dir.as_os_str().is_empty())
+                {
+                    return Err(Error::InvalidConfig(format!(
+                        "member {name:?}: `dir` names no directory — omit it to work in the \
+                         graph's own directory"
+                    )));
+                }
                 if let Some(schedule) = member.schedule {
                     if schedule.every == 0 {
                         return Err(Error::InvalidConfig(format!(
@@ -303,9 +360,18 @@ mod tests {
     #[test]
     fn a_graph_of_another_version_is_refused_by_version() {
         assert!(validate(&parse(ONE_MEMBER)).is_ok());
-        assert!(validate(&parse(&ONE_MEMBER.replace("version: 1", "version: 2"))).is_ok());
-        let err = validate(&parse(&ONE_MEMBER.replace("version: 1", "version: 3"))).unwrap_err();
-        assert!(err.to_string().contains("versions 1 through 2"), "{err}");
+        for readable in FIRST_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let document = ONE_MEMBER.replace("version: 1", &format!("version: {readable}"));
+            assert!(validate(&parse(&document)).is_ok(), "{document}");
+        }
+        let ahead = format!("version: {}", SCHEMA_VERSION + 1);
+        let err = validate(&parse(&ONE_MEMBER.replace("version: 1", &ahead))).unwrap_err();
+        assert!(
+            err.to_string().contains(&format!(
+                "versions {FIRST_SCHEMA_VERSION} through {SCHEMA_VERSION}"
+            )),
+            "{err}"
+        );
     }
 
     #[test]
@@ -326,6 +392,42 @@ mod tests {
             .to_string()
             .contains("requires graph schema version 2"));
         assert!(validate(&parse(&with_deps.replace("version: 1", "version: 2"))).is_ok());
+    }
+
+    /// A single-sided member may carry its own job, and a document that declares
+    /// an older schema is refused by the field's name rather than running under
+    /// the graph's task and directory instead.
+    #[test]
+    fn a_single_sided_members_own_job_requires_the_schema_that_has_it() {
+        let base = concat!(
+            "version: 3\nname: g\nmembers:\n",
+            "  check_in:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+        );
+        for own in ["    task: send one update\n", "    dir: ./api\n"] {
+            let document = format!("{base}{own}");
+            assert!(validate(&parse(&document)).is_ok(), "{document}");
+            for older in ["version: 1", "version: 2"] {
+                let older = document.replace("version: 3", older);
+                let err = validate(&parse(&older)).expect_err("the field postdates this schema");
+                assert!(
+                    err.to_string().contains("requires graph schema version 3"),
+                    "{older}: {err}"
+                );
+            }
+        }
+        // And a member with neither keeps parsing and validating under every
+        // schema this build reads, which is what "an existing graph document is
+        // unaffected" means.
+        for version in FIRST_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let unchanged = base.replace("version: 3", &format!("version: {version}"));
+            assert!(validate(&parse(&unchanged)).is_ok(), "{unchanged}");
+        }
+
+        // An empty `dir` is a typo, not a request to work in the graph's own
+        // directory: unrefused it would name wherever the launching process
+        // happened to be.
+        let err = validate(&parse(&format!("{base}    dir: ''\n"))).unwrap_err();
+        assert!(err.to_string().contains("names no directory"), "{err}");
     }
 
     /// A member's name is a directory this run creates and a signal file an

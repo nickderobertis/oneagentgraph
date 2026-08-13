@@ -43,6 +43,7 @@
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
+//! | `fake:record-cwd=<path>` | append the directory this process was started in |
 //! | `fake:record-env=<path>` | append this process's selection-shaped environment |
 //! | `fake:record-argv=<path>` | append the argv this side was spawned with |
 //! | `FAKE_HARNESS_REFUSAL=quota` | a zero-work 429 the chain steps past |
@@ -360,6 +361,16 @@ fn recordings(prompt: &str, argv: &[String]) {
     record(prompt, "record-prompt", prompt);
     record(prompt, "record-env", &selection_environment());
     record(prompt, "record-argv", &argv.join(" "));
+    // Where this process was *started*, which is the far end of `oneharness run
+    // --cwd`: a member is told a directory, and this is the only place the
+    // question "did the harness actually run there?" can be answered.
+    record(
+        prompt,
+        "record-cwd",
+        &std::env::current_dir()
+            .map(|dir| dir.display().to_string())
+            .unwrap_or_default(),
+    );
 }
 
 /// Whether `oneharness run --control` selected claude-code's streamed input
