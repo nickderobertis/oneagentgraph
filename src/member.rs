@@ -28,8 +28,17 @@
 //!   once, and a threshold near the write cadence reaps healthy ones under
 //!   exactly the load it creates.
 //! * The **activity watchdog** is the slow-stall backstop: a member that
-//!   published nothing for [`crate::liveness::DEFAULT_STALL_TIMEOUT`] is not
-//!   working, whatever its process tree looks like.
+//!   published nothing for [`crate::liveness::DEFAULT_STALL_TIMEOUT`] *and has
+//!   no live work under it* is not working. Silence alone was the rule once, and
+//!   it condemned members that were working: a supervisory member whose turn is
+//!   one long child — a whole round — publishes nothing for far longer than the
+//!   bound while being entirely healthy, and its teardown took the live worker
+//!   underneath it with it. It was style-sensitive, too, which is how it hid: a
+//!   supervisor that drove its round by *polling* emitted a tool event every few
+//!   seconds and survived, while one that *blocked* on a single call died — same
+//!   persona, same graph, opposite verdicts, on a choice the agent makes freely
+//!   turn by turn. [`Stall`] is the rule now, and what it adds is the evidence
+//!   the old one threw away.
 //!
 //! Either firing is a [`EventKind::MemberDied`], carrying the `rule` that fired,
 //! the classified `cause`, and a bounded `detail` — plus, for a member that was a
@@ -209,6 +218,127 @@ impl Bounds {
         })
     }
 }
+
+/// The activity watchdog, as a clock one member's supervisor keeps.
+///
+/// The rule it applies is two things rather than one: a member is condemned when
+/// it has published nothing for the whole stall bound **and** the process tree
+/// stamped for it did nothing in that time either. A member blocked on a child
+/// that is doing the work — the shape a supervisory member's turn takes, and the
+/// shape that made silence alone the wrong rule — clears the clock on the child's
+/// progress and is left alone.
+///
+/// What counts as progress is [`crate::scratch::work`]: a process starting or
+/// ending under this member's stamp, or one of them being charged for CPU.
+/// Deliberately not "a live child exists" — a wedged member has one of those too,
+/// which is precisely why its harness never answers — so the rule that keeps a
+/// working member alive is not one that keeps a dead one alive with it.
+///
+/// Two consequences worth stating plainly, because they are the cost of the
+/// trade:
+///
+/// * The bound becomes a **floor** rather than an exact deadline. Establishing
+///   that a tree is idle takes two observations, so a condemnation can arrive up
+///   to one probe interval late. A backstop measured in minutes does not need
+///   the precision, and a member killed for being briefly unobserved is the
+///   failure this exists to stop.
+/// * A member whose tree spins **forever** is no longer condemned by this rule.
+///   That is a real narrowing and it is deliberate: this rule's subject is a
+///   member that is idle and silent, which is what a wedged one is. A member
+///   burning CPU to no purpose is what `cancel` is for, and the heartbeat rule
+///   still answers for a supervisor that cannot confirm its member at all.
+#[derive(Debug)]
+pub struct Stall {
+    /// How long a member may be quiet before this rule condemns it.
+    bound: Duration,
+    /// How often the tree is examined while a member is quiet enough to be
+    /// worth examining.
+    probe_every: Duration,
+    /// The member's own elapsed milliseconds at the last evidence of live work,
+    /// which counts exactly as a published line does.
+    cleared: u64,
+    /// The last observation of the tree, and when it was taken. Dropped whenever
+    /// the member is publishing normally, so the comparison is always against
+    /// something recent rather than against a tree from ten minutes ago.
+    probed: Option<(Instant, crate::scratch::Work)>,
+    /// Whether the two most recent observations found the tree unchanged.
+    ///
+    /// A verdict rather than a reading, and it is what condemnation rests on: a
+    /// single look at a process tree says what it *is*, and the question this
+    /// rule asks is whether it changed. Kept between probes so the answer does
+    /// not depend on which iteration of the supervisor's loop happens to land on
+    /// the bound.
+    idle: bool,
+}
+
+impl Stall {
+    /// The clock for a member supervised under `bound`.
+    #[must_use]
+    pub fn new(bound: Duration) -> Self {
+        Self {
+            bound,
+            // A quarter of the window this rule watches in, so a member always
+            // gets a baseline *and* a comparison before the bound expires, and
+            // bounded above so a production run's probe is not fifteen minutes
+            // apart. Nothing is examined at all until a member has been quiet
+            // for half the bound, so a member publishing normally never pays for
+            // any of this.
+            probe_every: (bound / 8).clamp(HEARTBEAT_INTERVAL, MAX_PROBE_INTERVAL),
+            cleared: 0,
+            probed: None,
+            idle: false,
+        }
+    }
+
+    /// Whether this member is condemned, `elapsed` milliseconds into its life,
+    /// having last published at `published`.
+    ///
+    /// `scratch` is the member's own, which is the stamp its tree carries.
+    pub fn condemns(&mut self, elapsed: u64, published: u64, scratch: &Path) -> bool {
+        let quiet = Duration::from_millis(elapsed.saturating_sub(published.max(self.cleared)));
+        if quiet < self.bound / 2 {
+            // Publishing normally: nothing to explain, and a tree examined
+            // before this member's last event is not evidence about the silence
+            // that follows it.
+            self.probed = None;
+            self.idle = false;
+            return false;
+        }
+        let now = Instant::now();
+        let due = self
+            .probed
+            .as_ref()
+            .is_none_or(|(at, _)| now.duration_since(*at) >= self.probe_every);
+        if due {
+            let observed = crate::scratch::work(scratch);
+            self.idle = match &self.probed {
+                // Unchanged since the last look: nothing under this member did
+                // anything in between.
+                Some((_, before)) => *before == observed,
+                // The first look is a baseline and nothing else. Condemning on
+                // one would be condemning on a reading rather than a change,
+                // which is the rule this replaces.
+                None => false,
+            };
+            if !self.idle && self.probed.is_some() {
+                // Something moved, which counts exactly as a published line
+                // does: the member has live work under it, and its stall clock
+                // starts again from here.
+                self.cleared = elapsed;
+            }
+            self.probed = Some((now, observed));
+        }
+        self.idle && quiet > self.bound
+    }
+}
+
+/// The longest a quiet member goes unexamined, whatever its stall bound is.
+///
+/// The contract's default bound is ten minutes and an eighth of it would be over
+/// a minute — long enough that a member which did its work early in the window
+/// and then wedged would still be holding a stale verdict when the bound
+/// expired.
+const MAX_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// One duration read out of the environment.
 fn seconds(
@@ -416,6 +546,7 @@ fn supervise(
     // that a reader notices the silence before the watchdog does.
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
     let mut published = Instant::now();
+    let mut stall = Stall::new(bounds.stall);
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
@@ -441,8 +572,11 @@ fn supervise(
             published = now;
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
-        let quiet = elapsed_millis(started).saturating_sub(activity.load(Ordering::SeqCst));
-        if Duration::from_millis(quiet) > bounds.stall {
+        if stall.condemns(
+            elapsed_millis(started),
+            activity.load(Ordering::SeqCst),
+            scratch,
+        ) {
             return kill_and_report(
                 &mut child,
                 group,
@@ -865,6 +999,67 @@ mod tests {
         .expect("both parse");
         assert_eq!(moved.heartbeat, Duration::from_millis(1500));
         assert_eq!(moved.stall, Duration::from_secs(30));
+    }
+
+    /// The activity rule, on its own terms: a member publishing normally is never
+    /// condemned and its tree is never even examined; a silent one with nothing
+    /// running under it is condemned, but only once two looks agree.
+    ///
+    /// The scratch here is an empty directory, which is a member whose tree is
+    /// *gone* — the strongest form of "no live work". The member that has one and
+    /// is working through it is a real process tree, and so is proven by a real
+    /// run in `tests/e2e/liveness.rs` rather than here.
+    #[test]
+    fn the_activity_rule_needs_both_silence_and_an_idle_tree() {
+        let scratch = tempfile::tempdir().expect("a scratch");
+        let mut stall = Stall::new(Duration::from_secs(2));
+
+        // Publishing inside the window: not condemned, and nothing examined.
+        assert!(!stall.condemns(1_000, 900, scratch.path()));
+        assert!(
+            stall.probed.is_none(),
+            "a member publishing normally paid for a look at its own process tree"
+        );
+
+        // Quiet past the bound, but this is the first look: a reading is not a
+        // change, so the bound is a floor rather than an exact deadline.
+        assert!(!stall.condemns(2_100, 0, scratch.path()));
+        assert!(stall.probed.is_some());
+
+        // A second look, agreeing with the first: nothing is running under this
+        // member and it has published nothing, which is the rule.
+        std::thread::sleep(HEARTBEAT_INTERVAL + Duration::from_millis(100));
+        assert!(stall.condemns(3_000, 0, scratch.path()));
+
+        // And a member that publishes again is cleared, tree and all — the next
+        // silence is judged from scratch rather than on the verdict this one
+        // reached.
+        assert!(!stall.condemns(3_100, 3_100, scratch.path()));
+        assert!(!stall.idle && stall.probed.is_none());
+    }
+
+    /// The probe cadence is derived from the bound, and bounded at both ends: a
+    /// quiet member is always looked at twice before its bound expires, and a
+    /// production run's look is never a minute and a half apart.
+    #[test]
+    fn the_probe_cadence_fits_inside_the_bound_it_watches() {
+        for bound in [
+            Duration::from_millis(500),
+            Duration::from_secs(2),
+            Duration::from_secs(30),
+            DEFAULT_STALL_TIMEOUT,
+        ] {
+            let stall = Stall::new(bound);
+            assert!(
+                stall.probe_every <= MAX_PROBE_INTERVAL,
+                "{bound:?}: a quiet member would go {:?} unexamined",
+                stall.probe_every
+            );
+            assert!(
+                stall.probe_every >= HEARTBEAT_INTERVAL,
+                "{bound:?}: the tree would be examined faster than the supervisor loops"
+            );
+        }
     }
 
     /// A bound nobody meant refuses the run rather than supervising under it.

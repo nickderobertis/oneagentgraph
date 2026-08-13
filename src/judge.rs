@@ -61,7 +61,7 @@ use crate::event::{
 use crate::invoke::JudgeLaunch;
 use crate::member::{
     died_payload, payload, settle_report, summarize, unstartable, Bounds, Death, Outcome, Rule,
-    HEARTBEAT_INTERVAL,
+    Stall, HEARTBEAT_INTERVAL,
 };
 
 /// How long a condemned member's engine is given to answer the teardown before
@@ -181,6 +181,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // it exists to carry.
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
     let mut published = Instant::now();
+    let mut stall = Stall::new(bounds.stall);
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
             Ok(answer) => return finish(answer, emitter, scratch),
@@ -207,8 +208,11 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             published = now;
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
-        let quiet = elapsed_millis(started).saturating_sub(activity.load(Ordering::SeqCst));
-        if Duration::from_millis(quiet) > bounds.stall {
+        if stall.condemns(
+            elapsed_millis(started),
+            activity.load(Ordering::SeqCst),
+            scratch,
+        ) {
             return condemn(&rx, &abort, emitter, Rule::Activity, scratch);
         }
     }

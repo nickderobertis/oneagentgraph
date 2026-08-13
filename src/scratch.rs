@@ -450,6 +450,58 @@ mod platform {
         tail.split_whitespace().nth(19)?.parse().ok()
     }
 
+    /// How much CPU `pid` has been charged so far, in the kernel's own ticks.
+    ///
+    /// Deliberately opaque and only ever compared with an earlier reading of the
+    /// same process — see [`super::work`] — so no unit conversion has to be got
+    /// right on three platforms to answer the one question asked of it: has this
+    /// process done anything since last time?
+    #[cfg(target_os = "linux")]
+    pub fn consumed(pid: i32) -> Option<u64> {
+        // Fields 14 and 15 of `/proc/<pid>/stat`: the user and system time this
+        // process has been charged. Parsed from after the last `)` for the
+        // reason [`start_token`] gives — field 2 is an executable name that may
+        // itself contain spaces and parentheses.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let tail = &stat[stat.rfind(')')? + 1..];
+        let mut fields = tail.split_whitespace();
+        let user: u64 = fields.nth(11)?.parse().ok()?;
+        let system: u64 = fields.next()?.parse().ok()?;
+        Some(user.saturating_add(system))
+    }
+
+    /// The same reading from `libproc`, in nanoseconds, for the platform with no
+    /// `/proc` to read it out of.
+    #[cfg(target_vendor = "apple")]
+    pub fn consumed(pid: i32) -> Option<u64> {
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = c_int::try_from(std::mem::size_of::<libc::proc_taskinfo>()).ok()?;
+        // SAFETY: `proc_pidinfo` fills at most `size` bytes of the buffer, which
+        // is a live `proc_taskinfo` this frame owns, and reports how many it
+        // wrote. A short write is rejected below rather than read.
+        let written = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKINFO,
+                0,
+                std::ptr::from_mut(&mut info).cast(),
+                size,
+            )
+        };
+        if written != size {
+            return None;
+        }
+        Some(info.pti_total_user.saturating_add(info.pti_total_system))
+    }
+
+    /// No CPU accounting to be had here, so a member's silence is judged by its
+    /// stream alone — the behaviour every platform had before this reading
+    /// existed.
+    #[cfg(not(any(target_os = "linux", target_vendor = "apple")))]
+    pub fn consumed(_pid: i32) -> Option<u64> {
+        None
+    }
+
     /// Every process whose environment carries `stamp`, read from `/proc`.
     #[cfg(target_os = "linux")]
     fn enumerate(prefix: &str, stamp: &str) -> Vec<ProcessIdentity> {
@@ -915,6 +967,48 @@ mod platform {
         Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
     }
 
+    /// How much CPU `pid` has been charged so far, in 100-nanosecond ticks.
+    ///
+    /// The same call [`start_token`] reads a creation time out of, asked for the
+    /// other two times it returns. Opaque and only ever compared with an earlier
+    /// reading of the same process — see [`super::work`].
+    pub fn consumed(pid: i32) -> Option<u64> {
+        // Checked rather than `as`, for the reason [`start_token`] gives: a lossy
+        // widening turns a number that names no process into one that may name a
+        // real and unrelated one.
+        let pid = u32::try_from(pid).ok()?;
+        // SAFETY: `OpenProcess` takes a pid and reports failure with a null
+        // handle; nothing is borrowed.
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if handle.is_null() {
+            return None;
+        }
+        // SAFETY: `handle` is a live process handle this frame owns until the
+        // `CloseHandle` below, and every out-parameter is a live local.
+        let times = unsafe {
+            let mut created = std::mem::zeroed();
+            let mut exited = std::mem::zeroed();
+            let mut kernel = std::mem::zeroed();
+            let mut user = std::mem::zeroed();
+            let read = GetProcessTimes(
+                handle,
+                &raw mut created,
+                &raw mut exited,
+                &raw mut kernel,
+                &raw mut user,
+            );
+            CloseHandle(handle);
+            (read != 0).then_some((kernel, user))
+        };
+        let (kernel, user) = times?;
+        Some(ticks(kernel).saturating_add(ticks(user)))
+    }
+
+    /// One `FILETIME` as the single number its two halves are.
+    fn ticks(time: windows_sys::Win32::Foundation::FILETIME) -> u64 {
+        (u64::from(time.dwHighDateTime) << 32) | u64::from(time.dwLowDateTime)
+    }
+
     /// Every live process in the group `stamp` names, **or in one below it**.
     ///
     /// The "or below" is what makes a *run* answerable for its members: a member
@@ -1313,6 +1407,12 @@ mod platform {
         Vec::new()
     }
 
+    /// No CPU accounting either, so a member's silence is judged by its stream
+    /// alone.
+    pub fn consumed(_pid: i32) -> Option<u64> {
+        None
+    }
+
     /// Nothing is torn down through an unproven handle.
     pub fn terminate(_scratch: &std::path::Path, _targets: &[ProcessIdentity]) -> usize {
         0
@@ -1382,6 +1482,35 @@ pub fn own_identity() -> ProcessIdentity {
 #[must_use]
 pub fn is_live(identity: ProcessIdentity) -> bool {
     platform::start_token(identity.pid).is_some_and(|token| token == identity.start_token)
+}
+
+/// One observation of the work under a scratch: every live process stamped for
+/// it, and how much CPU each has been charged where the platform can say.
+///
+/// Compared, never read. Two observations that differ are a tree that did
+/// something in between — a process started or ended, or one of them was charged
+/// for CPU — and two that are identical are a tree that did nothing at all. That
+/// is the whole of what [`work`] is for, and it is why the CPU reading is left in
+/// each platform's own units.
+pub type Work = Vec<(ProcessIdentity, Option<u64>)>;
+
+/// Observe the work under `scratch` as it stands right now.
+///
+/// The evidence is the same the reap and the sweep rest on — the stamp the
+/// kernel fixed at `exec`, or the job object that stands in for it — so this
+/// reaches a descendant whose parent has already exited, which is exactly the
+/// process a supervisor's own view of its child cannot see.
+///
+/// An empty answer means nothing is running under this scratch, which is a
+/// member with no work to be doing rather than one whose work could not be
+/// examined: a platform that cannot enumerate a tree answers empty *every* time,
+/// so it never reads as a change.
+#[must_use]
+pub fn work(scratch: &Path) -> Work {
+    stamped_for(&scratch.display().to_string())
+        .into_iter()
+        .map(|identity| (identity, platform::consumed(identity.pid)))
+        .collect()
 }
 
 /// Terminate every live process this scratch still holds — the member's own
