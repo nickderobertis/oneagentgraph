@@ -41,6 +41,9 @@ use std::path::{Path, PathBuf};
 use oneharness_core::domain::control::{ControlReason, ControlResponse};
 use serde::{Deserialize, Serialize};
 
+use crate::error::Error;
+use crate::run::{MemberName, RunId, MEMBERS_DIR};
+
 /// The file a run records one member's turn control in, inside that member's own
 /// scratch — beside the `report.json` the same settle stores.
 pub const CONTROL_FILE: &str = "control.json";
@@ -195,6 +198,77 @@ pub enum Delivery {
     Failed(String),
     /// The redirection itself was not one oneharness would take.
     Invalid(String),
+}
+
+/// Redirect one member's in-flight turn, the way `oneagentgraph interrupt`
+/// does.
+///
+/// The whole verb short of the answer it prints: the run's record says which
+/// members exist and whether this one has already settled, the member's own
+/// scratch is where the run wrote down where its turn is addressed, and
+/// [`deliver`] is what reaches it. One implementation serves the command and a
+/// library caller, so the addressing and the order the refusals are decided in
+/// cannot land on only one.
+///
+/// What is *not* here is the CLI's own two halves: the exit code, and the
+/// `turn-interrupted` envelope it publishes on this process's stdout. A library
+/// caller is handed the [`Delivery`] those are both derived from, and has no
+/// stream of this process's to publish on.
+///
+/// Every input is a parameter, `oneharness_bin` included, because there is no
+/// environment this call may consult: the binary the CLI names with
+/// `ONEAGENTGRAPH_ONEHARNESS_BIN` is a caller's choice, and a library that read
+/// it from the process would give one answer to a consumer holding two runs on
+/// two installs.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when there is no such run, or when `member` is not
+/// one of its members. Everything else — a member with no lever, a turn already
+/// over, a delivery that failed, a redirection oneharness refused — is a
+/// [`Delivery`], because each of those is an answer about the turn rather than a
+/// reason the ask could not be made.
+pub fn interrupt(
+    state_dir: &Path,
+    run_id: &RunId,
+    member: &MemberName,
+    input: Option<&str>,
+    oneharness_bin: &str,
+) -> Result<Delivery, Error> {
+    let record = crate::history::show(state_dir, run_id.as_str())?;
+    record.require_member(member.as_str())?;
+    // Derived from the run's *id*, exactly as `cancel` derives the directory it
+    // reaps: `events_path` is a string this crate wrote into a file it reads
+    // back, and following it would let a record point this call at any directory
+    // the process can reach.
+    let scratch = state_dir
+        .join(&record.run_id)
+        .join(MEMBERS_DIR)
+        .join(member.as_str());
+    Ok(match read(&scratch) {
+        // An ask that was refused is the permanent fact and beats every other
+        // answer: a member on a harness with no lever has none whether it is
+        // running, between turns, or long settled.
+        Ok(Turn::Unavailable { reason }) => Delivery::NoTurn(reason),
+        Ok(Turn::Open { address }) => {
+            if settled(&record, member.as_str()) {
+                Delivery::NoTurn("the member has already settled, so its turn is over".to_string())
+            } else {
+                deliver(oneharness_bin, &address, input)
+            }
+        }
+        Err(reason) => Delivery::NoTurn(reason),
+    })
+}
+
+/// Whether the run already recorded an outcome for `member`.
+///
+/// The run's record — [`crate::run::Record`], not the [`Record`] this module
+/// writes — is the run's own evidence, so a member it has settled needs no
+/// socket asked: `members` fills in as members settle, and a finished run has an
+/// exit code of its own.
+fn settled(record: &crate::run::Record, member: &str) -> bool {
+    record.exit_code.is_some() || record.members.contains_key(member)
 }
 
 /// Ask the run listening at `address` to stop what it is doing and do `input`
