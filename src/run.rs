@@ -44,6 +44,14 @@ pub const SIGNAL_DIR: &str = "signals";
 /// Where a run's merged NDJSON is always written, whatever `--output` renders.
 pub const EVENTS_FILE: &str = "events.jsonl";
 
+/// The directory a run gives each member for its own scratch, inside the run's.
+///
+/// One name for every part of this crate that reaches a member's scratch — the
+/// run that creates it, the reaper that walks it, and the interrupt that reads
+/// an address out of it — so a rename cannot leave one of them looking in a
+/// directory nothing writes.
+pub(crate) const MEMBERS_DIR: &str = "members";
+
 /// The run record `history` reads back.
 pub const RECORD_FILE: &str = "record.json";
 
@@ -130,6 +138,42 @@ pub struct Record {
     /// plain `String`: a validated path type would promise a guarantee about a
     /// value this crate never acts on.
     pub events_path: String,
+}
+
+impl Record {
+    /// Refuse a member this run does not have, naming the ones it does.
+    ///
+    /// The names come from [`Record::declared_members`], written into the record
+    /// before anything launches, because [`Record::members`] fills in only as
+    /// members *settle* — so during a live run, which is when a member is
+    /// addressed from outside, it is empty. A record from before that field
+    /// existed falls back to the outcomes, and one that carries neither is not
+    /// second-guessed: refusing then would refuse a member that is really there.
+    ///
+    /// Public because it is the one check every out-of-band route shares.
+    /// [`signal`] and [`crate::control::interrupt`] make it themselves, and
+    /// `cancel` — whose released signature takes a resolved run directory rather
+    /// than a record — leaves it to its caller, so the `oneagentgraph cancel`
+    /// verb makes it through this method rather than through a second copy of
+    /// the rule.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] naming the members this run does have.
+    pub fn require_member(&self, member: &str) -> Result<(), Error> {
+        let mut known: Vec<&str> = self.declared_members.iter().map(String::as_str).collect();
+        if known.is_empty() {
+            known = self.members.keys().map(String::as_str).collect();
+        }
+        if known.is_empty() || known.contains(&member) {
+            return Ok(());
+        }
+        Err(Error::InvalidConfig(format!(
+            "run {:?} has no member {member:?}; it has {}",
+            self.run_id.as_str(),
+            known.join(", ")
+        )))
+    }
 }
 
 /// What became of one member, as the run record keeps it.
@@ -268,9 +312,52 @@ pub enum CancelMode {
     Kill,
 }
 
+/// One member of a run, addressed from outside it.
+///
+/// A type rather than a `&str` for the reason [`RunId`] is one: the name is
+/// *joined onto the run's own directory* by everything that reaches a member out
+/// of band — the signal file [`signal`] writes, the scratch tree `cancel --kill`
+/// reaps, the `control.json` [`crate::control::interrupt`] reads an address out
+/// of — so a value carrying a separator or a parent reference would write or
+/// read outside that directory entirely. Parsing at the boundary is what makes
+/// that unrepresentable, and the alphabet is the one a graph's own member names
+/// are held to, so a name this refuses is one no graph could have declared.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MemberName(String);
+
+impl MemberName {
+    /// One `MEMBER` argument, parsed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::InvalidConfig`] when `name` is outside that alphabet, and so
+    /// could name a path outside the run's own directory.
+    pub fn parse(name: &str) -> Result<Self, Error> {
+        if crate::config::is_member_name(name) {
+            return Ok(Self(name.to_string()));
+        }
+        Err(Error::InvalidConfig(format!(
+            "member {name:?}: a member name is letters, digits, hyphens, and underscores — this \
+             one would name a path outside the run's own directory"
+        )))
+    }
+
+    /// This name as it is written.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for MemberName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The validated scope of a cancellation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CancelScope(Option<String>);
+pub struct CancelScope(Option<MemberName>);
 
 impl CancelScope {
     /// Address the whole run.
@@ -285,16 +372,37 @@ impl CancelScope {
     ///
     /// [`Error::InvalidConfig`] when `name` is not a safe member name.
     pub fn member(name: &str) -> Result<Self, Error> {
-        if !crate::config::is_member_name(name) {
-            return Err(Error::InvalidConfig(format!(
-                "{name:?} is not a member name: use letters, digits, hyphens, and underscores"
-            )));
-        }
-        Ok(Self(Some(name.to_string())))
+        Ok(Self(Some(MemberName::parse(name)?)))
     }
 
     fn member_name(&self) -> Option<&str> {
-        self.0.as_deref()
+        self.0.as_ref().map(MemberName::as_str)
+    }
+}
+
+/// The two out-of-band signals the contract gives an operator over a scheduled
+/// member's clock.
+///
+/// A closed set, because a run watches for a file named after one: a third
+/// spelling would be a file nothing ever reads, and whoever wrote it would still
+/// have been told it worked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Signal {
+    /// Fire a scheduled member now — `oneagentgraph trigger`.
+    Trigger,
+    /// Restart a resettable schedule's clock — `oneagentgraph reset-timer`.
+    Reset,
+}
+
+impl Signal {
+    /// The suffix a run watches for, which is also how this reads back to an
+    /// operator.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Signal::Trigger => "trigger",
+            Signal::Reset => "reset",
+        }
     }
 }
 
@@ -398,12 +506,52 @@ pub fn cancel(
         .map_err(|err| Error::InvalidConfig(format!("cannot signal run {run_id:?}: {err}")))?;
     Ok(if mode == CancelMode::Kill {
         match member {
-            Some(member) => crate::scratch::reap(&root.join("members").join(member)),
+            Some(member) => crate::scratch::reap(&root.join(MEMBERS_DIR).join(member)),
             None => crate::scratch::reap(root),
         }
     } else {
         0
     })
+}
+
+/// Leave a run the out-of-band signal `oneagentgraph trigger` and
+/// `oneagentgraph reset-timer` leave.
+///
+/// One implementation serves those two verbs and a library caller, so a change
+/// to where a run watches, or to what counts as a member of it, cannot land on
+/// only one. The record is read for the reason the CLI reads it: a signal file
+/// is *named after* a member, so a name this run never declared is a file
+/// nothing will ever read — reported here rather than as a success the caller
+/// goes on to act on. That check is why this takes the state directory a record
+/// is found under, where [`cancel`] takes an already-resolved run directory.
+///
+/// The run picks the signal up on its own next tick. A member with no schedule
+/// ignores it, and so does a [`Signal::Reset`] for a schedule that did not
+/// declare itself `resettable` — a member's author decides whether its cadence
+/// can be deferred, and this call does not overrule that.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when there is no such run, when `member` is not one
+/// of its members, or when the signal cannot be written.
+pub fn signal(
+    state_dir: &Path,
+    run_id: &RunId,
+    member: &MemberName,
+    kind: Signal,
+) -> Result<(), Error> {
+    let record = crate::history::show(state_dir, run_id.as_str())?;
+    record.require_member(member.as_str())?;
+    // From the run's *id*, the way `cancel` derives the same directory — not
+    // from the record's `events_path`. That field is a string this crate wrote
+    // into a file it later reads back, and a signal is a write: deriving a write
+    // path from it would let a record place one anywhere the process can reach.
+    let dir = state_dir.join(&record.run_id).join(SIGNAL_DIR);
+    std::fs::create_dir_all(&dir)
+        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
+    let path = dir.join(format!("{member}.{}", kind.as_str()));
+    std::fs::write(&path, kind.as_str())
+        .map_err(|err| Error::InvalidConfig(format!("cannot write {}: {err}", path.display())))
 }
 
 /// A writer that turns the scheduler's flushed NDJSON back into typed events.
@@ -877,7 +1025,7 @@ pub fn run(
     // in early must not see.
     let mut invocations = BTreeMap::new();
     for (name, member) in &graph.members {
-        let scratch = root.join("members").join(name);
+        let scratch = root.join(MEMBERS_DIR).join(name);
         std::fs::create_dir_all(&scratch).map_err(|err| {
             Error::InvalidConfig(format!("cannot create {}: {err}", scratch.display()))
         })?;

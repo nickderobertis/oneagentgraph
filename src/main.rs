@@ -17,7 +17,7 @@ use oneagentgraph::cli::{
     PersonaArgs, PersonaCommand, RunArgs, SmokeArgs, SweepArgs, ValidateArgs,
 };
 use oneagentgraph::config::GraphConfig;
-use oneagentgraph::control::{Delivery, Turn};
+use oneagentgraph::control::Delivery;
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
@@ -75,8 +75,8 @@ fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Err
     match command {
         Command::Run(args) => run_graph(args, env),
         Command::Validate(args) => validate(&args, env),
-        Command::Trigger(args) => signal(&args, env, Signal::Trigger),
-        Command::ResetTimer(args) => signal(&args, env, Signal::Reset),
+        Command::Trigger(args) => signal(&args, env, run::Signal::Trigger),
+        Command::ResetTimer(args) => signal(&args, env, run::Signal::Reset),
         Command::Cancel(args) => cancel(&args, env),
         Command::Interrupt(args) => interrupt(&args, env),
         Command::History(args) => show_history(&args, env),
@@ -305,67 +305,15 @@ fn preflight(
     Ok(graph)
 }
 
-/// The two out-of-band signals the contract gives an operator.
-///
-/// A closed set, because the run watches for a file named after one: a third
-/// spelling would be a file nothing ever reads, and the command that wrote it
-/// would still have reported success.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Signal {
-    /// Fire a scheduled member now.
-    Trigger,
-    /// Restart a resettable schedule's clock.
-    Reset,
-}
-
-impl Signal {
-    /// The suffix the run watches for.
-    const fn as_str(self) -> &'static str {
-        match self {
-            Signal::Trigger => "trigger",
-            Signal::Reset => "reset",
-        }
-    }
-}
-
-/// Refuse a member this run does not have, naming the ones it does.
-///
-/// The names come from the graph, written into the record before anything
-/// launches, because `members` fills in only as members *settle* — so during a
-/// live run, which is when these verbs are used, it is empty. A record from
-/// before that field existed falls back to the outcomes, and one that carries
-/// neither is not second-guessed: refusing then would refuse a member that is
-/// really there.
-fn belongs_to_run(record: &run::Record, run: &str, member: &str) -> Result<(), Error> {
-    let mut known: Vec<&str> = record.declared_members.iter().map(String::as_str).collect();
-    if known.is_empty() {
-        known = record.members.keys().map(String::as_str).collect();
-    }
-    if known.is_empty() || known.contains(&member) {
-        return Ok(());
-    }
-    Err(Error::InvalidConfig(format!(
-        "run {run:?} has no member {member:?}; it has {}",
-        known.join(", ")
-    )))
-}
-
 /// `oneagentgraph trigger` / `reset-timer`: leave the run a signal to pick up.
-fn signal(args: &MemberArgs, env: &BTreeMap<String, String>, kind: Signal) -> Result<i32, Error> {
-    let member = member_name(&args.member)?;
-    let state = state_dir(env);
-    let record = history::show(&state, &args.run)?;
-    // From the run's *id*, the way `cancel` derives the same directory — not
-    // from the record's `events_path`. That field is a string this crate wrote
-    // into a file it later reads back, and a signal is a write: deriving a write
-    // path from it would let a record place one anywhere the process can reach.
-    let dir = state.join(&record.run_id).join(run::SIGNAL_DIR);
-    belongs_to_run(&record, &args.run, &args.member)?;
-    std::fs::create_dir_all(&dir)
-        .map_err(|err| Error::InvalidConfig(format!("cannot create {}: {err}", dir.display())))?;
-    let path = dir.join(format!("{member}.{}", kind.as_str()));
-    std::fs::write(&path, kind.as_str())
-        .map_err(|err| Error::InvalidConfig(format!("cannot write {}: {err}", path.display())))?;
+fn signal(
+    args: &MemberArgs,
+    env: &BTreeMap<String, String>,
+    kind: run::Signal,
+) -> Result<i32, Error> {
+    let member = run::MemberName::parse(&args.member)?;
+    let run_id = run::RunId::parse(&args.run)?;
+    run::signal(&state_dir(env), &run_id, &member, kind)?;
     println!("{}: {} {}", args.run, args.member, kind.as_str());
     Ok(EXIT_SUCCESS)
 }
@@ -374,11 +322,14 @@ use std::path::Path;
 
 /// `oneagentgraph cancel`.
 fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
-    let member = args.member.as_deref().map(member_name).transpose()?;
+    let scope = match args.member.as_deref() {
+        Some(named) => run::CancelScope::member(named)?,
+        None => run::CancelScope::run(),
+    };
     let state = state_dir(env);
     let record = history::show(&state, &args.run)?;
     if let Some(named) = &args.member {
-        belongs_to_run(&record, &args.run, named)?;
+        record.require_member(named)?;
     }
     let root = state.join(&record.run_id);
     // One implementation serves this command and the live library handle, so a
@@ -387,10 +338,6 @@ fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Erro
         run::CancelMode::Kill
     } else {
         run::CancelMode::Stop
-    };
-    let scope = match member {
-        Some(member) => run::CancelScope::member(member)?,
-        None => run::CancelScope::run(),
     };
     let reaped = run::cancel(&root, &record.run_id, &scope, mode)?;
     println!(
@@ -417,36 +364,24 @@ fn cancel(args: &CancelArgs, env: &BTreeMap<String, String>) -> Result<i32, Erro
 /// ends a turn and the worker's accumulated context goes with it, and this
 /// redirects one that keeps running.
 ///
-/// Every outcome publishes one `turn-interrupted`, including the ones that did not
-/// land: a verb that stayed quiet unless it worked would leave "the lever was
-/// pulled and nothing happened" visible only in an exit code.
+/// The addressing and the delivery are [`oneagentgraph::control::interrupt`],
+/// which a library caller reaches the same way; what this verb adds is the two
+/// halves only a process has — the exit code, and the event. Every outcome
+/// publishes one `turn-interrupted`, including the ones that did not land: a
+/// verb that stayed quiet unless it worked would leave "the lever was pulled and
+/// nothing happened" visible only in an exit code.
 fn interrupt(args: &InterruptArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
-    let member = member_name(&args.member)?;
+    let member = run::MemberName::parse(&args.member)?;
     let input = redirection(args)?;
-    let state = state_dir(env);
-    let record = history::show(&state, &args.run)?;
-    belongs_to_run(&record, &args.run, &args.member)?;
-    // Derived from the run's *id*, exactly as `cancel` derives the directory it
-    // reaps: `events_path` is a string this crate wrote into a file it reads
-    // back, and following it would let a record point this verb at any directory
-    // the process can reach.
-    let scratch = state.join(&record.run_id).join("members").join(member);
-
+    let run_id = run::RunId::parse(&args.run)?;
     let bytes = input.as_ref().map_or(0, |text| text.len() as u64);
-    let delivery = match oneagentgraph::control::read(&scratch) {
-        // An ask that was refused is the permanent fact and beats every other
-        // answer: a member on a harness with no lever has none whether it is
-        // running, between turns, or long settled.
-        Ok(Turn::Unavailable { reason }) => Delivery::NoTurn(reason),
-        Ok(Turn::Open { address }) => {
-            if settled(&record, member) {
-                Delivery::NoTurn("the member has already settled, so its turn is over".to_string())
-            } else {
-                oneagentgraph::control::deliver(&oneharness_bin(env), &address, input.as_deref())
-            }
-        }
-        Err(reason) => Delivery::NoTurn(reason),
-    };
+    let delivery = oneagentgraph::control::interrupt(
+        &state_dir(env),
+        &run_id,
+        &member,
+        input.as_deref(),
+        &oneharness_bin(env),
+    )?;
 
     let (code, reason) = match delivery {
         Delivery::Delivered => (EXIT_SUCCESS, None),
@@ -459,7 +394,7 @@ fn interrupt(args: &InterruptArgs, env: &BTreeMap<String, String>) -> Result<i32
             return Err(Error::InvalidConfig(format!("--input: {reason}")))
         }
     };
-    publish(&record.run_id, member, bytes, reason.clone());
+    publish(&run_id, member.as_str(), bytes, reason.clone());
     // Exit 3 is a fact rather than an error, so it says so on stdout with the
     // event; only a delivery that was attempted and failed is a diagnostic.
     if code == EXIT_MEMBER_FAILED {
@@ -502,15 +437,6 @@ fn redirection(args: &InterruptArgs) -> Result<Option<String>, Error> {
     Ok(Some(text))
 }
 
-/// Whether this run already recorded an outcome for `member`.
-///
-/// The record is the run's own evidence, so a member it has settled needs no
-/// socket asked: `members` fills in as members settle, and a finished run has an
-/// exit code of its own.
-fn settled(record: &run::Record, member: &str) -> bool {
-    record.exit_code.is_some() || record.members.contains_key(member)
-}
-
 /// Publish this interrupt as the contract's event, on this process's own stream.
 ///
 /// Its own stream id and its own `seq`, because the envelope's `stream` is "a
@@ -540,22 +466,6 @@ fn publish(run_id: &run::RunId, member: &str, input_bytes: u64, reason: Option<S
             _ => serde_json::Map::new(),
         },
     );
-}
-
-/// One `MEMBER` argument, checked against the shape a graph's own member names
-/// are checked against.
-///
-/// The argument becomes a path — the signal file a run watches for, and the
-/// member scratch `cancel --kill` reaps — so a value carrying a separator or a
-/// parent reference would write or reap outside the run's own directory.
-fn member_name(member: &str) -> Result<&str, Error> {
-    if config::is_member_name(member) {
-        return Ok(member);
-    }
-    Err(Error::InvalidConfig(format!(
-        "member {member:?}: a member name is letters, digits, hyphens, and underscores — this \
-         one would name a path outside the run's own directory"
-    )))
 }
 
 /// `oneagentgraph history`.
