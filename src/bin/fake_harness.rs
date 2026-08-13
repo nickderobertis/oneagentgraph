@@ -61,6 +61,45 @@
 //!
 //! Keep it deterministic and dependency-free beyond what the crate already
 //! carries: it is spawned as a subprocess, many times per journey.
+//!
+//! # Why this is not `oneharness mock-harness`
+//!
+//! oneharness ships a deterministic responder for exactly this seam, and it is
+//! the right thing to use the moment it can answer these journeys. Measured
+//! against oneharness 0.6.15, it cannot, and the blocker is one property rather
+//! than a list:
+//!
+//! **The `MOCK_*` contract fixes a response per process environment; a member
+//! needs several from one binary.** Every side of every member reaches
+//! `ONEHARNESS_BIN_CLAUDE_CODE`, and the graph's `env:` block is graph-wide, so
+//! one `MOCK_STDOUT` is what all of them get. onejudge renders a distinct framing
+//! per operation and requires a distinct *shape* back — a completion decision, a
+//! simulated user turn, a boolean or numeric verdict — which is why [`answer`]
+//! branches on the prompt. Driven for real, a two-party member on the responder
+//! dies as `provider error (oneharness:supervisor): supervisor did not return a
+//! JSON object; got: done` — the agent's answer handed to the judge. Nothing in
+//! `MOCK_*` is conditioned on the prompt (`MOCK_FAIL_IF_MODEL` conditions on
+//! argv; `MOCK_STDOUT_<n>` with `MOCK_ATTEMPT_FILE` conditions on a global,
+//! non-atomic launch counter, so it would script this suite's *own* assumption
+//! about onejudge's loop — the thing under test — and race between parallel
+//! members).
+//!
+//! Two smaller findings, so nobody re-derives them:
+//!
+//! * **The bytes stay here either way.** `MOCK_STDOUT` *is* the response, supplied
+//!   by the caller, so moving would relocate these documents into env-var string
+//!   literals rather than delete them. What the responder owns is the process
+//!   behaviour around them — streaming, the controlled turn, a native descendant.
+//! * **Selection.** `run --mock-harness <ID>` is a flag on an invocation onejudge
+//!   constructs, not this crate. The env route underneath it
+//!   (`ONEHARNESS_INTERNAL_MOCK_HARNESS`) is checked before argv parsing, so
+//!   setting it for the run turns the *outer* `oneharness run` into the responder
+//!   as well — it works only through a wrapper that sets it for the child alone.
+//!
+//! What would close this: a prompt-conditional response in the `MOCK_*` contract
+//! — a rules file mapping a prompt substring to the document to answer with, the
+//! shape `oneharness mock --rules` already has for tool calls. That is an
+//! upstream proposal, not a change to make from here.
 
 // This binary's whole product IS its stdout and stderr: it stands in for a
 // harness CLI, and a harness CLI answers on those two streams.
