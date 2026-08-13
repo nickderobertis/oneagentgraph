@@ -9,6 +9,24 @@
 //! This is that backend, deterministic, so a journey can drive the real
 //! `split`-provider path — real onejudge, real oneharness on the agent side —
 //! with only the paid supervisor replaced.
+//!
+//! # Why this is not onejudge's own `onejudge-echo-provider`
+//!
+//! onejudge does ship one — `src/bin/echo_provider.rs`, behind its `fake-provider`
+//! feature, answering the same five ops. It is a **binary of a dependency**, and
+//! cargo does not build those for a consumer: a `dev-dependencies` entry with that
+//! feature compiles onejudge's *library*, never its `[[bin]]`, so there is no
+//! `CARGO_BIN_EXE_*` to point a graph at. Reaching it means `cargo install
+//! onejudge --features fake-provider` in `bootstrap` and in CI, which puts a
+//! second pin on a crate `Cargo.lock` already pins and a second `onejudge` build
+//! on `PATH` to shadow — the outage `tests/e2e/support.rs::required` exists to
+//! diagnose, and one this development host already had: an
+//! `onejudge-echo-provider` in the cargo bin directory built from a release older
+//! than the engine `Cargo.lock` links.
+//!
+//! What would close this: `pub` access to that responder from the onejudge
+//! *library* under the same feature, which would make this file three lines. That
+//! is an upstream proposal, not a change to make from here.
 
 // The JSON-lines protocol IS stdout, and a diagnostic IS stderr: onejudge reads
 // one response object from the first and a classified failure from the second.

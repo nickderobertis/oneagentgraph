@@ -2,109 +2,107 @@
 //!
 //! `docs/contract.md` says this is "read from oneharness data", and it is meant
 //! literally: this crate owns no notion of an identity, a subscription, or a
-//! quota window, so `health` shells out to `oneharness usage --format json` and
-//! forwards what it answers. Every probe there is free — no harness takes a
-//! model turn — which is what makes this a pre-flight check rather than a cost.
+//! quota window, so `health` asks oneharness for its own sweep and forwards what
+//! it answers. Every probe there is free — no harness takes a model turn — which
+//! is what makes this a pre-flight check rather than a cost.
 //!
-//! What this module adds is the one thing a caller cannot get from that command
+//! # Why this is a library call rather than a child process
+//!
+//! It used to be `oneharness usage --format json`, spawned, with its stdout
+//! parsed back. The hop was kept for one stated reason: *which* identities a host
+//! has was assembled by the `oneharness` CLI rather than by the library, and
+//! rebuilding that assembly here would be this crate growing harness logic, which
+//! `AGENTS.md` forbids. [`oneharness_core::io::usage::report`] closed exactly
+//! that gap — it **is** the `usage` verb as a call, selection and variant
+//! identities and bounded concurrency included, and the CLI is now a shell that
+//! prints what it returns. So the sweep is reached without a process, from the
+//! same code the CLI runs, and nothing about identities is decided here.
+//!
+//! What this module adds is the one thing a caller cannot get from that call
 //! alone: a refusal that says *why* there is no answer, in this crate's own
-//! terms, rather than a stack trace or an empty document.
-//!
-//! # Why this one is still a child process
-//!
-//! `oneharness-core` is a library dependency of this crate, and it does expose
-//! the probes — but one identity at a time, as
-//! `io::usage::probe(&UsageProbeRequest)`, against a request naming the harness,
-//! its binary, and the exact variant environment to probe it under. *Which*
-//! identities a host has is assembled from the oneharness config, and that
-//! assembly lives in the `oneharness` CLI rather than in the library. Rebuilding
-//! it here would be this crate growing harness logic, which `AGENTS.md` forbids
-//! for the reason this whole split exists. So the hop stays, and it collapses
-//! when oneharness-core grows an entrypoint that returns a whole
-//! `domain::usage::UsageReport` for a resolved config.
+//! terms.
 
-use std::process::Command;
-
-use serde_json::Value;
+use oneharness_core::domain::usage::UsageReport;
+use oneharness_core::errors::OneharnessError;
+use oneharness_core::io::usage::{report, UsageRequest};
 
 use crate::error::Error;
 
 /// Read oneharness's own per-identity report.
 ///
+/// The report is oneharness's type rather than this crate's rendering of it:
+/// what it *says* stays oneharness's to define, and a consumer reading it in
+/// process gets the same document `oneharness usage --format json` prints.
+///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when the binary is not there, cannot be run, refuses
-/// the probe, or answers something that is not JSON — each named as itself, so
-/// an operator knows whether to install oneharness or to look at their config.
-pub fn read(oneharness_bin: &str) -> Result<Value, Error> {
-    let output = Command::new(oneharness_bin)
-        .args(["usage", "--format", "json"])
-        .output()
-        .map_err(|err| {
-            Error::InvalidConfig(format!(
-                "cannot run {oneharness_bin}: {err}. `health` reports what oneharness knows about \
-                 each identity, so oneharness has to be on PATH."
-            ))
-        })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(Error::InvalidConfig(format!(
-            "{oneharness_bin} usage refused the probe: {}",
-            stderr.trim()
-        )));
+/// [`Error::InvalidConfig`] when oneharness refuses the sweep before it probes
+/// anything. Nothing a harness does can fail this call — a missing binary, an
+/// unauthenticated identity, and a probe that timed out are all *identities in
+/// the report* — so the only refusal left is configuration oneharness cannot
+/// load, which is a fault an operator fixes in their own file.
+pub fn read() -> Result<UsageReport, Error> {
+    report(&request()).map_err(|err| refusal(&err))
+}
+
+/// What `health` sweeps for.
+///
+/// Every identity the host has, which is what a pre-flight check is for.
+/// Everything else is oneharness's own default: its config discovery from this
+/// process's working directory — the same one the spawned CLI inherited — and its
+/// own per-probe timeout.
+fn request() -> UsageRequest {
+    UsageRequest {
+        all: true,
+        ..UsageRequest::default()
     }
-    let report: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
-        Error::InvalidConfig(format!(
-            "{oneharness_bin} usage answered something that is not JSON: {err}"
-        ))
-    })?;
-    // A trust boundary: this is another process's stdout, and the one thing this
-    // crate promises about `health` is that it forwards a *report*. A scalar or
-    // a bare list is not one, and forwarding it would let a caller read "no
-    // identities" off something that never described identities at all. What the
-    // report *says* stays oneharness's to define — this crate owns no notion of
-    // an identity, so validating further would be inventing a schema.
-    if !report.is_object() && !report.is_array() {
-        return Err(Error::InvalidConfig(format!(
-            "{oneharness_bin} usage answered a bare value, not a report; a caller would read \
-             that as an answer about its identities"
-        )));
-    }
-    Ok(report)
+}
+
+/// One refusal, in the words `health` reports.
+///
+/// oneharness's own diagnostic is carried through untouched, because it names the
+/// file and the fault; what this adds is which verb was refused and that a
+/// refusal here is always about configuration rather than about a harness.
+fn refusal(err: &OneharnessError) -> Error {
+    Error::InvalidConfig(format!(
+        "oneharness cannot report on this host's identities: {err}. `health` is a free pre-flight \
+         read of oneharness's own data, so the only thing that refuses it is configuration it \
+         cannot load."
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A binary that is not there is named as that, with what `health` needs it
-    /// for — not as a bare spawn error.
-    #[test]
-    fn a_missing_oneharness_says_what_health_needs_it_for() {
-        let err = read("oneharness-that-is-not-installed").unwrap_err();
-        assert!(err.to_string().contains("has to be on PATH"), "{err}");
-    }
-
-    /// A binary that refuses forwards its own diagnostic, which is the part an
-    /// operator can act on.
-    #[test]
-    fn a_refused_probe_forwards_oneharness_s_own_words() {
-        let err = read("false").unwrap_err();
-        assert!(err.to_string().contains("refused the probe"), "{err}");
-    }
-
-    /// A binary that answers something that is not JSON is named as that rather
-    /// than producing an empty report.
+    /// Configuration oneharness will not load is reported as that, carrying its
+    /// own diagnostic — not as an empty report a caller would read as "no
+    /// identities".
     ///
-    /// The other half — JSON that parses but describes no identities — needs
-    /// stdout this test cannot choose, since `read` fixes the argv. It is driven
-    /// through the CLI in `tests/e2e/verbs.rs`, against a binary that really
-    /// answers `7`.
+    /// The error is a real one from the same call [`read`] makes, against a file
+    /// oneharness really refuses; only the file is named, because the config a
+    /// sweep discovers is discovered from the *process's* working directory and a
+    /// test that moved that would move it for every test running beside it. The
+    /// journey driving the whole verb against a broken `oneharness.toml` in its
+    /// own workspace is in `tests/e2e/verbs.rs`.
     #[test]
-    fn an_answer_that_is_not_json_is_refused_rather_than_forwarded() {
-        // `read` appends `usage --format json`, so `echo` answers that back as
-        // prose: something on stdout that is not JSON at all.
-        let err = read("echo").unwrap_err();
-        assert!(err.to_string().contains("not JSON"), "{err}");
+    fn configuration_oneharness_will_not_load_is_reported_as_that() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = dir.path().join("oneharness.toml");
+        std::fs::write(&config, "harnesses = [\n").expect("write");
+
+        let err = report(&UsageRequest {
+            config: Some(config.clone()),
+            ..request()
+        })
+        .map(|_| ())
+        .expect_err("oneharness refuses a config it cannot parse");
+
+        let reported = refusal(&err).to_string();
+        assert!(reported.contains("this host's identities"), "{reported}");
+        assert!(
+            reported.contains(&config.display().to_string()),
+            "oneharness's own diagnostic did not survive: {reported}"
+        );
     }
 }
