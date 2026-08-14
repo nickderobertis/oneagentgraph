@@ -207,13 +207,9 @@ pub fn build(
             )?;
             let path = context.scratch.join(AGENT_CONFIG_FILE);
             write(&path, &config)?;
-            // Every argument as computed, empty or not. This list used to be
-            // filtered for empty entries, which can only ever remove a *value* —
-            // it holds no optional flags — leaving an argv where oneharness reads
-            // the next flag as the value before it. An empty `--prompt` is now
-            // reachable from a valid document, a member whose whole task is
-            // `{task}` in a run that supplied none, and it must reach oneharness
-            // as an empty prompt rather than as a `--prompt` with no value at all.
+            // Every argument as computed, empty or not: there are no optional
+            // flags here, so dropping an empty entry can only shift a *value* out
+            // of the argv and leave oneharness reading the next flag as one.
             let args = vec![
                 "run".to_string(),
                 "--config".to_string(),
@@ -623,30 +619,18 @@ fn harness_families<'a>(
 
 const TASK_TOKEN: &str = "{task}";
 
-/// `{{task}}` is the whole escape mechanism, deliberately.
+/// The whole escape mechanism, and this exact spelling on purpose.
 ///
-/// A member's `task` is prose, not a template language: braces are ordinary
-/// characters everywhere else, `{{` doubles into nothing, and only these two
-/// exact spellings mean anything at all. A general `{{`-doubling rule would have
-/// changed what an already-written document says — every existing member task is
-/// literal text, and one containing `{{` anywhere would suddenly render
-/// differently. This spelling cannot: a document carrying `{{task}}` carries
-/// `{task}` too, so it is already inside the one set of documents expansion can
-/// change at all.
+/// A general `{{`-doubling rule would change what documents already written say;
+/// this one cannot, because a document carrying `{{task}}` carries `{task}` too
+/// and so is already in the set expansion touches.
 const ESCAPED_TASK_TOKEN: &str = "{{task}}";
 
 /// One member's own task prose, with the run's `--task` interpolated into it.
 ///
-/// A member carrying its own `task` still replaces the run's outright — that is
-/// what the field has always meant, and a member whose prose names no token keeps
-/// getting exactly that. What the token adds is the case the field could not
-/// express: two members needing the *same* run context and different instructions
-/// on what to do with it, which until now meant restating the context by hand and
-/// reaching for an environment variable to carry it.
-///
-/// A run that supplied no task at all expands the token to nothing rather than
-/// refusing. A member carrying its own task is the one shape of member that never
-/// needed a `--task`, and making the token demand one would take that away.
+/// A run that supplied none expands the token to nothing rather than refusing: a
+/// member carrying its own task is the one shape that never needed a `--task`,
+/// and a token demanding one would take that away.
 fn expand_task(template: &str, given: Option<&str>) -> String {
     let mut expanded = String::with_capacity(template.len());
     let mut rest = template;

@@ -943,29 +943,18 @@ pub fn ready_order(graph: &GraphConfig) -> Result<Vec<Vec<String>>, Error> {
 
 /// Refuse a member whose deferred first turn could never come due.
 ///
-/// The scheduler quiesces when no live work remains whose ancestry is not solely
-/// cron members — see [`solely_cron_descended`] — and a clock checks that count
-/// before every firing. A graph of *nothing but* cron members has no such work by
-/// construction, so its clocks stop on their first tick, and a first turn deferred
-/// past that tick never happens: the member starts, waits, and the run exits 0
-/// without it ever having run. That is a silent nothing, which is the one failure
-/// shape this scheduler exists to be the opposite of.
+/// A graph of nothing but cron members has no live work by
+/// [`solely_cron_descended`]'s reckoning, so its clocks stop on their first tick
+/// and a turn deferred past that tick never happens — the run exits 0 without the
+/// member ever having run. Per deferred member rather than per graph: a sibling
+/// firing at t=0 is not live work either, so that graph half-runs.
 ///
-/// Per deferred member rather than per graph, because a sibling firing at t=0
-/// does **not** rescue one: a scheduled member is not counted as live work either,
-/// so it takes its own turn and the count is still zero. A graph like that would
-/// half-run — the immediate schedule fires, the deferred one silently never does —
-/// which is worse to debug than a refusal, not better.
+/// Refused rather than held open, because a run kept alive for a pacemaker
+/// outlives the work it paces, and firing one into a finished run is a paid turn
+/// with nothing to report.
 ///
-/// Refused rather than special-cased. Making a never-fired member hold the run
-/// open would keep a paced graph alive long after the work it paces has settled,
-/// and firing a pacemaker into a finished run is a paid turn with nothing to
-/// report. The answer a graph like this wants is `start_after: 0`, and the refusal
-/// says so.
-///
-/// Called from the *end* of [`ready_order`] so that `run` and `validate` both make
-/// it rather than each making it separately, and so that the descent below walks a
-/// dependency graph already proven acyclic and complete.
+/// At the *end* of [`ready_order`], so `run` and `validate` share it and the
+/// descent below walks a graph already proven acyclic and complete.
 fn refuse_a_turn_that_never_comes_due(graph: &GraphConfig) -> Result<(), Error> {
     let mut memo = BTreeMap::new();
     if !graph
@@ -1154,14 +1143,9 @@ pub fn run(
                 }
             }
         }
-        // Before this wave runs, not after it. `run_wave` blocks until every
-        // member in the wave has settled, so a clock started on the far side of
-        // that call would begin counting only once this member's *siblings* were
-        // done — and the sibling `start_after` exists to pace is exactly the one
-        // that takes the whole run. A member with no `deps` is in the first wave,
-        // so its delay is counted from the graph starting; one that waits on
-        // dependencies is announced and starts counting when its own wave is
-        // reached, which is the earliest it could have run anything either way.
+        // Before this wave runs, not after it: `run_wave` blocks until every
+        // member in the wave has settled, and the sibling `start_after` exists to
+        // pace is exactly the one that takes the whole run.
         for name in deferred {
             let (invocation, _) = &invocations[&name];
             let schedule = schedule(&graph.members[&name]).expect("a deferred member is scheduled");
@@ -1349,13 +1333,8 @@ fn schedule(member: &Member) -> Option<crate::config::Schedule> {
 /// Whether this member's first turn waits, rather than happening in the wave that
 /// starts the member.
 ///
-/// Named for the turn because the turn is the only thing deferred, which is the
-/// distinction the whole of `start_after` rests on. Such a member still *starts*
-/// where it always did: its refs are resolved and its configs generated before the
-/// graph starts at all, so a bad persona ref or an unpairable model is still
-/// refused there, and it publishes `member-started` in its own wave rather than at
-/// its first tick — which on a half-hour cadence would be half an hour into a real
-/// run.
+/// Named for the turn because the turn is all that waits: such a member is built,
+/// refused if it cannot be, and announced exactly where it always was.
 fn defers_first_turn(member: &Member) -> bool {
     schedule(member).is_some_and(|schedule| schedule.first_turn_after() > 0)
 }
@@ -1623,10 +1602,6 @@ fn cron(
 }
 
 /// Which of a schedule's two spans a clock is counting down.
-///
-/// Two states rather than a flag, because they are asymmetric in a way a boolean
-/// hides: one happens at most once per member and the other happens forever, and
-/// a call with the two swapped would turn a first-turn delay into a cadence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     /// The member has taken no turn yet.

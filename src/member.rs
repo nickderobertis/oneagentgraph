@@ -462,24 +462,13 @@ pub fn run(
 
 /// Publish that a member came up, without taking a turn.
 ///
-/// What a deferred schedule leaves in place. A member whose `start_after` has not
-/// elapsed takes no turn in the wave that starts it, but it is *started*: its refs
-/// are resolved, its configs are generated, and it says so here alongside the rest
-/// of its wave — carrying the same `runner` and the same description of what it
-/// will run, plus the `start_after` its first turn waits.
+/// A deferred schedule takes no turn in the wave that starts it, and is started
+/// all the same — which is how a member ship-broken on a half-hour cadence is
+/// heard from within seconds rather than half an hour in. The payload is the one
+/// a turn's own start publishes, plus the delay before that turn.
 ///
-/// This is the whole reason `start_after` defers a turn rather than a launch. A
-/// graph's second member is the easy one to ship broken, and on a half-hour
-/// schedule a launch deferred with it would first be heard from half an hour into
-/// a real run — so a supervisor watching the stream sees every declared member
-/// within seconds of the launch, whatever each one's cadence.
-///
-/// Takes the whole [`Schedule`] rather than a number of seconds, so the delay
-/// published is the one the document declared rather than one a caller computed.
-/// That the member is single-sided needs no check here: `schedule:` is a field of
-/// [`crate::config::OneharnessMember`] alone, so a two-party member has no way to
-/// be deferred and this arm of [`started_payload`] is reached only by a member
-/// that really is starting.
+/// The whole [`Schedule`], so the delay published is the document's rather than a
+/// caller's arithmetic.
 pub(crate) fn announce(invocation: &Invocation, emitter: &Emitter, schedule: &Schedule) {
     let mut started = started_payload(&invocation.launch);
     started.insert(
