@@ -1151,6 +1151,17 @@ pub fn run(
             // The same `member-started` a turn of its own would publish, plus the
             // delay before that turn: the member is up, and this is what it will
             // run when its clock comes due.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] no journey can
+            // reach this with a two-party member, and none should be written
+            // pretending to: `schedule:` is a field of
+            // `crate::config::OneharnessMember` alone, so `schedule` above
+            // answers `None` for every onejudge member and a deferred one cannot
+            // exist. What is reachable here is a child process, and the journeys
+            // for it are `a_deferred_schedule_starts_with_the_graph_and_takes_no_turn`
+            // and its neighbours in `tests/e2e/scheduler.rs`; the library arm of
+            // `started_payload` belongs to a member that really is starting, and
+            // `tests/e2e/dispatch.rs` drives that one.
             let mut started = member::started_payload(&invocation.launch);
             started.insert(
                 "start_after".to_string(),
@@ -1163,6 +1174,7 @@ pub fn run(
                     invocation.persona.as_deref(),
                 ))
                 .emit(EventKind::MemberStarted, started);
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             cron_threads.push(spawn_cron(
                 schedule,
                 name,

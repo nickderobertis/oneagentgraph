@@ -459,6 +459,15 @@ pub fn run(
     }
 }
 
+// llmlint: ignore-block[invalid_states_unrepresentable] every event this crate
+// publishes carries a `Map<String, Value>`: `crate::event::Emitter::emit` takes
+// one, `payload` below builds one, and the envelope `docs/contract.md` fences —
+// which `tests/contract.rs` drives through these types — is that map. The three
+// functions here moved `member-started`'s existing construction behind names, so
+// that a member saying it has started and a member taking a turn cannot describe
+// the same launch differently. Typing the payload is a redesign of that shared
+// surface rather than a property of this change, and the envelope is a cross-repo
+// contract this crate does not own alone.
 /// What `member-started` says about a launch, whether it is starting now or
 /// saying so ahead of the turn it will take.
 pub(crate) fn started_payload(launch: &Launch) -> Map<String, Value> {
@@ -493,6 +502,7 @@ pub(crate) fn library_started(launch: &crate::invoke::JudgeLaunch) -> Map<String
         ),
     ])
 }
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Run a member that is a child process of its own.
 // Nine values, none derivable from another: which contract it settles under,
