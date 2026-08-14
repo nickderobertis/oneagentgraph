@@ -395,7 +395,10 @@ fn members_share_the_runs_task_where_they_name_it_and_replace_it_where_they_do_n
         "Report progress for the planner. Never drive the run.",
     );
     let own_job = own("own_job", "write one status update, and nothing else.");
-    let escaped = own("escaped", "mind the {{task}} escape, which is prose.");
+    let escaped = own(
+        "escaped",
+        "mind the {{task}} escape, {other} braces, and a lone { — all prose.",
+    );
     workspace.graph(&graph_with(
         concat!(
             "version: 3\nname: node-scope\n",
@@ -470,10 +473,16 @@ fn members_share_the_runs_task_where_they_name_it_and_replace_it_where_they_do_n
         "a member whose task names no token was still handed the run's: {replaced}"
     );
     let literal = carried("escaped");
-    assert!(
-        literal.contains("mind the {task} escape"),
-        "the documented escape did not reach the harness as the text it names: {literal}"
-    );
+    for text in [
+        "mind the {task} escape",
+        "{other} braces",
+        "a lone { — all prose",
+    ] {
+        assert!(
+            literal.contains(text),
+            "{text:?} did not reach the harness as the text it names: {literal}"
+        );
+    }
     assert!(
         !literal.contains(context),
         "an escaped token interpolated the run's task anyway: {literal}"
@@ -557,6 +566,59 @@ fn a_two_party_member_takes_the_runs_task_where_it_names_it() {
     assert!(
         !carried.contains("{task}"),
         "an unexpanded token reached the harness: {carried}"
+    );
+}
+
+/// The token takes the run's task from `--task-file` as readily as from `--task`.
+///
+/// The two flags are one task by the time a member is built, and a run whose
+/// context is long enough to want interpolating is exactly the run whose author
+/// reached for a file to hold it.
+#[test]
+fn a_task_token_takes_a_run_task_that_came_from_a_file() {
+    let workspace = Workspace::new();
+    let prompts = workspace.at("prompts.txt");
+    workspace.write(
+        "task.txt",
+        "fake:complete-now RUN CONTEXT: ship the retry, from a file.\n",
+    );
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.check_in.task".to_string(),
+                format!(
+                    "{{task}}\n\nReport progress. fake:record-prompt={}",
+                    prompts.display()
+                ),
+            ),
+        ],
+    ));
+    workspace
+        .run(&[
+            "run",
+            "./graph.yaml",
+            "--task-file",
+            "./task.txt",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ])
+        .expect_code(0);
+
+    let recorded = std::fs::read_to_string(&prompts).expect("the member recorded its prompt");
+    assert!(
+        recorded.contains("RUN CONTEXT: ship the retry, from a file."),
+        "the token expanded to nothing for a run whose task came from a file: {recorded}"
+    );
+    assert!(
+        recorded.contains("Report progress."),
+        "the member lost its own prose: {recorded}"
     );
 }
 
