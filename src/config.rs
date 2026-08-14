@@ -235,6 +235,38 @@ pub const FIRST_SCHEMA_VERSION: u32 = 1;
 /// The latest graph schema version this crate reads and writes in examples.
 pub const SCHEMA_VERSION: u32 = 4;
 
+/// How a member's own `task` is read: as the prose it has always been, or as a
+/// template naming the run's task.
+///
+/// The document's schema decides, and this is that decision rather than the
+/// version it came from — so nothing downstream carries a version number it would
+/// have to know the meaning of, and no unsupported one can reach a member's
+/// launch at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskText {
+    /// Every character of it is what the member is given.
+    Literal,
+    /// `{task}` in it expands to the run's own task, and `{{task}}` is the
+    /// literal text `{task}`.
+    Template,
+}
+
+impl TaskText {
+    /// What a document declaring `schema` means by a member's `task`.
+    ///
+    /// Total over every `u32`, including versions this build does not read: a
+    /// graph is refused for its version by [`validate`] long before a member is
+    /// built, so the only thing this has to be is unambiguous.
+    #[must_use]
+    pub fn under(schema: u32) -> Self {
+        if schema >= FIRST_TASK_TOKEN_VERSION {
+            TaskText::Template
+        } else {
+            TaskText::Literal
+        }
+    }
+}
+
 /// The first graph schema version in which a [`Schedule`] may name a
 /// [`start_after`](Schedule::start_after) — and, from which, one that names none
 /// waits a whole interval before its first turn rather than taking it at t=0.

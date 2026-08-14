@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::clock::unix_millis;
-use crate::config::{GraphConfig, Member};
+use crate::config::{GraphConfig, Member, TaskText};
 use crate::error::{Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_SUCCESS};
 use crate::event::{Emitter, EventKind, MemberStarted};
 use crate::invoke::{self, Context, Invocation};
@@ -1076,7 +1076,7 @@ pub fn run(
             scratch: &scratch,
             graph_dir: graph_document.base_dir.as_deref(),
             task: request.task.as_deref(),
-            schema: graph.version,
+            task_text: TaskText::under(graph.version),
             session: &format!("{run_id}-{name}"),
             oneharness_bin: &request.oneharness_bin,
         };

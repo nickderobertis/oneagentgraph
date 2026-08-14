@@ -1291,7 +1291,7 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         scratch: &scratch,
         graph_dir: Some(workspace.path()),
         task: Some("ship the release"),
-        schema: SCHEMA_VERSION,
+        task_text: oneagentgraph::config::TaskText::under(SCHEMA_VERSION),
         session: "s",
         oneharness_bin: "oneharness",
     };

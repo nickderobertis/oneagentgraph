@@ -44,7 +44,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 
-use crate::config::{AgentSide, ConfigRef, JudgeSide, Member, OnejudgeMember};
+use crate::config::{AgentSide, ConfigRef, JudgeSide, Member, OnejudgeMember, TaskText};
 use crate::error::Error;
 use crate::persona::{self, Persona};
 use crate::resolve::{ResolvedRef, Resolver};
@@ -176,9 +176,9 @@ pub struct Context<'a> {
     pub graph_dir: Option<&'a Path>,
     /// The task prose, when the run supplied one.
     pub task: Option<&'a str>,
-    /// The schema version the graph document declares, which decides how a
-    /// member's own task text is read — see [`crate::config::FIRST_TASK_TOKEN_VERSION`].
-    pub schema: u32,
+    /// How a member's own task text is read, which the graph document's schema
+    /// decided — see [`crate::config::TaskText`].
+    pub task_text: TaskText,
     /// The session name threaded across this member's turns.
     pub session: &'a str,
     /// The `oneharness` binary onejudge shells out to, and that a single-sided
@@ -659,12 +659,10 @@ fn expand_task(template: &str, given: Option<&str>) -> String {
 
 fn member_task(own: Option<&str>, context: &Context<'_>) -> Result<String, Error> {
     match own {
-        // Under a schema that predates the token, a member's task is the prose it
-        // has always been: the six characters `{task}` said themselves there, and
-        // a document is entitled to keep meaning what it meant.
-        Some(own) if context.schema < crate::config::FIRST_TASK_TOKEN_VERSION => {
-            Ok(own.to_string())
-        }
+        // Prose is prose: under the schema that predates the token, the six
+        // characters `{task}` said themselves, and a document is entitled to keep
+        // meaning what it meant.
+        Some(own) if context.task_text == TaskText::Literal => Ok(own.to_string()),
         Some(own) => Ok(expand_task(own, context.task)),
         None => task(context),
     }
@@ -809,7 +807,7 @@ mod tests {
             scratch,
             graph_dir: Some(dir),
             task: Some("do the thing"),
-            schema: crate::config::SCHEMA_VERSION,
+            task_text: TaskText::Template,
             session: "s",
             oneharness_bin: "oneharness",
         }
@@ -1070,7 +1068,7 @@ mod tests {
         // there, and a document written then keeps meaning what it meant.
         for older in crate::config::FIRST_SCHEMA_VERSION..crate::config::FIRST_TASK_TOKEN_VERSION {
             let mut before = context(dir.path(), &scratch);
-            before.schema = older;
+            before.task_text = TaskText::under(older);
             assert_eq!(
                 flag(
                     &process_args(&single_sided("{task}\n\nand report it"), &before),
