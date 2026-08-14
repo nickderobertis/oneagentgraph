@@ -624,8 +624,8 @@ fn harness_families<'a>(
 /// The token a member's own `task` interpolates the run's `--task` into.
 pub const TASK_TOKEN: &str = "{task}";
 
-/// The one escape: `{{task}}` is the literal text `{task}`, interpolated into
-/// nothing.
+/// The one escape: `{{task}}` reaches the member as the literal text `{task}`,
+/// with the run's own task interpolated nowhere.
 ///
 /// The whole escape mechanism, deliberately. A member's `task` is prose, not a
 /// template language: braces are ordinary characters everywhere else, `{{`
