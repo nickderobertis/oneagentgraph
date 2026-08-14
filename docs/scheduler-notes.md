@@ -79,9 +79,9 @@ acyclic and complete.
 
 `config::MAX_SCHEDULE_SECONDS` bounds both of a schedule's spans — a typo guard
 rather than a policy about cadence, since a `u64` of seconds is a member that
-never fires and never says why. `run::cron` compares `run::pending_interval`
-against an elapsed span rather than computing a deadline, so no span a document
-can carry reaches arithmetic that could panic on it.
+never fires and never says why. `run::cron` compares the span it is counting —
+`run::first_span`, then `every` — against elapsed time rather than computing a
+deadline, so no span a document can carry reaches arithmetic that could panic.
 
 `run::spawn_cron` owns the member's clock either way. `run::cron`
 watches the existing stop, member-stop, trigger, and reset files. It counts down

@@ -1551,13 +1551,13 @@ fn cron(
     let reset = signals.join(format!("{name}.reset"));
     let stopped = || stop.exists() || own_stop.exists();
     let mut last = None;
-    // The interval this clock is currently counting down — see `pending_interval`
+    // The interval this clock is currently counting down — see `first_span`
     // — and the moment it started counting. A span measured against `elapsed`
     // rather than a deadline computed by `Instant + Duration`: the interval comes
     // from a document, and that addition *panics* on a sum the platform cannot
     // represent, while comparing two `Duration`s is total for every value a
     // document can carry.
-    let mut interval = pending_interval(schedule, Phase::BeforeFirstTurn);
+    let mut interval = first_span(schedule);
     let mut counting_since = Instant::now();
     loop {
         std::thread::sleep(TICK);
@@ -1595,33 +1595,23 @@ fn cron(
             on_success();
         }
         last = Some(outcome);
-        interval = pending_interval(schedule, Phase::Repeating);
+        interval = Duration::from_secs(schedule.every);
         counting_since = Instant::now();
     }
     last
 }
 
-/// Which of a schedule's two spans a clock is counting down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// The member has taken no turn yet.
-    BeforeFirstTurn,
-    /// The member has taken one, and repeats from here.
-    Repeating,
-}
-
-/// How long this clock counts down before the member's next turn.
+/// The span a clock counts down before the first turn it is responsible for.
 ///
-/// `start_after` until the member has taken one, and `every` from then on. A
-/// schedule that starts at t=0 took its first turn in the wave that started it, so
-/// what is pending for it here is already its first *interval* — which is why a
-/// zero collapses to `every` rather than firing this clock immediately.
-fn pending_interval(schedule: &crate::config::Schedule, phase: Phase) -> Duration {
-    let seconds = match (phase, schedule.first_turn_after()) {
-        (Phase::Repeating, _) | (Phase::BeforeFirstTurn, 0) => schedule.every,
-        (Phase::BeforeFirstTurn, waited) => waited,
-    };
-    Duration::from_secs(seconds)
+/// `start_after` when that turn is still ahead of it, and `every` when the turn
+/// already happened in the wave that started the member — a clock handed a
+/// schedule that fired at t=0 owes the cadence rather than a delay. Every span
+/// after this one is the cadence, whichever this was.
+fn first_span(schedule: &crate::config::Schedule) -> Duration {
+    Duration::from_secs(match schedule.first_turn_after() {
+        0 => schedule.every,
+        waited => waited,
+    })
 }
 
 /// One member's outcome, as the run record keeps it.
@@ -1790,53 +1780,36 @@ mod tests {
         assert!(err.to_string().contains("form a cycle"), "{err}");
     }
 
-    /// A clock counts down `start_after` before the first turn and `every` after
-    /// it, and a schedule that fired at t=0 is already on `every`.
+    /// A clock's first span is the delay it still owes, and the cadence when it
+    /// owes none.
     ///
-    /// The switch is what keeps `start_after` a *first*-turn delay rather than a
-    /// cadence: a schedule settling in for ten minutes and then reporting every
-    /// minute is one member, not two.
+    /// What keeps `start_after` a *first*-turn delay rather than a cadence: a
+    /// schedule settling in for ten minutes and then reporting every minute is one
+    /// member, not two — and a schedule that already fired at t=0 has no delay
+    /// left to owe, so its clock starts on the cadence rather than firing again at
+    /// once.
     #[test]
-    fn a_clock_counts_down_the_first_delay_once_and_the_cadence_after_it() {
+    fn a_clocks_first_span_is_the_delay_it_still_owes() {
         let schedule = |every: u64, start_after: Option<u64>| crate::config::Schedule {
             every,
             start_after,
             resettable: false,
         };
-        // The default: one whole interval before the first turn, and the same
-        // interval after it — indistinguishable, which is why the two below are
-        // what prove the switch.
-        let inherited = schedule(1800, None);
-        for phase in [Phase::BeforeFirstTurn, Phase::Repeating] {
-            assert_eq!(
-                pending_interval(&inherited, phase),
-                Duration::from_secs(1800),
-                "{phase:?}"
-            );
-        }
-
-        let settling_in = schedule(60, Some(600));
         assert_eq!(
-            pending_interval(&settling_in, Phase::BeforeFirstTurn),
+            first_span(&schedule(1800, None)),
+            Duration::from_secs(1800),
+            "a schedule naming no delay owes one whole interval"
+        );
+        assert_eq!(
+            first_span(&schedule(60, Some(600))),
             Duration::from_secs(600),
             "the first turn must wait the delay the schedule named"
         );
         assert_eq!(
-            pending_interval(&settling_in, Phase::Repeating),
+            first_span(&schedule(60, Some(0))),
             Duration::from_secs(60),
-            "a later turn must come at the cadence, not at the first-turn delay"
+            "a schedule that fired at t=0 owes its cadence, not another turn now"
         );
-
-        // A schedule that fired at t=0 took its first turn in its wave, so what is
-        // pending for its clock is already the cadence rather than no wait at all.
-        let immediate = schedule(60, Some(0));
-        for phase in [Phase::BeforeFirstTurn, Phase::Repeating] {
-            assert_eq!(
-                pending_interval(&immediate, phase),
-                Duration::from_secs(60),
-                "{phase:?}"
-            );
-        }
     }
 
     /// A deferred first turn in a graph with nothing to pace is refused, and a
