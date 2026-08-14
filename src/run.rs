@@ -1162,11 +1162,18 @@ pub fn run(
             // and its neighbours in `tests/e2e/scheduler.rs`; the library arm of
             // `started_payload` belongs to a member that really is starting, and
             // `tests/e2e/dispatch.rs` drives that one.
+            // llmlint: ignore-block[invalid_states_unrepresentable] the same
+            // reason `member::started_payload` carries: an event payload is a
+            // `Map<String, Value>` throughout this crate, because that is the
+            // envelope `docs/contract.md` fences and `tests/contract.rs` drives.
+            // `start_after` is one more field in that map, and typing it here
+            // alone would leave every other payload untyped beside it.
             let mut started = member::started_payload(&invocation.launch);
             started.insert(
                 "start_after".to_string(),
                 Value::from(schedule.first_turn_after()),
             );
+            // llmlint: ignore-end[invalid_states_unrepresentable]
             emitter
                 .with_labels(member::labels(
                     emitter.stream(),
