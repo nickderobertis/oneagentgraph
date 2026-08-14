@@ -968,7 +968,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "libc",
- "oneharness-core",
+ "oneharness-core 0.8.0",
  "onejudge",
  "predicates",
  "rcgen",
@@ -1006,13 +1006,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "oneharness-core"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34aedaf60bd157b17835616aff1e021cd40ca6a07041a68f59c135a3af36e7fc"
+dependencies = [
+ "fs2",
+ "jsonschema",
+ "libc",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+ "uuid",
+ "wait-timeout",
+ "which",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "onejudge"
 version = "0.3.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2fa0d4ba61cb7c8752af70d05dcb0af31394961e0585a73017988df92b88651d"
 dependencies = [
  "clap",
- "oneharness-core",
+ "oneharness-core 0.6.13",
  "rustix",
  "serde",
  "serde_json",

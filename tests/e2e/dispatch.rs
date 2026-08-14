@@ -348,6 +348,224 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
     }
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the two journeys below assert on
+// a file the doubled harness wrote recording the directory it was started in and
+// the argv it was given. That is the observation point *because* it is the
+// subject: `--cwd` is a value this crate hands to oneharness, and the only place
+// its arrival can be checked is the process that received it. A member whose
+// harness started somewhere nobody named settles with a stream identical to a
+// correct one, so the stream cannot hold this. Every assertion about behaviour —
+// the exit code, the events, the published `worktree` — is still made through the
+// CLI.
+/// A two-party member's harness runs in the directory the graph was given with
+/// `--dir`, and is still pinned to the oneharness config the graph named while it
+/// does.
+///
+/// Both halves in one run, because the bug lived between them: the worktree was
+/// also the only thing pinning the agent side, so moving it alone reverts the
+/// member to whatever config sits above the operator's directory. The pin is
+/// asserted against a decoy — a second, valid `oneharness.toml` in the directory
+/// the member now works in, naming a different approval mode, which oneharness
+/// spells on the harness's own argv. Take `MemberSpawn`'s `--config` arm out and
+/// this half reddens while the directory half stays green.
+#[test]
+fn a_two_party_members_harness_runs_in_the_directory_the_graph_was_given() {
+    let workspace = Workspace::new();
+    let where_it_ran = workspace.at("worker.cwd");
+    let argv = workspace.at("worker.argv");
+
+    // The decoy: a config discovery would find first from the member's new
+    // working directory. Valid, plausible, and wrong — it names the posture the
+    // member was not given.
+    workspace.write(
+        "work/oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\nmode = \"bypass\"\n",
+    );
+    workspace.graph(
+        &two_party_graph(&fake_harness(), NO_ENV).replace("mode: bypass", "mode: read-only"),
+    );
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!(
+            "fake:complete-now write the thing. fake:record-cwd={} fake:record-argv={}",
+            where_it_ran.display(),
+            argv.display()
+        ),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    let graph_dir = workspace
+        .dir()
+        .canonicalize()
+        .expect("the graph's directory");
+    let reported: Vec<std::path::PathBuf> = std::fs::read_to_string(&where_it_ran)
+        .expect("the member's harness recorded its directory")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            std::path::Path::new(line.trim())
+                .canonicalize()
+                .expect("a directory the harness reported")
+        })
+        .collect();
+    assert!(
+        reported.contains(&graph_dir),
+        "no side of the member ran in the directory the graph was given ({}): {reported:?}",
+        graph_dir.display()
+    );
+    // And none of them ran in a directory this crate generated. Stated as its own
+    // assertion because it is the failure: a harness in the run's own state
+    // directory is one whose edits nobody is looking for.
+    let state = workspace
+        .state()
+        .canonicalize()
+        .expect("the state directory");
+    for directory in &reported {
+        assert!(
+            !directory.starts_with(&state),
+            "a side ran inside the run's generated state rather than the operator's \
+             directory: {}",
+            directory.display()
+        );
+    }
+
+    // The same answer in the stream, where a supervisor reads it. Asserted equal
+    // to what the harness reported rather than to a path this test rebuilt, so a
+    // change that repoints one without the other fails here.
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let claimed = started[0]["payload"]["worktree"]
+        .as_str()
+        .expect("an in-process member names its worktree");
+    assert_eq!(
+        std::path::Path::new(claimed)
+            .canonicalize()
+            .expect("the published worktree exists"),
+        graph_dir,
+        "the member was published with a worktree that is not the graph's directory"
+    );
+
+    // And the pin held while it moved: the member's own `read-only` reached the
+    // harness, not the decoy's `bypass`. Every side, not merely one — the judge
+    // side has always had a `--config` of its own, so an `any` here would be
+    // satisfied by the side that was never at risk and would pass with the agent
+    // side's pin taken away.
+    let recorded = std::fs::read_to_string(&argv).expect("the harness recorded its argv");
+    let lines: Vec<&str> = recorded.lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "not every side reached the double: {recorded:?}"
+    );
+    for line in &lines {
+        assert!(
+            line.contains("--tools Read Grep Glob"),
+            "a side ran under a config nobody named — discovery found the decoy \
+             beside it instead of the member's own stamped file: {line}"
+        );
+    }
+}
+
+/// A run that names no `--dir` hands **both** member kinds the same default —
+/// `.`, exactly as `member_dir` passes an unnamed directory through — and that
+/// one string still resolves differently down the two paths.
+///
+/// The asymmetry is pre-existing and deliberately untouched: a relative `--cwd`
+/// is resolved by whoever receives it, and a single-sided member's argv rides a
+/// child spawned in the member's *scratch* while a two-party member's worktree is
+/// read by an `oneharness` this process spawns without moving. `member_dir`
+/// promises a member that named no directory behaves as it did before, and that
+/// is what is pinned here; naming `--dir` is what makes the two agree. A relative
+/// *member* `dir` has no such edge — it is made absolute before it is handed on.
+#[test]
+fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
+    let workspace = Workspace::new();
+    let two_party = workspace.at("two-party.cwd");
+    let single_sided = workspace.at("single-sided.cwd");
+    // The binary is run with the workspace root as its working directory, which
+    // is what an unnamed `.` resolves against for the side nothing moved.
+    let launched_from = workspace.path().canonicalize().expect("the launch dir");
+    let state = workspace
+        .state()
+        .canonicalize()
+        .expect("the state directory");
+
+    let recorded = |path: &std::path::PathBuf| {
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("{}: no directory recorded: {err}", path.display()))
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                std::path::Path::new(line.trim())
+                    .canonicalize()
+                    .expect("a directory the harness reported")
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let two_party_run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!(
+            "fake:complete-now write the thing. fake:record-cwd={}",
+            two_party.display()
+        ),
+    ]);
+    two_party_run.expect_code(0);
+    // The value this crate decided, on the stream: the run's own default, passed
+    // through as written rather than resolved into something nobody typed.
+    assert_eq!(
+        two_party_run.of_kind("member-started")[0]["payload"]["worktree"],
+        serde_json::json!("."),
+        "a two-party member in a run with no --dir was published with a directory \
+         the run never named"
+    );
+    assert!(
+        recorded(&two_party).contains(&launched_from),
+        "a two-party member in a run with no --dir did not run where the run was \
+         launched: {:?}",
+        recorded(&two_party)
+    );
+
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let single_run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!(
+            "fake:complete-now write the thing. fake:record-cwd={}",
+            single_sided.display()
+        ),
+    ]);
+    single_run.expect_code(0);
+    let args = single_run.of_kind("member-started")[0]["payload"]["args"]
+        .as_array()
+        .expect("a single-sided member names its argv")
+        .clone();
+    let told = args
+        .iter()
+        .position(|arg| arg == "--cwd")
+        .and_then(|at| args.get(at + 1))
+        .expect("the argv carries a working directory")
+        .clone();
+    assert_eq!(told, serde_json::json!("."), "{args:?}");
+    // And resolved as it always was, against the scratch its child is spawned in.
+    // Unchanged by this fix, and asserted so a later change to it is a decision
+    // rather than a side effect.
+    let where_it_ran = recorded(&single_sided);
+    assert_eq!(where_it_ran.len(), 1, "{where_it_ran:?}");
+    assert!(
+        where_it_ran[0].starts_with(&state),
+        "a single-sided member's unnamed directory stopped meaning what it always \
+         meant: {where_it_ran:?}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Two members share the run's own task and differ only in what they are told to
 /// do with it, while a third is handed it unchanged — read back from the harness
 /// each one actually started.

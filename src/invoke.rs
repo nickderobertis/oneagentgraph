@@ -13,13 +13,18 @@
 //!
 //! onejudge routes both conversation sides through one `provider.bin`. The judge
 //! side is given `oneharness run --config <judge_config>`; the agent side is
-//! given none, and relies on oneharness discovering `oneharness.toml` upward from
-//! **the directory the harness will run in** — `oneharness run --cwd`, which
-//! onejudge takes from the conversation's own worktree. So the agent side is
-//! pinned by *placing* its resolved config at `<member scratch>/oneharness.toml`
-//! and naming that same directory as the worktree.
+//! given none on the argv onejudge builds, and would otherwise rely on oneharness
+//! discovering `oneharness.toml` upward from **the directory the harness will run
+//! in** — `oneharness run --cwd`, which onejudge takes from the conversation's own
+//! worktree.
 //!
-//! Naming it, rather than changing directory into it: a process has one working
+//! Both sides are therefore pinned by *file*, never by directory: each side's
+//! resolved config is written into the member's scratch, and the path to the
+//! agent side's rides [`JudgeLaunch::agent_config`] to `crate::judge`, which puts
+//! it on that side's own `--config`. That is what frees
+//! [`JudgeLaunch::worktree`] to be the directory the graph was told to work in.
+//!
+//! Naming a worktree, rather than changing directory into it: a process has one working
 //! directory and this one runs every member of the graph at once, so a member
 //! that pinned its side by `cd`-ing would pin its siblings too. Everything
 //! per-member is therefore carried *in the files this module writes*, never in
@@ -97,10 +102,12 @@ pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
 /// run driven **through onejudge's library, in this process** — there is no
 /// `onejudge` binary in the chain, and so no argv, no exit status, and no stderr
 /// for it. A `kind: oneharness` member is still `oneharness run`, a child process
-/// of its own, because oneharness's library surface writes its report to the
-/// *process's* stdout and returns an exit code: an in-process call could neither
-/// take the report back nor be given an event sink, and this process's stdout is
-/// the merged stream. See `docs/contract.md`.
+/// of its own — no longer because oneharness's library surface could not answer
+/// (since 0.7.0 `oneharness_core::io::run::run` returns the report and takes an
+/// event sink), but because a *supervised* member needs two things that surface
+/// still cannot give and one the contract has not yet been asked for.
+/// `src/harness_process.rs` names all three at the site, with the proposal each
+/// one is. See `docs/contract.md`.
 #[derive(Debug, Clone)]
 pub enum Launch {
     /// onejudge's own run driver, over the config written into the member's
@@ -127,11 +134,33 @@ pub struct JudgeLaunch {
     pub config: PathBuf,
     /// The task prose this member drives to completion.
     pub task: String,
-    /// The directory the harness works in, named to oneharness rather than
-    /// entered — see this module's own documentation. It is deliberately *not*
-    /// a working directory: this process has one of those and shares it with
-    /// every other member.
+    /// The directory this member's harness works in — `member_dir`, the same
+    /// value a single-sided member's `--cwd` gets.
+    ///
+    /// Named to oneharness rather than entered, because it is not *this
+    /// process's* working directory: this one is shared with every other member.
+    /// It **is** a working directory in every other sense — onejudge takes it as
+    /// the conversation's skill directory and puts it on the agent side's
+    /// `oneharness run --cwd` — and that is the whole of what it is for.
+    ///
+    /// Repointing it needs [`Self::agent_config`] set too, or the member reverts
+    /// to whatever config sits above the operator's directory: until that field
+    /// existed, this one was also the only thing pinning the agent side.
     pub worktree: PathBuf,
+    /// The agent side's resolved oneharness config, pinned by name rather than by
+    /// where the harness happens to run.
+    ///
+    /// onejudge gives the agent side no config key — only a worktree, from which
+    /// oneharness *discovers* a project `oneharness.toml` — so `crate::judge`
+    /// puts this on that side's own `--config` through onejudge's `SpawnHook`.
+    /// By name and not merely by preference, because this is the *stamped* copy:
+    /// discovery from an operator's own directory finds their `oneharness.toml`,
+    /// whose `harnesses` chain would spend a different subscription than the
+    /// graph named — [`PROCESS_WIDE_HARNESS_ENV`]'s hazard from the other side.
+    ///
+    /// *Proposal to onejudge, which would retire the hook:* an `agent_config` on
+    /// its `kind: oneharness` provider, beside the `judge_config` it takes.
+    pub agent_config: PathBuf,
     // llmlint: ignore-block[invalid_states_unrepresentable] the handle is a
     // `String` for the reason [`crate::control::Address::session`] records: what
     // a session handle may be is oneharness's rule, applied by it on both ends,
@@ -308,10 +337,14 @@ fn onejudge(
         launch: Launch::Library(Box::new(JudgeLaunch {
             config: config_path,
             task: prose,
-            // The member's own scratch, because that is where its `oneharness.toml`
-            // was placed and oneharness discovers a project config upward from the
-            // directory the harness will run in.
-            worktree: context.scratch.to_path_buf(),
+            // The graph's own directory, resolved exactly as a single-sided
+            // member's is. `None`, not because this kind has no `dir` of its own
+            // to honour but because `docs/contract.md` scopes that field to
+            // `kind: oneharness`, so `OnejudgeMember` has none to read; the call
+            // is written this way so the day the contract grows one, the value
+            // goes here and nothing else moves.
+            worktree: member_dir(None, context),
+            agent_config: agent_path,
             session: context.session.to_string(),
         })),
         persona: label,
@@ -681,6 +714,13 @@ fn task(context: &Context<'_>) -> Result<String, Error> {
 /// The directory one member is told to work in: its own when it named one, and
 /// the graph's when it did not.
 ///
+/// **Both member kinds**, and by the same call. A single-sided member carries it
+/// to `oneharness run --cwd` on the argv this module builds; a two-party one
+/// carries it on [`JudgeLaunch::worktree`], which onejudge puts on the same flag.
+/// Only a `kind: oneharness` member can name a `dir` of its own — that is
+/// `docs/contract.md`'s scoping rather than this function's — so the two-party
+/// call passes `None` and takes the graph's.
+///
 /// A member that named none gets `context.dir` **exactly as the run was given
 /// it**, relative or not, because that is what this crate has always passed to
 /// `oneharness run --cwd` and a member with no `dir` behaves as it did before.
@@ -871,7 +911,14 @@ mod tests {
         // The member's own task beats the run's, because a member that carries
         // one is asking for that task rather than the graph's.
         assert_eq!(judge_launch(&invocation).task, "do the thing");
-        assert_eq!(judge_launch(&invocation).worktree, scratch);
+        // The member works in the directory the graph was given, and is pinned by
+        // the stamped config in its scratch — two values now, because one field
+        // doing both is what kept `--dir` from reaching this member's harness.
+        assert_eq!(judge_launch(&invocation).worktree, dir.path());
+        assert_eq!(
+            judge_launch(&invocation).agent_config,
+            scratch.join(AGENT_CONFIG_FILE)
+        );
     }
 
     /// The two-party launch of `invocation`, or a panic naming what it was.

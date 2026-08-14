@@ -19,20 +19,12 @@ conversation. Do not grow harness selection here.
 
 **onejudge is a library dependency, not a CLI.** A two-party member is driven
 in-process, on a thread of this process, through onejudge's own config, plan, and
-streamed run driver. `oneharness run` is still a child process — its library
-surface prints its report to the process's stdout and returns only an exit code,
-and this process's stdout is the merged stream — and so are the agent harness and
-a `judge: {command: [...]}` provider. A **supervised** `oneharness run` stays a
-child process whatever entrypoints appear upstream: the process group is what a
-cancel, a watchdog, and a reap all reach a member's tree through, and an
-in-process run has no tree to hold. `oneagentgraph interrupt` stays one too, and
-for a reason the others do not share — the control socket is version-*equal*, not
-negotiated, so the client has to be the same build as the run that bound it;
-`src/control.rs` records the whole argument. `health` used to be on that list and
-is not: `oneharness_core::io::usage::report` is the `usage` verb as a call, so the
-sweep runs in this process from oneharness's own code. **Prefer the library at
+streamed run driver. `oneharness run` is still a child process, and so are the
+agent harness and a `judge: {command: [...]}` provider. **Prefer the library at
 every new site** — a hop that stays has to name what the library does not expose,
-in the code, at the site.
+in the code, at the site, and each of the two that remain already does:
+`src/harness_process.rs` for `oneharness run`, `src/control.rs` for
+`oneagentgraph interrupt`. Extend those rather than re-deriving them here.
 
 Ships as a Rust library plus the `oneagentgraph` binary, distributed on
 crates.io, PyPI (`oneagentgraph-cli`), and npm (`oneagentgraph-cli`).
