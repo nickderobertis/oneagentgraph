@@ -1292,14 +1292,15 @@ mod tests {
             runner: runner(&Launch::Library(Box::new(crate::invoke::JudgeLaunch {
                 config: std::path::PathBuf::from("/scratch/onejudge.yaml"),
                 task: "do the thing".into(),
-                worktree: std::path::PathBuf::from("/scratch"),
+                worktree: std::path::PathBuf::from("/work"),
+                agent_config: std::path::PathBuf::from("/scratch/oneharness.toml"),
                 session: "s-worker".into(),
             }))),
             start_after: None,
         });
         assert_eq!(library["runner"], "library");
         assert_eq!(library["engine"], ONEJUDGE_ENGINE);
-        assert_eq!(library["worktree"], "/scratch");
+        assert_eq!(library["worktree"], "/work");
         assert!(library.get("cwd").is_none(), "{library:?}");
 
         // A deferred member names the delay beside the launch it will run, and
