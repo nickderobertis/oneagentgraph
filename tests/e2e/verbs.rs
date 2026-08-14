@@ -103,16 +103,15 @@ fn validate_refuses_a_graph_that_could_never_run() {
             ),
             "never comes due",
         ),
-        // A span longer than a monotonic clock can count to is a document that
-        // would panic the run rather than pace it — on either of the two fields
-        // that carry one, because both are added to that clock.
+        // A span longer than any run is a member that never fires and never says
+        // why — refused on either of the two fields that can carry one.
         (
             concat!(
                 "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
                 "    oneharness_config: ./oneharness.toml\n",
                 "    schedule: {every: 60, start_after: 18446744073709551615}\n",
             ),
-            "what a clock can count to",
+            "longer than any run",
         ),
         (
             concat!(
@@ -120,7 +119,7 @@ fn validate_refuses_a_graph_that_could_never_run() {
                 "    oneharness_config: ./oneharness.toml\n",
                 "    schedule: {every: 18446744073709551615, start_after: 0}\n",
             ),
-            "what a clock can count to",
+            "longer than any run",
         ),
         (
             concat!(

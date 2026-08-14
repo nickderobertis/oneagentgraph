@@ -77,10 +77,11 @@ it — a scheduled member is not counted as live work either.
 so `run` and `validate` share it and so it walks a dependency graph already proven
 acyclic and complete.
 
-`config::MAX_SCHEDULE_SECONDS` bounds both of a schedule's spans. Neither is a
-policy about cadence: `run::pending_interval`'s result is added to an `Instant`,
-which panics rather than saturating on a sum the platform cannot represent, so
-without the bound a `u64` in a document would take the run down.
+`config::MAX_SCHEDULE_SECONDS` bounds both of a schedule's spans — a typo guard
+rather than a policy about cadence, since a `u64` of seconds is a member that
+never fires and never says why. `run::cron` compares `run::pending_interval`
+against an elapsed span rather than computing a deadline, so no span a document
+can carry reaches arithmetic that could panic on it.
 
 `run::spawn_cron` owns the member's clock either way. `run::cron`
 watches the existing stop, member-stop, trigger, and reset files. It counts down

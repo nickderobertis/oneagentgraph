@@ -1572,12 +1572,14 @@ fn cron(
     let reset = signals.join(format!("{name}.reset"));
     let stopped = || stop.exists() || own_stop.exists();
     let mut last = None;
-    // The interval this clock is currently counting down — see `pending_interval`.
-    // Adding it to a monotonic clock is what `config::MAX_SCHEDULE_SECONDS` exists
-    // for: `Instant + Duration` panics on a sum the platform cannot represent, and
-    // every schedule reaching here has been through `config::validate`.
+    // The interval this clock is currently counting down — see `pending_interval`
+    // — and the moment it started counting. A span measured against `elapsed`
+    // rather than a deadline computed by `Instant + Duration`: the interval comes
+    // from a document, and that addition *panics* on a sum the platform cannot
+    // represent, while comparing two `Duration`s is total for every value a
+    // document can carry.
     let mut interval = pending_interval(schedule, Phase::BeforeFirstTurn);
-    let mut due = Instant::now() + interval;
+    let mut counting_since = Instant::now();
     loop {
         std::thread::sleep(TICK);
         // Again, after the sleep: a cancel that landed while this member slept
@@ -1595,7 +1597,7 @@ fn cron(
             // The wait in progress, restarted — so a reset before the first turn
             // restores the whole of `start_after` rather than quietly promoting
             // the member to its steady cadence.
-            due = Instant::now() + interval;
+            counting_since = Instant::now();
             emitter.emit(EventKind::CronReset, Map::new());
             continue;
         }
@@ -1603,7 +1605,7 @@ fn cron(
             let _ = std::fs::remove_file(&trigger);
             true
         } else {
-            Instant::now() >= due
+            counting_since.elapsed() >= interval
         };
         if !fired {
             continue;
@@ -1615,7 +1617,7 @@ fn cron(
         }
         last = Some(outcome);
         interval = pending_interval(schedule, Phase::Repeating);
-        due = Instant::now() + interval;
+        counting_since = Instant::now();
     }
     last
 }

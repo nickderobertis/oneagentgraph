@@ -217,12 +217,12 @@ fn default_stream() -> bool {
 
 /// The longest span a [`Schedule`] may name, in seconds — a shade over 136 years.
 ///
-/// Not a policy about cadence: it is the bound that keeps a document from
-/// crashing the run. Both of a schedule's spans are added to a monotonic clock,
-/// which panics rather than saturating when the sum is not representable, and
-/// `u64::MAX` seconds is some four hundred billion years. `u32::MAX` is far past
-/// any run and far short of any platform's ceiling, and it is one number rather
-/// than a per-platform probe.
+/// A typo guard rather than a policy about cadence. A schedule's seconds are a
+/// `u64` an external document supplies, and `u64::MAX` of them is some four
+/// hundred billion years: a member whose clock names that is one that never fires
+/// and never says why, which is indistinguishable from the member being broken.
+/// `u32::MAX` is past every run anyone will make and short of every platform's
+/// own clock range, so it refuses the typo without refusing a cadence.
 pub const MAX_SCHEDULE_SECONDS: u64 = u32::MAX as u64;
 
 /// The first graph schema version this crate still reads.
@@ -395,12 +395,9 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                             "member {name:?}: a schedule of every 0 seconds never stops firing"
                         )));
                     }
-                    // Both spans are added to a monotonic clock to get the moment
-                    // the member is next due, and that addition *panics* on a sum
-                    // the platform cannot represent. A schedule's seconds are a
-                    // `u64` an external document supplies, so without this a
-                    // number nobody could mean would take the whole run down
-                    // rather than being refused as the typo it is.
+                    // A span nobody could mean is refused as the typo it is,
+                    // rather than becoming a member that waits out the heat death
+                    // of the universe while reporting nothing at all.
                     for (field, seconds) in [
                         ("every", schedule.every),
                         ("start_after", schedule.first_turn_after()),
@@ -408,7 +405,7 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                         if seconds > MAX_SCHEDULE_SECONDS {
                             return Err(Error::InvalidConfig(format!(
                                 "member {name:?}: `{field}` of {seconds} seconds is longer than \
-                                 any run, and past what a clock can count to — the ceiling is \
+                                 any run this will ever pace — the ceiling is \
                                  {MAX_SCHEDULE_SECONDS}"
                             )));
                         }
@@ -562,15 +559,14 @@ mod tests {
         assert!(!rendered.contains("start_after"), "{rendered}");
     }
 
-    /// A span longer than a clock can count to is refused by name, on both of a
-    /// schedule's fields and however it was arrived at.
+    /// A span longer than any run is refused by name, on both of a schedule's
+    /// fields and however it was arrived at.
     ///
-    /// Not a policy about cadence. Both spans are added to a monotonic clock,
-    /// which *panics* rather than saturating on a sum it cannot represent, so
-    /// without this a number in a document takes the run down instead of being
-    /// refused as the typo it is.
+    /// Not a policy about cadence: a `u64` of seconds is four hundred billion
+    /// years, and a member whose clock names that never fires and never says why
+    /// — which from outside is indistinguishable from the member being broken.
     #[test]
-    fn a_schedule_longer_than_a_clock_can_count_to_is_refused() {
+    fn a_schedule_longer_than_any_run_is_refused() {
         let document = |schedule: String| {
             format!(
                 concat!(
@@ -596,7 +592,7 @@ mod tests {
             let err = validate(&parse(&document(schedule.clone()))).unwrap_err();
             assert!(err.to_string().contains(field), "{schedule}: {err}");
             assert!(
-                err.to_string().contains("what a clock can count to"),
+                err.to_string().contains("longer than any run"),
                 "{schedule}: {err}"
             );
         }
