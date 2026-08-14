@@ -334,8 +334,12 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
     // up: a graph of nothing but the scheduled member settles every non-cron
     // member at once, and its cron thread stops with them. It waits on `anchor`
     // so it lands in the *second* wave — a held member in the first would keep
-    // that wave from finishing, and the scheduled member's clock does not start
-    // counting until it does.
+    // that wave from finishing, and a schedule taking its first turn at t=0 hands
+    // its clock over only once that turn has settled.
+    //
+    // `start_after: 0` is that first turn, asked for by name: the reset this
+    // journey delivers is to a clock that is already counting, and a schedule
+    // left on its default would still be waiting out its interval instead.
     let release = workspace.at("cron-keeper-release");
     workspace.graph(&graph_with(
         concat!(
@@ -343,7 +347,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
             "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600, start_after: 0, resettable: true}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",

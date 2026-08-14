@@ -63,6 +63,9 @@ pub struct OnejudgeMember {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<ConfigRef>,
     /// The task prose. Usually supplied by `--task` instead.
+    ///
+    /// `{task}` anywhere in it expands to the run's own `--task`; see
+    /// [`crate::invoke::TASK_TOKEN`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     /// The side that does the work.
@@ -96,6 +99,10 @@ pub struct OneharnessMember {
     /// graph-wide `--task` verbatim, and a scheduled member whose whole job is to
     /// write one status update was handed the orchestrator's instructions to
     /// drive the run instead. Requires graph schema version 3.
+    ///
+    /// `{task}` anywhere in it expands to the run's own `--task`, which is how two
+    /// members share one run's context and differ only in what they are told to do
+    /// with it; see [`crate::invoke::TASK_TOKEN`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     /// The directory this member works in, when its job is not the graph's.
@@ -167,9 +174,39 @@ pub struct JudgeCommand {
 pub struct Schedule {
     /// Interval in seconds.
     pub every: u64,
+    /// Seconds before this member's **first** turn, defaulting to
+    /// [`every`](Self::every) and read through [`first_turn_after`].
+    ///
+    /// `0` is the member taking a turn the moment the graph starts, which is what
+    /// every schedule did before this field existed.
+    ///
+    /// Deliberately **not** gated on a schema version, unlike
+    /// [`OneharnessMember::task`] and [`OneharnessMember::dir`]. Those changed
+    /// nothing for a document that omits them, so a gate only asked such a
+    /// document to say which schema it was written against; this one moves the
+    /// default for every schedule already written, and a version 1 or 2 document
+    /// has to be able to ask for the old behaviour back.
+    ///
+    /// [`first_turn_after`]: Self::first_turn_after
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_after: Option<u64>,
     /// Whether `reset-timer` may restart this schedule's clock.
     #[serde(default)]
     pub resettable: bool,
+}
+
+impl Schedule {
+    /// Seconds between the graph starting and this member's first turn.
+    ///
+    /// A schedule that names no `start_after` waits one whole interval, because
+    /// "every 1800 seconds" reads as *from now on* rather than *now, and then
+    /// every 1800 seconds* — and a member whose job is to report progress has
+    /// nothing to report at t=0. A schedule that wants the old behaviour asks for
+    /// it by name with `start_after: 0`.
+    #[must_use]
+    pub fn first_turn_after(&self) -> u64 {
+        self.start_after.unwrap_or(self.every)
+    }
 }
 
 /// serde default for [`AgentSide::stream`]: streaming is on unless a graph turns
@@ -447,6 +484,54 @@ mod tests {
             let err = validate(&parse(&format!("{base}{given}"))).unwrap_err();
             assert!(err.to_string().contains(expected), "{given}: {err}");
         }
+    }
+
+    /// A schedule's first turn waits one whole interval unless it says otherwise,
+    /// and `0` is the spelling that asks for a turn at t=0.
+    ///
+    /// The default is what a schedule *already written* now means, so it is
+    /// asserted through parsing a document rather than through a struct literal:
+    /// the field is absent from every graph in existence, and its absence is the
+    /// case that matters.
+    #[test]
+    fn a_schedules_first_turn_waits_an_interval_unless_it_names_another() {
+        let scheduled = |schedule: &str| -> Schedule {
+            let document = format!(
+                concat!(
+                    "version: 1\nname: g\nmembers:\n  ticker:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n    schedule: {}\n",
+                ),
+                schedule
+            );
+            let graph = parse(&document);
+            validate(&graph).unwrap_or_else(|err| panic!("{document}: {err}"));
+            let Member::Oneharness(member) = &graph.members["ticker"] else {
+                panic!("a scheduled member is single-sided")
+            };
+            member.schedule.expect("the member is scheduled")
+        };
+
+        let inherited = scheduled("{every: 1800}");
+        assert_eq!(inherited.start_after, None);
+        assert_eq!(inherited.first_turn_after(), 1800);
+        assert_eq!(
+            scheduled("{every: 1800, start_after: 0}").first_turn_after(),
+            0
+        );
+        assert_eq!(
+            scheduled("{every: 1800, start_after: 5}").first_turn_after(),
+            5
+        );
+        // Longer than the cadence is a legal thing to ask for — "settle in, then
+        // report often" — so it is carried rather than clamped.
+        assert_eq!(
+            scheduled("{every: 60, start_after: 600}").first_turn_after(),
+            600
+        );
+        // And a schedule that named none serializes without one, so a document
+        // written before the field existed round-trips unchanged.
+        let rendered = serde_norway::to_string(&inherited).expect("a schedule serializes");
+        assert!(!rendered.contains("start_after"), "{rendered}");
     }
 
     /// A member's name is a directory this run creates and a signal file an

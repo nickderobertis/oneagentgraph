@@ -41,11 +41,48 @@ the version named by `run::RECORD_SCHEMA_VERSION`.
 contains a schedule loop, so a cron member cannot hold its wave open and later
 waves are reachable after that first outcome.
 
-After the first firing, `run::spawn_cron` owns the member's clock. `run::cron`
-watches the existing stop, member-stop, trigger, and reset files. Before a due
-or triggered firing, it checks the shared count of live work whose ancestry is
-not solely cron members. `run::solely_cron_descended` computes that property
-from the validated DAG. When the count reaches zero the clock exits without
+`config::Schedule::first_turn_after` decides whether that first firing happens in
+the wave at all. It is `start_after` when the document names one and `every`
+otherwise, and `run::deferred_start` is the predicate the wave splits on:
+
+- **`start_after: 0`** — the member is in `run_wave`'s runnable set, takes its
+  turn at t=0, and `run::spawn_cron` takes its clock over once that turn settles.
+  This is what every schedule did before the field existed.
+- **anything else** — the member is not in the runnable set. `member::announce`
+  publishes its `member-started` — the same `runner` and launch description a
+  turn's own would carry, plus `start_after` — and `run::spawn_cron` starts its
+  clock **before** `run_wave` blocks. Before, not after, because `run_wave` waits
+  for every member in the wave: a clock started on the far side of that call
+  would begin counting only once this member's siblings were done, and the
+  sibling a pacemaker paces is exactly the one that takes the whole run.
+
+So a deferred member starts with the graph and only its *turn* waits. Everything
+that could refuse it — a ref that cannot be read, a persona that does not
+validate, a model paired with two harness families — is `invoke::build`, which
+runs for every member before `graph-started`, and is untouched by any of this.
+
+A deferred member has no `record.members` entry until it fires, which is the same
+state every member is in for the whole of a live run: outcomes fill in as members
+settle, and `Record::declared_members` is what names the members themselves.
+
+`ready_order` refuses one graph shape this default creates: every member scheduled
+or descended only from scheduled members, and every schedule deferred. Such a
+graph has no work to hold it past the quiescence rule below, so it would start its
+members, fire none of them, and exit 0. `run::refuse_a_graph_that_never_fires` is
+that check, at the end of `ready_order` so `run` and `validate` share it and so it
+walks a dependency graph already proven acyclic and complete.
+
+`run::spawn_cron` owns the member's clock either way. `run::cron`
+watches the existing stop, member-stop, trigger, and reset files. It counts down
+the interval currently pending — `start_after` until the member has taken a turn
+and `every` from then on, which is also what a `reset-timer` on a resettable
+schedule restarts, so a reset before the first turn restores the whole delay
+rather than promoting the member to its steady cadence. A schedule that fired at
+t=0 has nothing left to defer, so its pending interval is `every` from the start.
+
+Before a due or triggered firing, it checks the shared count of live work whose
+ancestry is not solely cron members. `run::solely_cron_descended` computes that
+property from the validated DAG. When the count reaches zero the clock exits without
 waiting for its next interval, which is the scheduler's quiescence boundary.
 
 Each successful later firing calls `run::run_cron_chain`. The reachable
@@ -63,5 +100,7 @@ created, while a callback already running completes before the cron thread
 joins. `run::run` joins those threads before emitting `graph-settled`, so the
 last admitted chain is present in the final stream and record.
 
-The event vocabulary is unchanged. There is no wave-boundary event; consumers
-continue to infer concurrency and ordering from member event timings.
+The event vocabulary gains no kind. `member-started` gains one payload field,
+`start_after`, on the one a deferred member publishes when it comes up without
+taking a turn. There is still no wave-boundary event; consumers continue to infer
+concurrency and ordering from member event timings.

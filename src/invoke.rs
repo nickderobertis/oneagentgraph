@@ -207,7 +207,14 @@ pub fn build(
             )?;
             let path = context.scratch.join(AGENT_CONFIG_FILE);
             write(&path, &config)?;
-            let mut args = vec![
+            // Every argument as computed, empty or not. This list used to be
+            // filtered for empty entries, which can only ever remove a *value* —
+            // it holds no optional flags — leaving an argv where oneharness reads
+            // the next flag as the value before it. An empty `--prompt` is now
+            // reachable from a valid document, a member whose whole task is
+            // `{task}` in a run that supplied none, and it must reach oneharness
+            // as an empty prompt rather than as a `--prompt` with no value at all.
+            let args = vec![
                 "run".to_string(),
                 "--config".to_string(),
                 path.display().to_string(),
@@ -218,12 +225,8 @@ pub fn build(
                 "--events".to_string(),
                 "--stream".to_string(),
                 "--prompt".to_string(),
-                match member.task.as_deref() {
-                    Some(own) => own.to_string(),
-                    None => task(context)?,
-                },
+                member_task(member.task.as_deref(), context)?,
             ];
-            args.retain(|arg| !arg.is_empty());
             Ok(Invocation {
                 kind: crate::member::Kind::Oneharness,
                 launch: Launch::Process {
@@ -299,10 +302,7 @@ fn onejudge(
     })?;
     write(&config_path, &rendered)?;
 
-    let prose = match member.task.as_deref() {
-        Some(own) => own.to_string(),
-        None => task(context)?,
-    };
+    let prose = member_task(member.task.as_deref(), context)?;
 
     Ok(Invocation {
         kind: crate::member::Kind::Onejudge,
@@ -619,6 +619,65 @@ fn harness_families<'a>(
         )));
     }
     Ok(families)
+}
+
+/// The token a member's own `task` interpolates the run's `--task` into.
+pub const TASK_TOKEN: &str = "{task}";
+
+/// The one escape: `{{task}}` is the literal text `{task}`, interpolated into
+/// nothing.
+///
+/// The whole escape mechanism, deliberately. A member's `task` is prose, not a
+/// template language: braces are ordinary characters everywhere else, `{{`
+/// doubles into nothing, and only these two exact spellings mean anything at all.
+/// A general `{{`-doubling rule would have changed what an already-written
+/// document says — every existing member task is literal text, and one containing
+/// `{{` anywhere would suddenly render differently. This spelling cannot: a
+/// document carrying `{{task}}` carries [`TASK_TOKEN`] too, so it is already
+/// inside the one set of documents expansion can change at all.
+pub const ESCAPED_TASK_TOKEN: &str = "{{task}}";
+
+/// One member's own task prose, with the run's `--task` interpolated into it.
+///
+/// A member carrying its own `task` still replaces the run's outright — that is
+/// what the field has always meant, and a member whose prose names no token keeps
+/// getting exactly that. What the token adds is the case the field could not
+/// express: two members needing the *same* run context and different instructions
+/// on what to do with it, which until now meant restating the context by hand and
+/// reaching for an environment variable to carry it.
+///
+/// A run that supplied no task at all expands the token to nothing rather than
+/// refusing. A member carrying its own task is the one shape of member that never
+/// needed a `--task`, and making the token demand one would take that away.
+fn expand_task(template: &str, given: Option<&str>) -> String {
+    let mut expanded = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(brace) = rest.find('{') {
+        expanded.push_str(&rest[..brace]);
+        rest = &rest[brace..];
+        if let Some(tail) = rest.strip_prefix(ESCAPED_TASK_TOKEN) {
+            expanded.push_str(TASK_TOKEN);
+            rest = tail;
+        } else if let Some(tail) = rest.strip_prefix(TASK_TOKEN) {
+            expanded.push_str(given.unwrap_or_default());
+            rest = tail;
+        } else {
+            // Any other brace is a brace. `{` is one ASCII byte, so this index is
+            // a character boundary.
+            expanded.push('{');
+            rest = &rest[1..];
+        }
+    }
+    expanded.push_str(rest);
+    expanded
+}
+
+/// The prose one member drives: its own, with `{task}` expanded, else the run's.
+fn member_task(own: Option<&str>, context: &Context<'_>) -> Result<String, Error> {
+    match own {
+        Some(own) => Ok(expand_task(own, context.task)),
+        None => task(context),
+    }
 }
 
 /// The task prose the run supplied, or the refusal for a member that needs one.
@@ -958,6 +1017,112 @@ mod tests {
         );
         let err = build(&graph_wide, &taskless, &mut Resolver::new()).unwrap_err();
         assert!(err.to_string().contains("no task"), "{err}");
+    }
+
+    /// A single-sided member carrying `{task}` is handed the run's task where it
+    /// named it, and everything else about the field is exactly as it was.
+    ///
+    /// Read off the argv, because `--prompt` *is* what this crate decides for a
+    /// single-sided member: the two compatibility guarantees below — a member with
+    /// no task of its own, and one whose task names no token — are only worth
+    /// anything as statements about the value that reaches oneharness.
+    #[test]
+    fn a_members_own_task_takes_the_runs_where_it_names_it() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let given = context(dir.path(), &scratch);
+        let mut taskless = context(dir.path(), &scratch);
+        taskless.task = None;
+
+        for (own, expanded, alone) in [
+            // The token is the whole task, and the token inside prose of the
+            // member's own — the shape a pacemaker's `task:` actually takes.
+            ("{task}", "do the thing", ""),
+            (
+                "{task}\n\nReport it, and nothing else.",
+                "do the thing\n\nReport it, and nothing else.",
+                "\n\nReport it, and nothing else.",
+            ),
+            // No token: the member's task replaces the run's outright, which is
+            // what the field has always meant and what every document already
+            // written depends on.
+            (
+                "write one status update",
+                "write one status update",
+                "write one status update",
+            ),
+            // The one escape, and every other brace left alone.
+            ("{{task}}", "{task}", "{task}"),
+            (
+                "{task} {{task}} {other} {",
+                "do the thing {task} {other} {",
+                " {task} {other} {",
+            ),
+        ] {
+            assert_eq!(
+                flag(&process_args(&single_sided(own), &given), "--prompt").as_deref(),
+                Some(expanded),
+                "{own:?}"
+            );
+            // And with no `--task` at all the token expands to nothing rather
+            // than refusing: a member carrying its own task is the one shape that
+            // never needed a run's.
+            assert_eq!(
+                flag(&process_args(&single_sided(own), &taskless), "--prompt").as_deref(),
+                Some(alone),
+                "{own:?} in a run with no task"
+            );
+        }
+
+        // The run's own task is prose, not a template: a member that named no
+        // task of its own is handed it byte for byte, token or no token.
+        let mut literal = context(dir.path(), &scratch);
+        literal.task = Some("mind the {task} in this sentence");
+        let graph_wide: Member =
+            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+                .expect("a member");
+        assert_eq!(
+            flag(&process_args(&graph_wide, &literal), "--prompt").as_deref(),
+            Some("mind the {task} in this sentence"),
+        );
+    }
+
+    /// A two-party member's own `task` takes the run's on the same terms — one
+    /// field, one rule, whichever kind of member carries it.
+    #[test]
+    fn a_two_party_members_own_task_takes_the_runs_the_same_way() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let member: Member = serde_norway::from_str(concat!(
+            "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\n",
+            "task: \"{task}\\n\\nand judge it\"\n",
+            "agent: {oneharness_config: ./oneharness.toml}\n",
+            "judge: {oneharness_config: ./oneharness.toml}\n",
+        ))
+        .expect("a member");
+        let invocation = build(
+            &member,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .expect("built");
+        assert_eq!(
+            judge_launch(&invocation).task,
+            "do the thing\n\nand judge it"
+        );
+    }
+
+    /// One single-sided member carrying `task`, built rather than parsed so a
+    /// template's braces and newlines need no YAML quoting to survive.
+    fn single_sided(task: &str) -> Member {
+        Member::Oneharness(crate::config::OneharnessMember {
+            oneharness_config: ConfigRef("./oneharness.toml".to_string()),
+            persona: None,
+            task: Some(task.to_string()),
+            dir: None,
+            schedule: None,
+            deps: Vec::new(),
+        })
     }
 
     /// The argv a single-sided member is launched with.

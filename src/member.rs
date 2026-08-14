@@ -459,6 +459,61 @@ pub fn run(
     }
 }
 
+/// Publish that a member came up, without taking a turn.
+///
+/// What a deferred schedule leaves in place. A member whose `start_after` has not
+/// elapsed takes no turn in the wave that starts it, but it is *started*: its refs
+/// are resolved, its configs are generated, and it says so here beside every other
+/// member of the graph — carrying the same `runner` and the same description of
+/// what it will run, plus the `start_after` its first turn waits.
+///
+/// This is the whole reason `start_after` defers a turn rather than a launch. A
+/// graph's second member is the easy one to ship broken, and on a half-hour
+/// schedule a launch deferred with it would first be heard from half an hour into
+/// a real run — so a supervisor watching the stream sees every declared member
+/// within seconds of the launch, whatever each one's cadence.
+pub fn announce(invocation: &Invocation, emitter: &Emitter, start_after: u64) {
+    let mut started = started_payload(&invocation.launch);
+    started.insert("start_after".to_string(), Value::from(start_after));
+    emitter.emit(EventKind::MemberStarted, started);
+}
+
+/// What `member-started` says about the launch it describes.
+pub(crate) fn started_payload(launch: &Launch) -> Map<String, Value> {
+    match launch {
+        Launch::Process { program, args, cwd } => process_started(program, args, cwd),
+        Launch::Library(judge) => library_started(judge),
+    }
+}
+
+/// The `member-started` fields of a member that is a child process.
+pub(crate) fn process_started(program: &str, args: &[String], cwd: &Path) -> Map<String, Value> {
+    payload([
+        ("runner", Value::String("process".into())),
+        ("program", Value::String(program.to_string())),
+        (
+            "args",
+            Value::Array(args.iter().cloned().map(Value::String).collect()),
+        ),
+        ("cwd", Value::String(cwd.display().to_string())),
+    ])
+}
+
+/// The `member-started` fields of a member driven in this process.
+pub(crate) fn library_started(launch: &crate::invoke::JudgeLaunch) -> Map<String, Value> {
+    payload([
+        ("runner", Value::String("library".into())),
+        ("engine", Value::String("onejudge".into())),
+        ("config", Value::String(launch.config.display().to_string())),
+        // `worktree`, not `cwd`: this member has no working directory of its own,
+        // and naming one would claim a thing that is not true.
+        (
+            "worktree",
+            Value::String(launch.worktree.display().to_string()),
+        ),
+    ])
+}
+
 /// Run a member that is a child process of its own.
 // Nine values, none derivable from another: which contract it settles under,
 // the three parts of the command, what this member adds to the environment,
@@ -478,15 +533,7 @@ fn spawned(
 ) -> Outcome {
     emitter.emit(
         EventKind::MemberStarted,
-        payload([
-            ("runner", Value::String("process".into())),
-            ("program", Value::String(program.to_string())),
-            (
-                "args",
-                Value::Array(args.iter().cloned().map(Value::String).collect()),
-            ),
-            ("cwd", Value::String(cwd.display().to_string())),
-        ]),
+        process_started(program, args, cwd),
     );
 
     let mut command = crate::harness_process::command(program);
@@ -1231,6 +1278,76 @@ mod tests {
             let err = Bounds::from_env(&env(&[(STALL_TIMEOUT_ENV, bad)])).unwrap_err();
             assert!(err.starts_with(STALL_TIMEOUT_ENV), "{bad}: {err}");
             assert!(err.contains("positive number of seconds"), "{bad}: {err}");
+        }
+    }
+
+    /// A member whose first turn waits still says it started, describing the
+    /// launch it will run and how long that turn waits.
+    ///
+    /// Both runners, because the payload a supervisor reads must not depend on
+    /// which one a member is; the fields are the same ones the member publishes
+    /// when it does take a turn, which is what makes the two comparable at all.
+    #[test]
+    fn a_member_that_came_up_without_taking_a_turn_describes_the_one_it_will() {
+        let sink = Arc::new(Mutex::new(Vec::new()));
+        let emitter = crate::event::Emitter::new("s", Box::new(Held(Arc::clone(&sink))));
+        let process = Invocation {
+            kind: Kind::Oneharness,
+            launch: Launch::Process {
+                program: "oneharness".into(),
+                args: vec!["run".into(), "--prompt".into(), "report".into()],
+                cwd: std::path::PathBuf::from("/work"),
+            },
+            persona: None,
+            env: Vec::new(),
+            refs: Vec::new(),
+        };
+        announce(&process, &emitter, 1800);
+        let library = Invocation {
+            kind: Kind::Onejudge,
+            launch: Launch::Library(Box::new(crate::invoke::JudgeLaunch {
+                config: std::path::PathBuf::from("/scratch/onejudge.yaml"),
+                task: "do the thing".into(),
+                worktree: std::path::PathBuf::from("/scratch"),
+                session: "s-worker".into(),
+            })),
+            persona: None,
+            env: Vec::new(),
+            refs: Vec::new(),
+        };
+        announce(&library, &emitter, 0);
+
+        let published: Vec<Value> = String::from_utf8(held(&sink).clone())
+            .expect("utf-8")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("an envelope"))
+            .collect();
+        assert_eq!(published.len(), 2);
+        for event in &published {
+            assert_eq!(event["kind"], "member-started");
+        }
+        assert_eq!(published[0]["payload"]["runner"], "process");
+        assert_eq!(published[0]["payload"]["program"], "oneharness");
+        assert_eq!(published[0]["payload"]["cwd"], "/work");
+        assert_eq!(published[0]["payload"]["args"][2], "report");
+        assert_eq!(published[0]["payload"]["start_after"], 1800);
+        assert_eq!(published[1]["payload"]["runner"], "library");
+        assert_eq!(published[1]["payload"]["engine"], "onejudge");
+        assert_eq!(published[1]["payload"]["worktree"], "/scratch");
+        assert_eq!(published[1]["payload"]["start_after"], 0);
+    }
+
+    /// A sink an assertion can read back what was written to it.
+    #[derive(Clone)]
+    struct Held(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Held {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            held(&self.0).extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

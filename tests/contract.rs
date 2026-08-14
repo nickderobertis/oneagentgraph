@@ -982,6 +982,7 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
             dir: None,
             schedule: Some(Schedule {
                 every: 1800,
+                start_after: Some(1800),
                 resettable: true,
             }),
             deps: Vec::new(),
@@ -1084,6 +1085,114 @@ fn the_documented_member_job_fields_round_trip_and_stay_omitted_when_unset() {
         serde_norway::from_str(&serde_norway::to_string(&graph).expect("serializes"))
             .expect("reparses");
     assert_eq!(reparsed, graph);
+}
+
+/// The contract documents `start_after`, it defaults to `every`, and a schedule
+/// written before it existed serializes without it.
+///
+/// The default is the assertion that matters twice over: it is what a schedule
+/// already in a consumer's repository now means, and the omission is what keeps
+/// that document byte-identical across a round trip through this crate.
+#[test]
+fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
+    let document = fenced_block("yaml");
+    assert!(
+        document.contains("start_after: 1800"),
+        "the documented schedule must show `start_after`"
+    );
+    let graph: GraphConfig =
+        serde_norway::from_str(&document).expect("the documented graph parses");
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    let documented = reporter.schedule.expect("the reporter is scheduled");
+    assert_eq!(documented.start_after, Some(1800));
+    assert_eq!(documented.first_turn_after(), 1800);
+
+    // A schedule from before the field existed: the first turn waits one whole
+    // interval, and the document round-trips without gaining a key an older
+    // consumer would reject.
+    let older = document.replace("start_after: 1800, ", "");
+    let graph: GraphConfig = serde_norway::from_str(&older).expect("the older graph parses");
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    let inherited = reporter.schedule.expect("the reporter is scheduled");
+    assert_eq!(inherited.start_after, None);
+    assert_eq!(inherited.first_turn_after(), inherited.every);
+    let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    assert!(
+        !round_trip.contains("start_after"),
+        "a schedule that named no start_after must serialize without one: {round_trip}"
+    );
+    let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    assert_eq!(reparsed, graph);
+
+    // And `0`, the spelling that asks for the behaviour every schedule had.
+    let at_once = document.replace("start_after: 1800", "start_after: 0");
+    let graph: GraphConfig = serde_norway::from_str(&at_once).expect("the immediate graph parses");
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert_eq!(
+        reporter
+            .schedule
+            .expect("the reporter is scheduled")
+            .first_turn_after(),
+        0
+    );
+}
+
+/// The contract documents `{task}` and its one escape, and both reach the member.
+///
+/// Asserted through the built invocation rather than through the expansion
+/// function, because what the contract promises is what the member is *given*.
+#[test]
+fn the_documented_task_token_expands_into_a_members_own_task() {
+    for spelling in ["`{task}`", "`{{task}}`"] {
+        assert!(
+            CONTRACT.contains(spelling),
+            "the contract must document {spelling}"
+        );
+    }
+    let workspace = tempfile::tempdir().expect("a workspace");
+    std::fs::write(
+        workspace.path().join("oneharness.toml"),
+        "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
+    )
+    .expect("a chain");
+    let member: Member = serde_norway::from_str(concat!(
+        "kind: oneharness\noneharness_config: ./oneharness.toml\n",
+        "task: \"{task}\\n\\nand report it, using {{task}} to say so\"\n",
+    ))
+    .expect("a member");
+    let scratch = workspace.path().join("scratch");
+    let context = oneagentgraph::invoke::Context {
+        dir: workspace.path(),
+        scratch: &scratch,
+        graph_dir: Some(workspace.path()),
+        task: Some("ship the release"),
+        session: "s",
+        oneharness_bin: "oneharness",
+    };
+    let invocation = oneagentgraph::invoke::build(
+        &member,
+        &context,
+        &mut oneagentgraph::resolve::Resolver::new(),
+    )
+    .expect("the member builds");
+    let oneagentgraph::invoke::Launch::Process { args, .. } = invocation.launch else {
+        panic!("a single-sided member is a child process")
+    };
+    let prompt = args
+        .iter()
+        .position(|arg| arg == "--prompt")
+        .and_then(|at| args.get(at + 1))
+        .expect("the member is given a prompt");
+    assert_eq!(
+        prompt,
+        "ship the release\n\nand report it, using {task} to say so"
+    );
 }
 
 #[test]

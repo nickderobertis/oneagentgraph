@@ -6,8 +6,19 @@
 
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
+
 use crate::support::{fake_harness, graph_with, until, Workspace, FAKE_HARNESS_KEY};
 
+/// The chain every journey below drives, whose `ticker` takes its first turn the
+/// moment the graph starts.
+///
+/// `start_after: 0` says so out loud rather than relying on the default, which is
+/// one whole interval: these journeys are about what a firing *does* — the chain
+/// it runs, the failures it propagates, the quiescence that ends it — and each one
+/// needs a firing to have happened. The default's own journeys are
+/// [`a_deferred_schedule_starts_with_the_graph_and_takes_no_turn`] and
+/// [`a_deferred_schedules_first_turn_waits_for_the_delay_it_named`].
 fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
     graph_with(
         concat!(
@@ -16,7 +27,7 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
             "members:\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  ticker:\n    kind: oneharness\n",
-            "    schedule: {every: 3600}\n",
+            "    schedule: {every: 3600, start_after: 0}\n",
             "  bridge:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "    deps: [anchor]\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
@@ -38,6 +49,220 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
             ),
         ],
     )
+}
+
+/// A graph whose scheduled member's first turn is deferred, beside a member that
+/// holds the run open while the assertion is made.
+///
+/// `hold` is released to end the run. `start_after` is written as given, so the
+/// two journeys below differ only in how long the deferred member waits.
+///
+/// The delay is substituted into the skeleton rather than passed through
+/// [`graph_with`], which writes every value as a string: a schedule's seconds are
+/// a number, and one quoted into the document would be refused by the schema
+/// before either journey reached what it tests.
+fn deferred_graph(fake: &str, hold: &str, start_after: u64, recorded: &str) -> String {
+    const SKELETON: &str = concat!(
+        "version: 3\nname: paced\n",
+        "env: {}\n",
+        "members:\n",
+        "  worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+        "  ticker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+        "    persona: reviewer\n",
+        "    schedule: {every: 3600, start_after: 0}\n",
+    );
+    graph_with(
+        &SKELETON.replace("start_after: 0", &format!("start_after: {start_after}")),
+        &[
+            (FAKE_HARNESS_KEY, fake.to_string()),
+            (
+                "members.worker.task",
+                format!("fake:complete-now hold this run open. fake:hold={hold}"),
+            ),
+            (
+                "members.ticker.task",
+                format!("fake:complete-now report progress. fake:record-prompt={recorded}"),
+            ),
+        ],
+    )
+}
+
+/// A deferred schedule **starts** with the graph and takes **no turn** until its
+/// delay elapses — the two halves asserted separately, in one run.
+///
+/// The distinction the field rests on, and the reason it is not a delayed launch.
+/// A graph's scheduled member is the easy one to ship broken — a bad persona ref,
+/// an unreadable config, a schedule shape nobody ran — and on a half-hour cadence
+/// a member that came up at its first tick would first be heard from half an hour
+/// into a real run. So the member comes up here, publishes `member-started` with
+/// the argv its first turn will run and the delay that turn is waiting, and has
+/// its generated config on disk — while the harness that would spend money is not
+/// started at all, which is the second half: no turn, no `cron-fired`, and no
+/// prompt recorded by a harness that never ran.
+#[test]
+fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
+    let workspace = Workspace::new();
+    let release = workspace.at("paced-release");
+    let recorded = workspace.at("ticker.prompt");
+    workspace.graph(&deferred_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        3600,
+        &recorded.display().to_string(),
+    ));
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events = || {
+        std::fs::read_dir(workspace.state())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .next()
+            .map(|entry| entry.path().join("events.jsonl"))
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default()
+    };
+    until("both members to start", || {
+        ["worker", "ticker"].iter().all(|member| {
+            events().lines().any(|line| {
+                line.contains("\"kind\":\"member-started\"")
+                    && line.contains(&format!("\"member\":\"{member}\""))
+            })
+        })
+    });
+
+    // Started: the deferred member's own `member-started`, carrying the launch it
+    // will run and the delay before it runs it.
+    let stream = events();
+    let started: Value = stream
+        .lines()
+        .filter(|line| {
+            line.contains("\"kind\":\"member-started\"") && line.contains("\"member\":\"ticker\"")
+        })
+        .map(|line| serde_json::from_str(line).expect("an envelope"))
+        .next()
+        .expect("the deferred member started");
+    assert_eq!(started["payload"]["start_after"], 3600);
+    assert_eq!(started["payload"]["runner"], "process");
+    assert_eq!(
+        crate::support::labels(&started).get("persona").cloned(),
+        Some("reviewer".to_string()),
+        "a deferred member that came up must carry the persona it resolved: {started}"
+    );
+    // Its configuration is not a promise: the generated oneharness config its
+    // argv names is on disk, which is the work a bad ref would have failed at.
+    let config = started["payload"]["args"]
+        .as_array()
+        .and_then(|args| {
+            args.iter()
+                .position(|arg| arg == "--config")
+                .and_then(|at| args.get(at + 1))
+        })
+        .and_then(Value::as_str)
+        .expect("the argv names a config");
+    assert!(
+        std::path::Path::new(config).is_file(),
+        "the deferred member's generated config was never written: {config}"
+    );
+
+    // And no turn: nothing fired, nothing was published for a turn, and the
+    // harness that would have been paid for one never ran.
+    let no_turn = |stream: &str| {
+        assert!(
+            !stream.contains("\"kind\":\"cron-fired\""),
+            "a deferred schedule fired: {stream}"
+        );
+        for kind in ["turn-started", "member-settled"] {
+            assert!(
+                !stream
+                    .lines()
+                    .any(|line| line.contains(&format!("\"kind\":\"{kind}\""))
+                        && line.contains("\"member\":\"ticker\"")),
+                "a deferred member published {kind}: {stream}"
+            );
+        }
+        assert!(
+            !recorded.exists(),
+            "a deferred member's harness ran: {:?}",
+            std::fs::read_to_string(&recorded)
+        );
+    };
+    no_turn(&stream);
+
+    std::fs::write(&release, "release").expect("release the worker");
+    let output = child.wait_with_output().expect("the run finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Still no turn once the run has ended: the delay outlived the run, which is
+    // the deferral doing exactly what it says.
+    no_turn(&events());
+}
+
+/// A deferred schedule's first turn happens once its delay has elapsed, and not
+/// before it.
+///
+/// The other half of the journey above, and what keeps it from being satisfied by
+/// a member that simply never fires: the same graph with a short delay takes its
+/// turn, runs the prompt it was given, and does so no sooner than the delay it
+/// named — measured from before the run was even launched, so a firing at t=0
+/// could not fit inside it.
+#[test]
+fn a_deferred_schedules_first_turn_waits_for_the_delay_it_named() {
+    let workspace = Workspace::new();
+    let release = workspace.at("paced-release");
+    let recorded = workspace.at("ticker.prompt");
+    workspace.graph(&deferred_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        3,
+        &recorded.display().to_string(),
+    ));
+    let launched = Instant::now();
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    assert!(
+        !recorded.exists(),
+        "the member recorded a prompt before the run was even launched"
+    );
+    until("the deferred first turn", || recorded.is_file());
+    let waited = launched.elapsed();
+    assert!(
+        waited >= Duration::from_secs(3),
+        "the first turn came {waited:?} after launch, sooner than the delay it named"
+    );
+    assert!(
+        std::fs::read_to_string(&recorded)
+            .expect("the prompt the deferred member ran")
+            .contains("report progress"),
+        "the deferred member ran something other than its own task"
+    );
+
+    std::fs::write(&release, "release").expect("release the worker");
+    let output = child.wait_with_output().expect("the run finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -312,7 +537,7 @@ fn a_cron_only_graph_quiesces_after_its_initial_firing() {
             "env: {}\n",
             "members:\n  ticker:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600}\n",
+            "    schedule: {every: 3600, start_after: 0}\n",
             "  report:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
         ),
@@ -345,7 +570,7 @@ fn a_failed_initial_scheduled_run_skips_its_chain_and_settles() {
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
     );
     workspace.graph(
-        "version: 1\nname: failed-initial-cron\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
+        "version: 1\nname: failed-initial-cron\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600, start_after: 0}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
     );
     let run = workspace.run_task("fake:complete-now: failed initial schedule");
     run.expect_code(1);

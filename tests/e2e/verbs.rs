@@ -92,6 +92,17 @@ fn validate_refuses_a_graph_that_could_never_run() {
             ),
             "never stops firing",
         ),
+        // A graph of nothing but schedules quiesces on its clocks' first tick, so
+        // with every first turn deferred it would start its members, fire none of
+        // them, and exit 0 having done nothing. Refused instead, saying which
+        // field asks for the other behaviour.
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n    schedule: {every: 1800}\n",
+            ),
+            "quiesces before anything fires",
+        ),
         (
             concat!(
                 "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
@@ -1385,13 +1396,16 @@ fn a_shipped_persona_is_reachable_by_name() {
 fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
     let workspace = Workspace::new();
     let release = workspace.at("cron-keeper-release");
+    // `start_after: 0` is the first turn taken at t=0, asked for by name: this
+    // journey acts on a clock that is already running, and a schedule left on
+    // its default would still be waiting out its first interval.
     workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
             "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600, start_after: 0, resettable: true}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
@@ -1478,6 +1492,9 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
 fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
     let workspace = Workspace::new();
     let release = workspace.at("member-cancel-keeper-release");
+    // `start_after: 0` is the first turn taken at t=0, asked for by name: this
+    // journey acts on a clock that is already running, and a schedule left on
+    // its default would still be waiting out its first interval.
     workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
@@ -1485,10 +1502,10 @@ fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
             "members:\n",
             "  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600, start_after: 0, resettable: true}\n",
             "  auditor:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600, start_after: 0, resettable: true}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
@@ -1686,13 +1703,16 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
 #[test]
 fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
     let workspace = Workspace::new();
+    // `start_after: 0` is the first turn taken at t=0, asked for by name: this
+    // journey acts on a clock that is already running, and a schedule left on
+    // its default would still be waiting out its first interval.
     workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
             "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600, start_after: 0, resettable: true}\n",
         ),
         &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
@@ -1911,13 +1931,16 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
 fn reset_timer_leaves_a_non_resettable_schedule_counting() {
     let workspace = Workspace::new();
     let release = workspace.at("reset-keeper-release");
+    // `start_after: 0` is the first turn taken at t=0, asked for by name: this
+    // journey acts on a clock that is already running, and a schedule left on
+    // its default would still be waiting out its first interval.
     workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
             "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: false}\n",
+            "    schedule: {every: 3600, start_after: 0, resettable: false}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
