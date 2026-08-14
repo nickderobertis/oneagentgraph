@@ -82,21 +82,6 @@ const TEARDOWN_POLL: Duration = Duration::from_millis(100);
 /// Run one two-party member to its end, publishing every envelope it produces.
 #[must_use]
 pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
-    emitter.emit(
-        EventKind::MemberStarted,
-        payload([
-            ("runner", Value::String("library".into())),
-            ("engine", Value::String("onejudge".into())),
-            ("config", Value::String(launch.config.display().to_string())),
-            // `worktree`, not `cwd`: this member has no working directory of its
-            // own, and naming one would claim a thing that is not true.
-            (
-                "worktree",
-                Value::String(launch.worktree.display().to_string()),
-            ),
-        ]),
-    );
-
     // The group is opened before the plan is driven for the same reason
     // `crate::member` opens one before it spawns: it is what the spawns go
     // *into*. Here they are not this module's spawns to make — onejudge starts
@@ -682,7 +667,7 @@ mod tests {
             .into_iter()
             .map(|event| event.kind)
             .collect();
-        assert_eq!(kinds, vec![EventKind::MemberStarted, EventKind::MemberDied]);
+        assert_eq!(kinds, vec![EventKind::MemberDied]);
     }
 
     /// One live tool event opens its turn and reports what it acted on; a turn

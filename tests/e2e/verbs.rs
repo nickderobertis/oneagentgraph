@@ -35,8 +35,8 @@ fn validate_refuses_a_graph_that_could_never_run() {
     let workspace = Workspace::new();
     for (document, expected) in [
         (
-            "version: 4\nname: g\nmembers: {}\n",
-            "reads versions 1 through 3",
+            "version: 5\nname: g\nmembers: {}\n",
+            "reads versions 1 through 4",
         ),
         ("version: 1\nname: g\nmembers: {}\n", "has no members"),
         (
@@ -91,6 +91,46 @@ fn validate_refuses_a_graph_that_could_never_run() {
                 "    oneharness_config: ./oneharness.toml\n    schedule: {every: 0}\n",
             ),
             "never stops firing",
+        ),
+        // A graph of nothing but schedules quiesces as soon as its clocks tick,
+        // so a deferred first turn in one never comes due: the member would
+        // start, wait, and the run would exit 0 without it ever having run.
+        // Refused instead, saying which field asks for the other behaviour.
+        (
+            concat!(
+                "version: 4\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n    schedule: {every: 1800}\n",
+            ),
+            "never comes due",
+        ),
+        // A span longer than any run is a member that never fires and never says
+        // why — refused on either of the two fields that can carry one.
+        (
+            concat!(
+                "version: 4\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+                "    schedule: {every: 60, start_after: 18446744073709551615}\n",
+            ),
+            "longer than any run",
+        ),
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+                "    schedule: {every: 18446744073709551615}\n",
+            ),
+            "longer than any run",
+        ),
+        // `start_after` postdates version 3, and a document declaring one is
+        // refused by the field's name rather than run at t=0 — the delay it
+        // asked for and the delay it would get are opposite answers.
+        (
+            concat!(
+                "version: 3\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+                "    schedule: {every: 1800, start_after: 30}\n",
+            ),
+            "requires graph schema version 4",
         ),
         (
             concat!(

@@ -41,7 +41,7 @@ How a member is launched, and why the two kinds differ:
 Graph config (YAML, by path or URL):
 
 ```yaml
-version: 3
+version: 4
 name: node-scope
 env:                                  # exported to every member process; values may reference ${HOME}
   MY_VAR: value
@@ -67,13 +67,15 @@ members:
     persona: ./reporter.yaml
     task: null                        # this member's own job; usually --task instead
     dir: null                         # this member's own directory; default the run's --dir
-    schedule: {every: 1800, resettable: true}   # cron member; seconds
+    schedule: {every: 1800, start_after: 1800, resettable: true}   # cron member; seconds
     deps: []                          # members whose settle precedes this member's first run
 ```
 
 - A `kind: onejudge` member's judge side may instead be `judge: {command: ["..."]}` — a command provider.
 - A member is a **job**, not a copy of its graph. A `kind: oneharness` member may carry its own `task` and its own `dir`, and each beats the graph's: a scheduled member whose whole job is to write one status update receives its own prose rather than the run's `--task`, and works in its own directory rather than the run's `--dir`. Both are optional and both default to the graph's, so a document that omits them runs exactly as before; a relative `dir` resolves against the run's `--dir`, and an absolute one is used as written. Both require `version: 3`. There is no per-member `env`: a member's environment is its oneharness config's own `[env]` table, which a graph already names per member, and the graph's `env:` block stays one block for the whole graph.
+- From `version: 4`, a member's own `task` may name the run's with `{task}`, which expands to the whole of `--task`/`--task-file` wherever it appears — so two members share one run's context and differ only in what they are told to do with it, instead of one of them restating that context by hand. A member with no `task` is unaffected and still receives the run's; a `task` naming no token still replaces it outright, exactly as before. `{task}` in a run whose `--task` is absent expands to nothing rather than refusing. The one escape is `{{task}}`, which is the literal text `{task}`: a member's `task` is prose rather than a template language, so every other brace — including a lone `{` or `}`, and `{anything-else}` — is itself. Nothing expands inside the run's own `--task`, or inside a persona, a `dir`, or an `env:` value. Under version 1, 2, or 3 a member's `task` is the literal prose it has always been, token or no token — the gate is on the reading, so a document written before this existed keeps saying exactly what it said.
 - A `model` override must be paired with a config whose declared chain is one harness family; validated pre-launch. The model value itself is forwarded unchecked.
+- A `schedule`'s `start_after` is how many seconds pass before that member's **first** turn, and from `version: 4` a schedule naming none waits `every` — "every 1800 seconds" means *from now on*, and a member whose job is to report progress has nothing to report at t=0. `start_after: 0` is the first turn taken the moment the graph starts, which is what every schedule did before this field existed and what a document declaring version 1, 2, or 3 still does: the field requires `version: 4`, and so does the default it moves, so no document already written changes behaviour. A version 3 document naming `start_after` is refused by the field's name rather than run at t=0 regardless. It defers the **turn**, never the **start**: a scheduled member comes up with its own wave whatever its cadence — with the graph, for one that waits on nothing — and publishes `member-started` there, and a bad persona ref, an unpairable model, or an unreadable config is still refused before the graph starts — so a member ship-broken on a half-hour schedule is heard from within seconds rather than half an hour in. A graph whose every member is scheduled, or descends only from scheduled members, has nothing to hold the run open past the moment its clocks tick, so a first turn deferred past that tick never comes due — the member would start, wait, and the run would exit 0 without it ever having run. Such a member is refused with the reason, and `start_after: 0`, or a member outside the schedules for it to pace, is the answer.
 - Remote refs (https) are fetched, checksummed, and recorded content-addressed in the run record; replay/audit never depends on the URL staying stable.
 
 CLI:
@@ -96,7 +98,7 @@ oneagentgraph persona new NAME | persona validate PATH
 
 `run` streams envelopes to stdout. Exit 0 = every member settled successfully; 1 = a member failed or died (the stream says which and why); 2 = invalid config. `--detach` prints `{run_id, events_path, pid}` and exits 0.
 
-Event kinds: `graph-started`, `member-started` (`runner: library|process`, plus what that runner is: the `engine`, `config`, and `worktree` of an in-process member — which has no working directory of its own — and the `program`, `args`, and `cwd` of a child one), `turn-started`, `turn-activity` (bounded tool summary: kind, name, 160-char detail), `turn-completed` (usage: tokens in/out, cache r/w, cost, duration), `turn-interrupted` (`member`, `delivered`, `input_bytes`, and the `reason` a delivery that did not land names), `member-heartbeat`, `fallback-advanced` (identity, classified reason), `member-died`, `cron-fired`, `cron-reset`, `member-settled` (full onejudge report as artifact, verdict inline, and the `report_path` that artifact is stored at), `graph-settled`.
+Event kinds: `graph-started`, `member-started` (`runner: library|process`, plus what that runner is: the `engine`, `config`, and `worktree` of an in-process member — which has no working directory of its own — and the `program`, `args`, and `cwd` of a child one; plus `start_after`, the seconds until the first turn, on the one published by a scheduled member that came up without taking one), `turn-started`, `turn-activity` (bounded tool summary: kind, name, 160-char detail), `turn-completed` (usage: tokens in/out, cache r/w, cost, duration), `turn-interrupted` (`member`, `delivered`, `input_bytes`, and the `reason` a delivery that did not land names), `member-heartbeat`, `fallback-advanced` (identity, classified reason), `member-died`, `cron-fired`, `cron-reset`, `member-settled` (full onejudge report as artifact, verdict inline, and the `report_path` that artifact is stored at), `graph-settled`.
 
 `member-died` describes an in-process failure honestly, and a member that *died* stays distinct from one that *failed its task* — the latter is a `member-settled` with `completed: false`, never this event. Its payload:
 

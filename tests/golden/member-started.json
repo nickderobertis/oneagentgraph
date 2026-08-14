@@ -1,0 +1,41 @@
+[
+  {
+    "runner": "library",
+    "engine": "onejudge",
+    "config": "/state/node-scope-1786171301679-1447994/members/worker/onejudge.yaml",
+    "worktree": "/state/node-scope-1786171301679-1447994/members/worker"
+  },
+  {
+    "runner": "process",
+    "program": "oneharness",
+    "args": [
+      "run",
+      "--config",
+      "/state/node-scope-1786171301679-1447994/members/reporter/oneharness.toml",
+      "--cwd",
+      "/work",
+      "--events",
+      "--stream",
+      "--prompt",
+      "write one status update"
+    ],
+    "cwd": "/state/node-scope-1786171301679-1447994/members/reporter"
+  },
+  {
+    "runner": "process",
+    "program": "oneharness",
+    "args": [
+      "run",
+      "--config",
+      "/state/node-scope-1786171301679-1447994/members/reporter/oneharness.toml",
+      "--cwd",
+      "/work",
+      "--events",
+      "--stream",
+      "--prompt",
+      "write one status update"
+    ],
+    "cwd": "/state/node-scope-1786171301679-1447994/members/reporter",
+    "start_after": 1800
+  }
+]

@@ -11,6 +11,8 @@
 // process is the single sanctioned double, replaced at oneharness's own
 // `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
 
+use std::collections::BTreeMap;
+
 use crate::support::{
     fake_harness, fake_provider, graph_with, labels, single_sided_graph, two_party_graph,
     Workspace, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
@@ -344,6 +346,450 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
         };
         assert_eq!(told, expected, "{}", event["payload"]);
     }
+}
+
+/// Two members share the run's own task and differ only in what they are told to
+/// do with it, while a third is handed it unchanged — read back from the harness
+/// each one actually started.
+///
+/// The case a member's own `task` could not express. Replacing the run's prose
+/// outright is right for a member whose job has nothing to do with the run, and
+/// wrong for the pair this graph has: an orchestrator and a check-in that need the
+/// *same* run context and opposite instructions about it. Until `{task}` there was
+/// no way to say that — the context had to be restated by hand in the member's own
+/// prose, or smuggled in through an environment variable, and the two copies drift
+/// the first time somebody edits one.
+///
+/// Every compatibility guarantee the token rests on is asserted in the same run,
+/// because they are only worth anything together: `plain` carries no task and is
+/// handed the run's, `own_job` carries one naming no token and replaces it
+/// outright, and `escaped` gets the one escape there is. What each member's
+/// harness was really given is one line per member in one file — the double writes
+/// the whole prompt it received, newlines and all — so a member handed somebody
+/// else's job is visible as such rather than as an absence.
+#[test]
+fn members_share_the_runs_task_where_they_name_it_and_replace_it_where_they_do_not() {
+    let workspace = Workspace::new();
+    // One recording path per member: the double appends the whole prompt it was
+    // given, and five members appending to one file interleave.
+    let recorded = |member: &str| workspace.at(&format!("{member}.prompt"));
+    let run_task = "fake:complete-now RUN CONTEXT: ship the retry.";
+    let own = |member: &str, instruction: &str| {
+        format!(
+            "fake:complete-now {instruction} fake:record-prompt={}",
+            recorded(member).display()
+        )
+    };
+    let shared = |member: &str, instruction: &str| {
+        format!(
+            "{{task}}\n\n{instruction} fake:record-prompt={}",
+            recorded(member).display()
+        )
+    };
+    let orchestrator = shared(
+        "orchestrator",
+        "Drive this run to settlement, and nothing else.",
+    );
+    let check_in = shared(
+        "check_in",
+        "Report progress for the planner. Never drive the run.",
+    );
+    let own_job = own("own_job", "write one status update, and nothing else.");
+    let escaped = own(
+        "escaped",
+        "mind the {{task}} escape, {other} braces, and a lone { — all prose.",
+    );
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 4\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n",
+            "  orchestrator:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "  plain:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "  own_job:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "  escaped:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.orchestrator.task".to_string(),
+                orchestrator.clone(),
+            ),
+            ("members.check_in.task".to_string(), check_in.clone()),
+            ("members.own_job.task".to_string(), own_job.clone()),
+            ("members.escaped.task".to_string(), escaped.clone()),
+        ],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        run_task,
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    // What each member's harness was really given, read off the file that
+    // harness wrote. The two members naming the token got the run's context and
+    // their own instructions, and neither got the other's.
+    let carried = |member: &str| {
+        std::fs::read_to_string(recorded(member)).unwrap_or_else(|err| {
+            panic!("member {member:?} recorded no prompt, so it was never given one: {err}")
+        })
+    };
+    let context = "RUN CONTEXT: ship the retry";
+    let driving = carried("orchestrator");
+    assert!(driving.contains(context), "{driving}");
+    assert!(
+        driving.contains("Drive this run to settlement"),
+        "{driving}"
+    );
+    assert!(
+        !driving.contains("Report progress"),
+        "a member was handed its sibling's job: {driving}"
+    );
+    let reporting = carried("check_in");
+    assert!(reporting.contains(context), "{reporting}");
+    assert!(reporting.contains("Report progress"), "{reporting}");
+    assert!(
+        !reporting.contains("Drive this run to settlement"),
+        "a member was handed its sibling's job: {reporting}"
+    );
+
+    // A task naming no token still replaces the run's outright, and the one
+    // escape reaches the harness as the text it names rather than as the run's
+    // task in braces.
+    let replaced = carried("own_job");
+    assert!(replaced.contains("write one status update"), "{replaced}");
+    assert!(
+        !replaced.contains(context),
+        "a member whose task names no token was still handed the run's: {replaced}"
+    );
+    let literal = carried("escaped");
+    for text in [
+        "mind the {task} escape",
+        "{other} braces",
+        "a lone { — all prose",
+    ] {
+        assert!(
+            literal.contains(text),
+            "{text:?} did not reach the harness as the text it names: {literal}"
+        );
+    }
+    assert!(
+        !literal.contains(context),
+        "an escaped token interpolated the run's task anyway: {literal}"
+    );
+
+    // And the invocation each member was launched with, byte for byte, which is
+    // where `plain` — the member carrying no task at all — is answered for: it is
+    // handed the run's task exactly as the run was given it.
+    let expected: BTreeMap<&str, String> = [
+        ("orchestrator", orchestrator.replace("{task}", run_task)),
+        ("check_in", check_in.replace("{task}", run_task)),
+        ("plain", run_task.to_string()),
+        ("own_job", own_job),
+        ("escaped", escaped.replace("{{task}}", "{task}")),
+    ]
+    .into_iter()
+    .collect();
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), expected.len(), "{started:?}");
+    for event in &started {
+        let member = labels(event)["member"].clone();
+        let args = event["payload"]["args"]
+            .as_array()
+            .expect("a single-sided member names its argv")
+            .clone();
+        let prompt = args
+            .iter()
+            .position(|arg| arg == "--prompt")
+            .and_then(|at| args.get(at + 1))
+            .and_then(serde_json::Value::as_str)
+            .expect("the argv carries a prompt");
+        assert_eq!(
+            prompt,
+            expected[member.as_str()].as_str(),
+            "member {member:?} was launched with a prompt nobody wrote"
+        );
+    }
+}
+
+/// A two-party member's own `task` takes the run's on the same terms, through the
+/// real onejudge engine.
+///
+/// One field, one rule, whichever kind of member carries it — and a two-party
+/// member reaches its harness by a different road entirely: no argv, an effective
+/// config this crate writes, and onejudge's own run driver in this process. What
+/// the harness was handed is read back from the harness, because that road is
+/// where a task the engine never carried would be lost.
+#[test]
+fn a_two_party_member_takes_the_runs_task_where_it_names_it() {
+    let workspace = Workspace::new();
+    let prompts = workspace.at("prompts.txt");
+    workspace.graph(&graph_with(
+        // Version 4 is the schema in which `{task}` is a token rather than the
+        // six characters it has always been, and the default graph is written
+        // against version 1.
+        &two_party_graph(&fake_harness(), NO_ENV).replace("version: 1", "version: 4"),
+        &[(
+            "members.worker.task",
+            "{task}\n\nJudge it against that context, and nothing else.",
+        )],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!(
+            "fake:complete-now RUN CONTEXT: ship the retry. fake:record-prompt={}",
+            prompts.display()
+        ),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    let recorded = std::fs::read_to_string(&prompts).expect("the agent recorded its prompt");
+    let carried = recorded
+        .lines()
+        .find(|line| line.contains("Judge it against that context"))
+        .unwrap_or_else(|| panic!("no side was given the member's own task:\n{recorded}"));
+    assert!(
+        carried.contains("RUN CONTEXT: ship the retry"),
+        "the token reached the engine unexpanded, so the member lost the run's context: {carried}"
+    );
+    assert!(
+        !carried.contains("{task}"),
+        "an unexpanded token reached the harness: {carried}"
+    );
+}
+
+/// Under the schema before the token, `{task}` in a member's task is the six
+/// characters it has always been.
+///
+/// The compatibility guarantee the version gate exists for, driven rather than
+/// argued: a member task is prose, and a document written against version 3 that
+/// happens to contain those characters says them. A run of that document must
+/// hand the harness exactly what the document says — the alternative is this
+/// crate silently rewriting prose somebody already shipped.
+#[test]
+fn a_task_token_is_literal_prose_under_the_schema_before_it() {
+    let workspace = Workspace::new();
+    let prompts = workspace.at("prompts.txt");
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.check_in.task".to_string(),
+                format!(
+                    "fake:complete-now mind the {{task}} in this sentence. fake:record-prompt={}",
+                    prompts.display()
+                ),
+            ),
+        ],
+    ));
+    workspace
+        .run(&[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now RUN CONTEXT: ship the retry.",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ])
+        .expect_code(0);
+
+    let recorded = std::fs::read_to_string(&prompts).expect("the member recorded its prompt");
+    assert!(
+        recorded.contains("mind the {task} in this sentence"),
+        "a version 3 document's prose was rewritten: {recorded}"
+    );
+    assert!(
+        !recorded.contains("RUN CONTEXT"),
+        "the token expanded under a schema that never had it: {recorded}"
+    );
+}
+
+/// The token takes the run's task from `--task-file` as readily as from `--task`.
+///
+/// The two flags are one task by the time a member is built, and a run whose
+/// context is long enough to want interpolating is exactly the run whose author
+/// reached for a file to hold it.
+#[test]
+fn a_task_token_takes_a_run_task_that_came_from_a_file() {
+    let workspace = Workspace::new();
+    let prompts = workspace.at("prompts.txt");
+    workspace.write(
+        "task.txt",
+        "fake:complete-now RUN CONTEXT: ship the retry, from a file.\n",
+    );
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 4\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.check_in.task".to_string(),
+                format!(
+                    "{{task}}\n\nReport progress. fake:record-prompt={}",
+                    prompts.display()
+                ),
+            ),
+        ],
+    ));
+    workspace
+        .run(&[
+            "run",
+            "./graph.yaml",
+            "--task-file",
+            "./task.txt",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ])
+        .expect_code(0);
+
+    let recorded = std::fs::read_to_string(&prompts).expect("the member recorded its prompt");
+    assert!(
+        recorded.contains("RUN CONTEXT: ship the retry, from a file."),
+        "the token expanded to nothing for a run whose task came from a file: {recorded}"
+    );
+    assert!(
+        recorded.contains("Report progress."),
+        "the member lost its own prose: {recorded}"
+    );
+}
+
+/// A member naming `{task}` in a run that supplied none is handed the rest of its
+/// own prose, and the run is not refused for it.
+///
+/// The taskless run is the one a graph of self-describing members makes, and a
+/// token that demanded a `--task` would take that shape away — a check-in member
+/// paced by a schedule would suddenly require prose nobody has typed.
+#[test]
+fn a_task_token_in_a_run_that_supplied_no_task_expands_to_nothing() {
+    let workspace = Workspace::new();
+    let prompts = workspace.at("prompts.txt");
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 4\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.check_in.task".to_string(),
+                format!(
+                    "{{task}}fake:complete-now write one status update. fake:record-prompt={}",
+                    prompts.display()
+                ),
+            ),
+        ],
+    ));
+    workspace
+        .run(&[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ])
+        .expect_code(0);
+    let recorded = std::fs::read_to_string(&prompts).expect("the member recorded its prompt");
+    assert!(
+        recorded.contains("write one status update"),
+        "the member never ran its own task: {recorded}"
+    );
+    assert!(
+        !recorded.contains("{task}"),
+        "an unexpanded token reached the harness: {recorded}"
+    );
+}
+
+/// A member whose *whole* task is the token, in a run that supplied none, is
+/// launched with an empty prompt rather than with a `--prompt` that has no value.
+///
+/// The argv edge the token opens. This crate used to drop empty arguments on the
+/// way to `oneharness run`, which can only ever remove a *value* — the argv holds
+/// no optional flags — leaving `--prompt` sitting next to the flag that followed
+/// it, so oneharness would read `--events` as the prompt and the member would run
+/// something nobody wrote. Asserted on the argv the member was launched with,
+/// because the failure was invisible in the outcome: a run that spends a turn on
+/// the wrong prompt exits 0.
+#[test]
+fn a_member_whose_whole_task_is_the_token_is_launched_with_an_empty_prompt() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 4\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            ("members.check_in.task".to_string(), "{task}".to_string()),
+        ],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let args: Vec<String> = started[0]["payload"]["args"]
+        .as_array()
+        .expect("a single-sided member names its argv")
+        .iter()
+        .map(|arg| arg.as_str().unwrap_or_default().to_string())
+        .collect();
+    let at = args
+        .iter()
+        .position(|arg| arg == "--prompt")
+        .expect("the argv carries a prompt flag");
+    assert_eq!(
+        args.get(at + 1).map(String::as_str),
+        Some(""),
+        "the empty prompt lost its place in the argv: {args:?}"
+    );
+    assert_eq!(
+        at + 2,
+        args.len(),
+        "the prompt is the last argument, so anything after it is a value that \
+         shifted into its place: {args:?}"
+    );
+    // And the member really was launched with it: what an empty prompt means is
+    // oneharness's and the harness's to decide, and this run reaches that decision
+    // rather than failing on an argv this crate malformed.
+    run.expect_code(0);
+    assert!(
+        run.of_kind("member-settled")
+            .iter()
+            .any(|event| labels(event)["member"] == "check_in"),
+        "the member launched with an empty prompt never settled: {}",
+        run.stdout
+    );
 }
 
 /// A graph whose every member carries its own job runs with **no `--task` at

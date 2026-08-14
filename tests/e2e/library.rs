@@ -334,8 +334,9 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
     // up: a graph of nothing but the scheduled member settles every non-cron
     // member at once, and its cron thread stops with them. It waits on `anchor`
     // so it lands in the *second* wave — a held member in the first would keep
-    // that wave from finishing, and the scheduled member's clock does not start
-    // counting until it does.
+    // that wave from finishing, and a schedule taking its first turn at t=0 —
+    // which is what a version 2 document's schedule does — hands its clock over
+    // only once that turn has settled.
     let release = workspace.at("cron-keeper-release");
     workspace.graph(&graph_with(
         concat!(
