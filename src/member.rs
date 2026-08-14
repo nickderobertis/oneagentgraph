@@ -489,7 +489,6 @@ pub(crate) fn announce(invocation: &Invocation, emitter: &Emitter, schedule: &Sc
     emitter.emit(EventKind::MemberStarted, started);
 }
 
-/// What `member-started` says about the launch it describes.
 pub(crate) fn started_payload(launch: &Launch) -> Map<String, Value> {
     match launch {
         Launch::Process { program, args, cwd } => process_started(program, args, cwd),
@@ -497,7 +496,6 @@ pub(crate) fn started_payload(launch: &Launch) -> Map<String, Value> {
     }
 }
 
-/// The `member-started` fields of a member that is a child process.
 pub(crate) fn process_started(program: &str, args: &[String], cwd: &Path) -> Map<String, Value> {
     payload([
         ("runner", Value::String("process".into())),
@@ -510,7 +508,6 @@ pub(crate) fn process_started(program: &str, args: &[String], cwd: &Path) -> Map
     ])
 }
 
-/// The `member-started` fields of a member driven in this process.
 pub(crate) fn library_started(launch: &crate::invoke::JudgeLaunch) -> Map<String, Value> {
     payload([
         ("runner", Value::String("library".into())),

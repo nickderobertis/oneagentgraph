@@ -136,8 +136,6 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
         })
     });
 
-    // Started: the deferred member's own `member-started`, carrying the launch it
-    // will run and the delay before it runs it.
     let published = stream(&workspace);
     let started: Value = published
         .lines()
@@ -170,8 +168,6 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
         "the deferred member's generated config was never written: {config}"
     );
 
-    // And no turn: nothing fired, nothing was published for a turn, and the
-    // harness that would have been paid for one never ran.
     let no_turn = |stream: &str| {
         assert!(
             !stream.contains("\"kind\":\"cron-fired\""),
@@ -487,6 +483,76 @@ fn a_cancel_stops_a_deferred_member_before_its_first_turn() {
         Some(0),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A deferred first turn that fails is the run's failure, reported and counted.
+///
+/// The route a failure takes is not the one a schedule firing at t=0 takes. That
+/// one settles inside its wave, where `run` records it directly; a deferred turn
+/// happens on the member's own clock thread and reaches the record and the exit
+/// status through the channel that thread reports on. A member that died quietly
+/// there would be a graph that exits 0 with a dead member in it, which is the
+/// failure shape this whole node exists to close.
+#[test]
+fn a_deferred_first_turn_that_fails_fails_the_run() {
+    let workspace = Workspace::new();
+    let release = workspace.at("paced-release");
+    let recorded = workspace.at("ticker.prompt");
+    // A chain naming an identity this journey gives no binary for: oneharness
+    // reaches nothing and the member dies, which is a death rather than a task it
+    // drove and did not finish.
+    workspace.write(
+        "failing.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    workspace.graph(
+        &deferred_graph(
+            &fake_harness(),
+            &release.display().to_string(),
+            (Some(1), 3600),
+            &recorded.display().to_string(),
+        )
+        .replace(
+            "  ticker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml",
+            "  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml",
+        ),
+    );
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    until("the deferred turn to die", || {
+        stream(&workspace).lines().any(|line| {
+            line.contains("\"kind\":\"member-died\"") && line.contains("\"member\":\"ticker\"")
+        })
+    });
+    assert!(
+        !recorded.exists(),
+        "the failing member ran a turn after all: {:?}",
+        std::fs::read_to_string(&recorded)
+    );
+
+    std::fs::write(&release, "release").expect("release the worker");
+    let output = child.wait_with_output().expect("the run finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a dead member on a deferred clock did not fail the run: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        workspace.record()["members"]["ticker"]
+            .as_str()
+            .unwrap_or_default(),
+        "died (provider-failure)",
+        "the record kept no outcome for the member its clock reported: {}",
+        workspace.record()
     );
 }
 

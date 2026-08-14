@@ -64,8 +64,8 @@ pub struct OnejudgeMember {
     pub persona: Option<ConfigRef>,
     /// The task prose. Usually supplied by `--task` instead.
     ///
-    /// `{task}` anywhere in it expands to the run's own `--task`; see
-    /// [`crate::invoke::TASK_TOKEN`].
+    /// `{task}` anywhere in it expands to the run's own `--task`, and `{{task}}`
+    /// is the literal text `{task}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     /// The side that does the work.
@@ -102,7 +102,7 @@ pub struct OneharnessMember {
     ///
     /// `{task}` anywhere in it expands to the run's own `--task`, which is how two
     /// members share one run's context and differ only in what they are told to do
-    /// with it; see [`crate::invoke::TASK_TOKEN`].
+    /// with it. `{{task}}` is the literal text `{task}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     /// The directory this member works in, when its job is not the graph's.

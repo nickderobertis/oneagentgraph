@@ -621,21 +621,19 @@ fn harness_families<'a>(
     Ok(families)
 }
 
-/// The token a member's own `task` interpolates the run's `--task` into.
-pub const TASK_TOKEN: &str = "{task}";
+const TASK_TOKEN: &str = "{task}";
 
-/// The one escape: `{{task}}` reaches the member as the literal text `{task}`,
-/// with the run's own task interpolated nowhere.
+/// `{{task}}` is the whole escape mechanism, deliberately.
 ///
-/// The whole escape mechanism, deliberately. A member's `task` is prose, not a
-/// template language: braces are ordinary characters everywhere else, `{{`
-/// doubles into nothing, and only these two exact spellings mean anything at all.
-/// A general `{{`-doubling rule would have changed what an already-written
-/// document says — every existing member task is literal text, and one containing
-/// `{{` anywhere would suddenly render differently. This spelling cannot: a
-/// document carrying `{{task}}` carries [`TASK_TOKEN`] too, so it is already
-/// inside the one set of documents expansion can change at all.
-pub const ESCAPED_TASK_TOKEN: &str = "{{task}}";
+/// A member's `task` is prose, not a template language: braces are ordinary
+/// characters everywhere else, `{{` doubles into nothing, and only these two
+/// exact spellings mean anything at all. A general `{{`-doubling rule would have
+/// changed what an already-written document says — every existing member task is
+/// literal text, and one containing `{{` anywhere would suddenly render
+/// differently. This spelling cannot: a document carrying `{{task}}` carries
+/// `{task}` too, so it is already inside the one set of documents expansion can
+/// change at all.
+const ESCAPED_TASK_TOKEN: &str = "{{task}}";
 
 /// One member's own task prose, with the run's `--task` interpolated into it.
 ///
@@ -672,7 +670,6 @@ fn expand_task(template: &str, given: Option<&str>) -> String {
     expanded
 }
 
-/// The prose one member drives: its own, with `{task}` expanded, else the run's.
 fn member_task(own: Option<&str>, context: &Context<'_>) -> Result<String, Error> {
     match own {
         Some(own) => Ok(expand_task(own, context.task)),
