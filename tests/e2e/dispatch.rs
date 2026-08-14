@@ -440,59 +440,75 @@ fn a_graph_whose_members_carry_their_own_jobs_needs_no_task_of_its_own() {
     );
 }
 
-/// A member's `task` and `dir` carry a path **exactly**, including the two
-/// characters that made an ordinary Windows path unspellable.
+/// A member's own `task` and `dir` carry a Windows path exactly, and the member
+/// is handed what the document said.
 ///
-/// The two journeys above are the ones this protects, and it is here because
-/// they could not protect themselves: they formatted a path into a double-quoted
-/// YAML scalar, and a Windows temporary directory is
-/// `C:\Users\runneradmin\AppData\Local\Temp\…`, where `\U` opens an eight-digit
-/// unicode escape. The parser demanded hexadecimal and refused the document, so
-/// both runs exited 2 having never reached the code under test — on the one
-/// platform this gate does not run.
-///
-/// So the path here is a Windows one whatever host is reading this, and the
-/// proof is on the two ends that matter: the real binary parses the document,
-/// and the value it parses to is the path character for character. Neither
-/// needs Windows, which is the point — the defect was a *serialization*
-/// question wearing a platform's clothes.
+/// The regression for the two journeys above, which could not hold it
+/// themselves: they formatted a path into a double-quoted YAML scalar, and `\U`
+/// in `C:\Users\…` opens an eight-digit unicode escape there, so the parser
+/// refused the document and both runs exited 2 without reaching what they test.
+/// The path here is a Windows one whatever host is reading this — the defect was
+/// a serialization question wearing a platform's clothes, so proving it needs no
+/// platform.
 #[test]
-fn a_composed_graph_carries_a_windows_path_exactly() {
+fn a_member_s_own_job_carries_a_windows_path_exactly() {
     let workspace = Workspace::new();
-    let windows = r"C:\Users\runneradmin\AppData\Local\Temp\.tmpQ1u9\check-in.prompt";
-    let task = format!("fake:complete-now write one update. fake:record-prompt={windows}");
-    let document = graph_with(
-        concat!(
-            "version: 3\nname: node-scope\n",
-            "env: {}\n",
-            "members:\n  check_in:\n    kind: oneharness\n",
-            "    oneharness_config: ./oneharness.toml\n",
-        ),
+    // The shape of a real one: a temporary directory under a user profile, which
+    // is where every journey's paths live on that platform.
+    let windows = r"C:\Users\runneradmin\AppData\Local\Temp\.tmpQ1u9";
+    let task = format!(r"fake:complete-now write one update. fake:seen={windows}\check-in.prompt");
+    let skeleton = concat!(
+        "version: 3\nname: node-scope\n",
+        "env: {}\n",
+        "members:\n  check_in:\n    kind: oneharness\n",
+        "    oneharness_config: ./oneharness.toml\n",
+    );
+
+    // A member's directory, which the run reads before it launches anything.
+    // This is the failure as it was observed: `oneagentgraph: invalid config:
+    // ./graph.yaml: did not find expected hexadecimal number`, exit 2.
+    workspace.graph(&graph_with(
+        skeleton,
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            ("members.check_in.dir", windows.to_string()),
+        ],
+    ));
+    workspace.run(&["validate", "./graph.yaml"]).expect_code(0);
+
+    // And a member's task, all the way to the harness: what the stream says it
+    // was given is the prose that was written, escape sequence and all. The
+    // directory is the run's here, because a Windows one names nothing on the
+    // host this runs on — parsing it is the half that can be held everywhere.
+    workspace.graph(&graph_with(
+        skeleton,
         &[
             (FAKE_HARNESS_KEY, fake_harness()),
             ("members.check_in.task", task.clone()),
-            ("members.check_in.dir", windows.to_string()),
         ],
-    );
-    workspace.graph(&document);
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "fake:complete-now: the run's own task, which this member does not use",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
 
-    // The failure as it was observed: `oneagentgraph: invalid config:
-    // ./graph.yaml: did not find expected hexadecimal number`, exit 2.
-    workspace.run(&["validate", "./graph.yaml"]).expect_code(0);
-
-    // And through the same typed boundary the run itself reads it at: a member
-    // is handed the path that was written, not an escape of it.
-    let parsed: oneagentgraph::config::GraphConfig =
-        serde_norway::from_str(&document).expect("the composed document parses");
-    let Some(oneagentgraph::config::Member::Oneharness(member)) = parsed.members.get("check_in")
-    else {
-        panic!("the composed document lost its member: {document}");
-    };
-    assert_eq!(member.task.as_deref(), Some(task.as_str()));
-    assert_eq!(
-        member.dir.as_deref(),
-        Some(std::path::Path::new(windows)),
-        "a member's directory did not survive being written into a graph document"
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let args = started[0]["payload"]["args"]
+        .as_array()
+        .expect("a child member names its argv")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        args.contains(&task),
+        "the member was handed something other than the task the document carried: {args:?}"
     );
 }
 

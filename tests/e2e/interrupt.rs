@@ -12,6 +12,13 @@
 //! answer that protocol: it parks, it is aborted, and the redirection arrives as
 //! the next turn.
 
+// llmlint: ignore-file[e2e_not_mocked] the same declaration its eight sibling
+// journey files carry, and for the same reason — see tests/e2e/support.rs: the
+// paid harness process is the one sanctioned double, replaced at oneharness's own
+// `ONEHARNESS_BIN_<ID>` seam. Here it is doubly load-bearing: what these journeys
+// drive is claude-code's stdin control protocol, and the double is the far end
+// that answers it.
+
 // The parked-turn fixture below serves the journeys that drive a *live* control
 // socket, and those are `cfg(unix)` because that is what a unix domain socket is.
 // On Windows the fixture is still compiled — so it is still type-checked and

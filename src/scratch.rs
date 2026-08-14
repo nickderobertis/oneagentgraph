@@ -454,9 +454,11 @@ mod platform {
     /// How much CPU `pid` has been charged so far, **in microseconds**.
     ///
     /// One unit on every platform, because the rule this feeds is a rate — see
-    /// [`Work::progressed`] — and a rate has to be in something. What the unit
-    /// is does not matter; that all three agree on it does, and microseconds is
-    /// the coarsest one no platform's own counter is coarser than.
+    /// [`Work::worked`] — and a rate has to be in something. Which unit
+    /// matters less than that all three agree on it: microseconds is finer than
+    /// the threshold can resolve over any window this is sampled at, so the two
+    /// platforms counting below it round away nothing the rule can see, and the
+    /// one counting above it converts exactly.
     #[cfg(target_os = "linux")]
     pub fn consumed(pid: i32) -> Option<u64> {
         // Fields 14 and 15 of `/proc/<pid>/stat`: the user and system time this
@@ -470,7 +472,7 @@ mod platform {
         let system: u64 = fields.next()?.parse().ok()?;
         Some(
             user.saturating_add(system)
-                .saturating_mul(micros_per_tick()),
+                .saturating_mul(micros_per_tick()?),
         )
     }
 
@@ -478,22 +480,25 @@ mod platform {
     ///
     /// It is a hundred per second on every ordinary Linux build, but it is an
     /// ABI constant of the *platform* rather than of the kernel — 1024 on alpha,
-    /// and settable elsewhere — so it is read. A refusal, or a value so absurd
-    /// that a tick would round to nothing, falls back to the usual hundred: a
-    /// reading in the wrong unit would move the rate the rule judges by, and the
-    /// direction that errs there is one that spares a wedged member.
+    /// and settable elsewhere — so it is read. A platform that will not answer,
+    /// or answers something a tick cannot be, yields no reading rather than one
+    /// in a unit nobody checked: an unreadable process counts as nothing, exactly
+    /// as it does when `/proc` cannot be parsed, and that is the direction that
+    /// still condemns a wedged member.
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey can reach the
+    // refusal below: `sysconf(_SC_CLK_TCK)` is a constant of any host that can
+    // run this suite. It degrades to the reading-less path a `/proc` parse
+    // failure already takes, which the journeys do cover.
     #[cfg(target_os = "linux")]
-    fn micros_per_tick() -> u64 {
+    fn micros_per_tick() -> Option<u64> {
         // SAFETY: `sysconf` reads a constant of the running platform into its
         // return value; nothing is borrowed and nothing is written.
-        let per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
-        let per_second = u64::try_from(per_second).unwrap_or(0);
-        if (1..=1_000_000).contains(&per_second) {
-            1_000_000 / per_second
-        } else {
-            10_000
-        }
+        let per_second = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).ok()?;
+        (1..=1_000_000)
+            .contains(&per_second)
+            .then(|| 1_000_000 / per_second)
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// The same reading from `libproc`, for the platform with no `/proc` to read
     /// it out of.
@@ -504,7 +509,7 @@ mod platform {
     /// longer compared for *equality* anywhere: a rule that asked whether the
     /// number moved at all read the same idle member as busy here and idle
     /// there, and coarsening this counter to hide that was calibrating a rule
-    /// whose shape was wrong. [`Work::progressed`] asks how *fast* it moved
+    /// whose shape was wrong. [`Work::worked`] asks how *fast* it moved
     /// instead, and this reports the same microseconds every platform does.
     #[cfg(target_vendor = "apple")]
     pub fn consumed(pid: i32) -> Option<u64> {
@@ -1007,7 +1012,7 @@ mod platform {
     /// The same call [`start_token`] reads a creation time out of, asked for the
     /// other two times it returns. `FILETIME` counts hundred-nanosecond ticks;
     /// the unit every platform reports in is microseconds, for the reason the
-    /// Linux reading gives — [`Work::progressed`] judges a rate, and a rate is
+    /// Linux reading gives — [`Work::worked`] judges a rate, and a rate is
     /// in something.
     pub fn consumed(pid: i32) -> Option<u64> {
         // Checked rather than `as`, for the reason [`start_token`] gives: a lossy
@@ -1526,7 +1531,7 @@ pub fn is_live(identity: ProcessIdentity) -> bool {
 /// stamped for it has been charged between them, in microseconds.
 ///
 /// Compared, never read. Two observations are a *rate* — see
-/// [`progressed`](Self::progressed) — which is the whole of what [`work`] is
+/// [`worked`](Self::worked) — which is the whole of what [`work`] is
 /// for.
 ///
 /// One number rather than a process-by-process record, because the question is
@@ -1547,42 +1552,42 @@ pub fn is_live(identity: ProcessIdentity) -> bool {
 pub struct Work(u64);
 
 /// The share of one core a member's tree has to be charged, over the window
-/// actually observed, before it counts as working: one hundredth.
+/// actually observed, before it counts as working — as a percentage.
 ///
-/// A threshold rather than "it moved at all", because *moved at all* is a
-/// question about a platform's accounting resolution rather than about the
-/// member. Linux charges CPU in ten-millisecond ticks, macOS in nanoseconds, and
-/// the same parked harness therefore never moved on the first and always moved
-/// on the second — which is exactly how an idle member evaded this watchdog on
-/// macOS until its provider gave up two minutes later. Coarsening the finer
-/// counter until it agreed was calibration: every constant that makes a parked
-/// harness look idle on a quiet runner is one a loaded runner can exceed.
+/// Public because `docs/contract.md` states it and `tests/contract.rs` gates the
+/// two against each other; this is the declaration, the document quotes it, and
+/// neither can move without the other.
 ///
-/// A rate has no such tuning, because the two populations it separates are four
-/// orders of magnitude apart and neither depends on the platform. Measured, on
-/// the host this was written on: a parked process is charged **0 µs/s**; one
-/// waking every half-second — the shape of a harness with a heartbeat, and the
-/// noisiest thing a wedged member's tree contains — **121 µs/s**, 0.012% of a
-/// core; a spin loop **987,678 µs/s**, 98.8% of a core. One hundredth of a core
-/// sits eighty times above the first pair and a hundred times below the second,
-/// which is as near the middle of that gap as makes no difference.
+/// A rate rather than "the reading moved", because *moved* is a question about
+/// the platform's accounting resolution — ten-millisecond ticks on Linux,
+/// nanoseconds on macOS — which the same parked harness answers differently on
+/// each. Coarsening the finer counter until they agreed was a calibration, and a
+/// constant that makes a parked harness look idle on a quiet runner is one a
+/// loaded runner can exceed.
 ///
-/// Neither margin is reachable by load. A process that is not running is not
-/// charged, so contention adds no CPU to a parked tree — to reach a hundredth of
-/// a core it would have to wake eighty times more often than this crate's own
-/// supervisor does *and* do real work each time, which is not noise but a member
-/// that is working. Contention cuts the other way for a busy tree, and a hundred
-/// runnable threads per core would have to be fighting over it before a spinning
-/// child fell to a hundredth.
-const WORKING_SHARE_OF_A_CORE: u64 = 100;
+/// The populations a rate separates are four orders of magnitude apart on every
+/// platform. Measured here over ten seconds each: a parked process is charged
+/// 0 µs/s; one waking every half-second — a harness with a heartbeat, the
+/// noisiest thing a wedged tree holds — 121 µs/s, 0.012% of a core; a spin loop
+/// 987,678 µs/s, 98.8%. One percent sits eighty times above the first pair and a
+/// hundred times below the second, and load closes neither margin: a process
+/// that is not running is not charged, and a spinning one would need a hundred
+/// runnable threads per core to fall this far.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] the populations either side of
+// this number have real journeys; the boundary itself has none, because holding a
+// process at it for a whole bound is a verdict that flips with runner load — the
+// flakiness this rate removes. It is covered either side in
+// `member::tests::a_tree_is_judged_by_how_fast_it_is_charged_cpu`.
+pub const WORKING_PERCENT_OF_A_CORE: u64 = 1;
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 impl Work {
     /// Whether the tree was working between this observation and `later`, taken
     /// `over` a window of wall-clock time.
     ///
     /// The comparison is a rate — CPU charged against wall time elapsed — held
-    /// against one hundredth of a core, for the reasons recorded on
-    /// `WORKING_SHARE_OF_A_CORE`. It is the *magnitude* of the change
+    /// against [`WORKING_PERCENT_OF_A_CORE`]. It is the *magnitude* of the change
     /// rather than its sign, because a process leaving the tree takes its whole
     /// lifetime's CPU out of the total: a member whose child just finished a
     /// second of work is a member that was working, and a total that fell says
@@ -1592,21 +1597,18 @@ impl Work {
     /// which condemns rather than spares. Every caller's window is at least one
     /// probe interval wide.
     #[must_use]
-    pub fn progressed(self, later: Self, over: Duration) -> bool {
+    pub fn worked(self, later: Self, over: Duration) -> bool {
         let charged = self.0.abs_diff(later.0);
         let window = u64::try_from(over.as_micros()).unwrap_or(u64::MAX);
-        charged > window / WORKING_SHARE_OF_A_CORE
+        charged > window * WORKING_PERCENT_OF_A_CORE / 100
     }
 
     /// A reading this crate's own tests supply, so the rule can be driven over a
     /// sequence of observations without a real process to take them from.
     ///
-    /// `#[cfg(test)]` is what keeps the invariant above true where it matters: no
-    /// shipped build has a second way to make one of these, so no caller can hand
-    /// the watchdog a number of its own choosing. The decision this feeds is a
-    /// judgement over readings, and a judgement is testable without waiting two
-    /// minutes on a real process to make one for it — on any platform, including
-    /// the two whose accounting differs and which no gate here can run.
+    /// `#[cfg(test)]` is what keeps the invariant above true where it matters:
+    /// no shipped build has a second way to make one, so no caller can hand the
+    /// watchdog a number of its own choosing.
     #[cfg(test)]
     pub(crate) const fn of_micros(micros: u64) -> Self {
         Self(micros)

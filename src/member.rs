@@ -231,7 +231,7 @@ impl Bounds {
 /// What counts as progress is a *rate*: the CPU charged to the processes stamped
 /// for this member — [`crate::scratch::work`] — against the wall time between two
 /// looks at it, held against the share of a core
-/// [`crate::scratch::Work::progressed`] fixes. Deliberately not "a live child
+/// [`crate::scratch::Work::worked`] fixes. Deliberately not "a live child
 /// exists" — a wedged member has one of those too, which is precisely why its
 /// harness never answers — so the rule that keeps a working member alive is not
 /// one that keeps a dead one alive with it. And deliberately not "the reading
@@ -379,8 +379,6 @@ impl Stall {
             return false;
         }
         if self.observed.due(now, self.probe_every) {
-            // Decided before the assignment, so the comparison reads the old
-            // sample and the new verdict replaces it.
             let before = self.observed.taken();
             let work = observe();
             self.observed = match before {
@@ -388,7 +386,7 @@ impl Stall {
                 // two looks decides which this is — a rate, so that neither
                 // verdict rests on how finely a platform happens to count.
                 Some((at, before)) => {
-                    if before.progressed(work, now.saturating_duration_since(at)) {
+                    if before.worked(work, now.saturating_duration_since(at)) {
                         // Which counts exactly as a published line does: the
                         // member has live work under it, and its stall clock
                         // starts again from here.
@@ -1054,6 +1052,7 @@ pub fn labels(run_id: &str, member: &str, persona: Option<&str>) -> Labels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Work;
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -1122,58 +1121,62 @@ mod tests {
         assert!(matches!(stall.observed, Observed::Nothing));
     }
 
-    /// The rule's *decision*, driven over a sequence of observations: a tree
-    /// charged what a wedged one is charged is condemned, and a tree charged what
-    /// a working one is charged is not.
+    /// The rule's *decision*, over supplied observations rather than a process:
+    /// the rates a wedged tree and a working one are charged, and the boundary
+    /// between them.
     ///
-    /// The journey pair in `tests/e2e/liveness.rs` proves the readings are the
-    /// kernel's; what it cannot prove is what is concluded from readings this
-    /// host does not produce. Both verdicts here rest on how *fast* a tree is
-    /// charged, and the two populations are four orders of magnitude apart, so
-    /// the decision is the same on every platform — including the two no gate
-    /// here runs, which is where an earlier rule silently stopped condemning
-    /// anything at all.
-    ///
-    /// The rates are measured rather than invented, on the host this was written
-    /// on, over ten seconds each.
+    /// The journeys prove the readings are the kernel's. This proves what is
+    /// concluded from readings taken on a platform this host is not, which is
+    /// where the rule this replaces silently stopped condemning anything.
     #[test]
     fn a_tree_is_judged_by_how_fast_it_is_charged_cpu() {
         let bound = Duration::from_secs(2);
+        let core = 1_000_000;
 
-        // A parked process is charged nothing at all — which is also, exactly,
-        // what a platform with no CPU accounting reports for every process it is
-        // asked about. Both are a member nothing under is working.
+        // Charged nothing: a parked tree, and also exactly what a platform with
+        // no CPU accounting at all reports for every process it is asked about.
         assert!(condemned(bound, 0).is_some(), "a wedged member was spared");
-        // A process waking every half second is the noisiest thing a wedged
-        // member's tree holds — the shape of a harness parked on a read with a
-        // heartbeat of its own. It is the reading macOS is precise enough to see
-        // and Linux is not, and the member it belongs to is wedged on both.
+        // 121 µs/s, measured: a process waking every half second, which is the
+        // noisiest thing a wedged tree holds and the reading macOS is precise
+        // enough to see. The member it belongs to is wedged on both platforms.
         assert!(
             condemned(bound, 121).is_some(),
             "a member whose tree only ticked its own bookkeeping was spared"
         );
-        // A spin loop: most of a core, for as long as it runs.
+        // 98.8% of a core, measured: a spin loop.
         assert_eq!(
             condemned(bound, 987_678),
             None,
             "a member whose child was burning a core was condemned anyway"
         );
-        // And a child doing a tenth of a core's steady work is working too — the
-        // threshold has to leave room above the noise it excludes, not merely
-        // below the loudest thing it admits.
-        assert_eq!(
-            condemned(bound, 100_000),
-            None,
-            "a member whose child was doing real work was condemned anyway"
+
+        // And the boundary itself, which no real process can be held at: a
+        // hundredth of a core is idle, and twice that is working.
+        assert!(condemned(bound, core / 100).is_some());
+        assert_eq!(condemned(bound, core / 50), None);
+
+        // A total that *falls* is work too. A process leaving the tree takes its
+        // whole lifetime's CPU out of the sum, so a member whose child just
+        // finished a second of work reads as a large negative change — and it was
+        // working. What the rule weighs is the size of the change, not its sign.
+        let started = Instant::now();
+        let mut stall = Stall::new(bound, started);
+        let (probe, mut charged) = (stall.probe_every, 4 * core);
+        assert!(!stall.judge(0, started + bound, || Work::of_micros(charged)));
+        charged -= core;
+        assert!(
+            !stall.judge(0, started + bound + probe, || Work::of_micros(charged)),
+            "a member whose working child exited between two looks was condemned for it"
         );
 
         // The bound is a floor rather than a deadline — establishing that a tree
-        // is idle takes two looks — but it is a floor within one probe of the
-        // bound, not two minutes past it.
-        let condemned_at = condemned(bound, 0).expect("a wedged member is condemned");
+        // is idle takes two looks — but a floor within one probe of the bound,
+        // not two minutes past it.
+        let at = condemned(bound, 0).expect("a wedged member is condemned");
+        let probe = Stall::new(bound, Instant::now()).probe_every;
         assert!(
-            condemned_at > bound && condemned_at <= bound + 2 * Stall::new(bound, Instant::now()).probe_every,
-            "a wedged member was condemned at {condemned_at:?}, which is not just past a {bound:?} bound"
+            at > bound && at <= bound + 2 * probe,
+            "a wedged member was condemned at {at:?}, which is not just past a {bound:?} bound"
         );
     }
 
@@ -1190,7 +1193,7 @@ mod tests {
         while at < bound * 4 {
             at += stall.probe_every;
             let charged = micros_per_second.saturating_mul(millis(at)) / 1_000;
-            if stall.judge(0, started + at, || crate::scratch::Work::of_micros(charged)) {
+            if stall.judge(0, started + at, || Work::of_micros(charged)) {
                 return Some(at);
             }
         }

@@ -305,24 +305,17 @@ pub const BASE: &str = concat!(
 /// the dotted key path beside it — parsed, assigned, and **serialized back**.
 ///
 /// This is how a journey gets a value it did not type itself — a path, a task,
-/// a URL — into a graph document, and the reason is a failure rather than a
-/// preference. A Windows temporary directory is
-/// `C:\Users\runneradmin\AppData\Local\Temp\…`; inside a *double-quoted* YAML
-/// scalar `\U` opens an eight-digit unicode escape, so two journeys that
-/// formatted such a path into one were refused by the parser — `did not find
-/// expected hexadecimal number` — before the run they were testing began. The
-/// path was fine and the run was fine; the format string was the bug.
+/// a URL — into a graph document. Formatting one in is what broke two journeys
+/// on Windows: `\U` in `C:\Users\…` opens a unicode escape inside a
+/// double-quoted scalar, and the parser refused the document. The correct
+/// quoting differs per value and per context — single quotes fail on an
+/// apostrophe, plain scalars on `: ` — so every journey's author would have to
+/// re-derive it. `serde_norway` does not: quoting what needs quoting is the one
+/// thing a serializer cannot get wrong.
 ///
-/// No formatting rule closes that class, because the rule has to be re-derived
-/// for every value and every context: single quotes fail on an apostrophe,
-/// plain scalars fail on `: `, and the author of the next journey has to know
-/// which. Serializing does not have to be re-derived. `serde_norway` renders
-/// the same YAML this crate parses back, and quoting a value that needs quoting
-/// is the one thing it cannot get wrong.
-///
-/// A `skeleton` is written with `concat!` rather than `format!` on purpose:
-/// literal text has nowhere for a value to be interpolated into, so the next
-/// one has nowhere to go but this function's `values`.
+/// A `skeleton` is `concat!` rather than `format!` on purpose: literal text has
+/// nowhere to interpolate into, so the next value has nowhere to go but
+/// `values`.
 pub fn graph_with<K: AsRef<str>, V: AsRef<str>>(skeleton: &str, values: &[(K, V)]) -> String {
     let mut document: serde_norway::Value = serde_norway::from_str(skeleton)
         .unwrap_or_else(|err| panic!("the skeleton is not a YAML document ({err}):\n{skeleton}"));
