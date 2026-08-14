@@ -513,6 +513,53 @@ fn members_share_the_runs_task_where_they_name_it_and_replace_it_where_they_do_n
     }
 }
 
+/// A two-party member's own `task` takes the run's on the same terms, through the
+/// real onejudge engine.
+///
+/// One field, one rule, whichever kind of member carries it — and a two-party
+/// member reaches its harness by a different road entirely: no argv, an effective
+/// config this crate writes, and onejudge's own run driver in this process. What
+/// the harness was handed is read back from the harness, because that road is
+/// where a task the engine never carried would be lost.
+#[test]
+fn a_two_party_member_takes_the_runs_task_where_it_names_it() {
+    let workspace = Workspace::new();
+    let prompts = workspace.at("prompts.txt");
+    workspace.graph(&graph_with(
+        &two_party_graph(&fake_harness(), NO_ENV),
+        &[(
+            "members.worker.task",
+            "{task}\n\nJudge it against that context, and nothing else.",
+        )],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!(
+            "fake:complete-now RUN CONTEXT: ship the retry. fake:record-prompt={}",
+            prompts.display()
+        ),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    let recorded = std::fs::read_to_string(&prompts).expect("the agent recorded its prompt");
+    let carried = recorded
+        .lines()
+        .find(|line| line.contains("Judge it against that context"))
+        .unwrap_or_else(|| panic!("no side was given the member's own task:\n{recorded}"));
+    assert!(
+        carried.contains("RUN CONTEXT: ship the retry"),
+        "the token reached the engine unexpanded, so the member lost the run's context: {carried}"
+    );
+    assert!(
+        !carried.contains("{task}"),
+        "an unexpanded token reached the harness: {carried}"
+    );
+}
+
 /// A member naming `{task}` in a run that supplied none is handed the rest of its
 /// own prose, and the run is not refused for it.
 ///

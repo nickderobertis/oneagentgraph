@@ -73,7 +73,7 @@ members. Such a graph has nothing to hold it past the quiescence rule below, so
 the deferred turn never comes due and the run exits 0 without it. The check is
 per member rather than per graph, because a sibling firing at t=0 does not rescue
 it — a scheduled member is not counted as live work either.
-`run::refuse_a_graph_that_never_fires` is that check, at the end of `ready_order`
+`run::refuse_a_turn_that_never_comes_due` is that check, at the end of `ready_order`
 so `run` and `validate` share it and so it walks a dependency graph already proven
 acyclic and complete.
 

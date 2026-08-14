@@ -937,11 +937,11 @@ pub fn ready_order(graph: &GraphConfig) -> Result<Vec<Vec<String>>, Error> {
         }
         waves.push(ready);
     }
-    refuse_a_graph_that_never_fires(graph)?;
+    refuse_a_turn_that_never_comes_due(graph)?;
     Ok(waves)
 }
 
-/// Refuse a graph in which a deferred first turn could never come due.
+/// Refuse a member whose deferred first turn could never come due.
 ///
 /// The scheduler quiesces when no live work remains whose ancestry is not solely
 /// cron members — see [`solely_cron_descended`] — and a clock checks that count
@@ -966,7 +966,7 @@ pub fn ready_order(graph: &GraphConfig) -> Result<Vec<Vec<String>>, Error> {
 /// Called from the *end* of [`ready_order`] so that `run` and `validate` both make
 /// it rather than each making it separately, and so that the descent below walks a
 /// dependency graph already proven acyclic and complete.
-fn refuse_a_graph_that_never_fires(graph: &GraphConfig) -> Result<(), Error> {
+fn refuse_a_turn_that_never_comes_due(graph: &GraphConfig) -> Result<(), Error> {
     let mut memo = BTreeMap::new();
     if !graph
         .members
