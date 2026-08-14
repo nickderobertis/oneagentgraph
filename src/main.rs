@@ -296,6 +296,7 @@ fn preflight(
             scratch: &member_scratch,
             graph_dir: document.base_dir.as_deref(),
             task,
+            schema: graph.version,
             session: "validate",
             oneharness_bin: &oneharness_bin(env),
         };

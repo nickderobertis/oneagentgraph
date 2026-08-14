@@ -60,8 +60,8 @@ use crate::event::{
 };
 use crate::invoke::JudgeLaunch;
 use crate::member::{
-    died_payload, library_started, payload, settle_report, summarize, unstartable, Bounds, Death,
-    Outcome, Rule, Stall, HEARTBEAT_INTERVAL,
+    died_payload, payload, settle_report, summarize, unstartable, Bounds, Death, Outcome, Rule,
+    Stall, HEARTBEAT_INTERVAL,
 };
 
 /// How long a condemned member's engine is given to answer the teardown before
@@ -82,8 +82,6 @@ const TEARDOWN_POLL: Duration = Duration::from_millis(100);
 /// Run one two-party member to its end, publishing every envelope it produces.
 #[must_use]
 pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
-    emitter.emit(EventKind::MemberStarted, library_started(launch));
-
     // The group is opened before the plan is driven for the same reason
     // `crate::member` opens one before it spawns: it is what the spawns go
     // *into*. Here they are not this module's spawns to make — onejudge starts
@@ -669,7 +667,7 @@ mod tests {
             .into_iter()
             .map(|event| event.kind)
             .collect();
-        assert_eq!(kinds, vec![EventKind::MemberStarted, EventKind::MemberDied]);
+        assert_eq!(kinds, vec![EventKind::MemberDied]);
     }
 
     /// One live tool event opens its turn and reports what it acted on; a turn

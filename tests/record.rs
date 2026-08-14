@@ -18,6 +18,9 @@
 //!   changed when onejudge became a library. It is not in `record.json`, but it
 //!   is in the `events.jsonl` a record points at, which outlives the run exactly
 //!   as the record does, and onepipeline compiles against it.
+//! * `member-started.json` — the three shapes of the payload a supervisor reads
+//!   first, on the same terms: one per runner, plus the one a member publishes
+//!   when it comes up without taking a turn.
 //!
 //! Regenerating an old record golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -34,7 +37,9 @@
 use std::collections::BTreeMap;
 
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
-use oneagentgraph::event::{Cause, Disposition, MemberDied, ENVELOPE_VERSION};
+use oneagentgraph::event::{
+    Cause, Disposition, MemberDied, MemberStarted, Runner, ENVELOPE_VERSION,
+};
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
 use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
@@ -222,6 +227,90 @@ fn the_member_died_goldens_are_exactly_what_this_build_writes() {
 
     let read: Vec<MemberDied> = serde_json::from_str(golden).expect("the golden reads");
     assert_eq!(read, golden_deaths(), "the golden did not round-trip");
+}
+
+/// The three `member-started` payloads this build writes, in the order the golden
+/// commits them: the member driven in this process, the child process, and the
+/// child that came up without taking a turn.
+fn golden_starts() -> Vec<MemberStarted> {
+    vec![
+        MemberStarted {
+            runner: Runner::Library {
+                engine: "onejudge".into(),
+                config: "/state/node-scope-1786171301679-1447994/members/worker/onejudge.yaml"
+                    .into(),
+                worktree: "/state/node-scope-1786171301679-1447994/members/worker".into(),
+            },
+            start_after: None,
+        },
+        MemberStarted {
+            runner: Runner::Process {
+                program: "oneharness".into(),
+                args: vec![
+                    "run".into(),
+                    "--config".into(),
+                    "/state/node-scope-1786171301679-1447994/members/reporter/oneharness.toml"
+                        .into(),
+                    "--cwd".into(),
+                    "/work".into(),
+                    "--events".into(),
+                    "--stream".into(),
+                    "--prompt".into(),
+                    "write one status update".into(),
+                ],
+                cwd: "/state/node-scope-1786171301679-1447994/members/reporter".into(),
+            },
+            start_after: None,
+        },
+        MemberStarted {
+            runner: Runner::Process {
+                program: "oneharness".into(),
+                args: vec![
+                    "run".into(),
+                    "--config".into(),
+                    "/state/node-scope-1786171301679-1447994/members/reporter/oneharness.toml"
+                        .into(),
+                    "--cwd".into(),
+                    "/work".into(),
+                    "--events".into(),
+                    "--stream".into(),
+                    "--prompt".into(),
+                    "write one status update".into(),
+                ],
+                cwd: "/state/node-scope-1786171301679-1447994/members/reporter".into(),
+            },
+            start_after: Some(1800),
+        },
+    ]
+}
+
+/// `member-started`'s three shapes are byte-for-byte the committed golden.
+///
+/// The payload a supervisor reads *first*, and the one this change touched: it
+/// gained `start_after`, so the shape without it is committed beside the shape
+/// with it. Both halves have to keep holding. A member taking its turn now must
+/// publish no delay at all — a `null` would have a consumer read a member that is
+/// waiting for something — and neither runner may carry the other's fields, which
+/// is what makes `runner` a field anything can branch on.
+///
+/// It rides envelope version 1, unchanged, for the reason the deaths above do.
+#[test]
+fn the_member_started_goldens_are_exactly_what_this_build_writes() {
+    assert_eq!(ENVELOPE_VERSION, 1, "the envelope this payload rides");
+    let golden = include_str!("golden/member-started.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_starts()).expect("the payloads serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "member-started's shape changed. If that was deliberate it is a change to \
+         docs/contract.md and to every consumer compiled against it — amend the contract \
+         and commit the new bytes here in the same change."
+    );
+
+    let read: Vec<MemberStarted> = serde_json::from_str(golden).expect("the golden reads");
+    assert_eq!(read, golden_starts(), "the golden did not round-trip");
 }
 
 /// The three turn-control records this build writes, in the order the golden

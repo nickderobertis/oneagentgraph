@@ -42,17 +42,22 @@ contains a schedule loop, so a cron member cannot hold its wave open and later
 waves are reachable after that first outcome.
 
 `config::Schedule::first_turn_after` decides whether that first firing happens in
-the wave at all. It is `start_after` when the document names one and `every`
-otherwise, and `run::defers_first_turn` is the predicate the wave splits on:
+the wave at all, and takes the schema the document declares because that is what
+an omitted `start_after` means: `every` from `config::FIRST_START_AFTER_VERSION`,
+and `0` — a turn in the wave, as it always was — under every version before it.
+The field itself is refused below that version rather than ignored, so a document
+cannot ask for a delay and silently receive its opposite.
+`run::defers_first_turn` is the predicate the wave splits on:
 
 - **`start_after: 0`** — the member is in `run_wave`'s runnable set, takes its
   turn at t=0, and `run::spawn_cron` takes its clock over once that turn settles.
   This is what every schedule did before the field existed.
 - **anything else** — the member is not in the runnable set. `run::run` publishes
-  its `member-started` from `member::started_payload` — the same `runner` and
-  launch description a turn's own would carry, plus `start_after` — and
-  `run::spawn_cron` starts its clock **before** `run_wave` blocks. Before, not after, because `run_wave` waits
-  for every member in the wave: a clock started on the far side of that call
+  its `member-started` from the same `event::MemberStarted` a turn's own start
+  builds — one `event::Runner` describing the launch, plus the `start_after` a
+  member that took no turn carries — and `run::spawn_cron` starts its clock
+  **before** `run_wave` blocks. Before, not after, because `run_wave` waits for
+  every member in the wave: a clock started on the far side of that call
   would begin counting only once this member's siblings were done, and the
   sibling a pacemaker paces is exactly the one that takes the whole run. Both
   happen when the member's own wave is reached, which for a member with no `deps`
@@ -73,9 +78,9 @@ members. Such a graph has nothing to hold it past the quiescence rule below, so
 the deferred turn never comes due and the run exits 0 without it. The check is
 per member rather than per graph, because a sibling firing at t=0 does not rescue
 it — a scheduled member is not counted as live work either.
-`run::refuse_a_turn_that_never_comes_due` is that check, at the end of `ready_order`
-so `run` and `validate` share it and so it walks a dependency graph already proven
-acyclic and complete.
+`run::refuse_a_turn_that_never_comes_due` is that check, at the end of
+`ready_order` so `run` and `validate` share it and so it walks a dependency graph
+already proven acyclic and complete.
 
 `config::MAX_SCHEDULE_SECONDS` bounds both of a schedule's spans — a typo guard
 rather than a policy about cadence, since a `u64` of seconds is a member that
@@ -83,18 +88,21 @@ never fires and never says why. `run::cron` compares the span it is counting —
 `run::first_span`, then `every` — against elapsed time rather than computing a
 deadline, so no span a document can carry reaches arithmetic that could panic.
 
-`run::spawn_cron` owns the member's clock either way. `run::cron`
-watches the existing stop, member-stop, trigger, and reset files. It counts down
-the interval currently pending — `start_after` until the member has taken a turn
-and `every` from then on, which is also what a `reset-timer` on a resettable
-schedule restarts, so a reset before the first turn restores the whole delay
-rather than promoting the member to its steady cadence. A schedule that fired at
+`run::spawn_cron` owns the member's clock either way, and is handed the span its
+first turn owes — `run::first_span`, resolved where the schema is known, so the
+clock itself needs no version. `run::cron` watches the existing stop,
+member-stop, trigger, and reset files. It counts down the interval currently
+pending — that first span until the member has taken a turn and `every` from then
+on, which is also what a `reset-timer` on a resettable schedule restarts, so a
+reset before the first turn restores the whole delay rather than promoting the
+member to its steady cadence. A schedule that fired at
 t=0 has nothing left to defer, so its pending interval is `every` from the start.
 
 Before a due or triggered firing, it checks the shared count of live work whose
 ancestry is not solely cron members. `run::solely_cron_descended` computes that
-property from the validated DAG. When the count reaches zero the clock exits without
-waiting for its next interval, which is the scheduler's quiescence boundary.
+property from the validated DAG. When the count reaches zero the clock exits
+without waiting for its next interval, which is the scheduler's quiescence
+boundary.
 
 Each successful later firing calls `run::run_cron_chain`. The reachable
 descendants are selected by `run::descendants_of`, traversed in the same
@@ -113,5 +121,6 @@ last admitted chain is present in the final stream and record.
 
 The event vocabulary gains no kind. `member-started` gains one payload field,
 `start_after`, on the one a deferred member publishes when it comes up without
-taking a turn. There is still no wave-boundary event; consumers continue to infer
-concurrency and ordering from member event timings.
+taking a turn; `tests/golden/member-started.json` commits every shape of that
+payload, with and without it. There is still no wave-boundary event; consumers
+continue to infer concurrency and ordering from member event timings.

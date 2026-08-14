@@ -401,7 +401,7 @@ fn members_share_the_runs_task_where_they_name_it_and_replace_it_where_they_do_n
     );
     workspace.graph(&graph_with(
         concat!(
-            "version: 3\nname: node-scope\n",
+            "version: 4\nname: node-scope\n",
             "env: {}\n",
             "members:\n",
             "  orchestrator:\n    kind: oneharness\n",
@@ -535,7 +535,10 @@ fn a_two_party_member_takes_the_runs_task_where_it_names_it() {
     let workspace = Workspace::new();
     let prompts = workspace.at("prompts.txt");
     workspace.graph(&graph_with(
-        &two_party_graph(&fake_harness(), NO_ENV),
+        // Version 4 is the schema in which `{task}` is a token rather than the
+        // six characters it has always been, and the default graph is written
+        // against version 1.
+        &two_party_graph(&fake_harness(), NO_ENV).replace("version: 1", "version: 4"),
         &[(
             "members.worker.task",
             "{task}\n\nJudge it against that context, and nothing else.",
@@ -569,6 +572,58 @@ fn a_two_party_member_takes_the_runs_task_where_it_names_it() {
     );
 }
 
+/// Under the schema before the token, `{task}` in a member's task is the six
+/// characters it has always been.
+///
+/// The compatibility guarantee the version gate exists for, driven rather than
+/// argued: a member task is prose, and a document written against version 3 that
+/// happens to contain those characters says them. A run of that document must
+/// hand the harness exactly what the document says — the alternative is this
+/// crate silently rewriting prose somebody already shipped.
+#[test]
+fn a_task_token_is_literal_prose_under_the_schema_before_it() {
+    let workspace = Workspace::new();
+    let prompts = workspace.at("prompts.txt");
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.check_in.task".to_string(),
+                format!(
+                    "fake:complete-now mind the {{task}} in this sentence. fake:record-prompt={}",
+                    prompts.display()
+                ),
+            ),
+        ],
+    ));
+    workspace
+        .run(&[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now RUN CONTEXT: ship the retry.",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ])
+        .expect_code(0);
+
+    let recorded = std::fs::read_to_string(&prompts).expect("the member recorded its prompt");
+    assert!(
+        recorded.contains("mind the {task} in this sentence"),
+        "a version 3 document's prose was rewritten: {recorded}"
+    );
+    assert!(
+        !recorded.contains("RUN CONTEXT"),
+        "the token expanded under a schema that never had it: {recorded}"
+    );
+}
+
 /// The token takes the run's task from `--task-file` as readily as from `--task`.
 ///
 /// The two flags are one task by the time a member is built, and a run whose
@@ -584,7 +639,7 @@ fn a_task_token_takes_a_run_task_that_came_from_a_file() {
     );
     workspace.graph(&graph_with(
         concat!(
-            "version: 3\nname: node-scope\n",
+            "version: 4\nname: node-scope\n",
             "env: {}\n",
             "members:\n  check_in:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
@@ -634,7 +689,7 @@ fn a_task_token_in_a_run_that_supplied_no_task_expands_to_nothing() {
     let prompts = workspace.at("prompts.txt");
     workspace.graph(&graph_with(
         concat!(
-            "version: 3\nname: node-scope\n",
+            "version: 4\nname: node-scope\n",
             "env: {}\n",
             "members:\n  check_in:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
@@ -684,7 +739,7 @@ fn a_member_whose_whole_task_is_the_token_is_launched_with_an_empty_prompt() {
     let workspace = Workspace::new();
     workspace.graph(&graph_with(
         concat!(
-            "version: 3\nname: node-scope\n",
+            "version: 4\nname: node-scope\n",
             "env: {}\n",
             "members:\n  check_in:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",

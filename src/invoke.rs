@@ -176,6 +176,9 @@ pub struct Context<'a> {
     pub graph_dir: Option<&'a Path>,
     /// The task prose, when the run supplied one.
     pub task: Option<&'a str>,
+    /// The schema version the graph document declares, which decides how a
+    /// member's own task text is read — see [`crate::config::FIRST_TASK_TOKEN_VERSION`].
+    pub schema: u32,
     /// The session name threaded across this member's turns.
     pub session: &'a str,
     /// The `oneharness` binary onejudge shells out to, and that a single-sided
@@ -656,6 +659,12 @@ fn expand_task(template: &str, given: Option<&str>) -> String {
 
 fn member_task(own: Option<&str>, context: &Context<'_>) -> Result<String, Error> {
     match own {
+        // Under a schema that predates the token, a member's task is the prose it
+        // has always been: the six characters `{task}` said themselves there, and
+        // a document is entitled to keep meaning what it meant.
+        Some(own) if context.schema < crate::config::FIRST_TASK_TOKEN_VERSION => {
+            Ok(own.to_string())
+        }
         Some(own) => Ok(expand_task(own, context.task)),
         None => task(context),
     }
@@ -793,13 +802,14 @@ mod tests {
         dir
     }
 
-    /// A [`Context`] over `dir`.
+    /// A [`Context`] over `dir`, under the schema this build writes.
     fn context<'a>(dir: &'a Path, scratch: &'a Path) -> Context<'a> {
         Context {
             dir,
             scratch,
             graph_dir: Some(dir),
             task: Some("do the thing"),
+            schema: crate::config::SCHEMA_VERSION,
             session: "s",
             oneharness_bin: "oneharness",
         }
@@ -1052,6 +1062,23 @@ mod tests {
                 flag(&process_args(&single_sided(own), &taskless), "--prompt").as_deref(),
                 Some(alone),
                 "{own:?} in a run with no task"
+            );
+        }
+
+        // And under every schema that predates the token, a member's own task is
+        // the prose it has always been — the six characters said themselves
+        // there, and a document written then keeps meaning what it meant.
+        for older in crate::config::FIRST_SCHEMA_VERSION..crate::config::FIRST_TASK_TOKEN_VERSION {
+            let mut before = context(dir.path(), &scratch);
+            before.schema = older;
+            assert_eq!(
+                flag(
+                    &process_args(&single_sided("{task}\n\nand report it"), &before),
+                    "--prompt"
+                )
+                .as_deref(),
+                Some("{task}\n\nand report it"),
+                "version {older} expanded a token that schema never had"
             );
         }
 

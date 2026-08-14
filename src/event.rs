@@ -153,6 +153,60 @@ pub struct Artifact {
     pub bytes: u64,
 }
 
+/// The payload of an [`EventKind::MemberStarted`] event.
+///
+/// A member says what it is about to run before it runs it, and the two runners
+/// describe different things — so the runner is a typed alternation carrying its
+/// own facts rather than a string beside a bag of optional ones, and no consumer
+/// can meet a `library` member with an argv or a `process` one with a worktree.
+///
+/// [`start_after`](Self::start_after) is the one field orthogonal to both: it is
+/// present when the member came up *without* taking a turn, and says how many
+/// seconds until the first one. Only a schedule defers a turn, so today only a
+/// single-sided member carries it — but that is the graph schema's rule rather
+/// than this payload's, and a consumer reads the field the same way whichever
+/// runner it arrives on.
+// `deny_unknown_fields` sits on [`Runner`] rather than here, because serde cannot
+// carry it across a `flatten`: the flattened field is what the remaining keys are
+// handed to, so it is the one that refuses a key nobody declared — including a
+// field belonging to the *other* runner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberStarted {
+    /// What runs this member, and what that runner is.
+    #[serde(flatten)]
+    pub runner: Runner,
+    /// Seconds until this member's first turn, on the event a member publishes
+    /// when it comes up without taking one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_after: Option<u64>,
+}
+
+/// What runs one member, and the facts that runner has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "runner", rename_all = "lowercase", deny_unknown_fields)]
+pub enum Runner {
+    /// Driven in this process through a library.
+    Library {
+        /// The engine driving it.
+        engine: String,
+        /// The effective config it was given.
+        config: String,
+        /// The directory the harness works in. Not `cwd`: this member has no
+        /// working directory of its own, and naming one would claim a thing that
+        /// is not true.
+        worktree: String,
+    },
+    /// A child process of its own.
+    Process {
+        /// The program spawned.
+        program: String,
+        /// Its arguments.
+        args: Vec<String>,
+        /// The directory the child runs in.
+        cwd: String,
+    },
+}
+
 /// The payload of an [`EventKind::TurnActivity`] event: a bounded tool summary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

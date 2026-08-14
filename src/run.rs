@@ -27,7 +27,7 @@ use serde_json::{Map, Value};
 use crate::clock::unix_millis;
 use crate::config::{GraphConfig, Member};
 use crate::error::{Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_SUCCESS};
-use crate::event::{Emitter, EventKind};
+use crate::event::{Emitter, EventKind, MemberStarted};
 use crate::invoke::{self, Context, Invocation};
 use crate::member::{self, Bounds, Outcome};
 use crate::resolve::{ResolvedRef, Resolver};
@@ -967,7 +967,7 @@ fn refuse_a_turn_that_never_comes_due(graph: &GraphConfig) -> Result<(), Error> 
     let deferred: Vec<&str> = graph
         .members
         .iter()
-        .filter(|(_, member)| defers_first_turn(member))
+        .filter(|(_, member)| defers_first_turn(member, graph.version))
         .map(|(name, _)| name.as_str())
         .collect();
     if deferred.is_empty() {
@@ -1076,6 +1076,7 @@ pub fn run(
             scratch: &scratch,
             graph_dir: graph_document.base_dir.as_deref(),
             task: request.task.as_deref(),
+            schema: graph.version,
             session: &format!("{run_id}-{name}"),
             oneharness_bin: &request.oneharness_bin,
         };
@@ -1124,7 +1125,7 @@ pub fn run(
             if unsuccessful.is_empty() {
                 // A schedule that defers its first turn takes no turn in this
                 // wave. It still comes up here, with everything else.
-                if defers_first_turn(&graph.members[&name]) {
+                if defers_first_turn(&graph.members[&name], graph.version) {
                     deferred.push(name);
                 } else {
                     runnable.push(name);
@@ -1148,42 +1149,25 @@ pub fn run(
         for name in deferred {
             let (invocation, _) = &invocations[&name];
             let schedule = schedule(&graph.members[&name]).expect("a deferred member is scheduled");
-            // The same `member-started` a turn of its own would publish, plus the
-            // delay before that turn: the member is up, and this is what it will
-            // run when its clock comes due.
-            //
-            // llmlint: ignore-block[changed_behavior_has_e2e] no journey can
-            // reach this with a two-party member, and none should be written
-            // pretending to: `schedule:` is a field of
-            // `crate::config::OneharnessMember` alone, so `schedule` above
-            // answers `None` for every onejudge member and a deferred one cannot
-            // exist. What is reachable here is a child process, and the journeys
-            // for it are `a_deferred_schedule_starts_with_the_graph_and_takes_no_turn`
-            // and its neighbours in `tests/e2e/scheduler.rs`; the library arm of
-            // `started_payload` belongs to a member that really is starting, and
-            // `tests/e2e/dispatch.rs` drives that one.
-            // llmlint: ignore-block[invalid_states_unrepresentable] the same
-            // reason `member::started_payload` carries: an event payload is a
-            // `Map<String, Value>` throughout this crate, because that is the
-            // envelope `docs/contract.md` fences and `tests/contract.rs` drives.
-            // `start_after` is one more field in that map, and typing it here
-            // alone would leave every other payload untyped beside it.
-            let mut started = member::started_payload(&invocation.launch);
-            started.insert(
-                "start_after".to_string(),
-                Value::from(schedule.first_turn_after()),
-            );
-            // llmlint: ignore-end[invalid_states_unrepresentable]
+            // The same `member-started` a turn of its own would publish, plus
+            // the delay before that turn: the member is up, and this names what
+            // it will run when its clock comes due.
             emitter
                 .with_labels(member::labels(
                     emitter.stream(),
                     &name,
                     invocation.persona.as_deref(),
                 ))
-                .emit(EventKind::MemberStarted, started);
-            // llmlint: ignore-end[changed_behavior_has_e2e]
+                .emit(
+                    EventKind::MemberStarted,
+                    member::started_payload(&MemberStarted {
+                        runner: member::runner(&invocation.launch),
+                        start_after: Some(schedule.first_turn_after(graph.version)),
+                    }),
+                );
             cron_threads.push(spawn_cron(
                 schedule,
+                first_span(&schedule, graph.version),
                 name,
                 graph.clone(),
                 invocations.clone(),
@@ -1216,6 +1200,7 @@ pub fn run(
             if let Some(schedule) = schedule(&graph.members[&name]) {
                 cron_threads.push(spawn_cron(
                     schedule,
+                    first_span(&schedule, graph.version),
                     name,
                     graph.clone(),
                     invocations.clone(),
@@ -1359,8 +1344,8 @@ fn schedule(member: &Member) -> Option<crate::config::Schedule> {
 ///
 /// Named for the turn because the turn is all that waits: such a member is built,
 /// refused if it cannot be, and announced exactly where it always was.
-fn defers_first_turn(member: &Member) -> bool {
-    schedule(member).is_some_and(|schedule| schedule.first_turn_after() > 0)
+fn defers_first_turn(member: &Member, schema: u32) -> bool {
+    schedule(member).is_some_and(|schedule| schedule.first_turn_after(schema) > 0)
 }
 
 fn solely_cron_descended(
@@ -1386,6 +1371,7 @@ fn solely_cron_descended(
 #[allow(clippy::too_many_arguments)]
 fn spawn_cron(
     schedule: crate::config::Schedule,
+    first_span: Duration,
     name: String,
     graph: GraphConfig,
     invocations: BTreeMap<String, (Invocation, PathBuf)>,
@@ -1407,6 +1393,7 @@ fn spawn_cron(
         let descendants = descendants_of(&name, &graph);
         let outcome = cron(
             &schedule,
+            first_span,
             &name,
             invocation,
             &member_emitter,
@@ -1557,6 +1544,7 @@ fn run_wave(
 #[allow(clippy::too_many_arguments)]
 fn cron(
     schedule: &crate::config::Schedule,
+    first_span: Duration,
     name: &str,
     invocation: &Invocation,
     emitter: &Emitter,
@@ -1575,13 +1563,14 @@ fn cron(
     let reset = signals.join(format!("{name}.reset"));
     let stopped = || stop.exists() || own_stop.exists();
     let mut last = None;
-    // The interval this clock is currently counting down — see `first_span`
+    // The interval this clock is currently counting down — `first_span` while it
+    // owes the member a first turn, and the cadence after that
     // — and the moment it started counting. A span measured against `elapsed`
     // rather than a deadline computed by `Instant + Duration`: the interval comes
     // from a document, and that addition *panics* on a sum the platform cannot
     // represent, while comparing two `Duration`s is total for every value a
     // document can carry.
-    let mut interval = first_span(schedule);
+    let mut interval = first_span;
     let mut counting_since = Instant::now();
     loop {
         std::thread::sleep(TICK);
@@ -1631,8 +1620,8 @@ fn cron(
 /// already happened in the wave that started the member — a clock handed a
 /// schedule that fired at t=0 owes the cadence rather than a delay. Every span
 /// after this one is the cadence, whichever this was.
-fn first_span(schedule: &crate::config::Schedule) -> Duration {
-    Duration::from_secs(match schedule.first_turn_after() {
+fn first_span(schedule: &crate::config::Schedule, schema: u32) -> Duration {
+    Duration::from_secs(match schedule.first_turn_after(schema) {
         0 => schedule.every,
         waited => waited,
     })
@@ -1819,21 +1808,31 @@ mod tests {
             start_after,
             resettable: false,
         };
+        let current = crate::config::SCHEMA_VERSION;
         assert_eq!(
-            first_span(&schedule(1800, None)),
+            first_span(&schedule(1800, None), current),
             Duration::from_secs(1800),
             "a schedule naming no delay owes one whole interval"
         );
         assert_eq!(
-            first_span(&schedule(60, Some(600))),
+            first_span(&schedule(60, Some(600)), current),
             Duration::from_secs(600),
             "the first turn must wait the delay the schedule named"
         );
         assert_eq!(
-            first_span(&schedule(60, Some(0))),
+            first_span(&schedule(60, Some(0)), current),
             Duration::from_secs(60),
             "a schedule that fired at t=0 owes its cadence, not another turn now"
         );
+        // Under a schema that predates the field, a schedule naming none fired at
+        // t=0 in its wave, so what its clock owes is already the cadence.
+        for older in crate::config::FIRST_SCHEMA_VERSION..crate::config::FIRST_START_AFTER_VERSION {
+            assert_eq!(
+                first_span(&schedule(1800, None), older),
+                Duration::from_secs(1800),
+                "version {older}"
+            );
+        }
     }
 
     /// A deferred first turn in a graph with nothing to pace is refused, and a
@@ -1846,7 +1845,7 @@ mod tests {
     #[test]
     fn a_deferred_turn_that_could_never_come_due_is_refused() {
         const CRON_ONLY: &str = concat!(
-            "version: 1\nname: g\nmembers:\n",
+            "version: 4\nname: g\nmembers:\n",
             "  ticker:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
             "    schedule: {every: 1800}\n",
             "  report:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",

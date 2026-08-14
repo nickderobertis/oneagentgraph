@@ -59,6 +59,7 @@ use serde_json::{Map, Value};
 
 use crate::event::{
     bound_detail, bound_text, Cause, Disposition, Emitter, EventKind, Labels, MemberDied,
+    MemberStarted, Runner,
 };
 use crate::invoke::{Invocation, Launch};
 use crate::liveness::{
@@ -443,6 +444,16 @@ pub fn run(
     bounds: Bounds,
     scratch: &Path,
 ) -> Outcome {
+    // One place says a member started, whichever runner it has and whether that
+    // start is a turn beginning now or a deferred one announced ahead of time —
+    // see `crate::run`, which publishes the deferred case from the same type.
+    emitter.emit(
+        EventKind::MemberStarted,
+        started_payload(&MemberStarted {
+            runner: runner(&invocation.launch),
+            start_after: None,
+        }),
+    );
     match &invocation.launch {
         Launch::Library(judge) => crate::judge::run(judge, emitter, bounds, scratch),
         Launch::Process { program, args, cwd } => spawned(
@@ -459,50 +470,32 @@ pub fn run(
     }
 }
 
-// llmlint: ignore-block[invalid_states_unrepresentable] every event this crate
-// publishes carries a `Map<String, Value>`: `crate::event::Emitter::emit` takes
-// one, `payload` below builds one, and the envelope `docs/contract.md` fences —
-// which `tests/contract.rs` drives through these types — is that map. The three
-// functions here moved `member-started`'s existing construction behind names, so
-// that a member saying it has started and a member taking a turn cannot describe
-// the same launch differently. Typing the payload is a redesign of that shared
-// surface rather than a property of this change, and the envelope is a cross-repo
-// contract this crate does not own alone.
-/// What `member-started` says about a launch, whether it is starting now or
-/// saying so ahead of the turn it will take.
-pub(crate) fn started_payload(launch: &Launch) -> Map<String, Value> {
+/// What runs this member, described for the `member-started` it publishes.
+pub(crate) fn runner(launch: &Launch) -> Runner {
     match launch {
-        Launch::Process { program, args, cwd } => process_started(program, args, cwd),
-        Launch::Library(judge) => library_started(judge),
+        Launch::Process { program, args, cwd } => Runner::Process {
+            program: program.clone(),
+            args: args.to_vec(),
+            cwd: cwd.display().to_string(),
+        },
+        Launch::Library(launch) => Runner::Library {
+            engine: ONEJUDGE_ENGINE.to_string(),
+            config: launch.config.display().to_string(),
+            worktree: launch.worktree.display().to_string(),
+        },
     }
 }
 
-pub(crate) fn process_started(program: &str, args: &[String], cwd: &Path) -> Map<String, Value> {
-    payload([
-        ("runner", Value::String("process".into())),
-        ("program", Value::String(program.to_string())),
-        (
-            "args",
-            Value::Array(args.iter().cloned().map(Value::String).collect()),
-        ),
-        ("cwd", Value::String(cwd.display().to_string())),
-    ])
-}
+/// The engine a two-party member is driven by, as its `member-started` names it.
+pub(crate) const ONEJUDGE_ENGINE: &str = "onejudge";
 
-pub(crate) fn library_started(launch: &crate::invoke::JudgeLaunch) -> Map<String, Value> {
-    payload([
-        ("runner", Value::String("library".into())),
-        ("engine", Value::String("onejudge".into())),
-        ("config", Value::String(launch.config.display().to_string())),
-        // `worktree`, not `cwd`: this member has no working directory of its own,
-        // and naming one would claim a thing that is not true.
-        (
-            "worktree",
-            Value::String(launch.worktree.display().to_string()),
-        ),
-    ])
+/// One `member-started` payload as the field map an [`Emitter`] takes.
+pub(crate) fn started_payload(started: &MemberStarted) -> Map<String, Value> {
+    match serde_json::to_value(started) {
+        Ok(Value::Object(map)) => map,
+        _ => Map::new(),
+    }
 }
-// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// Run a member that is a child process of its own.
 // Nine values, none derivable from another: which contract it settles under,
@@ -521,11 +514,6 @@ fn spawned(
     bounds: Bounds,
     scratch: &Path,
 ) -> Outcome {
-    emitter.emit(
-        EventKind::MemberStarted,
-        process_started(program, args, cwd),
-    );
-
     let mut command = crate::harness_process::command(program);
     command
         .args(args)
@@ -1271,35 +1259,61 @@ mod tests {
         }
     }
 
-    /// Each runner describes its own launch, in the fields a supervisor branches
-    /// on.
+    /// Each runner describes its own launch, and the payload says so in the
+    /// fields a supervisor branches on.
     ///
-    /// One function for the member that is starting a turn now and the one saying
-    /// so ahead of a deferred first turn, so what a stream carries never depends
-    /// on which of the two it was.
+    /// One type for the member starting a turn now and the one saying so ahead of
+    /// a deferred first turn, so what a stream carries never depends on which of
+    /// the two it was — asserted on the serialized event, because that is what a
+    /// consumer meets.
     #[test]
     fn each_runner_describes_the_launch_it_is_about_to_run() {
-        let process = started_payload(&Launch::Process {
-            program: "oneharness".into(),
-            args: vec!["run".into(), "--prompt".into(), "report".into()],
-            cwd: std::path::PathBuf::from("/work"),
-        });
-        assert_eq!(process["runner"], "process");
-        assert_eq!(process["program"], "oneharness");
-        assert_eq!(process["cwd"], "/work");
-        assert_eq!(process["args"][2], "report");
+        let process = MemberStarted {
+            runner: runner(&Launch::Process {
+                program: "oneharness".into(),
+                args: vec!["run".into(), "--prompt".into(), "report".into()],
+                cwd: std::path::PathBuf::from("/work"),
+            }),
+            start_after: None,
+        };
+        let published = started_payload(&process);
+        assert_eq!(published["runner"], "process");
+        assert_eq!(published["program"], "oneharness");
+        assert_eq!(published["cwd"], "/work");
+        assert_eq!(published["args"][2], "report");
+        assert!(
+            published.get("start_after").is_none(),
+            "a member taking its turn now named a delay: {published:?}"
+        );
+
         // Not `cwd`: a member driven in this process has no working directory of
         // its own, and claiming one would name a thing that is not true.
-        let library = started_payload(&Launch::Library(Box::new(crate::invoke::JudgeLaunch {
-            config: std::path::PathBuf::from("/scratch/onejudge.yaml"),
-            task: "do the thing".into(),
-            worktree: std::path::PathBuf::from("/scratch"),
-            session: "s-worker".into(),
-        })));
+        let library = started_payload(&MemberStarted {
+            runner: runner(&Launch::Library(Box::new(crate::invoke::JudgeLaunch {
+                config: std::path::PathBuf::from("/scratch/onejudge.yaml"),
+                task: "do the thing".into(),
+                worktree: std::path::PathBuf::from("/scratch"),
+                session: "s-worker".into(),
+            }))),
+            start_after: None,
+        });
         assert_eq!(library["runner"], "library");
-        assert_eq!(library["engine"], "onejudge");
+        assert_eq!(library["engine"], ONEJUDGE_ENGINE);
         assert_eq!(library["worktree"], "/scratch");
         assert!(library.get("cwd").is_none(), "{library:?}");
+
+        // A deferred member names the delay beside the launch it will run, and
+        // the whole payload reads back as what it was.
+        let deferred = MemberStarted {
+            start_after: Some(1800),
+            ..process.clone()
+        };
+        let published = started_payload(&deferred);
+        assert_eq!(published["start_after"], 1800);
+        assert_eq!(
+            serde_json::from_value::<MemberStarted>(Value::Object(published)).expect("reads back"),
+            deferred
+        );
     }
 
     /// A tool event's summary is what it acted on, whatever shape the input took.

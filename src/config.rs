@@ -174,20 +174,13 @@ pub struct JudgeCommand {
 pub struct Schedule {
     /// Interval in seconds.
     pub every: u64,
-    /// Seconds before this member's **first** turn, defaulting to
-    /// [`every`](Self::every) and read through [`first_turn_after`].
+    /// Seconds before this member's **first** turn, read through
+    /// [`first_turn_after`](Self::first_turn_after) because what its absence
+    /// means depends on the schema the document declares.
     ///
     /// `0` is the member taking a turn the moment the graph starts, which is what
-    /// every schedule did before this field existed.
-    ///
-    /// Deliberately **not** gated on a schema version, unlike
-    /// [`OneharnessMember::task`] and [`OneharnessMember::dir`]. Those changed
-    /// nothing for a document that omits them, so a gate only asked such a
-    /// document to say which schema it was written against; this one moves the
-    /// default for every schedule already written, and a version 1 or 2 document
-    /// has to be able to ask for the old behaviour back.
-    ///
-    /// [`first_turn_after`]: Self::first_turn_after
+    /// every schedule did before this field existed. Requires graph schema
+    /// version [`FIRST_START_AFTER_VERSION`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_after: Option<u64>,
     /// Whether `reset-timer` may restart this schedule's clock.
@@ -196,16 +189,27 @@ pub struct Schedule {
 }
 
 impl Schedule {
-    /// Seconds between the graph starting and this member's first turn.
+    /// Seconds between this member coming up and its first turn, under the schema
+    /// `schema` declares.
     ///
-    /// A schedule that names no `start_after` waits one whole interval, because
-    /// "every 1800 seconds" reads as *from now on* rather than *now, and then
-    /// every 1800 seconds* — and a member whose job is to report progress has
-    /// nothing to report at t=0. A schedule that wants the old behaviour asks for
-    /// it by name with `start_after: 0`.
+    /// A schedule naming no `start_after` waits one whole interval from
+    /// [`FIRST_START_AFTER_VERSION`] on, because "every 1800 seconds" reads as
+    /// *from now on* rather than *now, and then every 1800 seconds* — and a member
+    /// whose job is to report progress has nothing to report at t=0. Under an
+    /// older schema it waits none, which is what every schedule written against
+    /// those versions has always done, so the default moves only for a document
+    /// that says which schema it was written against.
+    ///
+    /// The schema is a parameter rather than a field because it belongs to the
+    /// document, not to the schedule: one graph has one version, and a `Schedule`
+    /// carrying its own copy could disagree with the graph holding it.
     #[must_use]
-    pub fn first_turn_after(&self) -> u64 {
-        self.start_after.unwrap_or(self.every)
+    pub fn first_turn_after(&self, schema: u32) -> u64 {
+        match self.start_after {
+            Some(seconds) => seconds,
+            None if schema >= FIRST_START_AFTER_VERSION => self.every,
+            None => 0,
+        }
     }
 }
 
@@ -229,7 +233,32 @@ pub const MAX_SCHEDULE_SECONDS: u64 = u32::MAX as u64;
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
+
+/// The first graph schema version in which a [`Schedule`] may name a
+/// [`start_after`](Schedule::start_after) — and, from which, one that names none
+/// waits a whole interval before its first turn rather than taking it at t=0.
+///
+/// The version exists for the *default* rather than for the field. A gate on the
+/// field alone would be the pattern [`FIRST_MEMBER_JOB_VERSION`] follows, where a
+/// document omitting it is unaffected; this one changes what an omission means, so
+/// a document written against an older schema has to keep the meaning it was
+/// written under. That is also why the field is refused there rather than merely
+/// ignored: a version 3 document asking for `start_after: 30` would otherwise be
+/// silently given `start_after: 0`, which is the opposite of what it asked for.
+pub const FIRST_START_AFTER_VERSION: u32 = 4;
+
+/// The first graph schema version in which `{task}` in a member's own
+/// [`task`](OneharnessMember::task) expands to the run's, rather than standing for
+/// itself.
+///
+/// A gate for the same reason [`FIRST_START_AFTER_VERSION`] is one, and it is the
+/// same version: this changes what an existing field's *text* means, and a member
+/// task that happens to contain those six characters said them literally under
+/// every schema before this one. Unlike `start_after` there is nothing to refuse
+/// in an older document — the text is valid prose there, and prose is exactly what
+/// it stays.
+pub const FIRST_TASK_TOKEN_VERSION: u32 = 4;
 
 /// The first graph schema version in which a single-sided member may carry its
 /// own [`task`](OneharnessMember::task) and [`dir`](OneharnessMember::dir).
@@ -395,12 +424,22 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                             "member {name:?}: a schedule of every 0 seconds never stops firing"
                         )));
                     }
+                    // Refused rather than ignored under an older schema: what a
+                    // missing `start_after` means is that schema's answer, so a
+                    // document declaring version 3 and asking for one would
+                    // otherwise be given the t=0 it did not ask for.
+                    if schedule.start_after.is_some() && graph.version < FIRST_START_AFTER_VERSION {
+                        return Err(Error::InvalidConfig(format!(
+                            "member {name:?} uses `schedule.start_after`, which requires graph \
+                             schema version {FIRST_START_AFTER_VERSION}"
+                        )));
+                    }
                     // A span nobody could mean is refused as the typo it is,
                     // rather than becoming a member that waits out the heat death
                     // of the universe while reporting nothing at all.
                     for (field, seconds) in [
                         ("every", schedule.every),
-                        ("start_after", schedule.first_turn_after()),
+                        ("start_after", schedule.first_turn_after(graph.version)),
                     ] {
                         if seconds > MAX_SCHEDULE_SECONDS {
                             return Err(Error::InvalidConfig(format!(
@@ -511,22 +550,22 @@ mod tests {
         }
     }
 
-    /// A schedule's first turn waits one whole interval unless it says otherwise,
-    /// and `0` is the spelling that asks for a turn at t=0.
+    /// From the schema that has `start_after`, a schedule naming none waits one
+    /// whole interval; under an older one it waits none, exactly as it always did.
     ///
-    /// The default is what a schedule *already written* now means, so it is
-    /// asserted through parsing a document rather than through a struct literal:
-    /// the field is absent from every graph in existence, and its absence is the
-    /// case that matters.
+    /// The default is what a schedule *already written* means, so both halves are
+    /// asserted through parsed documents rather than struct literals: the field is
+    /// absent from every graph in existence, and what its absence means under each
+    /// schema is the whole of this change.
     #[test]
-    fn a_schedules_first_turn_waits_an_interval_unless_it_names_another() {
-        let scheduled = |schedule: &str| -> Schedule {
+    fn a_schedules_first_turn_waits_an_interval_only_from_the_schema_that_has_it() {
+        let scheduled = |version: u32, schedule: &str| -> Schedule {
             let document = format!(
                 concat!(
-                    "version: 1\nname: g\nmembers:\n  ticker:\n    kind: oneharness\n",
+                    "version: {}\nname: g\nmembers:\n  ticker:\n    kind: oneharness\n",
                     "    oneharness_config: ./a.toml\n    schedule: {}\n",
                 ),
-                schedule
+                version, schedule
             );
             let graph = parse(&document);
             validate(&graph).unwrap_or_else(|err| panic!("{document}: {err}"));
@@ -536,27 +575,68 @@ mod tests {
             member.schedule.expect("the member is scheduled")
         };
 
-        let inherited = scheduled("{every: 1800}");
+        // Every schema that predates the field: a schedule naming none takes its
+        // first turn at t=0, which is what those documents have always done.
+        for older in FIRST_SCHEMA_VERSION..FIRST_START_AFTER_VERSION {
+            let inherited = scheduled(older, "{every: 1800}");
+            assert_eq!(inherited.start_after, None);
+            assert_eq!(
+                inherited.first_turn_after(older),
+                0,
+                "version {older} moved under a document that never asked it to"
+            );
+        }
+
+        let current = SCHEMA_VERSION;
+        let inherited = scheduled(current, "{every: 1800}");
         assert_eq!(inherited.start_after, None);
-        assert_eq!(inherited.first_turn_after(), 1800);
+        assert_eq!(inherited.first_turn_after(current), 1800);
         assert_eq!(
-            scheduled("{every: 1800, start_after: 0}").first_turn_after(),
+            scheduled(current, "{every: 1800, start_after: 0}").first_turn_after(current),
             0
         );
         assert_eq!(
-            scheduled("{every: 1800, start_after: 5}").first_turn_after(),
+            scheduled(current, "{every: 1800, start_after: 5}").first_turn_after(current),
             5
         );
         // Longer than the cadence is a legal thing to ask for — "settle in, then
         // report often" — so it is carried rather than clamped.
         assert_eq!(
-            scheduled("{every: 60, start_after: 600}").first_turn_after(),
+            scheduled(current, "{every: 60, start_after: 600}").first_turn_after(current),
             600
         );
         // And a schedule that named none serializes without one, so a document
         // written before the field existed round-trips unchanged.
         let rendered = serde_norway::to_string(&inherited).expect("a schedule serializes");
         assert!(!rendered.contains("start_after"), "{rendered}");
+    }
+
+    /// A document declaring a schema that predates `start_after` is refused by the
+    /// field's name rather than run with the delay it did not ask for.
+    #[test]
+    fn start_after_requires_the_schema_that_has_it() {
+        let document = |version: u32| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n  ticker:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n",
+                    "    schedule: {{every: 1800, start_after: 30}}\n",
+                ),
+                version
+            )
+        };
+        assert!(validate(&parse(&document(SCHEMA_VERSION))).is_ok());
+        for older in FIRST_SCHEMA_VERSION..FIRST_START_AFTER_VERSION {
+            let err =
+                validate(&parse(&document(older))).expect_err("the field postdates this schema");
+            assert!(
+                err.to_string().contains(&format!(
+                    "requires graph schema version {FIRST_START_AFTER_VERSION}"
+                )),
+                "version {older}: {err}"
+            );
+            assert!(err.to_string().contains("start_after"), "{err}");
+        }
     }
 
     /// A span longer than any run is refused by name, on both of a schedule's
@@ -570,10 +650,10 @@ mod tests {
         let document = |schedule: String| {
             format!(
                 concat!(
-                    "version: 1\nname: g\nmembers:\n  ticker:\n    kind: oneharness\n",
+                    "version: {}\nname: g\nmembers:\n  ticker:\n    kind: oneharness\n",
                     "    oneharness_config: ./a.toml\n    schedule: {}\n",
                 ),
-                schedule
+                SCHEMA_VERSION, schedule
             )
         };
         let ceiling = MAX_SCHEDULE_SECONDS;

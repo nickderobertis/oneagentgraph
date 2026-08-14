@@ -13,12 +13,12 @@ use crate::support::{fake_harness, graph_with, until, Workspace, FAKE_HARNESS_KE
 /// The chain every journey below drives, whose `ticker` takes its first turn the
 /// moment the graph starts.
 ///
-/// `start_after: 0` says so out loud rather than relying on the default, which is
-/// one whole interval: these journeys are about what a firing *does* — the chain
-/// it runs, the failures it propagates, the quiescence that ends it — and each one
-/// needs a firing to have happened. The default's own journeys are
-/// [`a_deferred_schedule_starts_with_the_graph_and_takes_no_turn`] and
-/// [`a_deferred_schedule_waits_for_its_delay_and_then_keeps_its_cadence`].
+/// It stays a **version 2** document, where a schedule naming no `start_after`
+/// fires at t=0: these journeys are about what a firing *does* — the chain it
+/// runs, the failures it propagates, the quiescence that ends it — and each one
+/// needs a firing to have happened. What a schedule means from version 4 has its
+/// own journeys, starting at
+/// [`a_deferred_schedule_starts_with_the_graph_and_takes_no_turn`].
 fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
     graph_with(
         concat!(
@@ -27,7 +27,7 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
             "members:\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  ticker:\n    kind: oneharness\n",
-            "    schedule: {every: 3600, start_after: 0}\n",
+            "    schedule: {every: 3600}\n",
             "  bridge:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "    deps: [anchor]\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
@@ -64,7 +64,7 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
 /// before any journey reached what it tests.
 fn deferred_graph(fake: &str, hold: &str, delays: (Option<u64>, u64), recorded: &str) -> String {
     const SKELETON: &str = concat!(
-        "version: 3\nname: paced\n",
+        "version: 4\nname: paced\n",
         "env: {}\n",
         "members:\n",
         "  worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
@@ -352,7 +352,7 @@ fn a_deferred_member_with_dependencies_comes_up_when_its_wave_is_reached() {
     let recorded = workspace.at("ticker.prompt");
     workspace.graph(&graph_with(
         concat!(
-            "version: 3\nname: paced-chain\n",
+            "version: 4\nname: paced-chain\n",
             "env: {}\n",
             "members:\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
@@ -962,7 +962,7 @@ fn a_cron_only_graph_quiesces_after_its_initial_firing() {
             "env: {}\n",
             "members:\n  ticker:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, start_after: 0}\n",
+            "    schedule: {every: 3600}\n",
             "  report:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
         ),
@@ -995,7 +995,7 @@ fn a_failed_initial_scheduled_run_skips_its_chain_and_settles() {
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
     );
     workspace.graph(
-        "version: 1\nname: failed-initial-cron\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600, start_after: 0}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
+        "version: 1\nname: failed-initial-cron\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
     );
     let run = workspace.run_task("fake:complete-now: failed initial schedule");
     run.expect_code(1);
