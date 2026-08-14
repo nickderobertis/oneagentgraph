@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.11](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.10...v0.2.11) - 2026-08-14
+
+### Added
+
+- compose a member task from the graph's, and defer a cron turn ([#37](https://github.com/nickderobertis/oneagentgraph/pull/37))
+
+### Fixed
+
+- judge a member's tree by a CPU rate, and serialize every graph fixture ([#34](https://github.com/nickderobertis/oneagentgraph/pull/34))
+
 ## [0.2.10](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.9...v0.2.10) - 2026-08-13
 
 ### Added
