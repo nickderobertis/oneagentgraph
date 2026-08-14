@@ -556,6 +556,109 @@ fn a_deferred_first_turn_that_fails_fails_the_run() {
     );
 }
 
+/// Under version 4, `start_after: 0` takes the first turn in the wave and then
+/// keeps the cadence.
+///
+/// The opt-out, driven where the default is the other answer. A schedule asking
+/// for t=0 must reach its turn through the ordinary wave rather than through a
+/// clock that deferred it by zero seconds — which is visible in the stream: a
+/// member that came up without taking a turn names the delay it is waiting, and
+/// this one has no delay to name.
+///
+/// The member holding the run open waits on `anchor` so it lands in the *second*
+/// wave. A schedule that fires at t=0 hands its clock over only once its own wave
+/// has settled, so a held member beside it in the first wave would keep that
+/// clock from ever starting — which is the shape the journeys in
+/// `tests/e2e/verbs.rs` use for the same reason.
+#[test]
+fn an_explicit_zero_delay_takes_its_first_turn_in_the_wave() {
+    const EVERY: u64 = 2;
+    let workspace = Workspace::new();
+    let release = workspace.at("keeper-release");
+    let recorded = workspace.at("ticker.prompt");
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 4\nname: paced-at-once\n",
+            "env: {}\n",
+            "members:\n",
+            "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  ticker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {every: 2, start_after: 0}\n",
+            "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    deps: [anchor]\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (
+                "members.anchor.task",
+                "fake:complete-now anchor this run.".to_string(),
+            ),
+            (
+                "members.keeper.task",
+                format!(
+                    "fake:complete-now hold this run open. fake:hold={}",
+                    release.display()
+                ),
+            ),
+            (
+                "members.ticker.task",
+                format!(
+                    "fake:complete-now report progress. fake:record-prompt={}",
+                    recorded.display()
+                ),
+            ),
+        ],
+    ));
+    let launched = Instant::now();
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let turns = || {
+        std::fs::read_to_string(&recorded)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("report progress"))
+            .count()
+    };
+    until("the first turn", || turns() >= 1);
+
+    let started: Value = stream(&workspace)
+        .lines()
+        .find(|line| {
+            line.contains("\"kind\":\"member-started\"") && line.contains("\"member\":\"ticker\"")
+        })
+        .map(|line| serde_json::from_str(line).expect("an envelope"))
+        .expect("the member started");
+    assert!(
+        started["payload"].get("start_after").is_none(),
+        "a member that took its turn in the wave named a delay it never waited: {started}"
+    );
+
+    // And the clock it hands over keeps the cadence, so `start_after: 0` is a
+    // first turn rather than a schedule that fires once.
+    until("the turn after it", || turns() >= 2);
+    let second = launched.elapsed();
+    assert!(
+        second >= Duration::from_secs(EVERY),
+        "the second turn came {second:?} after launch, sooner than the cadence allows"
+    );
+
+    std::fs::write(&release, "release").expect("release the keeper");
+    let output = child.wait_with_output().expect("the run finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 /// `trigger` fires a member whose first turn is still deferred, now.
 ///
 /// An operator is not locked out for the length of the delay. The pair with the
