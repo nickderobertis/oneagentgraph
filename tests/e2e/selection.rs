@@ -18,7 +18,8 @@
 // candidates and neither may be a real subscription.
 
 use crate::support::{
-    fake_harness, two_party_graph, Workspace, CHAIN, FALLBACK_CHAIN, MIXED_CHAIN,
+    fake_harness, graph_with, two_party_graph, Workspace, CHAIN, FAKE_HARNESS_KEY, FALLBACK_CHAIN,
+    MIXED_CHAIN, NO_ENV,
 };
 
 // llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
@@ -49,7 +50,7 @@ fn a_model_reaches_only_the_side_it_was_written_on() {
         "oneharness.judge.toml",
         &format!("{CHAIN}\n[harness.claude-code]\nmodel = \"judge-side-default\"\n"),
     );
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace(
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace(
         "    agent:\n      oneharness_config: ./oneharness.toml\n",
         "    agent:\n      oneharness_config: ./oneharness.toml\n      model: agent-only-model\n",
     ));
@@ -106,7 +107,7 @@ fn a_model_reaches_only_the_side_it_was_written_on() {
 fn a_model_on_a_chain_of_two_families_refuses_before_anything_starts() {
     let workspace = Workspace::new();
     workspace.write("oneharness.toml", MIXED_CHAIN);
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace(
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace(
         "    agent:\n      oneharness_config: ./oneharness.toml\n",
         "    agent:\n      oneharness_config: ./oneharness.toml\n      model: claude-opus-5\n",
     ));
@@ -137,7 +138,7 @@ fn a_model_on_a_chain_of_two_families_refuses_before_anything_starts() {
 #[test]
 fn the_model_value_itself_is_forwarded_unchecked() {
     let workspace = Workspace::new();
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace(
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace(
         "    agent:\n      oneharness_config: ./oneharness.toml\n",
         "    agent:\n      oneharness_config: ./oneharness.toml\n      model: no-such-model-anywhere\n",
     ));
@@ -227,19 +228,19 @@ fn each_side_runs_the_config_it_was_given() {
 fn a_chain_that_refuses_every_candidate_reports_each_one_and_fails() {
     let workspace = Workspace::new();
     workspace.write("oneharness.toml", FALLBACK_CHAIN);
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n",
-            // Both candidates are replaced, so the chain can reach no paid
-            // provider by any path — including the fall-through under test.
-            "  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
-            "  ONEHARNESS_BIN_CODEX: {fake}\n",
-            "  FAKE_HARNESS_REFUSAL: auth\n",
+            "env:\n  FAKE_HARNESS_REFUSAL: auth\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
         ),
-        fake = fake_harness(),
+        // Both candidates are replaced, so the chain can reach no paid
+        // provider by any path — including the fall-through under test.
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            ("env.ONEHARNESS_BIN_CODEX", fake_harness()),
+        ],
     ));
     // Both candidates refuse, because one `FAKE_HARNESS_REFUSAL` reaches both —
     // which is the chain that reached nothing, and it must fail rather than
@@ -293,17 +294,17 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
         ),
     );
     make_executable(&refusing);
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n",
-            "  ONEHARNESS_BIN_CLAUDE_CODE: {refusing}\n",
-            "  ONEHARNESS_BIN_CODEX: {fake}\n",
+            "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
         ),
-        refusing = refusing.display(),
-        fake = fake_harness(),
+        &[
+            (FAKE_HARNESS_KEY, refusing.display().to_string()),
+            ("env.ONEHARNESS_BIN_CODEX", fake_harness()),
+        ],
     ));
     let run = workspace.run_task("fake:complete-now: fall through to the next identity");
     run.expect_code(0);
@@ -361,20 +362,20 @@ fn a_two_party_member_reports_which_side_stepped_past_which_identity() {
         ),
     );
     make_executable(&refusing);
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n",
-            "  ONEHARNESS_BIN_CODEX: {refusing}\n",
-            "  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n",
         ),
-        refusing = refusing.display(),
-        fake = fake_harness(),
+        &[
+            ("env.ONEHARNESS_BIN_CODEX", refusing.display().to_string()),
+            (FAKE_HARNESS_KEY, fake_harness()),
+        ],
     ));
     let run = workspace.run_task("fake:complete-now: both sides fall through");
     run.expect_code(0);

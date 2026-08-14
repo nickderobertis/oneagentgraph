@@ -228,12 +228,15 @@ impl Bounds {
 /// shape that made silence alone the wrong rule — clears the clock on the child's
 /// progress and is left alone.
 ///
-/// What counts as progress is [`crate::scratch::work`]: the CPU charged to the
-/// processes stamped for this member, which changes when one of them runs and
-/// when one arrives or leaves. Deliberately not "a live child exists" — a wedged
-/// member has one of those too, which is precisely why its harness never answers
-/// — so the rule that keeps a working member alive is not one that keeps a dead
-/// one alive with it.
+/// What counts as progress is a *rate*: the CPU charged to the processes stamped
+/// for this member — [`crate::scratch::work`] — against the wall time between two
+/// looks at it, held against the share of a core
+/// [`crate::scratch::Work::worked`] fixes. Deliberately not "a live child
+/// exists" — a wedged member has one of those too, which is precisely why its
+/// harness never answers — so the rule that keeps a working member alive is not
+/// one that keeps a dead one alive with it. And deliberately not "the reading
+/// moved": that asks how finely the platform counts rather than what the member
+/// did, and it is why an idle member evaded this watchdog on macOS.
 ///
 /// Two consequences worth stating plainly, because they are the cost of the
 /// trade:
@@ -290,7 +293,8 @@ enum Observed {
         /// The sample itself, to compare the next one against.
         work: crate::scratch::Work,
     },
-    /// Two looks agreed: nothing under this member did anything between them.
+    /// Two looks agreed: whatever is under this member was charged too little
+    /// CPU, over the time between them, to be doing anything.
     Idle {
         /// When the later sample was taken.
         at: Instant,
@@ -310,11 +314,12 @@ impl Observed {
         }
     }
 
-    /// The sample the next one is compared against, when there is one.
-    fn sample(&self) -> Option<&crate::scratch::Work> {
+    /// The sample the next one is compared against, and when it was taken —
+    /// which is the window that comparison is a rate over.
+    fn taken(&self) -> Option<(Instant, crate::scratch::Work)> {
         match self {
             Observed::Nothing => None,
-            Observed::Moving { work, .. } | Observed::Idle { work, .. } => Some(work),
+            Observed::Moving { at, work } | Observed::Idle { at, work } => Some((*at, *work)),
         }
     }
 }
@@ -344,7 +349,27 @@ impl Stall {
     ///
     /// `scratch` is the member's own, which is the stamp its tree carries.
     pub fn condemns(&mut self, published: u64, scratch: &Path) -> bool {
-        let elapsed = elapsed_millis(self.started);
+        self.judge(published, Instant::now(), || crate::scratch::work(scratch))
+    }
+
+    /// The rule itself: a decision over readings, taking the clock and the
+    /// observation it judges rather than reaching for either.
+    ///
+    /// Split out from [`condemns`](Self::condemns) so the decision can be driven
+    /// over a sequence of observations — a wedged tree's, a working one's — in a
+    /// test, on any platform, without two minutes of real waiting on a real
+    /// process to produce them. The journeys in `tests/e2e/liveness.rs` are what
+    /// prove the readings this is given are the kernel's; this is what proves
+    /// what is concluded from them.
+    ///
+    /// `observe` is called at most once, and only when a look is actually due.
+    fn judge(
+        &mut self,
+        published: u64,
+        now: Instant,
+        observe: impl FnOnce() -> crate::scratch::Work,
+    ) -> bool {
+        let elapsed = millis(now.saturating_duration_since(self.started));
         let quiet = Duration::from_millis(elapsed.saturating_sub(published.max(self.cleared)));
         if quiet < self.bound / 2 {
             // Publishing normally: nothing to explain, and a tree examined
@@ -353,25 +378,27 @@ impl Stall {
             self.observed = Observed::Nothing;
             return false;
         }
-        let now = Instant::now();
         if self.observed.due(now, self.probe_every) {
-            let work = crate::scratch::work(scratch);
-            // Decided before the assignment, so the comparison borrows the old
-            // sample and the new verdict replaces it.
-            let unchanged = self.observed.sample().map(|before| *before == work);
-            self.observed = match unchanged {
-                // Nothing under this member did anything since the last look.
-                Some(true) => Observed::Idle { at: now, work },
-                // Something moved, which counts exactly as a published line
-                // does: the member has live work under it, and its stall clock
-                // starts again from here.
-                Some(false) => {
-                    self.cleared = elapsed;
-                    Observed::Moving { at: now, work }
+            let before = self.observed.taken();
+            let work = observe();
+            self.observed = match before {
+                // How fast the tree was charged CPU over the window between the
+                // two looks decides which this is — a rate, so that neither
+                // verdict rests on how finely a platform happens to count.
+                Some((at, before)) => {
+                    if before.worked(work, now.saturating_duration_since(at)) {
+                        // Which counts exactly as a published line does: the
+                        // member has live work under it, and its stall clock
+                        // starts again from here.
+                        self.cleared = elapsed;
+                        Observed::Moving { at: now, work }
+                    } else {
+                        Observed::Idle { at: now, work }
+                    }
                 }
                 // The first look is a baseline and nothing else. Condemning on
-                // one would be condemning on a reading rather than on a change,
-                // which is the rule this replaces.
+                // one would be condemning on a reading rather than on a rate,
+                // and there is no rate until there is a window to divide by.
                 None => Observed::Moving { at: now, work },
             };
         }
@@ -644,7 +671,12 @@ fn supervise(
 
 /// Milliseconds since the member started, as the watchdogs count them.
 fn elapsed_millis(since: Instant) -> u64 {
-    u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+    millis(since.elapsed())
+}
+
+/// One duration in the milliseconds the watchdogs count in.
+fn millis(span: Duration) -> u64 {
+    u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Turn one published line into envelopes.
@@ -1020,6 +1052,7 @@ pub fn labels(run_id: &str, member: &str, persona: Option<&str>) -> Labels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scratch::Work;
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
@@ -1086,6 +1119,85 @@ mod tests {
         // reached.
         assert!(!stall.condemns(elapsed_millis(stall.started), scratch.path()));
         assert!(matches!(stall.observed, Observed::Nothing));
+    }
+
+    /// The rule's *decision*, over supplied observations rather than a process:
+    /// the rates a wedged tree and a working one are charged, and the boundary
+    /// between them.
+    ///
+    /// The journeys prove the readings are the kernel's. This proves what is
+    /// concluded from readings taken on a platform this host is not, which is
+    /// where the rule this replaces silently stopped condemning anything.
+    #[test]
+    fn a_tree_is_judged_by_how_fast_it_is_charged_cpu() {
+        let bound = Duration::from_secs(2);
+        let core = 1_000_000;
+
+        // Charged nothing: a parked tree, and also exactly what a platform with
+        // no CPU accounting at all reports for every process it is asked about.
+        assert!(condemned(bound, 0).is_some(), "a wedged member was spared");
+        // 121 µs/s, measured: a process waking every half second, which is the
+        // noisiest thing a wedged tree holds and the reading macOS is precise
+        // enough to see. The member it belongs to is wedged on both platforms.
+        assert!(
+            condemned(bound, 121).is_some(),
+            "a member whose tree only ticked its own bookkeeping was spared"
+        );
+        // 98.8% of a core, measured: a spin loop.
+        assert_eq!(
+            condemned(bound, 987_678),
+            None,
+            "a member whose child was burning a core was condemned anyway"
+        );
+
+        // And the boundary itself, which no real process can be held at: a
+        // hundredth of a core is idle, and twice that is working.
+        assert!(condemned(bound, core / 100).is_some());
+        assert_eq!(condemned(bound, core / 50), None);
+
+        // A total that *falls* is work too. A process leaving the tree takes its
+        // whole lifetime's CPU out of the sum, so a member whose child just
+        // finished a second of work reads as a large negative change — and it was
+        // working. What the rule weighs is the size of the change, not its sign.
+        let started = Instant::now();
+        let mut stall = Stall::new(bound, started);
+        let (probe, mut charged) = (stall.probe_every, 4 * core);
+        assert!(!stall.judge(0, started + bound, || Work::of_micros(charged)));
+        charged -= core;
+        assert!(
+            !stall.judge(0, started + bound + probe, || Work::of_micros(charged)),
+            "a member whose working child exited between two looks was condemned for it"
+        );
+
+        // The bound is a floor rather than a deadline — establishing that a tree
+        // is idle takes two looks — but a floor within one probe of the bound,
+        // not two minutes past it.
+        let at = condemned(bound, 0).expect("a wedged member is condemned");
+        let probe = Stall::new(bound, Instant::now()).probe_every;
+        assert!(
+            at > bound && at <= bound + 2 * probe,
+            "a wedged member was condemned at {at:?}, which is not just past a {bound:?} bound"
+        );
+    }
+
+    /// Drive the rule over a member that publishes nothing at all while the tree
+    /// under it is charged `micros_per_second` of CPU, and answer how far into
+    /// its life it was condemned — or `None` if it outlived four whole bounds.
+    ///
+    /// No process and no sleeping: the clock and the readings are both supplied,
+    /// which is what makes this a test of the decision rather than of a host.
+    fn condemned(bound: Duration, micros_per_second: u64) -> Option<Duration> {
+        let started = Instant::now();
+        let mut stall = Stall::new(bound, started);
+        let mut at = Duration::ZERO;
+        while at < bound * 4 {
+            at += stall.probe_every;
+            let charged = micros_per_second.saturating_mul(millis(at)) / 1_000;
+            if stall.judge(0, started + at, || Work::of_micros(charged)) {
+                return Some(at);
+            }
+        }
+        None
     }
 
     /// The probe cadence is derived from the bound, and bounded at both ends: a

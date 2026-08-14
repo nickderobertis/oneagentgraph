@@ -6,22 +6,21 @@
 
 use std::time::{Duration, Instant};
 
-use crate::support::{fake_harness, until, Workspace};
+use crate::support::{fake_harness, graph_with, until, Workspace, FAKE_HARNESS_KEY};
 
 fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
-    format!(
+    graph_with(
         concat!(
             "version: 2\nname: scheduled-chain\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
-            "  ticker:\n    kind: oneharness\n    oneharness_config: {ticker_config}\n",
-            "    schedule: {{every: 3600}}\n",
+            "  ticker:\n    kind: oneharness\n",
+            "    schedule: {every: 3600}\n",
             "  bridge:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "    deps: [anchor]\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
-            "    task: 'fake:complete-now fake:hold={hold}'\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n    deps: [bridge]\n",
@@ -30,9 +29,14 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
             "  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "    deps: [report]\n",
         ),
-        fake = fake,
-        hold = hold,
-        ticker_config = ticker_config,
+        &[
+            (FAKE_HARNESS_KEY, fake),
+            ("members.ticker.oneharness_config", ticker_config),
+            (
+                "members.keeper.task",
+                &format!("fake:complete-now fake:hold={hold}"),
+            ),
+        ],
     )
 }
 
@@ -126,14 +130,16 @@ fn a_failed_downstream_member_suppresses_its_dependant_in_that_cron_iteration() 
     .replace(
         "report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml",
         "report:\n    kind: oneharness\n    oneharness_config: ./report.toml",
-    )
-    .replace(
-        "members:\n",
-        &format!(
-            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\nmembers:\n",
-            fake = fake_harness(),
-            marker = marker.display()
-        ),
+    );
+    let graph = graph_with(
+        &graph,
+        &[
+            ("env.ONEHARNESS_BIN_CODEX", fake_harness()),
+            (
+                "env.FAKE_HARNESS_FAIL_AFTER_MARKER",
+                marker.display().to_string(),
+            ),
+        ],
     );
     workspace.graph(&graph);
     let child = workspace.spawn_with(
@@ -223,14 +229,16 @@ fn a_failed_later_cron_firing_suppresses_that_iterations_chain() {
         &fake_harness(),
         &release.display().to_string(),
         "./ticker.toml",
-    )
-    .replace(
-        "members:\n",
-        &format!(
-            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_AFTER_MARKER: {marker}\nmembers:\n",
-            fake = fake_harness(),
-            marker = marker.display()
-        ),
+    );
+    let graph = graph_with(
+        &graph,
+        &[
+            ("env.ONEHARNESS_BIN_CODEX", fake_harness()),
+            (
+                "env.FAKE_HARNESS_FAIL_AFTER_MARKER",
+                marker.display().to_string(),
+            ),
+        ],
     );
     workspace.graph(&graph);
     let child = workspace.spawn_with(
@@ -298,17 +306,17 @@ fn a_failed_later_cron_firing_suppresses_that_iterations_chain() {
 #[test]
 fn a_cron_only_graph_quiesces_after_its_initial_firing() {
     let workspace = Workspace::new();
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 1\nname: cron-only\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  ticker:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {{every: 3600}}\n",
+            "    schedule: {every: 3600}\n",
             "  report:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
     let started = Instant::now();
     let run = workspace.run_task("fake:complete-now: cron only");
@@ -367,14 +375,16 @@ fn a_failed_initial_scheduled_run_can_fire_again_while_non_cron_work_is_live() {
         &fake_harness(),
         &release.display().to_string(),
         "./ticker.toml",
-    )
-    .replace(
-        "members:\n",
-        &format!(
-            "  ONEHARNESS_BIN_CODEX: {fake}\n  FAKE_HARNESS_FAIL_ONCE_MARKER: {failed_once}\nmembers:\n",
-            fake = fake_harness(),
-            failed_once = failed_once.display(),
-        ),
+    );
+    let graph = graph_with(
+        &graph,
+        &[
+            ("env.ONEHARNESS_BIN_CODEX", fake_harness()),
+            (
+                "env.FAKE_HARNESS_FAIL_ONCE_MARKER",
+                failed_once.display().to_string(),
+            ),
+        ],
     );
     workspace.graph(&graph);
     let child = workspace.spawn_with(
@@ -436,16 +446,20 @@ fn cron_iterations_keep_failed_independent_dependencies_blocked() {
         "failing.toml",
         "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
     );
-    let graph = scheduled_graph(
-        &fake_harness(),
-        &release.display().to_string(),
-        "./oneharness.toml",
-    )
-    .replace(
-        "members:\n",
-        "members:\n  gate:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n",
-    )
-    .replace("deps: [ticker]", "deps: [ticker, gate]");
+    let graph = graph_with(
+        &scheduled_graph(
+            &fake_harness(),
+            &release.display().to_string(),
+            "./oneharness.toml",
+        )
+        .replace(
+            "members:\n",
+            "members:\n  gate:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n",
+        ),
+        // A second dependency on `report`, appended to the list the skeleton
+        // already gave it.
+        &[("members.report.deps.1", "gate")],
+    );
     workspace.graph(&graph);
     let child = workspace.spawn_with(
         &[

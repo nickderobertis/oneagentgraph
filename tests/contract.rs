@@ -30,6 +30,7 @@ use oneagentgraph::liveness::{
     STALL_TIMEOUT_ENV,
 };
 use oneagentgraph::run::{RunId, Started};
+use oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE;
 use oneagentgraph::sweep::{families, RUNS_FAMILY, TEMP_FAMILY};
 use serde_json::{json, Value};
 
@@ -890,6 +891,14 @@ fn the_documented_liveness_bounds_are_the_ones_the_crate_declares() {
             "docs/contract.md no longer names `{name}`"
         );
     }
+    // The activity watchdog's other number: the share of a core below which a
+    // tree counts as idle. The document states it and this build applies it, so
+    // neither may move alone — a threshold nobody wrote down is the calibration
+    // this rule replaced.
+    assert!(
+        CONTRACT.contains(&format!("{WORKING_PERCENT_OF_A_CORE}% of one core")),
+        "the idle threshold in docs/contract.md and WORKING_PERCENT_OF_A_CORE disagree"
+    );
 }
 
 /// The families `sweep` names, and the floor it applies, are the ones the crate

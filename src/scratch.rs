@@ -69,6 +69,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::time::Duration;
 
 use crate::error::Error;
 use crate::liveness::OWNER_LOCK_FILE;
@@ -450,36 +451,66 @@ mod platform {
         tail.split_whitespace().nth(19)?.parse().ok()
     }
 
-    /// How much CPU `pid` has been charged so far, in the kernel's own ticks.
+    /// How much CPU `pid` has been charged so far, **in microseconds**.
     ///
-    /// Deliberately opaque and only ever compared with an earlier reading of the
-    /// same process — see [`super::work`] — so no unit conversion has to be got
-    /// right on three platforms to answer the one question asked of it: has this
-    /// process done anything since last time?
+    /// One unit on every platform, because the rule this feeds is a rate — see
+    /// [`Work::worked`] — and a rate has to be in something. Which unit
+    /// matters less than that all three agree on it: microseconds is finer than
+    /// the threshold can resolve over any window this is sampled at, so the two
+    /// platforms counting below it round away nothing the rule can see, and the
+    /// one counting above it converts exactly.
     #[cfg(target_os = "linux")]
     pub fn consumed(pid: i32) -> Option<u64> {
         // Fields 14 and 15 of `/proc/<pid>/stat`: the user and system time this
-        // process has been charged. Parsed from after the last `)` for the
-        // reason [`start_token`] gives — field 2 is an executable name that may
-        // itself contain spaces and parentheses.
+        // process has been charged, in the kernel's own ticks. Parsed from after
+        // the last `)` for the reason [`start_token`] gives — field 2 is an
+        // executable name that may itself contain spaces and parentheses.
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let tail = &stat[stat.rfind(')')? + 1..];
         let mut fields = tail.split_whitespace();
         let user: u64 = fields.nth(11)?.parse().ok()?;
         let system: u64 = fields.next()?.parse().ok()?;
-        Some(user.saturating_add(system))
+        Some(
+            user.saturating_add(system)
+                .saturating_mul(micros_per_tick()?),
+        )
     }
 
-    /// The same reading from `libproc`, reduced to the scheduler-scale ticks the
-    /// Linux reading exposes, for the platform with no `/proc` to read it out
-    /// of.
+    /// How long one of those ticks is, asked of the platform rather than assumed.
     ///
-    /// `proc_taskinfo` reports nanoseconds precise enough to count the tiny
-    /// bookkeeping wake-ups of an otherwise parked harness as work. Linux CPU
-    /// accounting does not, and that difference made the same idle member evade
-    /// the watchdog on macOS until its provider timeout. Ten-millisecond buckets
-    /// retain a CPU-bound child's unmistakable progress while treating that
-    /// polling noise as the idleness the rule is meant to recognize.
+    /// It is a hundred per second on every ordinary Linux build, but it is an
+    /// ABI constant of the *platform* rather than of the kernel — 1024 on alpha,
+    /// and settable elsewhere — so it is read. A platform that will not answer,
+    /// or answers something a tick cannot be, yields no reading rather than one
+    /// in a unit nobody checked: an unreadable process counts as nothing, exactly
+    /// as it does when `/proc` cannot be parsed, and that is the direction that
+    /// still condemns a wedged member.
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey can reach the
+    // refusal below: `sysconf(_SC_CLK_TCK)` is a constant of any host that can
+    // run this suite. It degrades to the reading-less path a `/proc` parse
+    // failure already takes, which the journeys do cover.
+    #[cfg(target_os = "linux")]
+    fn micros_per_tick() -> Option<u64> {
+        // SAFETY: `sysconf` reads a constant of the running platform into its
+        // return value; nothing is borrowed and nothing is written.
+        let per_second = u64::try_from(unsafe { libc::sysconf(libc::_SC_CLK_TCK) }).ok()?;
+        (1..=1_000_000)
+            .contains(&per_second)
+            .then(|| 1_000_000 / per_second)
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+
+    /// The same reading from `libproc`, for the platform with no `/proc` to read
+    /// it out of.
+    ///
+    /// `proc_taskinfo` counts in nanoseconds, which is precise enough to see the
+    /// bookkeeping wake-ups of an otherwise parked harness — a resolution the
+    /// Linux counter does not have. That difference is why this reading is no
+    /// longer compared for *equality* anywhere: a rule that asked whether the
+    /// number moved at all read the same idle member as busy here and idle
+    /// there, and coarsening this counter to hide that was calibrating a rule
+    /// whose shape was wrong. [`Work::worked`] asks how *fast* it moved
+    /// instead, and this reports the same microseconds every platform does.
     #[cfg(target_vendor = "apple")]
     pub fn consumed(pid: i32) -> Option<u64> {
         let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
@@ -499,8 +530,8 @@ mod platform {
         if written != size {
             return None;
         }
-        const NANOS_PER_TICK: u64 = 10_000_000;
-        Some(info.pti_total_user.saturating_add(info.pti_total_system) / NANOS_PER_TICK)
+        const NANOS_PER_MICRO: u64 = 1_000;
+        Some(info.pti_total_user.saturating_add(info.pti_total_system) / NANOS_PER_MICRO)
     }
 
     /// No CPU accounting to be had here, so a member's silence is judged by its
@@ -976,11 +1007,13 @@ mod platform {
         Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
     }
 
-    /// How much CPU `pid` has been charged so far, in 100-nanosecond ticks.
+    /// How much CPU `pid` has been charged so far, **in microseconds**.
     ///
     /// The same call [`start_token`] reads a creation time out of, asked for the
-    /// other two times it returns. Opaque and only ever compared with an earlier
-    /// reading of the same process — see [`super::work`].
+    /// other two times it returns. `FILETIME` counts hundred-nanosecond ticks;
+    /// the unit every platform reports in is microseconds, for the reason the
+    /// Linux reading gives — [`Work::worked`] judges a rate, and a rate is
+    /// in something.
     pub fn consumed(pid: i32) -> Option<u64> {
         // Checked rather than `as`, for the reason [`start_token`] gives: a lossy
         // widening turns a number that names no process into one that may name a
@@ -1010,7 +1043,8 @@ mod platform {
             (read != 0).then_some((kernel, user))
         };
         let (kernel, user) = times?;
-        Some(ticks(kernel).saturating_add(ticks(user)))
+        const TICKS_PER_MICRO: u64 = 10;
+        Some(ticks(kernel).saturating_add(ticks(user)) / TICKS_PER_MICRO)
     }
 
     /// One `FILETIME` as the single number its two halves are.
@@ -1494,13 +1528,11 @@ pub fn is_live(identity: ProcessIdentity) -> bool {
 }
 
 /// One observation of the work under a scratch: how much CPU every live process
-/// stamped for it has been charged between them.
+/// stamped for it has been charged between them, in microseconds.
 ///
-/// Compared, never read. Two observations that differ are a tree that did
-/// something in between; two that are identical are a tree that did nothing at
-/// all. That is the whole of what [`work`] is for, and it is why the reading is
-/// left in whatever unit the platform counts in — a conversion nobody performs
-/// is a conversion nobody can get wrong on three of them.
+/// Compared, never read. Two observations are a *rate* — see
+/// [`worked`](Self::worked) — which is the whole of what [`work`] is
+/// for.
 ///
 /// One number rather than a process-by-process record, because the question is
 /// about the tree rather than about any process in it, and a second signal is a
@@ -1513,8 +1545,75 @@ pub fn is_live(identity: ProcessIdentity) -> bool {
 /// same stamp, and a caller that could name its own number could make an idle
 /// tree compare as a busy one — the direction that spares a wedged member
 /// forever. [`work`] is the only way to obtain one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not comparable for equality, and that is deliberate too: "the number moved"
+/// was the rule once, and it is the one this replaces.
+#[derive(Debug, Clone, Copy)]
 pub struct Work(u64);
+
+/// The share of one core a member's tree has to be charged, over the window
+/// actually observed, before it counts as working — as a percentage.
+///
+/// Public because `docs/contract.md` states it and `tests/contract.rs` gates the
+/// two against each other; this is the declaration, the document quotes it, and
+/// neither can move without the other.
+///
+/// A rate rather than "the reading moved", because *moved* is a question about
+/// the platform's accounting resolution — ten-millisecond ticks on Linux,
+/// nanoseconds on macOS — which the same parked harness answers differently on
+/// each. Coarsening the finer counter until they agreed was a calibration, and a
+/// constant that makes a parked harness look idle on a quiet runner is one a
+/// loaded runner can exceed.
+///
+/// The populations a rate separates are four orders of magnitude apart on every
+/// platform. Measured here over ten seconds each: a parked process is charged
+/// 0 µs/s; one waking every half-second — a harness with a heartbeat, the
+/// noisiest thing a wedged tree holds — 121 µs/s, 0.012% of a core; a spin loop
+/// 987,678 µs/s, 98.8%. One percent sits eighty times above the first pair and a
+/// hundred times below the second, and load closes neither margin: a process
+/// that is not running is not charged, and a spinning one would need a hundred
+/// runnable threads per core to fall this far.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] the populations either side of
+// this number have real journeys; the boundary itself has none, because holding a
+// process at it for a whole bound is a verdict that flips with runner load — the
+// flakiness this rate removes. It is covered either side in
+// `member::tests::a_tree_is_judged_by_how_fast_it_is_charged_cpu`.
+pub const WORKING_PERCENT_OF_A_CORE: u64 = 1;
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+impl Work {
+    /// Whether the tree was working between this observation and `later`, taken
+    /// `over` a window of wall-clock time.
+    ///
+    /// The comparison is a rate — CPU charged against wall time elapsed — held
+    /// against [`WORKING_PERCENT_OF_A_CORE`]. It is the *magnitude* of the change
+    /// rather than its sign, because a process leaving the tree takes its whole
+    /// lifetime's CPU out of the total: a member whose child just finished a
+    /// second of work is a member that was working, and a total that fell says
+    /// so as plainly as one that rose.
+    ///
+    /// A window of nothing is no evidence of anything, and answers `false` —
+    /// which condemns rather than spares. Every caller's window is at least one
+    /// probe interval wide.
+    #[must_use]
+    pub fn worked(self, later: Self, over: Duration) -> bool {
+        let charged = self.0.abs_diff(later.0);
+        let window = u64::try_from(over.as_micros()).unwrap_or(u64::MAX);
+        charged > window * WORKING_PERCENT_OF_A_CORE / 100
+    }
+
+    /// A reading this crate's own tests supply, so the rule can be driven over a
+    /// sequence of observations without a real process to take them from.
+    ///
+    /// `#[cfg(test)]` is what keeps the invariant above true where it matters:
+    /// no shipped build has a second way to make one, so no caller can hand the
+    /// watchdog a number of its own choosing.
+    #[cfg(test)]
+    pub(crate) const fn of_micros(micros: u64) -> Self {
+        Self(micros)
+    }
+}
 
 /// Observe the work under `scratch` as it stands right now.
 ///

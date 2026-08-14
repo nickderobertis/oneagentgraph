@@ -8,7 +8,9 @@
 // process is the single sanctioned double, and the wrapper scripts here are that
 // same double reached under a second `ONEHARNESS_BIN_*` key.
 
-use crate::support::{fake_harness, two_party_graph, until, Workspace, CHAIN};
+use crate::support::{
+    fake_harness, graph_with, two_party_graph, until, Workspace, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
+};
 
 /// `validate` reads every ref the graph names, so a pass means the graph could
 /// be launched — not merely that it parses.
@@ -18,7 +20,8 @@ fn validate_reads_every_ref_the_graph_names() {
     workspace.run(&["validate", "./graph.yaml"]).expect_code(0);
 
     workspace.graph(
-        &two_party_graph(&fake_harness(), "").replace("./oneharness.judge.toml", "./nowhere.toml"),
+        &two_party_graph(&fake_harness(), NO_ENV)
+            .replace("./oneharness.judge.toml", "./nowhere.toml"),
     );
     let run = workspace.run(&["validate", "./graph.yaml"]);
     run.expect_code(2);
@@ -189,7 +192,7 @@ fn an_unreachable_https_ref_and_a_cleartext_one_are_both_refused_by_url() {
     // And the same for a ref *inside* a graph this build can read, so the
     // refusal is the fetch rather than the graph.
     workspace.graph(
-        &two_party_graph(&fake_harness(), "")
+        &two_party_graph(&fake_harness(), NO_ENV)
             .replace("./base.yaml", "https://oneagentgraph.invalid/base.yaml"),
     );
     let inner = workspace.run(&["validate", "./graph.yaml"]);
@@ -1355,7 +1358,7 @@ fn a_shipped_persona_is_reachable_by_name() {
     let workspace = Workspace::new();
     let record = workspace.at("prompts.txt");
     workspace.graph(
-        &two_party_graph(&fake_harness(), "").replace("persona: engineer", "persona: reviewer"),
+        &two_party_graph(&fake_harness(), NO_ENV).replace("persona: engineer", "persona: reviewer"),
     );
     let run = workspace.run_task(&format!(
         "fake:complete-now: shipped fake:record-prompt={}",
@@ -1382,22 +1385,27 @@ fn a_shipped_persona_is_reachable_by_name() {
 fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
     let workspace = Workspace::new();
     let release = workspace.at("cron-keeper-release");
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {{every: 3600, resettable: true}}\n",
+            "    schedule: {every: 3600, resettable: true}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
-            "    persona: engineer\n    task: 'fake:complete-now fake:hold={release}'\n",
+            "    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n    deps: [anchor]\n",
         ),
-        fake = fake_harness(),
-        release = release.display(),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (
+                "members.keeper.task",
+                format!("fake:complete-now fake:hold={}", release.display()),
+            ),
+        ],
     ));
     let state = workspace.state();
     let handle = {
@@ -1470,26 +1478,31 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
 fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
     let workspace = Workspace::new();
     let release = workspace.at("member-cancel-keeper-release");
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n",
             "  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {{every: 3600, resettable: true}}\n",
+            "    schedule: {every: 3600, resettable: true}\n",
             "  auditor:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {{every: 3600, resettable: true}}\n",
+            "    schedule: {every: 3600, resettable: true}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
-            "    persona: engineer\n    task: 'fake:complete-now fake:hold={release}'\n",
+            "    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n    deps: [anchor]\n",
         ),
-        fake = fake_harness(),
-        release = release.display(),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (
+                "members.keeper.task",
+                format!("fake:complete-now fake:hold={}", release.display()),
+            ),
+        ],
     ));
     let state = workspace.state();
     let handle = {
@@ -1673,15 +1686,15 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
 #[test]
 fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
     let workspace = Workspace::new();
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {{every: 3600, resettable: true}}\n",
+            "    schedule: {every: 3600, resettable: true}\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
     let state = workspace.state();
     let handle = {
@@ -1801,7 +1814,7 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
         "oneharness.toml",
         "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\", \"codex\"]\n",
     );
-    workspace.graph(&two_party_graph(&fake_harness(), "").replace(
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV).replace(
         "    agent:\n      oneharness_config: ./oneharness.toml\n",
         "    agent:\n      oneharness_config: ./oneharness.toml\n      model: claude-opus-5\n",
     ));
@@ -1898,22 +1911,27 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
 fn reset_timer_leaves_a_non_resettable_schedule_counting() {
     let workspace = Workspace::new();
     let release = workspace.at("reset-keeper-release");
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {{every: 3600, resettable: false}}\n",
+            "    schedule: {every: 3600, resettable: false}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
-            "    persona: engineer\n    task: 'fake:complete-now fake:hold={release}'\n",
+            "    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n    deps: [anchor]\n",
         ),
-        fake = fake_harness(),
-        release = release.display(),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (
+                "members.keeper.task",
+                format!("fake:complete-now fake:hold={}", release.display()),
+            ),
+        ],
     ));
     let state = workspace.state();
     let handle = {

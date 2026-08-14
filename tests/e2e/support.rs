@@ -107,7 +107,7 @@ impl Workspace {
         workspace.write("oneharness.toml", CHAIN);
         workspace.write("oneharness.judge.toml", CHAIN);
         workspace.write("base.yaml", BASE);
-        workspace.write("graph.yaml", &two_party_graph(&fake_harness(), ""));
+        workspace.write("graph.yaml", &two_party_graph(&fake_harness(), NO_ENV));
         workspace
     }
 
@@ -301,36 +301,105 @@ pub const BASE: &str = concat!(
     "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
 );
 
-/// The default graph: one two-party member, both sides on the doubled chain.
-pub fn two_party_graph(fake: &str, extra_env: &str) -> String {
-    format!(
+/// The graph document `skeleton` describes, carrying each value in `values` at
+/// the dotted key path beside it — parsed, assigned, and **serialized back**.
+///
+/// This is how a journey gets a value it did not type itself — a path, a task,
+/// a URL — into a graph document. Formatting one in is what broke two journeys
+/// on Windows: `\U` in `C:\Users\…` opens a unicode escape inside a
+/// double-quoted scalar, and the parser refused the document. The correct
+/// quoting differs per value and per context — single quotes fail on an
+/// apostrophe, plain scalars on `: ` — so every journey's author would have to
+/// re-derive it. `serde_norway` does not: quoting what needs quoting is the one
+/// thing a serializer cannot get wrong.
+///
+/// A `skeleton` is `concat!` rather than `format!` on purpose: literal text has
+/// nowhere to interpolate into, so the next value has nowhere to go but
+/// `values`.
+pub fn graph_with<K: AsRef<str>, V: AsRef<str>>(skeleton: &str, values: &[(K, V)]) -> String {
+    let mut document: serde_norway::Value = serde_norway::from_str(skeleton)
+        .unwrap_or_else(|err| panic!("the skeleton is not a YAML document ({err}):\n{skeleton}"));
+    for (path, value) in values {
+        let (path, value) = (path.as_ref(), value.as_ref());
+        let mut at = &mut document;
+        for key in path.split('.') {
+            at = match at {
+                // A sequence is addressed by index — `…judge.command.0` for a
+                // provider spelled as a command line, `…deps.1` for a second
+                // dependency. One past the end appends, which is how a journey
+                // adds to a list the skeleton already has.
+                serde_norway::Value::Sequence(items) => {
+                    let index: usize = key.parse().unwrap_or_else(|_| {
+                        panic!("{path}: `{key}` is not an index into the sequence there")
+                    });
+                    let held = items.len();
+                    if index == held {
+                        items.push(serde_norway::Value::Null);
+                    }
+                    items.get_mut(index).unwrap_or_else(|| {
+                        panic!("{path}: the sequence there has {held} elements, so {index} is past its end")
+                    })
+                }
+                holder => {
+                    let key = serde_norway::Value::String(key.to_string());
+                    let holder = holder.as_mapping_mut().unwrap_or_else(|| {
+                        panic!("{path}: the skeleton has neither a mapping nor a sequence there")
+                    });
+                    holder
+                        .entry(key.clone())
+                        .or_insert(serde_norway::Value::Null);
+                    holder.get_mut(&key).expect("the entry just inserted")
+                }
+            };
+        }
+        *at = serde_norway::Value::String(value.to_string());
+    }
+    serde_norway::to_string(&document).expect("a document built from strings serializes")
+}
+
+/// The default graph: one two-party member, both sides on the doubled chain,
+/// plus whatever else the journey needs in the graph's `env:` block.
+pub fn two_party_graph<K: AsRef<str>, V: AsRef<str>>(fake: &str, extra_env: &[(K, V)]) -> String {
+    let mut values = vec![(FAKE_HARNESS_KEY.to_string(), fake.to_string())];
+    values.extend(
+        extra_env
+            .iter()
+            .map(|(key, value)| (format!("env.{}", key.as_ref()), value.as_ref().to_string())),
+    );
+    graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n{extra}",
+            "env: {}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n",
         ),
-        fake = fake,
-        extra = extra_env,
+        &values,
     )
 }
 
 /// A graph with one single-sided member — the kind that is still a child process
 /// of its own, and so the only one a spawn failure is reachable through.
 pub fn single_sided_graph(fake: &str) -> String {
-    format!(
+    graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
         ),
-        fake = fake,
+        &[(FAKE_HARNESS_KEY, fake)],
     )
 }
+
+/// Where the doubled paid harness's path goes in a graph document: oneharness's
+/// own `ONEHARNESS_BIN_<ID>` override, in the graph's `env:` block.
+pub const FAKE_HARNESS_KEY: &str = "env.ONEHARNESS_BIN_CLAUDE_CODE";
+
+/// A graph whose `env:` block needs nothing beyond the doubled harness.
+pub const NO_ENV: &[(&str, &str)] = &[];
 
 /// The compiled paid-harness double.
 pub fn fake_harness() -> String {

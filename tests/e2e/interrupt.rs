@@ -12,6 +12,13 @@
 //! answer that protocol: it parks, it is aborted, and the redirection arrives as
 //! the next turn.
 
+// llmlint: ignore-file[e2e_not_mocked] the same declaration its eight sibling
+// journey files carry, and for the same reason — see tests/e2e/support.rs: the
+// paid harness process is the one sanctioned double, replaced at oneharness's own
+// `ONEHARNESS_BIN_<ID>` seam. Here it is doubly load-bearing: what these journeys
+// drive is claude-code's stdin control protocol, and the double is the far end
+// that answers it.
+
 // The parked-turn fixture below serves the journeys that drive a *live* control
 // socket, and those are `cfg(unix)` because that is what a unix domain socket is.
 // On Windows the fixture is still compiled — so it is still type-checked and
@@ -20,7 +27,7 @@
 
 use std::path::PathBuf;
 
-use crate::support::{until, Workspace};
+use crate::support::{graph_with, until, Workspace};
 
 /// One run whose member is parked on a controllable turn, and the run id an
 /// operator addresses it by.
@@ -602,16 +609,16 @@ const QWEN_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"qwen\"]\n";
 /// The default two-party graph, on a chain whose harness has no control
 /// mechanism.
 fn uncontrollable_graph(fake: &str) -> String {
-    format!(
+    graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_QWEN: {fake}\n",
+            "env: {}\n",
             "members:\n  worker:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n",
         ),
-        fake = fake,
+        &[("env.ONEHARNESS_BIN_QWEN", fake)],
     )
 }

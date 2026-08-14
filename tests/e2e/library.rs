@@ -11,7 +11,7 @@ use oneagentgraph::config::ConfigRef;
 use oneagentgraph::event::{Envelope, EventKind};
 use oneagentgraph::run::{self, MemberName, Request, Signal};
 
-use crate::support::{fake_harness, oneharness_bin, Workspace};
+use crate::support::{fake_harness, graph_with, oneharness_bin, Workspace, FAKE_HARNESS_KEY};
 // The one Unix-only journey's own surface and helper: on a platform without a
 // unix domain socket it compiles away, and an import left behind is a
 // `-D warnings` build failure rather than dead weight.
@@ -56,10 +56,10 @@ fn a_library_caller_watches_cancels_and_waits_for_a_live_graph() {
     // the graph boundary exercises the same export path a CLI run uses.
     workspace.graph(&crate::support::two_party_graph(
         &fake_harness(),
-        &format!(
-            "  XDG_STATE_HOME: {}\n",
-            workspace.session_store().display()
-        ),
+        &[(
+            "XDG_STATE_HOME",
+            workspace.session_store().display().to_string(),
+        )],
     ));
 
     let running = run::start(&request, &env).expect("the graph starts");
@@ -172,10 +172,10 @@ fn a_successful_live_run_returns_the_blocking_exit_status() {
     let workspace = Workspace::new();
     workspace.graph(&crate::support::two_party_graph(
         &fake_harness(),
-        &format!(
-            "  XDG_STATE_HOME: {}\n",
-            workspace.session_store().display()
-        ),
+        &[(
+            "XDG_STATE_HOME",
+            workspace.session_store().display().to_string(),
+        )],
     ));
     let request = Request {
         graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
@@ -210,10 +210,10 @@ fn a_library_caller_redirects_a_members_in_flight_turn() {
     let workspace = Workspace::new();
     workspace.graph(&crate::support::two_party_graph(
         &fake_harness(),
-        &format!(
-            "  XDG_STATE_HOME: {}\n",
-            workspace.session_store().display()
-        ),
+        &[(
+            "XDG_STATE_HOME",
+            workspace.session_store().display().to_string(),
+        )],
     ));
     let started = workspace.at("turn-started");
     let original_work = workspace.at("did-original-work");
@@ -337,22 +337,27 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
     // that wave from finishing, and the scheduled member's clock does not start
     // counting until it does.
     let release = workspace.at("cron-keeper-release");
-    workspace.graph(&format!(
+    workspace.graph(&graph_with(
         concat!(
             "version: 2\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {{every: 3600, resettable: true}}\n",
+            "    schedule: {every: 3600, resettable: true}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
-            "    persona: engineer\n    task: 'fake:complete-now fake:hold={release}'\n",
+            "    persona: engineer\n",
             "    agent:\n      oneharness_config: ./oneharness.toml\n",
             "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
             "    mode: bypass\n    deps: [anchor]\n",
         ),
-        fake = fake_harness(),
-        release = release.display(),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (
+                "members.keeper.task",
+                format!("fake:complete-now fake:hold={}", release.display()),
+            ),
+        ],
     ));
     let request = Request {
         graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),

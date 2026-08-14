@@ -30,7 +30,9 @@
 
 use std::path::Path;
 
-use crate::support::{as_env, bounds, fake_harness, labels, until, Workspace};
+use crate::support::{
+    as_env, bounds, fake_harness, graph_with, labels, until, Workspace, FAKE_HARNESS_KEY,
+};
 // The one Unix-only journey's own helper: on a platform without `SIGTERM` it
 // compiles away, and an import left behind is a `-D warnings` build failure
 // rather than dead weight.
@@ -482,14 +484,14 @@ fn a_member_the_heartbeat_rule_condemns_leaves_no_descendant_running() {
 /// two-party tree is condemned by the journeys above and torn down by the cancel
 /// journeys below; what these two need is a tree that is reliably *there*.
 fn single_sided_graph() -> String {
-    format!(
+    graph_with(
         concat!(
             "version: 1\nname: node-scope\n",
-            "env:\n  ONEHARNESS_BIN_CLAUDE_CODE: {fake}\n",
+            "env: {}\n",
             "members:\n  worker:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
         ),
-        fake = fake_harness(),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
     )
 }
 
@@ -1028,7 +1030,7 @@ fn a_descendant_that_refuses_to_stop_is_killed_anyway() {
     // the member process — and the turn refusing the signal is that process.
     workspace.graph(&two_party_graph(
         &fake_harness(),
-        "  FAKE_HARNESS_IGNORE_TERM: \"1\"\n",
+        &[("FAKE_HARNESS_IGNORE_TERM", "1")],
     ));
     let release = workspace.at("release");
     let started = workspace.at("turn-started");
