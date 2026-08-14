@@ -106,10 +106,12 @@ pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
 /// run driven **through onejudge's library, in this process** — there is no
 /// `onejudge` binary in the chain, and so no argv, no exit status, and no stderr
 /// for it. A `kind: oneharness` member is still `oneharness run`, a child process
-/// of its own, because oneharness's library surface writes its report to the
-/// *process's* stdout and returns an exit code: an in-process call could neither
-/// take the report back nor be given an event sink, and this process's stdout is
-/// the merged stream. See `docs/contract.md`.
+/// of its own — no longer because oneharness's library surface could not answer
+/// (since 0.7.0 `oneharness_core::io::run::run` returns the report and takes an
+/// event sink), but because a *supervised* member needs two things that surface
+/// still cannot give and one the contract has not yet been asked for.
+/// `src/harness_process.rs` names all three at the site, with the proposal each
+/// one is. See `docs/contract.md`.
 #[derive(Debug, Clone)]
 pub enum Launch {
     /// onejudge's own run driver, over the config written into the member's
