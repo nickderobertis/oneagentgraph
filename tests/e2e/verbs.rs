@@ -92,16 +92,26 @@ fn validate_refuses_a_graph_that_could_never_run() {
             ),
             "never stops firing",
         ),
-        // A graph of nothing but schedules quiesces on its clocks' first tick, so
-        // with every first turn deferred it would start its members, fire none of
-        // them, and exit 0 having done nothing. Refused instead, saying which
-        // field asks for the other behaviour.
+        // A graph of nothing but schedules quiesces as soon as its clocks tick,
+        // so a deferred first turn in one never comes due: the member would
+        // start, wait, and the run would exit 0 without it ever having run.
+        // Refused instead, saying which field asks for the other behaviour.
         (
             concat!(
                 "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
                 "    oneharness_config: ./oneharness.toml\n    schedule: {every: 1800}\n",
             ),
-            "quiesces before anything fires",
+            "never comes due",
+        ),
+        // A span longer than a monotonic clock can count to is a document that
+        // would panic the run rather than pace it.
+        (
+            concat!(
+                "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+                "    schedule: {every: 60, start_after: 18446744073709551615}\n",
+            ),
+            "what a clock can count to",
         ),
         (
             concat!(

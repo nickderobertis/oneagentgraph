@@ -215,6 +215,16 @@ fn default_stream() -> bool {
     true
 }
 
+/// The longest span a [`Schedule`] may name, in seconds — a shade over 136 years.
+///
+/// Not a policy about cadence: it is the bound that keeps a document from
+/// crashing the run. Both of a schedule's spans are added to a monotonic clock,
+/// which panics rather than saturating when the sum is not representable, and
+/// `u64::MAX` seconds is some four hundred billion years. `u32::MAX` is far past
+/// any run and far short of any platform's ceiling, and it is one number rather
+/// than a per-platform probe.
+pub const MAX_SCHEDULE_SECONDS: u64 = u32::MAX as u64;
+
 /// The first graph schema version this crate still reads.
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
@@ -385,6 +395,24 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                             "member {name:?}: a schedule of every 0 seconds never stops firing"
                         )));
                     }
+                    // Both spans are added to a monotonic clock to get the moment
+                    // the member is next due, and that addition *panics* on a sum
+                    // the platform cannot represent. A schedule's seconds are a
+                    // `u64` an external document supplies, so without this a
+                    // number nobody could mean would take the whole run down
+                    // rather than being refused as the typo it is.
+                    for (field, seconds) in [
+                        ("every", schedule.every),
+                        ("start_after", schedule.first_turn_after()),
+                    ] {
+                        if seconds > MAX_SCHEDULE_SECONDS {
+                            return Err(Error::InvalidConfig(format!(
+                                "member {name:?}: `{field}` of {seconds} seconds is longer than \
+                                 any run, and past what a clock can count to — the ceiling is \
+                                 {MAX_SCHEDULE_SECONDS}"
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -532,6 +560,46 @@ mod tests {
         // written before the field existed round-trips unchanged.
         let rendered = serde_norway::to_string(&inherited).expect("a schedule serializes");
         assert!(!rendered.contains("start_after"), "{rendered}");
+    }
+
+    /// A span longer than a clock can count to is refused by name, on both of a
+    /// schedule's fields and however it was arrived at.
+    ///
+    /// Not a policy about cadence. Both spans are added to a monotonic clock,
+    /// which *panics* rather than saturating on a sum it cannot represent, so
+    /// without this a number in a document takes the run down instead of being
+    /// refused as the typo it is.
+    #[test]
+    fn a_schedule_longer_than_a_clock_can_count_to_is_refused() {
+        let document = |schedule: String| {
+            format!(
+                concat!(
+                    "version: 1\nname: g\nmembers:\n  ticker:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n    schedule: {}\n",
+                ),
+                schedule
+            )
+        };
+        let ceiling = MAX_SCHEDULE_SECONDS;
+        assert!(validate(&parse(&document(format!("{{every: {ceiling}}}")))).is_ok());
+        for (schedule, field) in [
+            (format!("{{every: {}}}", ceiling + 1), "every"),
+            // Named directly...
+            (
+                format!("{{every: 60, start_after: {}}}", u64::MAX),
+                "start_after",
+            ),
+            // ...and inherited from `every`, which is the same span by another
+            // route and must be refused by the field the author would look at.
+            (format!("{{every: {}}}", u64::MAX), "every"),
+        ] {
+            let err = validate(&parse(&document(schedule.clone()))).unwrap_err();
+            assert!(err.to_string().contains(field), "{schedule}: {err}");
+            assert!(
+                err.to_string().contains("what a clock can count to"),
+                "{schedule}: {err}"
+            );
+        }
     }
 
     /// A member's name is a directory this run creates and a signal file an

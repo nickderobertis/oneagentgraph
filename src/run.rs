@@ -941,17 +941,21 @@ pub fn ready_order(graph: &GraphConfig) -> Result<Vec<Vec<String>>, Error> {
     Ok(waves)
 }
 
-/// Refuse a graph whose every member's first turn is deferred past the moment the
-/// run ends.
+/// Refuse a graph in which a deferred first turn could never come due.
 ///
 /// The scheduler quiesces when no live work remains whose ancestry is not solely
-/// cron members — see [`solely_cron_descended`]. A graph of *nothing but* cron
-/// members has no such work by construction, so it quiesces on its clocks' first
-/// tick; before `start_after` existed that was still a graph that ran, because
-/// every schedule took its first turn in the wave that started it. With every
-/// first turn deferred, the same graph starts its members, fires none of them, and
-/// exits 0 — which is a silent nothing, and the one failure shape this scheduler
-/// exists to be the opposite of.
+/// cron members — see [`solely_cron_descended`] — and a clock checks that count
+/// before every firing. A graph of *nothing but* cron members has no such work by
+/// construction, so its clocks stop on their first tick, and a first turn deferred
+/// past that tick never happens: the member starts, waits, and the run exits 0
+/// without it ever having run. That is a silent nothing, which is the one failure
+/// shape this scheduler exists to be the opposite of.
+///
+/// Per deferred member rather than per graph, because a sibling firing at t=0
+/// does **not** rescue one: a scheduled member is not counted as live work either,
+/// so it takes its own turn and the count is still zero. A graph like that would
+/// half-run — the immediate schedule fires, the deferred one silently never does —
+/// which is worse to debug than a refusal, not better.
 ///
 /// Refused rather than special-cased. Making a never-fired member hold the run
 /// open would keep a paced graph alive long after the work it paces has settled,
@@ -971,20 +975,19 @@ fn refuse_a_graph_that_never_fires(graph: &GraphConfig) -> Result<(), Error> {
     {
         return Ok(());
     }
-    let scheduled: Vec<(&str, bool)> = graph
+    let deferred: Vec<&str> = graph
         .members
         .iter()
-        .filter(|(_, member)| schedule(member).is_some())
-        .map(|(name, member)| (name.as_str(), deferred_start(member)))
+        .filter(|(_, member)| deferred_start(member))
+        .map(|(name, _)| name.as_str())
         .collect();
-    if scheduled.iter().any(|(_, deferred)| !deferred) {
+    if deferred.is_empty() {
         return Ok(());
     }
-    let deferred: Vec<&str> = scheduled.iter().map(|(name, _)| *name).collect();
     Err(Error::InvalidConfig(format!(
-        "every member of this graph is scheduled or descends from one, and every schedule defers \
-         its first turn ({}), so the run quiesces before anything fires; give one of them \
-         `start_after: 0`",
+        "every member of this graph is scheduled or descends from one, so the run quiesces as \
+         soon as its clocks tick and a deferred first turn ({}) never comes due; give each of \
+         them `start_after: 0`, or a member outside the schedules for them to pace",
         deferred.join(", ")
     )))
 }
@@ -1567,15 +1570,11 @@ fn cron(
     let reset = signals.join(format!("{name}.reset"));
     let stopped = || stop.exists() || own_stop.exists();
     let mut last = None;
-    // The interval this clock is currently counting down, which is `start_after`
-    // until the member has taken a turn and `every` from then on. A schedule that
-    // starts at t=0 already took that turn in the wave that started it, so what is
-    // pending here is its first *interval* — which is why the two collapse to
-    // `every` rather than to zero.
-    let mut interval = Duration::from_secs(match schedule.first_turn_after() {
-        0 => schedule.every,
-        waited => waited,
-    });
+    // The interval this clock is currently counting down — see `pending_interval`.
+    // Adding it to a monotonic clock is what `config::MAX_SCHEDULE_SECONDS` exists
+    // for: `Instant + Duration` panics on a sum the platform cannot represent, and
+    // every schedule reaching here has been through `config::validate`.
+    let mut interval = pending_interval(schedule, false);
     let mut due = Instant::now() + interval;
     loop {
         std::thread::sleep(TICK);
@@ -1613,10 +1612,25 @@ fn cron(
             on_success();
         }
         last = Some(outcome);
-        interval = Duration::from_secs(schedule.every);
+        interval = pending_interval(schedule, true);
         due = Instant::now() + interval;
     }
     last
+}
+
+/// How long this clock counts down before the member's next turn.
+///
+/// `start_after` until the member has taken one, and `every` from then on. A
+/// schedule that starts at t=0 took its first turn in the wave that started it, so
+/// what is pending for it here is already its first *interval* — which is why a
+/// zero collapses to `every` rather than firing this clock immediately.
+fn pending_interval(schedule: &crate::config::Schedule, taken_a_turn: bool) -> Duration {
+    let seconds = match schedule.first_turn_after() {
+        _ if taken_a_turn => schedule.every,
+        0 => schedule.every,
+        waited => waited,
+    };
+    Duration::from_secs(seconds)
 }
 
 /// One member's outcome, as the run record keeps it.
@@ -1785,15 +1799,60 @@ mod tests {
         assert!(err.to_string().contains("form a cycle"), "{err}");
     }
 
-    /// A graph whose every turn is deferred past its own quiescence is refused,
-    /// and every graph that still fires something is not.
+    /// A clock counts down `start_after` before the first turn and `every` after
+    /// it, and a schedule that fired at t=0 is already on `every`.
+    ///
+    /// The switch is what keeps `start_after` a *first*-turn delay rather than a
+    /// cadence: a schedule settling in for ten minutes and then reporting every
+    /// minute is one member, not two.
+    #[test]
+    fn a_clock_counts_down_the_first_delay_once_and_the_cadence_after_it() {
+        let schedule = |every: u64, start_after: Option<u64>| crate::config::Schedule {
+            every,
+            start_after,
+            resettable: false,
+        };
+        // The default: one whole interval before the first turn, and the same
+        // interval after it — indistinguishable, which is why the two below are
+        // what prove the switch.
+        let inherited = schedule(1800, None);
+        assert_eq!(
+            pending_interval(&inherited, false),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            pending_interval(&inherited, true),
+            Duration::from_secs(1800)
+        );
+
+        let settling_in = schedule(60, Some(600));
+        assert_eq!(
+            pending_interval(&settling_in, false),
+            Duration::from_secs(600),
+            "the first turn must wait the delay the schedule named"
+        );
+        assert_eq!(
+            pending_interval(&settling_in, true),
+            Duration::from_secs(60),
+            "a later turn must come at the cadence, not at the first-turn delay"
+        );
+
+        // A schedule that fired at t=0 took its first turn in its wave, so what is
+        // pending for its clock is already the cadence rather than no wait at all.
+        let immediate = schedule(60, Some(0));
+        assert_eq!(pending_interval(&immediate, false), Duration::from_secs(60));
+        assert_eq!(pending_interval(&immediate, true), Duration::from_secs(60));
+    }
+
+    /// A deferred first turn in a graph with nothing to pace is refused, and a
+    /// graph where it can come due is not.
     ///
     /// The one shape the `start_after` default can silence: a run with no work
-    /// outside the cron descent ends on its clocks' first tick, so with every
-    /// first turn deferred it would start its members, fire none of them, and
-    /// exit 0 having done nothing.
+    /// outside the cron descent ends as soon as its clocks tick, so a first turn
+    /// deferred past that tick never happens and the run exits 0 having not run
+    /// the member at all.
     #[test]
-    fn a_graph_whose_every_turn_is_deferred_past_quiescence_is_refused() {
+    fn a_deferred_turn_that_could_never_come_due_is_refused() {
         const CRON_ONLY: &str = concat!(
             "version: 1\nname: g\nmembers:\n",
             "  ticker:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
@@ -1819,16 +1878,23 @@ mod tests {
         )))
         .is_ok());
 
-        // One of several schedules firing at t=0 is enough to hold the graph
-        // open for the rest, so only a graph where *none* does is refused.
-        assert!(ready_order(&graph(&format!(
+        // A sibling firing at t=0 does not rescue it: a scheduled member is not
+        // live work either, so the count is still zero when its own turn ends.
+        // The graph would half-run — one schedule firing, the other silently
+        // never — so it is refused by the member that could never come due.
+        let mixed = format!(
             concat!(
                 "{}  pacemaker:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
                 "    schedule: {{every: 60, start_after: 0}}\n"
             ),
             CRON_ONLY
-        )))
-        .is_ok());
+        );
+        let err = ready_order(&graph(&mixed)).unwrap_err();
+        assert!(err.to_string().contains("ticker"), "{err}");
+        assert!(
+            !err.to_string().contains("pacemaker"),
+            "the refusal blamed a schedule that does come due: {err}"
+        );
     }
 
     /// `--set` reaches the field it names, keeping the field's own type, and a

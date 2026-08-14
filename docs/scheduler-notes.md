@@ -65,12 +65,20 @@ A deferred member has no `record.members` entry until it fires, which is the sam
 state every member is in for the whole of a live run: outcomes fill in as members
 settle, and `Record::declared_members` is what names the members themselves.
 
-`ready_order` refuses one graph shape this default creates: every member scheduled
-or descended only from scheduled members, and every schedule deferred. Such a
-graph has no work to hold it past the quiescence rule below, so it would start its
-members, fire none of them, and exit 0. `run::refuse_a_graph_that_never_fires` is
-that check, at the end of `ready_order` so `run` and `validate` share it and so it
-walks a dependency graph already proven acyclic and complete.
+`ready_order` refuses the one shape this default can silence: a deferred schedule
+in a graph where every member is scheduled or descends only from scheduled
+members. Such a graph has nothing to hold it past the quiescence rule below, so
+the deferred turn never comes due and the run exits 0 without it. The check is
+per member rather than per graph, because a sibling firing at t=0 does not rescue
+it — a scheduled member is not counted as live work either.
+`run::refuse_a_graph_that_never_fires` is that check, at the end of `ready_order`
+so `run` and `validate` share it and so it walks a dependency graph already proven
+acyclic and complete.
+
+`config::MAX_SCHEDULE_SECONDS` bounds both of a schedule's spans. Neither is a
+policy about cadence: `run::pending_interval`'s result is added to an `Instant`,
+which panics rather than saturating on a sum the platform cannot represent, so
+without the bound a `u64` in a document would take the run down.
 
 `run::spawn_cron` owns the member's clock either way. `run::cron`
 watches the existing stop, member-stop, trigger, and reset files. It counts down

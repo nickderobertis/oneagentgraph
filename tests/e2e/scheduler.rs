@@ -18,7 +18,7 @@ use crate::support::{fake_harness, graph_with, until, Workspace, FAKE_HARNESS_KE
 /// it runs, the failures it propagates, the quiescence that ends it — and each one
 /// needs a firing to have happened. The default's own journeys are
 /// [`a_deferred_schedule_starts_with_the_graph_and_takes_no_turn`] and
-/// [`a_deferred_schedules_first_turn_waits_for_the_delay_it_named`].
+/// [`a_deferred_schedule_waits_for_its_delay_and_then_keeps_its_cadence`].
 fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
     graph_with(
         concat!(
@@ -54,14 +54,15 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
 /// A graph whose scheduled member's first turn is deferred, beside a member that
 /// holds the run open while the assertion is made.
 ///
-/// `hold` is released to end the run. `start_after` is written as given, so the
-/// two journeys below differ only in how long the deferred member waits.
+/// `hold` is released to end the run, and `delays` is the schedule's
+/// `(start_after, every)`, so the journeys below differ only in how long the
+/// deferred member waits and how often it repeats.
 ///
-/// The delay is substituted into the skeleton rather than passed through
+/// The seconds are substituted into the skeleton rather than passed through
 /// [`graph_with`], which writes every value as a string: a schedule's seconds are
 /// a number, and one quoted into the document would be refused by the schema
-/// before either journey reached what it tests.
-fn deferred_graph(fake: &str, hold: &str, start_after: u64, recorded: &str) -> String {
+/// before any journey reached what it tests.
+fn deferred_graph(fake: &str, hold: &str, delays: (u64, u64), recorded: &str) -> String {
     const SKELETON: &str = concat!(
         "version: 3\nname: paced\n",
         "env: {}\n",
@@ -69,10 +70,13 @@ fn deferred_graph(fake: &str, hold: &str, start_after: u64, recorded: &str) -> S
         "  worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
         "  ticker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
         "    persona: reviewer\n",
-        "    schedule: {every: 3600, start_after: 0}\n",
+        "    schedule: {every: 0, start_after: 0, resettable: true}\n",
     );
+    let (start_after, every) = delays;
     graph_with(
-        &SKELETON.replace("start_after: 0", &format!("start_after: {start_after}")),
+        &SKELETON
+            .replace("start_after: 0", &format!("start_after: {start_after}"))
+            .replace("every: 0", &format!("every: {every}")),
         &[
             (FAKE_HARNESS_KEY, fake.to_string()),
             (
@@ -107,7 +111,7 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
     workspace.graph(&deferred_graph(
         &fake_harness(),
         &release.display().to_string(),
-        3600,
+        (3600, 3600),
         &recorded.display().to_string(),
     ));
     let child = workspace.spawn_with(
@@ -119,19 +123,9 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
         ],
         &[],
     );
-    let events = || {
-        std::fs::read_dir(workspace.state())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .next()
-            .map(|entry| entry.path().join("events.jsonl"))
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .unwrap_or_default()
-    };
     until("both members to start", || {
         ["worker", "ticker"].iter().all(|member| {
-            events().lines().any(|line| {
+            stream(&workspace).lines().any(|line| {
                 line.contains("\"kind\":\"member-started\"")
                     && line.contains(&format!("\"member\":\"{member}\""))
             })
@@ -140,8 +134,8 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
 
     // Started: the deferred member's own `member-started`, carrying the launch it
     // will run and the delay before it runs it.
-    let stream = events();
-    let started: Value = stream
+    let published = stream(&workspace);
+    let started: Value = published
         .lines()
         .filter(|line| {
             line.contains("\"kind\":\"member-started\"") && line.contains("\"member\":\"ticker\"")
@@ -194,7 +188,7 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
             std::fs::read_to_string(&recorded)
         );
     };
-    no_turn(&stream);
+    no_turn(&published);
 
     std::fs::write(&release, "release").expect("release the worker");
     let output = child.wait_with_output().expect("the run finishes");
@@ -206,26 +200,30 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
     );
     // Still no turn once the run has ended: the delay outlived the run, which is
     // the deferral doing exactly what it says.
-    no_turn(&events());
+    no_turn(&stream(&workspace));
 }
 
-/// A deferred schedule's first turn happens once its delay has elapsed, and not
-/// before it.
+/// A deferred schedule's first turn happens once its delay has elapsed, and the
+/// turns after it come at `every` rather than at the delay again.
 ///
 /// The other half of the journey above, and what keeps it from being satisfied by
-/// a member that simply never fires: the same graph with a short delay takes its
-/// turn, runs the prompt it was given, and does so no sooner than the delay it
-/// named — measured from before the run was even launched, so a firing at t=0
-/// could not fit inside it.
+/// a member that simply never fires. Both assertions are floors measured from
+/// before the run was launched, so process startup can only push them further out:
+/// the first turn cannot fit inside `start_after`, and the second cannot fit
+/// inside `start_after + every`. A clock that never left its first-turn delay
+/// would take the second turn at twice `start_after`, which is inside that floor
+/// and fails here.
 #[test]
-fn a_deferred_schedules_first_turn_waits_for_the_delay_it_named() {
+fn a_deferred_schedule_waits_for_its_delay_and_then_keeps_its_cadence() {
+    const START_AFTER: u64 = 1;
+    const EVERY: u64 = 4;
     let workspace = Workspace::new();
     let release = workspace.at("paced-release");
     let recorded = workspace.at("ticker.prompt");
     workspace.graph(&deferred_graph(
         &fake_harness(),
         &release.display().to_string(),
-        3,
+        (START_AFTER, EVERY),
         &recorded.display().to_string(),
     ));
     let launched = Instant::now();
@@ -242,17 +240,27 @@ fn a_deferred_schedules_first_turn_waits_for_the_delay_it_named() {
         !recorded.exists(),
         "the member recorded a prompt before the run was even launched"
     );
-    until("the deferred first turn", || recorded.is_file());
-    let waited = launched.elapsed();
-    assert!(
-        waited >= Duration::from_secs(3),
-        "the first turn came {waited:?} after launch, sooner than the delay it named"
-    );
-    assert!(
+    // One line per turn: the double writes the whole prompt it was given, with
+    // its newlines escaped, so a turn is a line.
+    let turns = || {
         std::fs::read_to_string(&recorded)
-            .expect("the prompt the deferred member ran")
-            .contains("report progress"),
-        "the deferred member ran something other than its own task"
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("report progress"))
+            .count()
+    };
+    until("the deferred first turn", || turns() >= 1);
+    let first = launched.elapsed();
+    assert!(
+        first >= Duration::from_secs(START_AFTER),
+        "the first turn came {first:?} after launch, sooner than the delay it named"
+    );
+
+    until("the turn after it", || turns() >= 2);
+    let second = launched.elapsed();
+    assert!(
+        second >= Duration::from_secs(START_AFTER + EVERY),
+        "the second turn came {second:?} after launch, sooner than the cadence allows"
     );
 
     std::fs::write(&release, "release").expect("release the worker");
@@ -263,6 +271,140 @@ fn a_deferred_schedules_first_turn_waits_for_the_delay_it_named() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// `trigger` fires a member whose first turn is still deferred, now.
+///
+/// An operator is not locked out for the length of the delay. The pair with the
+/// journey above is the point: the same graph that takes no turn for an hour takes
+/// one within seconds when somebody asks for it, so a half-hour pacemaker can
+/// still be made to report on demand.
+#[test]
+fn a_trigger_fires_a_member_whose_first_turn_is_still_deferred() {
+    let workspace = Workspace::new();
+    let release = workspace.at("paced-release");
+    let recorded = workspace.at("ticker.prompt");
+    workspace.graph(&deferred_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        (3600, 3600),
+        &recorded.display().to_string(),
+    ));
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    until("the deferred member to come up", || {
+        stream(&workspace).lines().any(|line| {
+            line.contains("\"kind\":\"member-started\"") && line.contains("\"member\":\"ticker\"")
+        })
+    });
+    let id = workspace.record()["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    workspace.run(&["trigger", &id, "ticker"]).expect_code(0);
+    until("the triggered turn", || recorded.is_file());
+    assert!(
+        stream(&workspace).contains("\"kind\":\"cron-fired\""),
+        "a triggered turn was taken without saying so: {}",
+        stream(&workspace)
+    );
+
+    std::fs::write(&release, "release").expect("release the worker");
+    let output = child.wait_with_output().expect("the run finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `reset-timer` before the first turn restarts the whole of `start_after`,
+/// rather than promoting the member to its steady cadence.
+///
+/// What a reset means is "restart the wait in progress", and before the first turn
+/// the wait in progress is the first-turn delay. The floor is measured from the
+/// moment the reset was *asked for* — the run picks it up strictly after that — so
+/// a member that ignored the reset would fire at launch plus the delay, which is
+/// earlier than this floor and fails here.
+#[test]
+fn a_reset_before_the_first_turn_restarts_the_whole_delay() {
+    const START_AFTER: u64 = 4;
+    let workspace = Workspace::new();
+    let release = workspace.at("paced-release");
+    let recorded = workspace.at("ticker.prompt");
+    workspace.graph(&deferred_graph(
+        &fake_harness(),
+        &release.display().to_string(),
+        (START_AFTER, 3600),
+        &recorded.display().to_string(),
+    ));
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    until("the deferred member to come up", || {
+        stream(&workspace).lines().any(|line| {
+            line.contains("\"kind\":\"member-started\"") && line.contains("\"member\":\"ticker\"")
+        })
+    });
+    // Well into the delay, so that "the reset restarted it" and "the reset did
+    // nothing" are seconds apart rather than milliseconds.
+    std::thread::sleep(Duration::from_secs(2));
+    let id = workspace.record()["run_id"]
+        .as_str()
+        .expect("run id")
+        .to_string();
+    assert!(
+        !recorded.exists(),
+        "the member took its turn before the reset this journey is about"
+    );
+    let asked = Instant::now();
+    workspace
+        .run(&["reset-timer", &id, "ticker"])
+        .expect_code(0);
+    until("the run to pick the reset up", || {
+        stream(&workspace).contains("\"kind\":\"cron-reset\"")
+    });
+    until("the restarted first turn", || recorded.is_file());
+    let waited = asked.elapsed();
+    assert!(
+        waited >= Duration::from_secs(START_AFTER),
+        "the first turn came {waited:?} after the reset, so the reset did not restart the delay"
+    );
+
+    std::fs::write(&release, "release").expect("release the worker");
+    let output = child.wait_with_output().expect("the run finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// This run's merged event stream, as it stands.
+fn stream(workspace: &Workspace) -> String {
+    std::fs::read_dir(workspace.state())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .next()
+        .map(|entry| entry.path().join("events.jsonl"))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
 }
 
 #[test]
