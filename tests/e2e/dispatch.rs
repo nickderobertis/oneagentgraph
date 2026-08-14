@@ -352,36 +352,22 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
 // a file the doubled harness wrote recording the directory it was started in and
 // the argv it was given. That is the observation point *because* it is the
 // subject: `--cwd` is a value this crate hands to oneharness, and the only place
-// its arrival can be checked is the process that received it. Nothing a user
-// reads carries it — a member whose harness started in a generated scratch
-// instead of the operator's checkout settles `done (no-changes)` with a stream
-// identical to a correct one, which is exactly how twelve hours of dispatches
-// wrote into directories nobody was looking at. Every assertion about behaviour —
+// its arrival can be checked is the process that received it. A member whose
+// harness started somewhere nobody named settles with a stream identical to a
+// correct one, so the stream cannot hold this. Every assertion about behaviour —
 // the exit code, the events, the published `worktree` — is still made through the
 // CLI.
 /// A two-party member's harness runs in the directory the graph was given with
 /// `--dir`, and is still pinned to the oneharness config the graph named while it
 /// does.
 ///
-/// The failure this closes. `--dir` reached a `kind: oneharness` member through
-/// an argv this crate builds, and stopped dead at a `kind: onejudge` one: that
-/// member's worktree was its own generated scratch, so the paid agent — the one
-/// that does the work — started somewhere the operator never named. A run
-/// launched with `--dir <D>` recorded `<D>` in `graph-started` while its worker's
-/// `pwd` answered `…/members/worker`, and four dispatches improvised into a
-/// shared checkout instead, each settling `no-changes` while real work sat
-/// somewhere nobody was reading.
-///
-/// It stopped there because one value did two jobs: the directory the harness
-/// works in, and the root oneharness discovered the agent side's stamped
-/// `oneharness.toml` upward from — onejudge putting no `--config` on that side's
-/// argv. So the pin is asserted *in the same run*, against a decoy: a second,
-/// valid `oneharness.toml` sits in the directory the member now works in, naming
-/// a different approval mode. A member that reverted to discovery would find the
-/// decoy and run under `bypass`; one still pinned by name runs `read-only`, which
-/// oneharness spells on the harness's own argv. Take the `--config` arm out of
-/// `MemberSpawn` and this half goes red while the directory half stays green,
-/// which is the pair the bug lived between.
+/// Both halves in one run, because the bug lived between them: the worktree was
+/// also the only thing pinning the agent side, so moving it alone reverts the
+/// member to whatever config sits above the operator's directory. The pin is
+/// asserted against a decoy — a second, valid `oneharness.toml` in the directory
+/// the member now works in, naming a different approval mode, which oneharness
+/// spells on the harness's own argv. Take `MemberSpawn`'s `--config` arm out and
+/// this half reddens while the directory half stays green.
 #[test]
 fn a_two_party_members_harness_runs_in_the_directory_the_graph_was_given() {
     let workspace = Workspace::new();
@@ -412,7 +398,6 @@ fn a_two_party_members_harness_runs_in_the_directory_the_graph_was_given() {
     ]);
     run.expect_code(0);
 
-    // Where the harness processes really started.
     let graph_dir = workspace
         .dir()
         .canonicalize()
@@ -485,25 +470,16 @@ fn a_two_party_members_harness_runs_in_the_directory_the_graph_was_given() {
 }
 
 /// A run that names no `--dir` hands **both** member kinds the same default —
-/// `.`, exactly as `member_dir` has always passed an unnamed directory through —
-/// and that one string still resolves differently down the two paths.
+/// `.`, exactly as `member_dir` passes an unnamed directory through — and that
+/// one string still resolves differently down the two paths.
 ///
-/// The default the journey above moves, held explicitly and in both halves,
-/// because only one of them changed. `--dir` is optional and falls back to `.`;
-/// what a two-party member does with it is new (it used to get its own scratch,
-/// whatever the run said, which is the bug), and what a single-sided member does
-/// with it is not.
-///
-/// The asymmetry that leaves is real, pre-existing, and deliberately untouched:
-/// a relative `--cwd` is resolved by whoever receives it, and the two kinds are
-/// received differently — a single-sided member's argv rides a child spawned in
-/// the member's *scratch*, so `.` is that scratch, while a two-party member's
-/// worktree is read by an `oneharness` this process spawns without moving, so `.`
-/// is where the run was launched. `member_dir` promises a member that named no
-/// directory "behaves as it did before", and that promise is what is pinned here;
-/// naming `--dir` is what makes the answer the same on both paths, which is the
-/// journey above. A relative *member* `dir` has no such edge — it is resolved
-/// against the graph's own directory and made absolute before it is handed over.
+/// The asymmetry is pre-existing and deliberately untouched: a relative `--cwd`
+/// is resolved by whoever receives it, and a single-sided member's argv rides a
+/// child spawned in the member's *scratch* while a two-party member's worktree is
+/// read by an `oneharness` this process spawns without moving. `member_dir`
+/// promises a member that named no directory behaves as it did before, and that
+/// is what is pinned here; naming `--dir` is what makes the two agree. A relative
+/// *member* `dir` has no such edge — it is made absolute before it is handed on.
 #[test]
 fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
     let workspace = Workspace::new();
@@ -566,7 +542,6 @@ fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
         ),
     ]);
     single_run.expect_code(0);
-    // The same string on the other kind's argv — one default, one function.
     let args = single_run.of_kind("member-started")[0]["payload"]["args"]
         .as_array()
         .expect("a single-sided member names its argv")

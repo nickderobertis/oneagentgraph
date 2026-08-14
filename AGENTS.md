@@ -20,23 +20,11 @@ conversation. Do not grow harness selection here.
 **onejudge is a library dependency, not a CLI.** A two-party member is driven
 in-process, on a thread of this process, through onejudge's own config, plan, and
 streamed run driver. `oneharness run` is still a child process, and so are the
-agent harness and a `judge: {command: [...]}` provider. That is no longer for
-want of an entrypoint: `oneharness_core::io::run::run` returns its report, takes
-an event sink, and takes a cancel token, which is exactly what
-`docs/contract.md` says collapses the hop. What holds it open now is narrower and
-written out in full at `src/harness_process.rs` — a per-member environment
-(`ONEHARNESS_HARNESSES` cannot be unset for one member of a shared process), a
-tree to hold (no spawn hook, so no Windows job object), and the contract's own
-child-process facts on `member-started`/`member-died`. The first two are
-proposals against oneharness; the third is one to the contract's owner. Do not
-re-derive them — extend that comment. `oneagentgraph interrupt` stays a process
-too, for a reason the others do not share: the control socket is version-*equal*,
-not negotiated, so the client has to be the same build as the run that bound it;
-`src/control.rs` records the whole argument. `health` used to be on that list and
-is not: `oneharness_core::io::usage::report` is the `usage` verb as a call, so the
-sweep runs in this process from oneharness's own code. **Prefer the library at
+agent harness and a `judge: {command: [...]}` provider. **Prefer the library at
 every new site** — a hop that stays has to name what the library does not expose,
-in the code, at the site.
+in the code, at the site, and each of the two that remain already does:
+`src/harness_process.rs` for `oneharness run`, `src/control.rs` for
+`oneagentgraph interrupt`. Extend those rather than re-deriving them here.
 
 Ships as a Rust library plus the `oneagentgraph` binary, distributed on
 crates.io, PyPI (`oneagentgraph-cli`), and npm (`oneagentgraph-cli`).

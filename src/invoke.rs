@@ -21,12 +21,8 @@
 //! Both sides are therefore pinned by *file*, never by directory: each side's
 //! resolved config is written into the member's scratch, and the path to the
 //! agent side's rides [`JudgeLaunch::agent_config`] to `crate::judge`, which puts
-//! it on that side's own `--config` as the spawn is made. That is what frees
-//! [`JudgeLaunch::worktree`] to be the directory the graph was told to work in —
-//! the fix for a two-party member whose harness used to start in a generated
-//! scratch whatever `--dir` said. The seam it takes to get there, and the upstream
-//! change that would remove the need for one, are at
-//! [`JudgeLaunch::agent_config`].
+//! it on that side's own `--config`. That is what frees
+//! [`JudgeLaunch::worktree`] to be the directory the graph was told to work in.
 //!
 //! Naming a worktree, rather than changing directory into it: a process has one working
 //! directory and this one runs every member of the graph at once, so a member
@@ -138,47 +134,32 @@ pub struct JudgeLaunch {
     pub config: PathBuf,
     /// The task prose this member drives to completion.
     pub task: String,
-    /// The directory this member's harness works in — the graph's `--dir`, named
-    /// to oneharness rather than entered.
+    /// The directory this member's harness works in — `member_dir`, the same
+    /// value a single-sided member's `--cwd` gets.
     ///
-    /// It is not *this process's* working directory: this process has one of
-    /// those and shares it with every other member, which is why the value is
-    /// carried in a file rather than by a `cd`. It **is** a working directory in
-    /// every other sense, and that is the whole of what it is for: onejudge takes
-    /// it as the conversation's skill directory and puts it on the agent side's
-    /// `oneharness run --cwd`, so it is where the paid harness process really
-    /// starts and what an agent's own `pwd` answers.
+    /// Named to oneharness rather than entered, because it is not *this
+    /// process's* working directory: this one is shared with every other member.
+    /// It **is** a working directory in every other sense — onejudge takes it as
+    /// the conversation's skill directory and puts it on the agent side's
+    /// `oneharness run --cwd` — and that is the whole of what it is for.
     ///
-    /// So it is `member_dir`, the same value a single-sided member's `--cwd`
-    /// gets — a graph run with `--dir <D>` has both its member kinds working in
-    /// `<D>`. It used to be the member's *scratch*, because that one field was
-    /// also the only thing pinning the agent side's config; [`Self::agent_config`]
-    /// is what took that duty away, and repointing this without it silently
-    /// reverts the member to whatever config sits above the operator's directory.
+    /// Repointing it needs [`Self::agent_config`] set too, or the member reverts
+    /// to whatever config sits above the operator's directory: until that field
+    /// existed, this one was also the only thing pinning the agent side.
     pub worktree: PathBuf,
     /// The agent side's resolved oneharness config, pinned by name rather than by
     /// where the harness happens to run.
     ///
-    /// The judge side's config reaches it through onejudge's own `judge_config`,
-    /// which becomes `oneharness run --config <path>`. onejudge offers the agent
-    /// side no such key — only a worktree, from which oneharness *discovers* a
-    /// project `oneharness.toml` — so `crate::judge` puts this on that side's
-    /// `--config` through onejudge's `SpawnHook`, which is the documented seam for
-    /// configuring a process onejudge is about to start.
+    /// onejudge gives the agent side no config key — only a worktree, from which
+    /// oneharness *discovers* a project `oneharness.toml` — so `crate::judge`
+    /// puts this on that side's own `--config` through onejudge's `SpawnHook`.
+    /// By name and not merely by preference, because this is the *stamped* copy:
+    /// discovery from an operator's own directory finds their `oneharness.toml`,
+    /// whose `harnesses` chain would spend a different subscription than the
+    /// graph named — [`PROCESS_WIDE_HARNESS_ENV`]'s hazard from the other side.
     ///
-    /// It has to be pinned by name, not merely preferred: this file is the
-    /// *stamped* copy, carrying the member's `mode`, its per-side `model`, and the
-    /// [`crate::scratch::SCRATCH_ENV`] ownership stamp. Discovery from a real
-    /// operator's directory finds that operator's own `oneharness.toml` — which
-    /// declares a `harnesses` chain, and so silently spends a different
-    /// subscription than the graph named. That is the hazard
-    /// [`PROCESS_WIDE_HARNESS_ENV`] describes, reached from the other side.
-    ///
-    /// **The gap this stands in for**, so the seam is removable rather than
-    /// permanent: onejudge's `kind: oneharness` provider needs an `agent_config`
-    /// beside the `judge_config` it already takes. With one, this rides the
-    /// member's own config document like every other setting and no hook touches
-    /// an argv.
+    /// *Proposal to onejudge, which would retire the hook:* an `agent_config` on
+    /// its `kind: oneharness` provider, beside the `judge_config` it takes.
     pub agent_config: PathBuf,
     // llmlint: ignore-block[invalid_states_unrepresentable] the handle is a
     // `String` for the reason [`crate::control::Address::session`] records: what
@@ -363,7 +344,6 @@ fn onejudge(
             // is written this way so the day the contract grows one, the value
             // goes here and nothing else moves.
             worktree: member_dir(None, context),
-            // And the file that pins this member's agent side wherever it runs.
             agent_config: agent_path,
             session: context.session.to_string(),
         })),

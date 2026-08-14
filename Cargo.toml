@@ -118,23 +118,22 @@ onejudge = { version = "0.3.8", features = ["cli"] }
 # than guessed by field name, so an upstream change is a compile error here
 # instead of a silently-absent field.
 #
-# 0.7.0 is the floor and not a preference: it is the first release carrying
-# `oneharness_core::io::run::run` — `oneharness run` as a call that *returns* its
-# report instead of printing it, takes a `RunControls::events` sink so events
-# arrive as they occur, and takes a `RunControls::cancel` token that tears the
-# harness tree down. `docs/contract.md` named that exact trio as what collapses
-# the `oneharness run` subprocess hop, and `crate::member` does not compile
-# below it.
+# The requirement below is the current release rather than whatever still
+# compiles, and the reason is `oneharness_core::io::run::run`: `oneharness run` as
+# a call that *returns* its report instead of printing it, with an event sink and
+# a cancel token beside it. `docs/contract.md` names that trio as what collapses
+# the `oneharness run` subprocess hop, and `src/harness_process.rs` records what
+# is left holding it open — so the version this crate reads that surface from has
+# to be one that has it.
 #
-# 0.8.0 is what is published, and taking it costs one thing worth naming here:
-# onejudge pins `oneharness-core = "0.6.13"`, so the graph now carries **two**
-# copies of this crate. That is sound because nothing crosses between them —
-# every oneharness value onejudge hands back arrives as JSON (`Report`,
-# `FallThrough`, `Usage`) and is parsed into *this* copy's types — and
-# `cargo deny`'s `multiple-versions = "allow"` records the choice. It collapses
-# to one copy when onejudge raises its own floor; until then, do not thread a
-# `oneharness_core::` value through a `onejudge::` signature, because the two
-# spellings are different types and the compiler will say so.
+# The cost, which is what actually needs writing down: onejudge's own requirement
+# on this crate is a major version behind, so the graph carries **two** copies of
+# it. Sound because nothing crosses between them — every oneharness value onejudge
+# hands back arrives as JSON (`Report`, `FallThrough`, `Usage`) and is parsed into
+# *this* copy's types — and `cargo deny`'s `multiple-versions = "allow"` records
+# the choice. It collapses to one when onejudge raises its own; until then, do not
+# thread a `oneharness_core::` value through a `onejudge::` signature, because the
+# two spellings are different types and the compiler will say so.
 oneharness-core = "0.8.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

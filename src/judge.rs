@@ -209,33 +209,18 @@ type Answer = Result<RunSummary, Box<RunFailure>>;
 /// place it in this member's [`crate::scratch::Group`], and — for the agent side
 /// only — name the config that side runs under.
 ///
-/// **The group** exists because driving onejudge in-process took away grouping
-/// that a subprocess hop gave for free: while a member *was* `onejudge run`, this
-/// crate spawned one process into a group and everything below it joined by
-/// inheritance. In-process, the `oneharness run` for each side is spawned by this
-/// process — so without this, a two-party member's harnesses sit in whatever
-/// group the supervisor is in, and `cancel --kill` has no tree to name. One hook
-/// for both sides on purpose: onejudge installs it on both backends of a `split`,
-/// so the worker's harness and the judge's land in the *same* group, and one
-/// `TerminateJobObject` ends the pair.
+/// **The group** is what `cancel --kill` and the reap reach a member's tree
+/// through, and in-process the `oneharness run` for each side is spawned by this
+/// process rather than into a group of its own. One hook for both sides on
+/// purpose: onejudge installs it on both backends of a `split`, so one
+/// termination ends the pair.
 ///
-/// **The config** is the other half, and it is why the graph's `--dir` can reach
-/// a two-party member's harness at all. onejudge builds the judge side's argv
-/// with `--config <judge_config>` and the agent side's with none, leaving that
-/// side pinned only by oneharness discovering a project `oneharness.toml` upward
-/// from `--cwd`. Fusing the two meant the harness had to run in the member's
-/// scratch to find its own stamped config — mode, per-side model, and the
-/// ownership stamp — so `--dir` stopped at this module. Appending the flag here
-/// unfuses them: the agent side gets the same explicit `--config` a single-sided
-/// member has always had, and `--cwd` is free to be the directory the operator
-/// named. See [`crate::invoke::JudgeLaunch::agent_config`] for the upstream
-/// `agent_config` key that would retire this arm.
-///
-/// Appending is safe in both directions. oneharness's `run` parses flags in any
-/// order and takes the last `--config` it is given, so a future onejudge that
-/// passes one of its own is overridden here rather than colliding with it; and
-/// the arm is taken only for the `respond` operation, which is the agent turn —
-/// a judge side, and a `judge: {command: [...]}` provider, are left byte-identical.
+/// **The config** is why the graph's `--dir` can reach this member's harness —
+/// see [`crate::invoke::JudgeLaunch::agent_config`], including the upstream key
+/// that would retire the arm. Appending is safe in both directions: oneharness
+/// takes the last `--config` it is given, so a future onejudge that passes one is
+/// overridden rather than collided with, and only `respond` is touched — a judge
+/// side and a `judge: {command: [...]}` provider stay byte-identical.
 struct MemberSpawn {
     /// The group every process onejudge starts for this member joins.
     group: Arc<crate::scratch::Group>,
