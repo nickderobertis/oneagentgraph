@@ -43,7 +43,7 @@ waves are reachable after that first outcome.
 
 `config::Schedule::first_turn_after` decides whether that first firing happens in
 the wave at all. It is `start_after` when the document names one and `every`
-otherwise, and `run::deferred_start` is the predicate the wave splits on:
+otherwise, and `run::defers_first_turn` is the predicate the wave splits on:
 
 - **`start_after: 0`** — the member is in `run_wave`'s runnable set, takes its
   turn at t=0, and `run::spawn_cron` takes its clock over once that turn settles.
@@ -54,9 +54,11 @@ otherwise, and `run::deferred_start` is the predicate the wave splits on:
   clock **before** `run_wave` blocks. Before, not after, because `run_wave` waits
   for every member in the wave: a clock started on the far side of that call
   would begin counting only once this member's siblings were done, and the
-  sibling a pacemaker paces is exactly the one that takes the whole run.
+  sibling a pacemaker paces is exactly the one that takes the whole run. Both
+  happen when the member's own wave is reached, which for a member with no `deps`
+  — every pacemaker so far — is when the graph starts.
 
-So a deferred member starts with the graph and only its *turn* waits. Everything
+So a deferred member starts with its wave and only its *turn* waits. Everything
 that could refuse it — a ref that cannot be read, a persona that does not
 validate, a model paired with two harness families — is `invoke::build`, which
 runs for every member before `graph-started`, and is untouched by any of this.

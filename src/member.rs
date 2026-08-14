@@ -57,6 +57,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
+use crate::config::Schedule;
 use crate::event::{
     bound_detail, bound_text, Cause, Disposition, Emitter, EventKind, Labels, MemberDied,
 };
@@ -463,18 +464,28 @@ pub fn run(
 ///
 /// What a deferred schedule leaves in place. A member whose `start_after` has not
 /// elapsed takes no turn in the wave that starts it, but it is *started*: its refs
-/// are resolved, its configs are generated, and it says so here beside every other
-/// member of the graph — carrying the same `runner` and the same description of
-/// what it will run, plus the `start_after` its first turn waits.
+/// are resolved, its configs are generated, and it says so here alongside the rest
+/// of its wave — carrying the same `runner` and the same description of what it
+/// will run, plus the `start_after` its first turn waits.
 ///
 /// This is the whole reason `start_after` defers a turn rather than a launch. A
 /// graph's second member is the easy one to ship broken, and on a half-hour
 /// schedule a launch deferred with it would first be heard from half an hour into
 /// a real run — so a supervisor watching the stream sees every declared member
 /// within seconds of the launch, whatever each one's cadence.
-pub fn announce(invocation: &Invocation, emitter: &Emitter, start_after: u64) {
+///
+/// Takes the whole [`Schedule`] rather than a number of seconds, so the delay
+/// published is the one the document declared rather than one a caller computed.
+/// That the member is single-sided needs no check here: `schedule:` is a field of
+/// [`crate::config::OneharnessMember`] alone, so a two-party member has no way to
+/// be deferred and this arm of [`started_payload`] is reached only by a member
+/// that really is starting.
+pub(crate) fn announce(invocation: &Invocation, emitter: &Emitter, schedule: &Schedule) {
     let mut started = started_payload(&invocation.launch);
-    started.insert("start_after".to_string(), Value::from(start_after));
+    started.insert(
+        "start_after".to_string(),
+        Value::from(schedule.first_turn_after()),
+    );
     emitter.emit(EventKind::MemberStarted, started);
 }
 
@@ -1291,6 +1302,11 @@ mod tests {
     fn a_member_that_came_up_without_taking_a_turn_describes_the_one_it_will() {
         let sink = Arc::new(Mutex::new(Vec::new()));
         let emitter = crate::event::Emitter::new("s", Box::new(Held(Arc::clone(&sink))));
+        let schedule = |start_after| Schedule {
+            every: 1800,
+            start_after: Some(start_after),
+            resettable: false,
+        };
         let process = Invocation {
             kind: Kind::Oneharness,
             launch: Launch::Process {
@@ -1302,7 +1318,7 @@ mod tests {
             env: Vec::new(),
             refs: Vec::new(),
         };
-        announce(&process, &emitter, 1800);
+        announce(&process, &emitter, &schedule(1800));
         let library = Invocation {
             kind: Kind::Onejudge,
             launch: Launch::Library(Box::new(crate::invoke::JudgeLaunch {
@@ -1315,7 +1331,7 @@ mod tests {
             env: Vec::new(),
             refs: Vec::new(),
         };
-        announce(&library, &emitter, 0);
+        announce(&library, &emitter, &schedule(0));
 
         let published: Vec<Value> = String::from_utf8(held(&sink).clone())
             .expect("utf-8")

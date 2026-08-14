@@ -560,6 +560,74 @@ fn a_task_token_in_a_run_that_supplied_no_task_expands_to_nothing() {
     );
 }
 
+/// A member whose *whole* task is the token, in a run that supplied none, is
+/// launched with an empty prompt rather than with a `--prompt` that has no value.
+///
+/// The argv edge the token opens. This crate used to drop empty arguments on the
+/// way to `oneharness run`, which can only ever remove a *value* — the argv holds
+/// no optional flags — leaving `--prompt` sitting next to the flag that followed
+/// it, so oneharness would read `--events` as the prompt and the member would run
+/// something nobody wrote. Asserted on the argv the member was launched with,
+/// because the failure was invisible in the outcome: a run that spends a turn on
+/// the wrong prompt exits 0.
+#[test]
+fn a_member_whose_whole_task_is_the_token_is_launched_with_an_empty_prompt() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  check_in:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            ("members.check_in.task".to_string(), "{task}".to_string()),
+        ],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    let args: Vec<String> = started[0]["payload"]["args"]
+        .as_array()
+        .expect("a single-sided member names its argv")
+        .iter()
+        .map(|arg| arg.as_str().unwrap_or_default().to_string())
+        .collect();
+    let at = args
+        .iter()
+        .position(|arg| arg == "--prompt")
+        .expect("the argv carries a prompt flag");
+    assert_eq!(
+        args.get(at + 1).map(String::as_str),
+        Some(""),
+        "the empty prompt lost its place in the argv: {args:?}"
+    );
+    assert_eq!(
+        at + 2,
+        args.len(),
+        "the prompt is the last argument, so anything after it is a value that \
+         shifted into its place: {args:?}"
+    );
+    // And the member really was launched with it: what an empty prompt means is
+    // oneharness's and the harness's to decide, and this run reaches that decision
+    // rather than failing on an argv this crate malformed.
+    run.expect_code(0);
+    assert!(
+        run.of_kind("member-settled")
+            .iter()
+            .any(|event| labels(event)["member"] == "check_in"),
+        "the member launched with an empty prompt never settled: {}",
+        run.stdout
+    );
+}
+
 /// A graph whose every member carries its own job runs with **no `--task` at
 /// all** — and the same graph without that job is refused, saying so.
 ///

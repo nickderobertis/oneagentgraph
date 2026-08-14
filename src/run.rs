@@ -978,7 +978,7 @@ fn refuse_a_graph_that_never_fires(graph: &GraphConfig) -> Result<(), Error> {
     let deferred: Vec<&str> = graph
         .members
         .iter()
-        .filter(|(_, member)| deferred_start(member))
+        .filter(|(_, member)| defers_first_turn(member))
         .map(|(name, _)| name.as_str())
         .collect();
     if deferred.is_empty() {
@@ -1136,7 +1136,7 @@ pub fn run(
                 // A schedule that defers its first turn takes no turn in this
                 // wave. It still comes up here, with everything else — see
                 // `member::announce`.
-                if deferred_start(&graph.members[&name]) {
+                if defers_first_turn(&graph.members[&name]) {
                     deferred.push(name);
                 } else {
                     runnable.push(name);
@@ -1154,12 +1154,14 @@ pub fn run(
                 }
             }
         }
-        // Before the wave runs, not after it. `run_wave` blocks until every
-        // member in it has settled, so a clock started on the far side of that
-        // call would begin counting only once this member's *siblings* were done
-        // — and the member `start_after` exists for paces a long-running sibling
-        // it shares a wave with. Its first turn is due `start_after` after the
-        // graph started, which is here.
+        // Before this wave runs, not after it. `run_wave` blocks until every
+        // member in the wave has settled, so a clock started on the far side of
+        // that call would begin counting only once this member's *siblings* were
+        // done — and the sibling `start_after` exists to pace is exactly the one
+        // that takes the whole run. A member with no `deps` is in the first wave,
+        // so its delay is counted from the graph starting; one that waits on
+        // dependencies is announced and starts counting when its own wave is
+        // reached, which is the earliest it could have run anything either way.
         for name in deferred {
             let (invocation, _) = &invocations[&name];
             let schedule = schedule(&graph.members[&name]).expect("a deferred member is scheduled");
@@ -1170,7 +1172,7 @@ pub fn run(
                     &name,
                     invocation.persona.as_deref(),
                 )),
-                schedule.first_turn_after(),
+                &schedule,
             );
             cron_threads.push(spawn_cron(
                 schedule,
@@ -1345,16 +1347,16 @@ fn schedule(member: &Member) -> Option<crate::config::Schedule> {
 }
 
 /// Whether this member's first turn waits, rather than happening in the wave that
-/// starts it.
+/// starts the member.
 ///
-/// The distinction the whole of `start_after` rests on: a deferred member still
-/// **starts** with the graph — its refs are resolved, its configs are generated,
-/// and it publishes `member-started` beside every other member — and only its
-/// *turn* waits. A member with a bad persona ref or an unpairable model is
-/// refused before the graph starts at all, exactly as it was; deferring the start
-/// itself would have hidden both until the first tick, which on a half-hour
-/// schedule is half an hour into a real run.
-fn deferred_start(member: &Member) -> bool {
+/// Named for the turn because the turn is the only thing deferred, which is the
+/// distinction the whole of `start_after` rests on. Such a member still *starts*
+/// where it always did: its refs are resolved and its configs generated before the
+/// graph starts at all, so a bad persona ref or an unpairable model is still
+/// refused there, and it publishes `member-started` in its own wave rather than at
+/// its first tick — which on a half-hour cadence would be half an hour into a real
+/// run.
+fn defers_first_turn(member: &Member) -> bool {
     schedule(member).is_some_and(|schedule| schedule.first_turn_after() > 0)
 }
 
@@ -1574,7 +1576,7 @@ fn cron(
     // Adding it to a monotonic clock is what `config::MAX_SCHEDULE_SECONDS` exists
     // for: `Instant + Duration` panics on a sum the platform cannot represent, and
     // every schedule reaching here has been through `config::validate`.
-    let mut interval = pending_interval(schedule, false);
+    let mut interval = pending_interval(schedule, Phase::BeforeFirstTurn);
     let mut due = Instant::now() + interval;
     loop {
         std::thread::sleep(TICK);
@@ -1612,10 +1614,23 @@ fn cron(
             on_success();
         }
         last = Some(outcome);
-        interval = pending_interval(schedule, true);
+        interval = pending_interval(schedule, Phase::Repeating);
         due = Instant::now() + interval;
     }
     last
+}
+
+/// Which of a schedule's two spans a clock is counting down.
+///
+/// Two states rather than a flag, because they are asymmetric in a way a boolean
+/// hides: one happens at most once per member and the other happens forever, and
+/// a call with the two swapped would turn a first-turn delay into a cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    /// The member has taken no turn yet.
+    BeforeFirstTurn,
+    /// The member has taken one, and repeats from here.
+    Repeating,
 }
 
 /// How long this clock counts down before the member's next turn.
@@ -1624,11 +1639,10 @@ fn cron(
 /// schedule that starts at t=0 took its first turn in the wave that started it, so
 /// what is pending for it here is already its first *interval* — which is why a
 /// zero collapses to `every` rather than firing this clock immediately.
-fn pending_interval(schedule: &crate::config::Schedule, taken_a_turn: bool) -> Duration {
-    let seconds = match schedule.first_turn_after() {
-        _ if taken_a_turn => schedule.every,
-        0 => schedule.every,
-        waited => waited,
+fn pending_interval(schedule: &crate::config::Schedule, phase: Phase) -> Duration {
+    let seconds = match (phase, schedule.first_turn_after()) {
+        (Phase::Repeating, _) | (Phase::BeforeFirstTurn, 0) => schedule.every,
+        (Phase::BeforeFirstTurn, waited) => waited,
     };
     Duration::from_secs(seconds)
 }
@@ -1816,23 +1830,22 @@ mod tests {
         // interval after it — indistinguishable, which is why the two below are
         // what prove the switch.
         let inherited = schedule(1800, None);
-        assert_eq!(
-            pending_interval(&inherited, false),
-            Duration::from_secs(1800)
-        );
-        assert_eq!(
-            pending_interval(&inherited, true),
-            Duration::from_secs(1800)
-        );
+        for phase in [Phase::BeforeFirstTurn, Phase::Repeating] {
+            assert_eq!(
+                pending_interval(&inherited, phase),
+                Duration::from_secs(1800),
+                "{phase:?}"
+            );
+        }
 
         let settling_in = schedule(60, Some(600));
         assert_eq!(
-            pending_interval(&settling_in, false),
+            pending_interval(&settling_in, Phase::BeforeFirstTurn),
             Duration::from_secs(600),
             "the first turn must wait the delay the schedule named"
         );
         assert_eq!(
-            pending_interval(&settling_in, true),
+            pending_interval(&settling_in, Phase::Repeating),
             Duration::from_secs(60),
             "a later turn must come at the cadence, not at the first-turn delay"
         );
@@ -1840,8 +1853,13 @@ mod tests {
         // A schedule that fired at t=0 took its first turn in its wave, so what is
         // pending for its clock is already the cadence rather than no wait at all.
         let immediate = schedule(60, Some(0));
-        assert_eq!(pending_interval(&immediate, false), Duration::from_secs(60));
-        assert_eq!(pending_interval(&immediate, true), Duration::from_secs(60));
+        for phase in [Phase::BeforeFirstTurn, Phase::Repeating] {
+            assert_eq!(
+                pending_interval(&immediate, phase),
+                Duration::from_secs(60),
+                "{phase:?}"
+            );
+        }
     }
 
     /// A deferred first turn in a graph with nothing to pace is refused, and a
