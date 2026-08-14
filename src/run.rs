@@ -1123,8 +1123,7 @@ pub fn run(
                 .collect();
             if unsuccessful.is_empty() {
                 // A schedule that defers its first turn takes no turn in this
-                // wave. It still comes up here, with everything else — see
-                // `member::announce`.
+                // wave. It still comes up here, with everything else.
                 if defers_first_turn(&graph.members[&name]) {
                     deferred.push(name);
                 } else {
@@ -1149,15 +1148,21 @@ pub fn run(
         for name in deferred {
             let (invocation, _) = &invocations[&name];
             let schedule = schedule(&graph.members[&name]).expect("a deferred member is scheduled");
-            member::announce(
-                invocation,
-                &emitter.with_labels(member::labels(
+            // The same `member-started` a turn of its own would publish, plus the
+            // delay before that turn: the member is up, and this is what it will
+            // run when its clock comes due.
+            let mut started = member::started_payload(&invocation.launch);
+            started.insert(
+                "start_after".to_string(),
+                Value::from(schedule.first_turn_after()),
+            );
+            emitter
+                .with_labels(member::labels(
                     emitter.stream(),
                     &name,
                     invocation.persona.as_deref(),
-                )),
-                &schedule,
-            );
+                ))
+                .emit(EventKind::MemberStarted, started);
             cron_threads.push(spawn_cron(
                 schedule,
                 name,

@@ -48,10 +48,10 @@ otherwise, and `run::defers_first_turn` is the predicate the wave splits on:
 - **`start_after: 0`** — the member is in `run_wave`'s runnable set, takes its
   turn at t=0, and `run::spawn_cron` takes its clock over once that turn settles.
   This is what every schedule did before the field existed.
-- **anything else** — the member is not in the runnable set. `member::announce`
-  publishes its `member-started` — the same `runner` and launch description a
-  turn's own would carry, plus `start_after` — and `run::spawn_cron` starts its
-  clock **before** `run_wave` blocks. Before, not after, because `run_wave` waits
+- **anything else** — the member is not in the runnable set. `run::run` publishes
+  its `member-started` from `member::started_payload` — the same `runner` and
+  launch description a turn's own would carry, plus `start_after` — and
+  `run::spawn_cron` starts its clock **before** `run_wave` blocks. Before, not after, because `run_wave` waits
   for every member in the wave: a clock started on the far side of that call
   would begin counting only once this member's siblings were done, and the
   sibling a pacemaker paces is exactly the one that takes the whole run. Both

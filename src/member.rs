@@ -57,7 +57,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
-use crate::config::Schedule;
 use crate::event::{
     bound_detail, bound_text, Cause, Disposition, Emitter, EventKind, Labels, MemberDied,
 };
@@ -460,24 +459,8 @@ pub fn run(
     }
 }
 
-/// Publish that a member came up, without taking a turn.
-///
-/// A deferred schedule takes no turn in the wave that starts it, and is started
-/// all the same — which is how a member ship-broken on a half-hour cadence is
-/// heard from within seconds rather than half an hour in. The payload is the one
-/// a turn's own start publishes, plus the delay before that turn.
-///
-/// The whole [`Schedule`], so the delay published is the document's rather than a
-/// caller's arithmetic.
-pub(crate) fn announce(invocation: &Invocation, emitter: &Emitter, schedule: &Schedule) {
-    let mut started = started_payload(&invocation.launch);
-    started.insert(
-        "start_after".to_string(),
-        Value::from(schedule.first_turn_after()),
-    );
-    emitter.emit(EventKind::MemberStarted, started);
-}
-
+/// What `member-started` says about a launch, whether it is starting now or
+/// saying so ahead of the turn it will take.
 pub(crate) fn started_payload(launch: &Launch) -> Map<String, Value> {
     match launch {
         Launch::Process { program, args, cwd } => process_started(program, args, cwd),
@@ -1278,79 +1261,35 @@ mod tests {
         }
     }
 
-    /// A member whose first turn waits still says it started, describing the
-    /// launch it will run and how long that turn waits.
+    /// Each runner describes its own launch, in the fields a supervisor branches
+    /// on.
     ///
-    /// Both runners, because the payload a supervisor reads must not depend on
-    /// which one a member is; the fields are the same ones the member publishes
-    /// when it does take a turn, which is what makes the two comparable at all.
+    /// One function for the member that is starting a turn now and the one saying
+    /// so ahead of a deferred first turn, so what a stream carries never depends
+    /// on which of the two it was.
     #[test]
-    fn a_member_that_came_up_without_taking_a_turn_describes_the_one_it_will() {
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        let emitter = crate::event::Emitter::new("s", Box::new(Held(Arc::clone(&sink))));
-        let schedule = |start_after| Schedule {
-            every: 1800,
-            start_after: Some(start_after),
-            resettable: false,
-        };
-        let process = Invocation {
-            kind: Kind::Oneharness,
-            launch: Launch::Process {
-                program: "oneharness".into(),
-                args: vec!["run".into(), "--prompt".into(), "report".into()],
-                cwd: std::path::PathBuf::from("/work"),
-            },
-            persona: None,
-            env: Vec::new(),
-            refs: Vec::new(),
-        };
-        announce(&process, &emitter, &schedule(1800));
-        let library = Invocation {
-            kind: Kind::Onejudge,
-            launch: Launch::Library(Box::new(crate::invoke::JudgeLaunch {
-                config: std::path::PathBuf::from("/scratch/onejudge.yaml"),
-                task: "do the thing".into(),
-                worktree: std::path::PathBuf::from("/scratch"),
-                session: "s-worker".into(),
-            })),
-            persona: None,
-            env: Vec::new(),
-            refs: Vec::new(),
-        };
-        announce(&library, &emitter, &schedule(0));
-
-        let published: Vec<Value> = String::from_utf8(held(&sink).clone())
-            .expect("utf-8")
-            .lines()
-            .map(|line| serde_json::from_str(line).expect("an envelope"))
-            .collect();
-        assert_eq!(published.len(), 2);
-        for event in &published {
-            assert_eq!(event["kind"], "member-started");
-        }
-        assert_eq!(published[0]["payload"]["runner"], "process");
-        assert_eq!(published[0]["payload"]["program"], "oneharness");
-        assert_eq!(published[0]["payload"]["cwd"], "/work");
-        assert_eq!(published[0]["payload"]["args"][2], "report");
-        assert_eq!(published[0]["payload"]["start_after"], 1800);
-        assert_eq!(published[1]["payload"]["runner"], "library");
-        assert_eq!(published[1]["payload"]["engine"], "onejudge");
-        assert_eq!(published[1]["payload"]["worktree"], "/scratch");
-        assert_eq!(published[1]["payload"]["start_after"], 0);
-    }
-
-    /// A sink an assertion can read back what was written to it.
-    #[derive(Clone)]
-    struct Held(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Held {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            held(&self.0).extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+    fn each_runner_describes_the_launch_it_is_about_to_run() {
+        let process = started_payload(&Launch::Process {
+            program: "oneharness".into(),
+            args: vec!["run".into(), "--prompt".into(), "report".into()],
+            cwd: std::path::PathBuf::from("/work"),
+        });
+        assert_eq!(process["runner"], "process");
+        assert_eq!(process["program"], "oneharness");
+        assert_eq!(process["cwd"], "/work");
+        assert_eq!(process["args"][2], "report");
+        // Not `cwd`: a member driven in this process has no working directory of
+        // its own, and claiming one would name a thing that is not true.
+        let library = started_payload(&Launch::Library(Box::new(crate::invoke::JudgeLaunch {
+            config: std::path::PathBuf::from("/scratch/onejudge.yaml"),
+            task: "do the thing".into(),
+            worktree: std::path::PathBuf::from("/scratch"),
+            session: "s-worker".into(),
+        })));
+        assert_eq!(library["runner"], "library");
+        assert_eq!(library["engine"], "onejudge");
+        assert_eq!(library["worktree"], "/scratch");
+        assert!(library.get("cwd").is_none(), "{library:?}");
     }
 
     /// A tool event's summary is what it acted on, whatever shape the input took.
