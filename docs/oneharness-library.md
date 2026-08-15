@@ -1,5 +1,28 @@
 # The `oneharness run` boundary inventory
 
+> **Status: blocked, and not started. This document describes a conversion that
+> has not happened.** A `kind: oneharness` member's turn is `oneharness run`, a
+> child process, exactly as it has always been; nothing here has been applied to
+> the code. Every "replaced by …" below is the *future* tense — the seam that
+> would take over if the conversion ran — not a report of what
+> `src/harness_process.rs` does now. For current behaviour read that module and
+> `docs/contract.md`.
+>
+> **The blocker** is Windows process grouping, and its cause is
+> `oneharness-core` 0.8.0's public API: [`RunControls`](#what-is-still-holding-the-hop-open-grouping-on-windows-only)
+> exposes only `events`, `cancel`, `signal_cancel`, and `version`, and
+> `io::process::Process` — which holds the two moments a caller would need — is
+> `pub(crate)` inside a private `io::process` module. So an embedder has no
+> pre-spawn or post-spawn hook at which to put each harness child into the
+> member's named job object.
+>
+> **What unblocks it** is a `spawning(&mut Command)` / `spawned(&Child)` pair on
+> `RunControls`, or any equivalent seam that hands the caller the harness
+> `Command` before the fork and the `Child` after it. That is upstream's to add;
+> [the proposal](#the-proposal-which-is-upstreams-rather-than-this-crates-to-build)
+> is below. Converting without it silently breaks the activity watchdog and
+> leaves a killed run's paid harnesses billing.
+
 Why `src/harness_process.rs` is still a subprocess hop, what its process boundary
 provides, and the seam that would replace each of those things — written down
 *before* the conversion, because this conversion's two predecessors each dropped
