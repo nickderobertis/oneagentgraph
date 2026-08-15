@@ -613,6 +613,132 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
     assert_eq!(running.wait().expect("the run ends"), 0);
 }
 
+/// Every member's harness runs where the graph told it to, and the process
+/// hosting them all stays where it started.
+///
+/// A member's directory is a **value** on the way to a harness — a single-sided
+/// member's `oneharness run --cwd`, a two-party member's
+/// `invoke::JudgeLaunch::worktree`, which onejudge puts on the same flag — because
+/// one process hosts every member: a `set_current_dir` anywhere in the run path
+/// moves the members that never asked, and moves them mid-run. This is the only
+/// suite that can say so. The CLI journeys already prove where each harness ran
+/// (`tests/e2e/dispatch.rs`), but they watch a process that has since exited, and
+/// its working directory with it; here the run happens in *this* process, so the
+/// directory it kept is readable on both sides of the run — and a side that
+/// inherits rather than being told one reports it from inside.
+///
+/// It is also the invariant the last `oneharness run` hop has to keep when it
+/// collapses into `oneharness_core::io::run::run`, whose `cwd` is a `RunRequest`
+/// field rather than a process state for exactly this reason — see
+/// `src/harness_process.rs`, which carries that boundary inventory.
+#[test]
+fn a_members_directory_never_becomes_the_hosting_processs_own() {
+    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let workspace = Workspace::new();
+    let own = workspace.dir().join("api");
+    std::fs::create_dir_all(&own).expect("the member's own directory");
+    let single_sided = workspace.at("reporter.cwd");
+    let two_party = workspace.at("worker.cwd");
+
+    // Both member kinds in one graph, because they reach a directory by
+    // different routes and only one of them is a child process today.
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n",
+            "  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    dir: ./api\n",
+            "  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "env.XDG_STATE_HOME".to_string(),
+                workspace.session_store().display().to_string(),
+            ),
+            (
+                "members.reporter.task".to_string(),
+                format!(
+                    "fake:complete-now report in. fake:record-cwd={}",
+                    single_sided.display()
+                ),
+            ),
+        ],
+    ));
+    let request = Request {
+        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
+        task: Some(format!(
+            "fake:complete-now drive this run to settlement. fake:record-cwd={}",
+            two_party.display()
+        )),
+        dir: workspace.dir(),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter: None,
+        state_dir: workspace.state(),
+        oneharness_bin: oneharness_bin(),
+    };
+
+    let before = std::env::current_dir().expect("the hosting process has a working directory");
+    let running = run::start(&request, &BTreeMap::new()).expect("the graph starts");
+    assert_eq!(running.wait().expect("the graph settles"), 0);
+    assert_eq!(
+        std::env::current_dir().expect("the hosting process still has a working directory"),
+        before,
+        "the run moved the working directory of the process that hosts every member"
+    );
+
+    // And the members really did work elsewhere, so the assertion above is about
+    // a directory something was asked to change rather than one nobody used.
+    assert_eq!(recorded(&single_sided), vec![canonical(&own)]);
+
+    // The two-party member's own turns are told the graph's directory — and the
+    // sides onejudge tells nothing (its judge side takes no `--cwd`, having its
+    // config by name) inherit this process's, which is what makes the invariant
+    // observable from *inside* the run: a `set_current_dir` that moved the host
+    // mid-run is recorded here by a harness that started after it, where reading
+    // `current_dir()` afterwards would be fooled by one that put it back.
+    let sides = recorded(&two_party);
+    let told = canonical(&workspace.dir());
+    let inherited = canonical(&before);
+    assert!(
+        sides.contains(&told),
+        "no side of the two-party member ran in the directory the graph named: {sides:?}"
+    );
+    assert!(
+        sides.iter().all(|dir| *dir == told || *dir == inherited),
+        "a side ran somewhere neither the graph nor this process named: {sides:?}"
+    );
+}
+
+/// Every directory a harness recorded through `fake:record-cwd`, canonical so a
+/// host whose temporary directory is a symlink (macOS: `/var` → `/private/var`)
+/// compares equal to what the graph named.
+fn recorded(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|err| {
+            panic!(
+                "no harness recorded a directory in {}: {err}",
+                path.display()
+            )
+        })
+        .lines()
+        .map(|line| canonical(std::path::Path::new(line.trim())))
+        .collect()
+}
+
+/// One path as the host resolves it.
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|err| panic!("{} cannot be resolved: {err}", path.display()))
+}
+
 /// Read the live stream until an envelope satisfies `wanted`, or the run stops
 /// producing them.
 fn drain_until(running: &run::Running, wanted: impl Fn(&Envelope) -> bool) -> bool {

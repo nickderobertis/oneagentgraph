@@ -4,6 +4,16 @@
 //! this host can still reach an identity that runs a turn. So it drives the real
 //! `oneharness run` in a throwaway directory and then reads the report back.
 //!
+//! **This one keeps spawning `oneharness` for a different reason than the members
+//! do, and is not part of that collapse.** `src/harness_process.rs` inventories
+//! what the member hop's process boundary provides; what a smoke proves is that
+//! *this host's* launch path reaches an identity, so it has to take the path the
+//! members take — the binary on `PATH`, at whatever version is installed there.
+//! Rewritten onto `oneharness_core::io::run::run` it would prove the linked engine
+//! works, which `Cargo.lock` already decides, and would answer `ok` on a host
+//! whose `oneharness` is missing or too old for every member that follows. It
+//! collapses when the members do, and not before.
+//!
 //! What it judges is ported from ai-orchestrator, and the subtlety is worth
 //! keeping: a fallback chain records **every candidate it attempts**, and only
 //! the last of them is the launch path's outcome. A candidate counts as fallen

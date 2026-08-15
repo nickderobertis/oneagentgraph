@@ -140,6 +140,18 @@
 //! of the same two methods. Rebuilding it here is not an option the composition
 //! rule leaves open.
 //!
+//! **The same gap is already filed upstream, by the other dependent, and it holds
+//! two hops rather than one.** onejudge drives a turn in process through
+//! `io::run::run` by default and keeps a spawning seam beside it for one stated
+//! reason — `RunControls` cannot offer a spawned harness to the caller — written
+//! up with a proposal against oneharness in its own `docs/oneharness-library.md`.
+//! Installing a `SpawnHook` is what *selects* that seam, and [`crate::judge`]
+//! installs one on every two-party member, for this crate's grouping. So both
+//! `oneharness run` processes in this stack are held open by the one missing
+//! hook: this module's, and the one per side per turn that a `kind: onejudge`
+//! member is pushed back onto. That is what the addition buys, and it is why the
+//! ask belongs upstream rather than in either dependent.
+//!
 //! **Why the conversion is not done for POSIX alone in the meantime.** The two
 //! member kinds are distinguishable on the wire: `member-started` carries
 //! `runner: library|process`, and `member-died` carries `exit_code`,
