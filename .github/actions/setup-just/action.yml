@@ -1,6 +1,16 @@
 name: Set up just
 description: Restore a pinned just binary, or build it from crates.io on a cache miss
 
+inputs:
+  version:
+    description: >-
+      The just version this repository is pinned to. The one source for all three
+      places below — the cache key, the install, and the check that what landed
+      is what was asked for — so a bump cannot half-apply and leave a job
+      restoring one version and asserting another.
+    required: false
+    default: "1.53.0"
+
 runs:
   using: composite
   steps:
@@ -14,13 +24,13 @@ runs:
         path: |
           ~/.cargo/bin/just
           ~/.cargo/bin/just.exe
-        key: just-${{ runner.os }}-${{ runner.arch }}-1.53.0
+        key: just-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
     - name: Install just from crates.io
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       # rust-cache may have restored a different `just` into Cargo's bin dir.
       # A miss in this action's versioned cache must replace it deterministically.
-      run: cargo install just --locked --version 1.53.0 --force
+      run: cargo install just --locked --version "${{ inputs.version }}" --force
     - name: Verify just is available
       shell: bash
-      run: test "$(just --version)" = "just 1.53.0"
+      run: test "$(just --version)" = "just ${{ inputs.version }}"

@@ -1922,6 +1922,7 @@ fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
         "personas/ours.yaml",
         "agent:\n  instructions: ours\nuser:\n  persona: ours\n",
     );
+    std::fs::create_dir_all(workspace.at("personas/adirectory.yaml")).expect("not a persona");
     for (graph, expected) in [
         // A name neither catalog holds. Read as a *file* it would be a path
         // nobody wrote, so it says where it looked and what it found instead.
@@ -1942,6 +1943,13 @@ fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
             catalogued_graph("./base.yaml", "ours"),
             "is not a directory this run can read",
         ),
+        // An entry of that name which is not a persona file is not a persona:
+        // the catalog holds none by that name, and the answer says so rather
+        // than trying to read a directory as a document.
+        (
+            catalogued_graph("./personas", "adirectory"),
+            "holds no adirectory.yaml",
+        ),
     ] {
         workspace.graph(&graph);
         let refused = workspace.run_task("fake:complete-now: never gets here");
@@ -1956,6 +1964,34 @@ fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
             "a refusal must not read as an event stream"
         );
     }
+}
+
+/// A catalog entry the filesystem will not describe is reported, not read as a
+/// name the catalog does not hold.
+///
+/// The distinction is the whole of why the lookup asks about *absence* rather
+/// than trusting a boolean: a persona that is there and unreadable, read as
+/// absent, dispatches the member under a shipped role instead of saying what
+/// went wrong. A symlink that points at itself is the one way to make a
+/// filesystem refuse a stat for every user, including root — a permission bit
+/// proves nothing on a runner that ignores it.
+#[cfg(unix)]
+#[test]
+fn a_catalog_entry_that_cannot_be_described_is_reported_rather_than_missed() {
+    let workspace = Workspace::new();
+    std::fs::create_dir_all(workspace.at("personas")).expect("a catalog");
+    std::os::unix::fs::symlink("lead.yaml", workspace.at("personas/lead.yaml"))
+        .expect("a symlink to itself");
+    workspace.graph(&catalogued_graph("./personas", "lead"));
+
+    let refused = workspace.run_task("fake:complete-now: never gets here");
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("from this graph's catalog"),
+        "{}",
+        refused.stderr
+    );
+    assert!(refused.stderr.contains("lead.yaml"), "{}", refused.stderr);
 }
 
 /// A local persona and a shipped one of the same name is refused before the

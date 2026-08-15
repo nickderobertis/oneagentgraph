@@ -424,9 +424,7 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
         }
     }
     // A graph's own persona catalog, gated for the reason
-    // `FIRST_PERSONA_CATALOG_VERSION` records: it changes what a member's bare
-    // `persona: NAME` resolves to, so a document declaring an older schema is
-    // refused by the key's name rather than run under a rule it never had.
+    // `FIRST_PERSONA_CATALOG_VERSION` records.
     if let Some(root) = &graph.personas {
         if graph.version < FIRST_PERSONA_CATALOG_VERSION {
             return Err(Error::InvalidConfig(format!(
