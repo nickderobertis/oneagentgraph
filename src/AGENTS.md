@@ -24,7 +24,7 @@ Rules that hold as this grows:
 | `judge` | a two-party member, driven through onejudge's library in this process |
 | `run` | dependency order, cron members, the merged stream, the exit code |
 | `scratch` | `owner.lock` ownership, proven descendant reaping |
-| `event` / `render` | the wire envelope, and the text rendering of the same events |
+| `event` / `render` | the wire envelope, the shared filter over it (`docs/event-filter-notes.md`), and the text rendering of the same events |
 | `history` / `health` / `smoke` | the read-only verbs |
 
 ## The seams that are easy to get wrong

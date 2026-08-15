@@ -20,6 +20,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::event::EventFilter;
+
 /// A reference to another config file: a filesystem path, or an `https` URL that
 /// is fetched, checksummed, and recorded content-addressed in the run record so
 /// replay never depends on the URL staying stable.
@@ -38,8 +40,30 @@ pub struct GraphConfig {
     /// Exported to every member process. Values may reference `${HOME}`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// What this graph's run puts on its merged event stream.
+    ///
+    /// Absent is every envelope, which is what every graph written before the
+    /// block existed says and goes on meaning. Requires graph schema version
+    /// [`FIRST_EVENT_FILTER_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<Events>,
     /// The members, by name.
     pub members: BTreeMap<String, Member>,
+}
+
+/// A graph's own say over its merged event stream.
+///
+/// A block rather than a bare `filter:` key, because what a run publishes is a
+/// subject of its own — this is where a second decision about the stream goes,
+/// rather than beside the members that happen to feed it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Events {
+    /// Which envelopes reach the stream; absent is all of them.
+    ///
+    /// `oneagentgraph run --event-filter` names one instead, and wins over this.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filter: Option<EventFilter>,
 }
 
 /// A graph member: either a two-party onejudge conversation, or a single-sided
@@ -233,7 +257,7 @@ pub const MAX_SCHEDULE_SECONDS: u64 = u32::MAX as u64;
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// How a member's own `task` is read: as the prose it has always been, or as a
 /// template naming the run's task.
@@ -291,6 +315,16 @@ pub const FIRST_START_AFTER_VERSION: u32 = 4;
 /// in an older document — the text is valid prose there, and prose is exactly what
 /// it stays.
 pub const FIRST_TASK_TOKEN_VERSION: u32 = 4;
+
+/// The first graph schema version in which a graph may name an
+/// [`events`](GraphConfig::events) block, and so a filter over its own stream.
+///
+/// The gate is on the *reading*, the way [`FIRST_START_AFTER_VERSION`] is: a
+/// document declaring an older schema and naming this block is refused by the
+/// block's name rather than run under a filter that schema never had. Omitting
+/// it is unaffected under every version — a graph with no `events` streams every
+/// envelope, which is what all of them did before this existed.
+pub const FIRST_EVENT_FILTER_VERSION: u32 = 5;
 
 /// The first graph schema version in which a single-sided member may carry its
 /// own [`task`](OneharnessMember::task) and [`dir`](OneharnessMember::dir).
@@ -364,6 +398,23 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                 "env value for {key:?}: an environment value cannot contain a NUL, and this one \
                  is exported to every member"
             )));
+        }
+    }
+    // A graph's say over its own stream, gated the way `schedule.start_after` is
+    // and refused for the same reason: a document declaring an older schema and
+    // naming this block would otherwise be given the unfiltered stream it did
+    // not ask for, silently publishing everything it meant to hold back.
+    if let Some(events) = &graph.events {
+        if graph.version < FIRST_EVENT_FILTER_VERSION {
+            return Err(Error::InvalidConfig(format!(
+                "this graph uses `events`, which requires graph schema version \
+                 {FIRST_EVENT_FILTER_VERSION}"
+            )));
+        }
+        if let Some(filter) = &events.filter {
+            filter
+                .validate()
+                .map_err(|why| Error::InvalidConfig(format!("`events.filter`: {why}")))?;
         }
     }
     for (name, member) in &graph.members {
@@ -778,6 +829,89 @@ mod tests {
             let err = validate(&parse(&document)).unwrap_err();
             assert!(err.to_string().contains(expected), "{document}: {err}");
         }
+    }
+
+    /// A graph may name a filter over its own stream from the schema that has
+    /// one, and a document declaring an older schema is refused by the block's
+    /// name rather than run with the unfiltered stream it did not ask for.
+    #[test]
+    fn an_events_block_requires_the_schema_that_has_it() {
+        let document = |version: u32| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\n",
+                    "events:\n  filter:\n    exclude: [{{kind: turn-activity}}]\n",
+                    "members:\n  build:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n",
+                ),
+                version
+            )
+        };
+        let graph = parse(&document(FIRST_EVENT_FILTER_VERSION));
+        validate(&graph).expect("the schema that has the block accepts it");
+        assert_eq!(
+            graph
+                .events
+                .and_then(|events| events.filter)
+                .expect("the block carries a filter")
+                .exclude
+                .len(),
+            1
+        );
+        for older in FIRST_SCHEMA_VERSION..FIRST_EVENT_FILTER_VERSION {
+            let err = validate(&parse(&document(older))).expect_err("the block postdates it");
+            assert!(
+                err.to_string().contains("`events`"),
+                "version {older}: {err}"
+            );
+            assert!(
+                err.to_string().contains(&format!(
+                    "requires graph schema version {FIRST_EVENT_FILTER_VERSION}"
+                )),
+                "version {older}: {err}"
+            );
+        }
+        // And a graph naming no block validates under every schema this build
+        // reads, and serializes without one — an existing document is untouched.
+        for version in FIRST_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let unchanged = ONE_MEMBER.replace("version: 1", &format!("version: {version}"));
+            let graph = parse(&unchanged);
+            assert_eq!(graph.events, None);
+            assert!(validate(&graph).is_ok(), "{unchanged}");
+            let rendered = serde_norway::to_string(&graph).expect("a graph serializes");
+            assert!(!rendered.contains("events"), "{rendered}");
+        }
+    }
+
+    /// A filter a run could not honour is refused with the offending matcher
+    /// named, before anything is launched.
+    #[test]
+    fn a_filter_that_could_match_nothing_is_refused_with_the_matcher_named() {
+        let document = |filter: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nevents:\n  filter:\n{}",
+                    "members:\n  build:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n",
+                ),
+                SCHEMA_VERSION, filter
+            )
+        };
+        for (filter, expected) in [
+            ("    exclude: [{}]\n", "exclude[0] {}"),
+            ("    include: [{kind: ''}]\n", r#"include[0] {"kind":""}"#),
+            (
+                "    include: [{kind: 'turn-*'}, {member: ' '}]\n",
+                r#"include[1] {"member":" "}"#,
+            ),
+        ] {
+            let err = validate(&parse(&document(filter))).expect_err("the matcher is unusable");
+            assert!(err.to_string().contains("`events.filter`"), "{err}");
+            assert!(err.to_string().contains(expected), "{filter}: {err}");
+        }
+        // An `events` block naming no filter is the stream every graph already
+        // has, and is not a refusal.
+        assert!(validate(&parse(&document("    include: [{kind: '*'}]\n"))).is_ok());
     }
 
     /// The contract's own default: a side streams unless a graph turns it off.

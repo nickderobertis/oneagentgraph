@@ -35,8 +35,8 @@ fn validate_refuses_a_graph_that_could_never_run() {
     let workspace = Workspace::new();
     for (document, expected) in [
         (
-            "version: 5\nname: g\nmembers: {}\n",
-            "reads versions 1 through 4",
+            "version: 6\nname: g\nmembers: {}\n",
+            "reads versions 1 through 5",
         ),
         ("version: 1\nname: g\nmembers: {}\n", "has no members"),
         (
