@@ -632,7 +632,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
 /// field rather than a process state for exactly this reason — see
 /// `src/harness_process.rs`, which carries that boundary inventory.
 #[test]
-fn a_members_directory_never_becomes_the_hosting_processs_own() {
+fn the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere() {
     let _serial = LIBRARY_RUN.lock().expect("library journey lock");
     let workspace = Workspace::new();
     let own = workspace.dir().join("api");
@@ -733,7 +733,6 @@ fn recorded(path: &std::path::Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// One path as the host resolves it.
 fn canonical(path: &std::path::Path) -> std::path::PathBuf {
     path.canonicalize()
         .unwrap_or_else(|err| panic!("{} cannot be resolved: {err}", path.display()))
