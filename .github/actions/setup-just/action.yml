@@ -14,6 +14,19 @@ inputs:
 runs:
   using: composite
   steps:
+    # Checked before the value reaches anything, and first so it is checked
+    # before the cache key below expands it: a pin that is not a version number
+    # produces a cache key nobody can hit and a `cargo install` failure that
+    # names the registry rather than the typo that caused it.
+    - name: The pin is a version number
+      shell: bash
+      env:
+        JUST_VERSION: ${{ inputs.version }}
+      run: |
+        if [[ ! $JUST_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::setup-just was given version '$JUST_VERSION', which is not a MAJOR.MINOR.PATCH pin" >&2
+          exit 1
+        fi
     # The version is part of the immutable key: once one run has built this exact
     # binary, a crates.io outage cannot take later required checks down. OS and
     # architecture keep native executables from crossing runner boundaries.

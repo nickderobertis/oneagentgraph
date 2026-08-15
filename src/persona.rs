@@ -302,15 +302,30 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
     if let Some(text) = &persona.user.persona {
         user.insert("persona".into(), Value::String(text.clone()));
     }
-    // The bars each side brought, blank ones dropped the way the two halves of
-    // the prompt above are: a bar of whitespace is a bar nobody wrote, and one
-    // that survived would be numbered and handed to a supervisor as a condition.
-    let role_bar = persona.user.done_when.as_deref().unwrap_or_default();
-    let base_bar = match persona.user.done_when_replaces_base {
-        true => "",
-        false => user.get("done_when").and_then(Value::as_str).unwrap_or(""),
+    // The base's own bar, read as the string it has to be. A base is external
+    // input and this is the value the whole composition rests on, so a
+    // `done_when:` of some other shape is refused with what was found rather
+    // than read as no bar at all — which is the shared review bar going missing
+    // silently, the very thing composing them is here to stop.
+    let base_bar = match user.get("done_when") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => {
+            return Err(Error::InvalidConfig(format!(
+                "{base_origin}: `user.done_when` must be a string, got {}",
+                kind_of(other)
+            )))
+        }
     };
-    let bars: Vec<&str> = [base_bar.trim(), role_bar.trim()]
+    // Blank bars are dropped the way the two halves of the prompt above are: a
+    // bar of whitespace is a bar nobody wrote, and one that survived would be
+    // numbered and handed to a supervisor as a condition of its own.
+    let role_bar = persona.user.done_when.as_deref().unwrap_or_default();
+    let kept = match persona.user.done_when_replaces_base {
+        true => "",
+        false => base_bar.trim(),
+    };
+    let bars: Vec<&str> = [kept, role_bar.trim()]
         .into_iter()
         .filter(|bar| !bar.is_empty())
         .collect();
@@ -593,6 +608,15 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("`user` must be a mapping, got a number"),
+            "{err}"
+        );
+        // And the one value the composition rests on: a bar of another shape is
+        // refused rather than read as a base that never set one, which would
+        // drop the shared review bar without saying so.
+        let err = merge("user:\n  done_when: [a]\n", "list.yaml", &persona).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`user.done_when` must be a string, got a list"),
             "{err}"
         );
         // An empty document is a base with nothing in it, not a failure.

@@ -2120,6 +2120,23 @@ fn an_incomplete_base_config_refuses_the_run() {
     let run = workspace.run_task("fake:complete-now: incomplete base");
     run.expect_code(2);
     assert!(run.stderr.contains("user.done_when"), "{}", run.stderr);
+
+    // A bar of the wrong shape is refused with what was found, rather than read
+    // as a base that set none — which would run the dispatch under whatever the
+    // persona brought and no shared review bar at all.
+    workspace.write(
+        "base.yaml",
+        &BASE.replace("done_when: \"the task is complete\"", "done_when: [a, b]"),
+    );
+    let wrong_shape = workspace.run_task("fake:complete-now: a bar of the wrong shape");
+    wrong_shape.expect_code(2);
+    assert!(
+        wrong_shape
+            .stderr
+            .contains("`user.done_when` must be a string, got a list"),
+        "{}",
+        wrong_shape.stderr
+    );
 }
 
 /// `--set` reaches the member's own field, and a path naming nothing refuses
