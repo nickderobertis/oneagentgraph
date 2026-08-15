@@ -103,11 +103,14 @@ pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
 /// `onejudge` binary in the chain, and so no argv, no exit status, and no stderr
 /// for it. A `kind: oneharness` member is still `oneharness run`, a child process
 /// of its own — no longer because oneharness's library surface could not answer
-/// (since 0.7.0 `oneharness_core::io::run::run` returns the report and takes an
-/// event sink), but because a *supervised* member needs two things that surface
-/// still cannot give and one the contract has not yet been asked for.
-/// `src/harness_process.rs` names all three at the site, with the proposal each
-/// one is. See `docs/contract.md`.
+/// (since 0.7.0 `oneharness_core::io::run::run` returns the report, takes an
+/// event sink, and takes a cancel token), but because a *supervised* member needs
+/// one thing that surface still cannot give: a seam between the moment a harness
+/// process is built and the moment it exists, which is how a member's tree joins
+/// the job object Windows proves group membership by. `src/harness_process.rs`
+/// carries the whole boundary inventory — every other guarantee the spawn
+/// provides, with the seam that replaces it — and the upstream proposal that one
+/// gap is. See `docs/contract.md`.
 #[derive(Debug, Clone)]
 pub enum Launch {
     /// onejudge's own run driver, over the config written into the member's
