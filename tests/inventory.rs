@@ -2,12 +2,12 @@
 //!
 //! `docs/oneharness-library.md` says the `oneharness run` hop is blocked, and
 //! rests that claim on names it does not own: `oneharness-core`'s public API on
-//! one side, `docs/contract.md`'s wire schema on the other. Neither copy can be
-//! generated — the document is prose written for a reader — so this suite is the
-//! drift gate instead. Every upstream name in the document is held against the
-//! real type, and every contract name against the real contract, so a rename or
-//! an addition on either side fails here rather than leaving the document quietly
-//! wrong about why the conversion cannot run.
+//! one side, `docs/contract.md`'s wire schema and this crate's manifest on the
+//! other. Neither copy can be generated — the document is prose written for a
+//! reader — so this suite is the drift gate instead. Every upstream field the
+//! document names is resolved by the compiler against the real type, every
+//! sentence it quotes is matched against the document it quotes, and the version
+//! it blames is read out of `Cargo.toml`.
 //!
 //! The load-bearing one is
 //! [`the_inventorys_blocker_is_still_the_shape_of_run_controls`]: it destructures
@@ -18,13 +18,16 @@
 use std::collections::BTreeSet;
 
 use oneagentgraph::event::{Cause, Disposition, MemberDied, Runner};
+use oneharness_core::domain::report::RunReport;
 use oneharness_core::io::cancel::CancelToken;
-use oneharness_core::io::run::{RunControls, RunRequest};
+use oneharness_core::io::run::{RunControls, RunOutcome, RunRequest};
 
 /// The inventory itself, read at compile time rather than copied beside this.
 const INVENTORY: &str = include_str!("../docs/oneharness-library.md");
 /// The approved contract, which owns every wire name the inventory restates.
 const CONTRACT: &str = include_str!("../docs/contract.md");
+/// The manifest, which owns the `oneharness-core` version the inventory names.
+const MANIFEST: &str = include_str!("../Cargo.toml");
 
 /// The blocker is that `RunControls` has no seam between building a harness
 /// process and having one, so this crate cannot join each one to the member's
@@ -63,57 +66,53 @@ fn the_inventorys_blocker_is_still_the_shape_of_run_controls() {
     );
 }
 
+/// The name of an upstream field, produced from the very tokens the compiler
+/// resolves it by.
+///
+/// `offset_of!` needs the type and the field but no value, so this reaches fields
+/// of types nothing here can cheaply build — `RunReport` has two dozen required
+/// members — while `stringify!` makes the string a product of the same tokens
+/// rather than a second copy of them. A field renamed or dropped upstream fails to
+/// compile; a string that disagrees with the field is unwritable.
+macro_rules! field {
+    ($type:ty, $field:ident) => {{
+        let _ = std::mem::offset_of!($type, $field);
+        concat!(stringify!($type), "::", stringify!($field))
+    }};
+}
+
 /// Every `RunRequest`/`RunControls`/`RunOutcome`/`RunReport` field the inventory
 /// names as the replacement for something the spawn provides today.
 ///
 /// The document argues from these by name; a field renamed or dropped upstream
-/// turns an argument into a dangling reference. The literals below are what makes
-/// the check real — the compiler rejects a name that no longer exists, and this
-/// test rejects a name in the document that nobody wrote down here.
+/// turns an argument into a dangling reference. Each entry below is resolved by
+/// the compiler against the real type, so this test's only remaining job is to
+/// reject a name in the document that nobody put on the list.
 #[test]
 fn every_upstream_field_the_inventory_names_is_still_there() {
-    // Naming them in a literal is the proof they exist; `..default()` keeps an
-    // unrelated upstream addition from failing this crate's gate.
-    let request = RunRequest {
-        config: None,
-        cwd: None,
-        events: false,
-        stream: None,
-        prompt: Vec::new(),
-        env: Vec::new(),
-        control: false,
-        no_config: false,
-        bin: Vec::new(),
-        ..RunRequest::default()
-    };
-    assert!(
-        !request.no_config,
-        "the inventory reasons about the default"
-    );
-
     let proven: BTreeSet<String> = [
-        "RunRequest::config",
-        "RunRequest::cwd",
-        "RunRequest::events",
-        "RunRequest::stream",
-        "RunRequest::prompt",
-        "RunRequest::env",
-        "RunRequest::control",
-        "RunRequest::no_config",
-        "RunRequest::bin",
-        // `RunControls`'s own fields are destructured exhaustively above.
-        "RunControls::events",
-        "RunControls::cancel",
-        "RunControls::signal_cancel",
-        "RunControls::version",
-        // Read off the returned values in `src/member.rs`'s place.
-        "RunOutcome::exit_code",
-        "RunOutcome::failure_summary",
-        "RunReport::control",
-        "RunReport::fallback",
+        field!(RunRequest, config),
+        field!(RunRequest, cwd),
+        field!(RunRequest, events),
+        field!(RunRequest, stream),
+        field!(RunRequest, prompt),
+        field!(RunRequest, env),
+        field!(RunRequest, control),
+        field!(RunRequest, no_config),
+        field!(RunRequest, bin),
+        field!(RunControls<'_>, events),
+        field!(RunControls<'_>, cancel),
+        field!(RunControls<'_>, signal_cancel),
+        field!(RunControls<'_>, version),
+        field!(RunOutcome, exit_code),
+        field!(RunOutcome, failure_summary),
+        field!(RunReport, control),
+        field!(RunReport, fallback),
     ]
     .into_iter()
-    .map(str::to_owned)
+    // `RunControls<'_>` stringifies with its lifetime; the document writes the
+    // type by name.
+    .map(|name| name.replace("<'_>", ""))
     .collect();
 
     let named = qualified_fields_named_in(INVENTORY);
@@ -129,6 +128,31 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
         mapped_request_fields(),
         BTreeSet::from(["config", "cwd", "events", "prompt", "stream"]),
         "the argument table maps onto different `RunRequest` fields than it did"
+    );
+}
+
+/// The status block attributes the blocker to a *version* of `oneharness-core`,
+/// and the manifest is what decides which one that is.
+///
+/// A bump that leaves this document naming the version it was written against
+/// would read as a claim about the linked engine that nobody checked — which is
+/// exactly how a fixed blocker goes unnoticed.
+#[test]
+fn the_status_block_names_the_version_the_manifest_takes() {
+    let (_, rest) = MANIFEST
+        .split_once("\noneharness-core = \"")
+        .expect("the manifest still takes `oneharness-core` by version");
+    let (linked, _) = rest.split_once('"').expect("the requirement is quoted");
+
+    let (_, rest) = INVENTORY
+        .split_once("`oneharness-core` ")
+        .expect("the status block still names the dependency");
+    let (named, _) = rest
+        .split_once("'s public API")
+        .expect("the status block still attributes the blocker to its public API");
+    assert_eq!(
+        named, linked,
+        "the inventory blames `oneharness-core` {named} for a blocker in the {linked} the manifest takes"
     );
 }
 
