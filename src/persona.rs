@@ -315,7 +315,7 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
         .filter(|bar| !bar.is_empty())
         .collect();
     if !role_bar.trim().is_empty() {
-        user.insert("done_when".into(), Value::String(both_bars(&bars)));
+        user.insert("done_when".into(), Value::String(one_bar_from(&bars)));
     }
     if let Some(cap) = persona.user.max_turns {
         user.insert("max_turns".into(), Value::Number(cap.into()));
@@ -333,7 +333,7 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
 /// either bar may itself be several sentences: what a supervisor is handed has
 /// to say plainly that there is more than one and that neither is optional. One
 /// bar is handed over as it was written — there is nothing to conjoin.
-fn both_bars(bars: &[&str]) -> String {
+fn one_bar_from(bars: &[&str]) -> String {
     if let [only] = bars {
         return (*only).to_string();
     }
