@@ -40,6 +40,17 @@ pub struct GraphConfig {
     /// Exported to every member process. Values may reference `${HOME}`.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// The directory this graph's own persona catalog sits in.
+    ///
+    /// A member's `persona:` that is a bare or slash-qualified *name* — rather
+    /// than a path or a URL — is looked up here as `<name>.yaml` before it is
+    /// looked up in the personas this crate ships. Without it an operator's own
+    /// catalog is unreachable by name, which is most of what a catalog is for.
+    /// A relative path resolves against the graph document, like every other ref
+    /// a graph names. Requires graph schema version
+    /// [`FIRST_PERSONA_CATALOG_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personas: Option<PathBuf>,
     /// What this graph's run puts on its merged event stream.
     ///
     /// Absent is every envelope, which is what every graph written before the
@@ -257,7 +268,7 @@ pub const MAX_SCHEDULE_SECONDS: u64 = u32::MAX as u64;
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// How a member's own `task` is read: as the prose it has always been, or as a
 /// template naming the run's task.
@@ -325,6 +336,18 @@ pub const FIRST_TASK_TOKEN_VERSION: u32 = 4;
 /// it is unaffected under every version — a graph with no `events` streams every
 /// envelope, which is what all of them did before this existed.
 pub const FIRST_EVENT_FILTER_VERSION: u32 = 5;
+
+/// The first graph schema version in which a graph may name its own
+/// [`personas`](GraphConfig::personas) catalog.
+///
+/// The gate is on the *reading*, like [`FIRST_EVENT_FILTER_VERSION`]: naming a
+/// catalog changes what a member's bare `persona: NAME` means — it may now name
+/// the operator's own file, and a name that is in both catalogs is refused
+/// rather than resolved — so a document declaring an older schema is refused by
+/// the key's name rather than run with a resolution rule that schema never had.
+/// Omitting it is unaffected under every version: a name resolves to a shipped
+/// persona and anything else to a path or URL, exactly as before.
+pub const FIRST_PERSONA_CATALOG_VERSION: u32 = 6;
 
 /// The first graph schema version in which a single-sided member may carry its
 /// own [`task`](OneharnessMember::task) and [`dir`](OneharnessMember::dir).
@@ -398,6 +421,28 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                 "env value for {key:?}: an environment value cannot contain a NUL, and this one \
                  is exported to every member"
             )));
+        }
+    }
+    // A graph's own persona catalog, gated for the reason
+    // `FIRST_PERSONA_CATALOG_VERSION` records: it changes what a member's bare
+    // `persona: NAME` resolves to, so a document declaring an older schema is
+    // refused by the key's name rather than run under a rule it never had.
+    if let Some(root) = &graph.personas {
+        if graph.version < FIRST_PERSONA_CATALOG_VERSION {
+            return Err(Error::InvalidConfig(format!(
+                "this graph uses `personas`, which requires graph schema version \
+                 {FIRST_PERSONA_CATALOG_VERSION}"
+            )));
+        }
+        // Present and empty, refused for the reason a member's empty `dir` is:
+        // it names wherever the launching process happened to be, which is a
+        // catalog nobody chose rather than the one the author meant.
+        if root.as_os_str().is_empty() {
+            return Err(Error::InvalidConfig(
+                "`personas` names no directory — omit it to resolve a member's `persona` name \
+                 against the personas this crate ships"
+                    .into(),
+            ));
         }
     }
     // A graph's say over its own stream, gated the way `schedule.start_after` is
@@ -880,6 +925,58 @@ mod tests {
             assert!(validate(&graph).is_ok(), "{unchanged}");
             let rendered = serde_norway::to_string(&graph).expect("a graph serializes");
             assert!(!rendered.contains("events"), "{rendered}");
+        }
+    }
+
+    /// A graph may name its own persona catalog from the schema that has one,
+    /// and a document declaring an older schema is refused by the key's name
+    /// rather than run under a name-resolution rule that schema never had.
+    #[test]
+    fn a_persona_catalog_requires_the_schema_that_has_it() {
+        let document = |version: u32, root: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\npersonas: {}\nmembers:\n",
+                    "  build:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+                    "    persona: crozier/crozier-corpus\n",
+                ),
+                version, root
+            )
+        };
+        let graph = parse(&document(FIRST_PERSONA_CATALOG_VERSION, "./personas"));
+        validate(&graph).expect("the schema that has the key accepts it");
+        assert_eq!(
+            graph.personas.as_deref(),
+            Some(std::path::Path::new("./personas"))
+        );
+
+        for older in FIRST_SCHEMA_VERSION..FIRST_PERSONA_CATALOG_VERSION {
+            let err = validate(&parse(&document(older, "./personas")))
+                .expect_err("the key postdates this schema");
+            assert!(err.to_string().contains("`personas`"), "{older}: {err}");
+            assert!(
+                err.to_string().contains(&format!(
+                    "requires graph schema version {FIRST_PERSONA_CATALOG_VERSION}"
+                )),
+                "{older}: {err}"
+            );
+        }
+
+        // Present and empty is a typo, not a request for the shipped set: it
+        // names wherever the launching process happened to be.
+        let err = validate(&parse(&document(SCHEMA_VERSION, "''"))).unwrap_err();
+        assert!(err.to_string().contains("names no directory"), "{err}");
+
+        // And a graph naming no catalog validates under every schema this build
+        // reads, and serializes without the key — an existing document is
+        // untouched, and stays readable by a consumer that predates this.
+        for version in FIRST_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let unchanged = ONE_MEMBER.replace("version: 1", &format!("version: {version}"));
+            let graph = parse(&unchanged);
+            assert_eq!(graph.personas, None);
+            assert!(validate(&graph).is_ok(), "{unchanged}");
+            let rendered = serde_norway::to_string(&graph).expect("a graph serializes");
+            assert!(!rendered.contains("personas"), "{rendered}");
         }
     }
 

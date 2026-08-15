@@ -203,6 +203,9 @@ pub struct Context<'a> {
     pub scratch: &'a Path,
     /// The directory relative refs in the graph document resolve against.
     pub graph_dir: Option<&'a Path>,
+    /// The graph's own persona catalog, when it named one — see
+    /// [`crate::config::GraphConfig::personas`].
+    pub personas: Option<&'a Path>,
     /// The task prose, when the run supplied one.
     pub task: Option<&'a str>,
     /// How a member's own task text is read, which the graph document's schema
@@ -546,13 +549,7 @@ fn load_persona(
     let Some(reference) = reference else {
         return Ok((Persona::default(), None));
     };
-    let (document, origin) = match persona::shipped(&reference.0) {
-        Some(document) => (document.to_string(), reference.0.clone()),
-        None => {
-            let resolved = resolver.resolve(reference, context.graph_dir)?;
-            (resolved.content.clone(), reference.0.clone())
-        }
-    };
+    let (document, origin) = persona_document(reference, context, resolver)?;
     let persona = Persona::parse(&document, &origin)?;
     let errors = persona.validate();
     if !errors.is_empty() {
@@ -568,6 +565,86 @@ fn load_persona(
             .map(str::to_string)
     });
     Ok((persona, label))
+}
+
+/// The document one `persona:` ref names, and the origin to report it under.
+///
+/// A ref that parses as a persona *name* — `engineer`, or the slash-qualified
+/// `crozier/crozier-corpus` — is a catalog lookup; anything else is the path or
+/// URL it has always been, and `./roles/lead.yaml` is not a name. That split is
+/// what makes an operator's own catalog dispatchable without taking a path ref
+/// away from anyone.
+///
+/// A name in the graph's catalog **and** in the shipped set is refused rather
+/// than resolved. Either answer would be silent: a graph would depend on which
+/// catalog this build happens to prefer, and today's preference for the shipped
+/// one shadows an operator's file of the same name without a word. The explicit
+/// selection is a path ref, which reaches a file whatever it is called.
+fn persona_document(
+    reference: &ConfigRef,
+    context: &Context<'_>,
+    resolver: &mut Resolver,
+) -> Result<(String, String), Error> {
+    let name = &reference.0;
+    if persona::is_persona_name(name) {
+        match (catalog_file(name, context), persona::shipped(name)) {
+            (Some(path), Some(_)) => {
+                return Err(Error::InvalidConfig(format!(
+                    "persona {name:?} names both {} in this graph's catalog and one this crate \
+                     ships, and which of them a member runs under must not be this build's to \
+                     decide: rename yours, or name it by path (`persona: {}`)",
+                    path.display(),
+                    path.display()
+                )))
+            }
+            (Some(path), None) => {
+                let reference = ConfigRef(path.display().to_string());
+                let resolved = resolver.resolve(&reference, None)?;
+                return Ok((resolved.content.clone(), reference.0));
+            }
+            (None, Some(document)) => return Ok((document.to_string(), name.clone())),
+            // A graph that named a catalog meant a name to be looked up in it,
+            // so a miss is refused with both catalogs named rather than falling
+            // through to read a file called `crozier/crozier-corpus`.
+            (None, None) if context.personas.is_some() => {
+                return Err(Error::InvalidConfig(format!(
+                    "persona {name:?}: this graph's catalog ({}) holds no {name}.yaml, and it is \
+                     not one this crate ships ({}). Name a file by path to use one from anywhere \
+                     else.",
+                    catalog_root(context)
+                        .expect("the graph named a catalog")
+                        .display(),
+                    persona::shipped_names()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )))
+            }
+            (None, None) => {}
+        }
+    }
+    let resolved = resolver.resolve(reference, context.graph_dir)?;
+    Ok((resolved.content.clone(), reference.0.clone()))
+}
+
+/// This graph's persona catalog, resolved against the graph document the way
+/// every other relative ref in it is.
+fn catalog_root(context: &Context<'_>) -> Option<PathBuf> {
+    let root = context.personas?;
+    Some(match context.graph_dir {
+        Some(graph_dir) if root.is_relative() => graph_dir.join(root),
+        _ => root.to_path_buf(),
+    })
+}
+
+/// The catalog file a persona name points at, when this graph named a catalog
+/// and the file is there.
+///
+/// The name has already been through [`persona::is_persona_name`], which is what
+/// keeps a slash-qualified one inside the catalog it is joined onto.
+fn catalog_file(name: &str, context: &Context<'_>) -> Option<PathBuf> {
+    let file = catalog_root(context)?.join(format!("{name}.yaml"));
+    file.is_file().then_some(file)
 }
 
 /// Stamp `model` into every per-harness section of one side's config.
@@ -846,6 +923,7 @@ mod tests {
             dir,
             scratch,
             graph_dir: Some(dir),
+            personas: None,
             task: Some("do the thing"),
             task_text: TaskText::Template,
             session: "s",
@@ -980,6 +1058,115 @@ mod tests {
         taskless.task = None;
         let err = build(&member, &taskless, &mut Resolver::new()).unwrap_err();
         assert!(err.to_string().contains("no task"), "{err}");
+    }
+
+    /// A graph's own catalog is what makes an operator's personas dispatchable
+    /// by name — a bare one and a slash-qualified one alike — and a name that is
+    /// in that catalog *and* in the shipped set is refused rather than quietly
+    /// resolved to either.
+    #[test]
+    fn a_graph_local_catalog_is_reachable_by_name() {
+        let dir = workspace();
+        let catalog = dir.path().join("personas");
+        std::fs::create_dir_all(catalog.join("crozier")).expect("catalog");
+        std::fs::write(
+            catalog.join("crozier/crozier-corpus.yaml"),
+            "agent:\n  instructions: corpus role\nuser:\n  persona: corpus supervisor\n",
+        )
+        .expect("a catalog persona");
+        let scratch = dir.path().join("scratch");
+        let member = |named: &str| -> Member {
+            serde_norway::from_str(&format!(
+                "kind: oneharness\noneharness_config: ./oneharness.toml\npersona: {named}\n"
+            ))
+            .expect("a member")
+        };
+        let mut catalogued = context(dir.path(), &scratch);
+        catalogued.personas = Some(Path::new("personas"));
+
+        let invocation = build(
+            &member("crozier/crozier-corpus"),
+            &catalogued,
+            &mut Resolver::new(),
+        )
+        .expect("the catalog persona resolves");
+        assert_eq!(invocation.persona.as_deref(), Some("crozier-corpus"));
+        // And it is in the run record as the file it was read from, so an audit
+        // says which document the member actually ran under.
+        assert!(
+            invocation
+                .refs
+                .iter()
+                .any(|resolved| resolved.origin.ends_with("crozier-corpus.yaml")),
+            "{:?}",
+            invocation.refs
+        );
+
+        // A shipped name still resolves through a catalog that does not hold it.
+        assert_eq!(
+            build(&member("reviewer"), &catalogued, &mut Resolver::new())
+                .expect("a shipped persona still resolves")
+                .persona
+                .as_deref(),
+            Some("reviewer")
+        );
+
+        // Until the catalog holds one too, and then neither wins silently.
+        std::fs::write(
+            catalog.join("reviewer.yaml"),
+            "agent:\n  instructions: our reviewer\nuser:\n  persona: ours\n",
+        )
+        .expect("a colliding persona");
+        let err = build(&member("reviewer"), &catalogued, &mut Resolver::new()).unwrap_err();
+        assert!(err.to_string().contains("names both"), "{err}");
+        assert!(err.to_string().contains("reviewer.yaml"), "{err}");
+
+        // A name in neither is refused with both catalogs named, rather than
+        // read as a file called `nobody`.
+        let err = build(&member("nobody"), &catalogued, &mut Resolver::new()).unwrap_err();
+        assert!(err.to_string().contains("holds no nobody.yaml"), "{err}");
+        assert!(err.to_string().contains("engineer"), "{err}");
+
+        // A path ref is how an operator names their own file whatever it
+        // collides with, and it is not a catalog lookup at all.
+        assert_eq!(
+            build(
+                &member("./personas/reviewer.yaml"),
+                &catalogued,
+                &mut Resolver::new()
+            )
+            .expect("a path ref reaches the file")
+            .persona
+            .as_deref(),
+            Some("reviewer")
+        );
+    }
+
+    /// A graph that names no catalog resolves exactly as it did before there
+    /// were any: a shipped name, or a ref.
+    #[test]
+    fn a_graph_with_no_catalog_resolves_the_shipped_personas_and_refs() {
+        let dir = workspace();
+        std::fs::create_dir_all(dir.path().join("personas")).expect("catalog");
+        std::fs::write(
+            dir.path().join("personas/reviewer.yaml"),
+            "agent:\n  instructions: our reviewer\nuser:\n  persona: ours\n",
+        )
+        .expect("a persona no graph named");
+        let scratch = dir.path().join("scratch");
+        let member: Member = serde_norway::from_str(
+            "kind: oneharness\noneharness_config: ./oneharness.toml\npersona: reviewer\n",
+        )
+        .expect("a member");
+        // The directory is there, unnamed, and so is not consulted — a graph
+        // opts into its own catalog rather than acquiring one by being near it.
+        let invocation = build(
+            &member,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .expect("the shipped persona resolves");
+        assert_eq!(invocation.persona.as_deref(), Some("reviewer"));
     }
 
     /// A single-sided member's own `task` and `dir` are what oneharness is told,

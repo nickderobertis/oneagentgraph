@@ -338,6 +338,7 @@ fn preflight(
             dir: Path::new("."),
             scratch: &member_scratch,
             graph_dir: document.base_dir.as_deref(),
+            personas: graph.personas.as_deref(),
             task,
             task_text: oneagentgraph::config::TaskText::under(graph.version),
             session: "validate",

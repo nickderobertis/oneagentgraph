@@ -21,11 +21,12 @@
 //! * `member-started.json` — the three shapes of the payload a supervisor reads
 //!   first, on the same terms: one per runner, plus the one a member publishes
 //!   when it comes up without taking a turn.
-//! * `graph.v4.yaml` / `graph.v5.yaml` — the graph config schema, which is
-//!   versioned for the same reason and read on the *other* side of the same
-//!   promise: this build does not write these, an author does, and a document
-//!   written against an older schema has to keep meaning what it said. The two
-//!   differ by exactly the `events` block version 5 added.
+//! * `graph.v4.yaml` / `graph.v5.yaml` / `graph.v6.yaml` — the graph config
+//!   schema, which is versioned for the same reason and read on the *other* side
+//!   of the same promise: this build does not write these, an author does, and a
+//!   document written against an older schema has to keep meaning what it said.
+//!   Each differs from the one before it by exactly what that version added: the
+//!   `events` block in version 5, the `personas` catalog in version 6.
 //!
 //! Regenerating an old golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -43,7 +44,8 @@ use std::collections::BTreeMap;
 
 use oneagentgraph::config::{
     AgentSide, ConfigRef, Events, GraphConfig, JudgeHarness, JudgeSide, Member, OneharnessMember,
-    OnejudgeMember, Schedule, FIRST_EVENT_FILTER_VERSION, SCHEMA_VERSION,
+    OnejudgeMember, Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION,
+    SCHEMA_VERSION,
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
@@ -54,16 +56,18 @@ use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
 use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
 
-/// The graph both config goldens describe, at the current schema version.
+/// The graph the config goldens describe, at the current schema version.
 ///
-/// One member of each kind, so the golden covers both arms of the tagged union,
-/// and the `events` block version 5 added — carrying a matcher of each shape the
-/// grammar has: a source, a kind glob, and the reserved labels.
+/// One member of each kind, so the golden covers both arms of the tagged union;
+/// the `events` block version 5 added — carrying a matcher of each shape the
+/// grammar has: a source, a kind glob, and the reserved labels; and the
+/// `personas` catalog version 6 added.
 fn golden_graph() -> GraphConfig {
     GraphConfig {
         version: SCHEMA_VERSION,
         name: "node-scope".into(),
         env: BTreeMap::from([("MY_VAR".to_string(), "value".to_string())]),
+        personas: Some("./personas".into()),
         events: Some(Events {
             filter: Some(EventFilter {
                 include: vec![
@@ -128,7 +132,7 @@ fn golden_graph() -> GraphConfig {
 /// back to the same graph, and validates as a runnable one.
 #[test]
 fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
-    let golden = include_str!("golden/graph.v5.yaml");
+    let golden = include_str!("golden/graph.v6.yaml");
     let written = serde_norway::to_string(&golden_graph()).expect("a graph serializes");
     assert_eq!(
         written, golden,
@@ -153,6 +157,53 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
     assert_eq!(filter.include.len(), 2);
     assert_eq!(filter.exclude.len(), 1);
     filter.validate().expect("the golden's filter is usable");
+
+    // And the catalog this version added, on the same terms: a key that survived
+    // the trip as an absent one would be a graph whose own personas are
+    // unreachable by name, which is the state this version exists to end.
+    assert_eq!(
+        read.personas.as_deref(),
+        Some(std::path::Path::new("./personas"))
+    );
+}
+
+/// A graph written against the schema before `personas` existed reads unchanged,
+/// gains no `personas` key when written back, and is refused by the key's name
+/// if it names one anyway.
+///
+/// The same three-part promise the version 4 journey below holds, for the key
+/// version 6 added: a document that predates it keeps resolving a member's bare
+/// `persona: NAME` the way it always did, and one declaring that schema and
+/// asking for a catalog is told which version has it rather than being run under
+/// a resolution rule it never named.
+#[test]
+fn a_version_five_graph_still_reads_and_is_refused_the_catalog_it_predates() {
+    let golden = include_str!("golden/graph.v5.yaml");
+    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 5 graph still reads");
+    assert_eq!(graph.version, FIRST_PERSONA_CATALOG_VERSION - 1);
+    assert_eq!(graph.personas, None, "version 5 has no persona catalog");
+    oneagentgraph::config::validate(&graph).expect("a version 5 graph still validates");
+
+    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    assert!(
+        !written.contains("personas"),
+        "an absent catalog must stay absent, or an older reader now meets a key it \
+         rejects: {written}"
+    );
+    assert_eq!(written, golden, "a version 5 document did not round-trip");
+
+    // The same document, naming the key its schema predates.
+    let named = format!("personas: ./personas\n{golden}");
+    let asking: GraphConfig = serde_norway::from_str(&named).expect("it still parses");
+    let error = oneagentgraph::config::validate(&asking)
+        .expect_err("the key postdates the schema this document declares");
+    assert!(error.to_string().contains("`personas`"), "{error}");
+    assert!(
+        error.to_string().contains(&format!(
+            "requires graph schema version {FIRST_PERSONA_CATALOG_VERSION}"
+        )),
+        "{error}"
+    );
 }
 
 /// A graph written against the schema before `events` existed reads unchanged,

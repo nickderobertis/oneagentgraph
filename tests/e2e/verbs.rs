@@ -8,6 +8,8 @@
 // process is the single sanctioned double, and the wrapper scripts here are that
 // same double reached under a second `ONEHARNESS_BIN_*` key.
 
+use oneagentgraph::config::{FIRST_SCHEMA_VERSION, SCHEMA_VERSION};
+
 use crate::support::{
     fake_harness, graph_with, two_party_graph, until, Workspace, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
 };
@@ -33,11 +35,23 @@ fn validate_reads_every_ref_the_graph_names() {
 #[test]
 fn validate_refuses_a_graph_that_could_never_run() {
     let workspace = Workspace::new();
+    // A version past the ones this build reads, derived rather than typed: it
+    // moves with every schema this crate adds, and a literal here made the next
+    // bump refuse the schema it had just started reading.
+    let ahead = SCHEMA_VERSION + 1;
+    let document = format!("version: {ahead}\nname: g\nmembers: {{}}\n");
+    workspace.graph(&document);
+    let run = workspace.run(&["validate", "./graph.yaml"]);
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains(&format!(
+            "reads versions {FIRST_SCHEMA_VERSION} through {SCHEMA_VERSION}"
+        )),
+        "{document}: {}",
+        run.stderr
+    );
+
     for (document, expected) in [
-        (
-            "version: 6\nname: g\nmembers: {}\n",
-            "reads versions 1 through 5",
-        ),
         ("version: 1\nname: g\nmembers: {}\n", "has no members"),
         (
             concat!(

@@ -1753,6 +1753,118 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
     }
 }
 
+/// The graph document a journey uses to dispatch `persona` out of its own
+/// catalog at `./personas`.
+fn catalogued_graph(persona: &str) -> String {
+    graph_with(
+        &format!(
+            concat!(
+                "version: 6\nname: node-scope\n",
+                "env: {{}}\n",
+                "personas: ./personas\n",
+                "members:\n  worker:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n    persona: {}\n",
+                "    agent:\n      oneharness_config: ./oneharness.toml\n",
+                "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+                "    mode: bypass\n",
+            ),
+            persona
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    )
+}
+
+/// A graph's own persona catalog is dispatchable by name — the slash-qualified
+/// one included — and the role in that file is what the agent is actually run
+/// under.
+///
+/// The evidence an operator has that a catalog works is the prompt the harness
+/// received, so that is what this reads: a catalog nothing maps a name onto is
+/// inert however well its files parse.
+#[test]
+fn a_graph_local_persona_catalog_is_dispatchable_by_name() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "personas/crozier/crozier-corpus.yaml",
+        concat!(
+            "agent:\n  instructions: |\n    Catalog marker: mind the corpus.\n",
+            "user:\n  persona: |\n    Catalog supervisor: check the citations.\n",
+        ),
+    );
+    workspace.graph(&catalogued_graph("crozier/crozier-corpus"));
+
+    let record = workspace.at("prompts.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: catalogued fake:record-prompt={}",
+        record.display()
+    ));
+    run.expect_code(0);
+
+    let delivered = std::fs::read_to_string(&record).expect("prompts");
+    assert!(
+        delivered.contains("Catalog marker: mind the corpus."),
+        "the catalog's role never reached the agent: {delivered}"
+    );
+    assert!(
+        delivered.contains("Catalog supervisor: check the citations."),
+        "{delivered}"
+    );
+    // The base's shared preamble is still underneath it.
+    assert!(
+        delivered.contains("Standing bar: verify before you claim done."),
+        "{delivered}"
+    );
+    assert_eq!(
+        labels(&run.of_kind("member-started")[0])["persona"],
+        "crozier-corpus"
+    );
+}
+
+/// A local persona and a shipped one of the same name is refused before the
+/// graph starts, rather than resolved to the shipped one behind the operator's
+/// back — and naming the file by path is the way to say which was meant.
+#[test]
+fn a_persona_name_in_both_catalogs_refuses_the_run() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "personas/reviewer.yaml",
+        concat!(
+            "agent:\n  instructions: |\n    Local marker: our own reviewer.\n",
+            "user:\n  persona: |\n    Local supervisor: our own bar.\n",
+        ),
+    );
+    workspace.graph(&catalogued_graph("reviewer"));
+
+    let refused = workspace.run_task("fake:complete-now: never gets here");
+    refused.expect_code(2);
+    assert!(refused.stderr.contains("names both"), "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("reviewer.yaml"),
+        "{}",
+        refused.stderr
+    );
+    assert!(
+        refused.stdout.is_empty(),
+        "a refusal must not read as an event stream"
+    );
+
+    // The explicit selection: a path ref reaches the operator's file whatever it
+    // is called, and the run goes through.
+    workspace.graph(&catalogued_graph("./personas/reviewer.yaml"));
+    let record = workspace.at("prompts.txt");
+    workspace
+        .run_task(&format!(
+            "fake:complete-now: ours fake:record-prompt={}",
+            record.display()
+        ))
+        .expect_code(0);
+    let delivered = std::fs::read_to_string(&record).expect("prompts");
+    assert!(
+        delivered.contains("Local marker: our own reviewer."),
+        "{delivered}"
+    );
+}
+
 /// A graph whose base config merges to something incomplete refuses, naming the
 /// field the base never supplied.
 #[test]
