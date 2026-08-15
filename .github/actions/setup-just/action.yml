@@ -1,0 +1,26 @@
+name: Set up just
+description: Restore a pinned just binary, or build it from crates.io on a cache miss
+
+runs:
+  using: composite
+  steps:
+    # The version is part of the immutable key: once one run has built this exact
+    # binary, a crates.io outage cannot take later required checks down. OS and
+    # architecture keep native executables from crossing runner boundaries.
+    - name: Restore just
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/just
+          ~/.cargo/bin/just.exe
+        key: just-${{ runner.os }}-${{ runner.arch }}-1.53.0
+    - name: Install just from crates.io
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      # rust-cache may have restored a different `just` into Cargo's bin dir.
+      # A miss in this action's versioned cache must replace it deterministically.
+      run: cargo install just --locked --version 1.53.0 --force
+    - name: Verify just is available
+      shell: bash
+      run: test "$(just --version)" = "just 1.53.0"
