@@ -1506,6 +1506,64 @@ fn the_base_preamble_and_the_persona_role_both_reach_the_agent() {
     assert_eq!(labels(&run.of_kind("member-started")[0])["persona"], "lead");
 }
 
+/// A base config's `done_when` is the review bar an operator centralizes for
+/// every dispatch, so a persona bringing its own adds a bar rather than removing
+/// that one — and the effective config the member is handed carries both.
+///
+/// Read off the generated `onejudge.yaml` because that document *is* what the
+/// dispatch received: a bar that never reached the file never reached the
+/// supervisor either, whatever the merge computed in memory.
+#[test]
+fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
+    /// The effective config a member is handed when its persona carries `extra`
+    /// beside its own bar.
+    fn effective_config(extra: &str) -> String {
+        let workspace = Workspace::new();
+        workspace.write(
+            "roles/lead.yaml",
+            &format!(
+                concat!(
+                    "agent:\n  name: lead\n  instructions: |\n    Role marker: you lead.\n",
+                    "user:\n  persona: |\n    Supervisor marker: push hard.\n",
+                    "  done_when: \"Role bar: every finding cites the code it names\"\n{}",
+                ),
+                extra
+            ),
+        );
+        workspace.graph(
+            &two_party_graph(&fake_harness(), NO_ENV)
+                .replace("persona: engineer", "persona: ./roles/lead.yaml"),
+        );
+        workspace
+            .run_task("fake:complete-now: the bars")
+            .expect_code(0);
+        workspace.member_file("worker", "onejudge.yaml")
+    }
+
+    let composed = effective_config("");
+    // `base.yaml`'s own bar, which is what the operator centralized.
+    assert!(
+        composed.contains("the task is complete"),
+        "the base's review bar was dropped by the persona: {composed}"
+    );
+    assert!(
+        composed.contains("Role bar: every finding cites the code it names"),
+        "{composed}"
+    );
+
+    // And a persona that genuinely must stand in for the shared bar says so,
+    // which is the one way the base's bar leaves the effective config.
+    let replaced = effective_config("  done_when_replaces_base: true\n");
+    assert!(
+        !replaced.contains("the task is complete"),
+        "an explicit replacement must be the only bar: {replaced}"
+    );
+    assert!(
+        replaced.contains("Role bar: every finding cites the code it names"),
+        "{replaced}"
+    );
+}
+
 /// A graph's `env` reaches every member process, `${VAR}` expanded — and that is
 /// the seam the whole suite reaches the double through, so it is proven rather
 /// than assumed.
