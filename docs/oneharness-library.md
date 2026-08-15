@@ -34,6 +34,13 @@ The short version: `oneharness_core::io::run::run` is not the obstacle, and only
 **one** guarantee is genuinely missing — process grouping, on Windows only. It is
 upstream's to add and this document is the proposal.
 
+Nothing here owns the names it argues from, so **`tests/inventory.rs` is the drift
+gate**: it reads this file at compile time and holds every upstream field against
+the real type and every wire name against `docs/contract.md`. The blocker itself is
+an *exhaustive* destructure of `RunControls`, so the day upstream adds the seam
+below, that suite stops compiling — which is the notice that this document is
+stale and the conversion can start.
+
 ## The call is there
 
 `run` returns the report, takes an event sink, and takes a cancel token — the
@@ -48,6 +55,9 @@ three things `docs/contract.md` names as collapsing this hop — and every argum
 | `--stream` | `stream: Some(true)` |
 | `--prompt <text>` | `prompt` |
 | `--compact` | none, by design: it is how the CLI *prints* a report |
+
+`tests/inventory.rs` parses that column and names each field in a `RunRequest`
+literal, so a rename upstream fails there rather than here.
 
 ## What the process boundary provides, and what would replace it
 
@@ -197,3 +207,7 @@ the collapse needs from the *schema* is already spelled there — `runner: libra
 with an `engine`, a `config`, and a `worktree`, and the three process facts scoped
 to "a member that was one" — so this is a prose correction and not an interface
 change. It is still the contract owner's to make.
+
+Every sentence quoted in this section, and every wire name the section above
+restates, is checked against `docs/contract.md` itself by `tests/inventory.rs` — a
+quotation that stops being one fails there.

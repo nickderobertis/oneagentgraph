@@ -5,9 +5,10 @@
 //! `oneharness run` in a throwaway directory and then reads the report back.
 //!
 //! The path has to be the *members'* path, which is why this spawn is not the one
-//! `docs/oneharness-library.md` inventories and does not collapse with it: a smoke
-//! run on the linked engine would prove something no member depends on, and pass
-//! on a host whose `oneharness` is missing.
+//! `docs/oneharness-library.md` inventories: it has no boundary of its own to
+//! convert, it just follows theirs. A smoke run on the linked engine would prove
+//! something no member depends on, and would pass on a host whose `oneharness` is
+//! missing — so this collapses when a member's turn does, and not before.
 //!
 //! What it judges is ported from ai-orchestrator, and the subtlety is worth
 //! keeping: a fallback chain records **every candidate it attempts**, and only
