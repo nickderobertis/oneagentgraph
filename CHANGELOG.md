@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.14](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.13...v0.2.14) - 2026-08-15
+
+### Fixed
+
+- *(persona)* dispatch repo-local personas and keep the shared bar ([#42](https://github.com/nickderobertis/oneagentgraph/pull/42))
+
 ## [0.2.13](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.12...v0.2.13) - 2026-08-15
 
 ### Added
