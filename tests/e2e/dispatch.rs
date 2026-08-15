@@ -2017,6 +2017,53 @@ fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
     }
 }
 
+/// A single-sided member resolves its persona out of the same catalog, and the
+/// same collision refusal applies to it.
+///
+/// The two member kinds share one resolution, and a member with no judge is the
+/// one whose persona is nothing *but* the label on its events — so the label is
+/// where this reads the answer.
+#[test]
+fn a_single_sided_member_takes_its_persona_from_the_catalog_too() {
+    let workspace = Workspace::new();
+    let single_sided = |persona: &str| {
+        graph_with(
+            &format!(
+                concat!(
+                    "version: 6\nname: node-scope\n",
+                    "env: {{}}\n",
+                    "personas: ./personas\n",
+                    "members:\n  reporter:\n    kind: oneharness\n",
+                    "    oneharness_config: ./oneharness.toml\n    persona: {}\n",
+                ),
+                persona
+            ),
+            &[(FAKE_HARNESS_KEY, fake_harness())],
+        )
+    };
+    workspace.write(
+        "personas/crozier/crozier-corpus.yaml",
+        "agent:\n  instructions: corpus role\nuser:\n  persona: corpus supervisor\n",
+    );
+    workspace.graph(&single_sided("crozier/crozier-corpus"));
+
+    let run = workspace.run_task("fake:complete-now: catalogued and single sided");
+    run.expect_code(0);
+    assert_eq!(
+        labels(&run.of_kind("member-started")[0])["persona"],
+        "crozier-corpus"
+    );
+
+    workspace.write(
+        "personas/reviewer.yaml",
+        "agent:\n  instructions: ours\nuser:\n  persona: ours\n",
+    );
+    workspace.graph(&single_sided("reviewer"));
+    let refused = workspace.run_task("fake:complete-now: never gets here");
+    refused.expect_code(2);
+    assert!(refused.stderr.contains("names both"), "{}", refused.stderr);
+}
+
 /// A catalog entry the filesystem will not describe is reported, not read as a
 /// name the catalog does not hold.
 ///

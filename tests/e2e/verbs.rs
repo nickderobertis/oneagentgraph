@@ -190,6 +190,16 @@ fn validate_refuses_a_graph_that_could_never_run() {
             ),
             "`personas` names no directory",
         ),
+        // The key changes what a member's bare `persona: NAME` resolves to, so a
+        // document declaring a schema that predates it is refused by the key's
+        // name rather than run under a rule that schema never had.
+        (
+            concat!(
+                "version: 5\nname: g\npersonas: ./personas\nmembers:\n  a:\n",
+                "    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            ),
+            "requires graph schema version 6",
+        ),
         // Each field replaces what the graph supplies, so an empty one asks for
         // nothing rather than for the graph's — and an empty task reached the
         // harness as a `--prompt` with no value at all.
