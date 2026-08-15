@@ -94,10 +94,7 @@ pub fn line(envelope: &Envelope) -> String {
         }
         EventKind::GraphSettled => format!("exit {}", field(envelope, "exit_code")),
     };
-    let kind = serde_json::to_value(envelope.kind)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .unwrap_or_default();
+    let kind = envelope.kind.as_str();
     if detail.is_empty() {
         format!("{} {member} {kind}", envelope.ts)
     } else {

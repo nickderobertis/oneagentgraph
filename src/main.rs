@@ -21,7 +21,7 @@ use oneagentgraph::control::Delivery;
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
-use oneagentgraph::event::{Emitter, EventKind, Labels, TurnInterrupted};
+use oneagentgraph::event::{Emitter, EventFilter, EventKind, Labels, TurnInterrupted};
 use oneagentgraph::persona::{Persona, PERSONA_TEMPLATE};
 use oneagentgraph::render::Text;
 use oneagentgraph::resolve::Resolver;
@@ -113,12 +113,48 @@ fn requested_task(args: &RunArgs) -> Result<Option<String>, Error> {
     }
 }
 
+/// The filter this invocation names, from a file or straight off the argv.
+///
+/// A spec that starts with `{` is the document itself — the shape `onepipeline`
+/// passes through when it runs this binary — and anything else is a path to one.
+/// Inline is read as JSON, which is what a caller composing one line of argv
+/// writes; a file is read as YAML, of which JSON is a subset, so a filter kept
+/// beside a graph is written the same way it would be written *inside* that
+/// graph's `events.filter`.
+///
+/// One reader for both the foreground run and the `--detach` preflight, for the
+/// same reason [`requested_task`] is one: the child is handed the same flag, so
+/// a preflight that read it differently would be checking another invocation.
+fn requested_filter(args: &RunArgs) -> Result<Option<EventFilter>, Error> {
+    let Some(spec) = &args.event_filter else {
+        return Ok(None);
+    };
+    let filter: EventFilter = if spec.trim_start().starts_with('{') {
+        serde_json::from_str(spec)
+            .map_err(|err| Error::InvalidConfig(format!("--event-filter is not a filter: {err}")))?
+    } else {
+        let document = std::fs::read_to_string(spec).map_err(|err| {
+            Error::InvalidConfig(format!("cannot read --event-filter {spec}: {err}"))
+        })?;
+        serde_norway::from_str(&document)
+            .map_err(|err| Error::InvalidConfig(format!("{spec} is not a filter: {err}")))?
+    };
+    // Named here as well as inside the run: `--detach` reports a started run
+    // without ever reaching `run::run`, and a spec it could not honour must be
+    // the exit 2 it is rather than a child that dies out of sight.
+    filter
+        .validate()
+        .map_err(|why| Error::InvalidConfig(format!("`--event-filter`: {why}")))?;
+    Ok(Some(filter))
+}
+
 /// `oneagentgraph run`.
 fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     let task = requested_task(&args)?;
     let request = run::Request {
         graph: config::ConfigRef(args.graph.clone()),
         task,
+        filter: requested_filter(&args)?,
         dir: args.dir.clone().unwrap_or_else(|| PathBuf::from(".")),
         labels: args
             .label
@@ -166,6 +202,10 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     // invalid config the foreground run exits 2 for — and reporting it as a
     // started run on stdout is the exact failure this preflight exists for.
     let task = requested_task(args)?;
+    // For the same reason: a `--event-filter` naming a file that is not there,
+    // or a matcher that could match nothing, is an invalid invocation whichever
+    // side of the fork runs it.
+    requested_filter(args)?;
     preflight(&args.graph, &overrides, env, task.as_deref())?;
 
     let state = state_dir(env);
@@ -191,6 +231,9 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     }
     for set in &args.set {
         command.args(["--set", set]);
+    }
+    if let Some(spec) = &args.event_filter {
+        command.args(["--event-filter", spec]);
     }
     let child = command
         .stdin(std::process::Stdio::null())

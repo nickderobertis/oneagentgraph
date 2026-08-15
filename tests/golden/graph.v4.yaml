@@ -1,0 +1,23 @@
+version: 4
+name: node-scope
+env:
+  MY_VAR: value
+members:
+  reporter:
+    kind: oneharness
+    oneharness_config: ./oneharness.toml
+    persona: ./reporter.yaml
+    schedule:
+      every: 1800
+      start_after: 1800
+      resettable: true
+  worker:
+    kind: onejudge
+    base_config: ./onejudge.base.yaml
+    persona: engineer
+    agent:
+      oneharness_config: ./oneharness.toml
+      stream: true
+    judge:
+      oneharness_config: ./oneharness.judge.toml
+    mode: bypass

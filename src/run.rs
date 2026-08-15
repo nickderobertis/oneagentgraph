@@ -11,7 +11,7 @@
 //! settle, and `trigger` / `reset-timer` are how an operator moves that clock
 //! from outside the run.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
@@ -270,6 +270,10 @@ pub struct Request {
     pub labels: Vec<Label>,
     /// `members.worker.agent.model=NAME`-style overrides, already parsed.
     pub overrides: Vec<Override>,
+    /// Which envelopes this run puts on its merged stream, overriding the
+    /// graph's own `events.filter`. `None` leaves that in force, and a graph
+    /// naming none streams every envelope.
+    pub filter: Option<crate::event::EventFilter>,
     /// Where run state lives.
     pub state_dir: PathBuf,
     /// The `oneharness` binary.
@@ -297,7 +301,6 @@ pub struct Started {
 pub struct Running {
     started: Started,
     events: mpsc::Receiver<crate::event::Envelope>,
-    pending: Mutex<VecDeque<crate::event::Envelope>>,
     result: mpsc::Receiver<Result<i32, Error>>,
     thread: std::thread::JoinHandle<()>,
     root: PathBuf,
@@ -427,14 +430,6 @@ impl Running {
         &self,
         timeout: Duration,
     ) -> Result<Option<crate::event::Envelope>, mpsc::RecvTimeoutError> {
-        if let Some(envelope) = self
-            .pending
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .pop_front()
-        {
-            return Ok(Some(envelope));
-        }
         match self.events.recv_timeout(timeout) {
             Ok(envelope) => Ok(Some(envelope)),
             Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
@@ -580,31 +575,24 @@ impl Write for EventWriter {
     }
 }
 
-fn describe_started(
-    envelope: &crate::event::Envelope,
-    state_dir: &Path,
-) -> Result<(Started, PathBuf), Error> {
-    if envelope.kind != EventKind::GraphStarted {
-        return Err(Error::InvalidConfig(format!(
-            "the graph began with {:?}, not graph-started",
-            envelope.kind
-        )));
-    }
-    let raw_run_id = envelope
-        .labels
-        .run_id
-        .as_deref()
-        .ok_or_else(|| Error::InvalidConfig("graph-started carried no run id".into()))?;
-    let run_id = RunId::parse(raw_run_id)?;
+/// What a caller needs to watch or cancel the run `run_id` names.
+///
+/// Derived from the id the scheduler minted rather than read off the stream it
+/// publishes, because the stream is the one thing here a caller is entitled to
+/// narrow: a filter excluding `graph-started` is a legal filter, and a handle
+/// that could only be built from that envelope would refuse to describe a run
+/// that had started perfectly well. Everything this returns is a fact about
+/// *where* the run is, which no filter touches.
+fn describe_started(run_id: RunId, state_dir: &Path) -> (Started, PathBuf) {
     let root = state_dir.join(&run_id);
-    Ok((
+    (
         Started {
             run_id,
             events_path: root.join(EVENTS_FILE).display().to_string(),
             pid: std::process::id(),
         },
         root,
-    ))
+    )
 }
 
 /// A run id: sortable, unique on one host, and readable in a directory listing.
@@ -993,6 +981,23 @@ pub fn run(
     sink: Box<dyn std::io::Write + Send>,
     env: &BTreeMap<String, String>,
 ) -> Result<i32, Error> {
+    run_announcing(request, sink, env, &mut |_| {})
+}
+
+/// [`run`], telling `announce` the run's id at the moment the graph starts.
+///
+/// The seam [`start`] is built on. It fires exactly where `graph-started` is
+/// published — not where the id is minted — so everything that refuses between
+/// the two, an unreadable ref or an unpairable model among them, is still a
+/// refusal the caller receives instead of a handle to a run that never ran.
+/// What it is *not* is a reader of the stream: the announcement reaches the
+/// caller whether or not that envelope was admitted onto it.
+fn run_announcing(
+    request: &Request,
+    sink: Box<dyn std::io::Write + Send>,
+    env: &BTreeMap<String, String>,
+    announce: &mut dyn FnMut(RunId),
+) -> Result<i32, Error> {
     let mut resolver = Resolver::new();
     let graph_document = resolver.resolve(&request.graph, None)?.clone();
     let mut parsed: Value = serde_norway::from_str(&graph_document.content)
@@ -1004,6 +1009,24 @@ pub fn run(
     )
     .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?;
     crate::config::validate(&graph)?;
+    // The flag beats the graph's own key, and whichever one is in force is
+    // checked here — before a directory is created, a ref is fetched, or a
+    // member is launched. A spec that names an unmatchable matcher is the same
+    // class of refusal as a bad persona ref or an unpairable model: something
+    // the run cannot do, found before it spends a paid turn doing the rest.
+    let filter = match &request.filter {
+        Some(given) => {
+            given
+                .validate()
+                .map_err(|why| Error::InvalidConfig(format!("`--event-filter`: {why}")))?;
+            given.clone()
+        }
+        None => graph
+            .events
+            .as_ref()
+            .and_then(|events| events.filter.clone())
+            .unwrap_or_default(),
+    };
     let waves = ready_order(&graph)?;
 
     let run_id = RunId::mint(&graph.name, SystemTime::now());
@@ -1031,8 +1054,9 @@ pub fn run(
     let file = std::fs::File::create(&events_path).map_err(|err| {
         Error::InvalidConfig(format!("cannot create {}: {err}", events_path.display()))
     })?;
-    let emitter = Emitter::new(run_id.to_string(), Box::new(Tee { sink, file })).with_labels(
-        crate::event::Labels {
+    let emitter = Emitter::new(run_id.to_string(), Box::new(Tee { sink, file }))
+        .with_filter(filter)
+        .with_labels(crate::event::Labels {
             run_id: Some(run_id.to_string()),
             extra: request
                 .labels
@@ -1040,8 +1064,7 @@ pub fn run(
                 .map(|label| (label.key.clone(), Value::String(label.value.clone())))
                 .collect(),
             ..crate::event::Labels::default()
-        },
-    );
+        });
 
     let mut record = Record {
         schema_version: RECORD_SCHEMA_VERSION,
@@ -1088,6 +1111,7 @@ pub fn run(
     record.refs = resolver.inventory();
     write_record(&root, &record)?;
 
+    announce(run_id.clone());
     emitter.emit(
         EventKind::GraphStarted,
         [
@@ -1258,39 +1282,45 @@ pub fn run(
 
 /// Start a graph on a scheduler thread and return a live handle.
 ///
-/// This returns after the scheduler publishes `graph-started`, rather than
-/// after the graph settles. The first envelope remains available through the
-/// returned handle, so observing startup does not consume caller-visible data.
+/// This returns when the scheduler starts the graph, rather than when the graph
+/// settles. No envelope is consumed to learn that: the scheduler says so
+/// directly, so a run whose filter omits `graph-started` — a legal thing for a
+/// caller to ask for — still yields a handle describing where it is. Everything
+/// it publishes stays available through that handle.
+///
 /// The scheduler itself is [`run`]: this function supplies a channel-backed
 /// writer to that entry point and adds no scheduling path of its own.
 ///
 /// # Errors
 ///
-/// The same startup errors as [`run`]. Errors that occur after `graph-started`
-/// are returned by [`Running::wait`].
+/// The same startup errors as [`run`], which is every refusal up to and
+/// including the moment the graph starts. Errors after it are returned by
+/// [`Running::wait`].
 pub fn start(request: &Request, env: &BTreeMap<String, String>) -> Result<Running, Error> {
     let request = request.clone();
     let state_dir = request.state_dir.clone();
     let env = env.clone();
     let (event_tx, event_rx) = mpsc::channel();
     let (result_tx, result_rx) = mpsc::channel();
+    let (started_tx, started_rx) = mpsc::channel();
     let thread = std::thread::spawn(move || {
         let writer = EventWriter {
             events: event_tx,
             buffered: Vec::new(),
         };
-        let result = run(&request, Box::new(writer), &env);
+        let result = run_announcing(&request, Box::new(writer), &env, &mut |run_id| {
+            let _ = started_tx.send(run_id);
+        });
         let _ = result_tx.send(result);
     });
 
     loop {
-        match event_rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(envelope) => {
-                let (started, root) = describe_started(&envelope, &state_dir)?;
+        match started_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(run_id) => {
+                let (started, root) = describe_started(run_id, &state_dir);
                 return Ok(Running {
                     started,
                     events: event_rx,
-                    pending: Mutex::new(VecDeque::from([envelope])),
                     result: result_rx,
                     thread,
                     root,
@@ -1302,7 +1332,7 @@ pub fn start(request: &Request, env: &BTreeMap<String, String>) -> Result<Runnin
                     return match result {
                         Err(error) => Err(error),
                         Ok(_) => Err(Error::InvalidConfig(
-                            "the graph ended without publishing graph-started".into(),
+                            "the graph ended without ever starting".into(),
                         )),
                     };
                 }
@@ -1317,7 +1347,7 @@ pub fn start(request: &Request, env: &BTreeMap<String, String>) -> Result<Runnin
                 return match result {
                     Err(error) => Err(error),
                     Ok(_) => Err(Error::InvalidConfig(
-                        "the graph ended without publishing graph-started".into(),
+                        "the graph ended without ever starting".into(),
                     )),
                 };
             }
@@ -2176,18 +2206,23 @@ mod tests {
         let envelope = rx.recv().expect("typed envelope");
         assert_eq!(envelope.kind, EventKind::GraphStarted);
         assert!(rx.try_recv().is_err(), "invalid NDJSON was not forwarded");
+    }
 
+    /// A live handle describes where the run is, from the id the scheduler
+    /// minted — nothing here reads the stream, which a caller is entitled to
+    /// have filtered down to nothing at all.
+    #[test]
+    fn a_live_handle_is_built_from_the_run_id_rather_than_from_the_stream() {
         let state = tempfile::tempdir().expect("state");
-        assert!(describe_started(&envelope, state.path())
-            .unwrap_err()
-            .to_string()
-            .contains("no run id"));
-        let mut wrong_kind = envelope;
-        wrong_kind.kind = EventKind::GraphSettled;
-        assert!(describe_started(&wrong_kind, state.path())
-            .unwrap_err()
-            .to_string()
-            .contains("not graph-started"));
+        let run_id = RunId::parse("node-scope-1786171301679-1447994").expect("a run id");
+        let (started, root) = describe_started(run_id.clone(), state.path());
+        assert_eq!(started.run_id, run_id);
+        assert_eq!(root, state.path().join(&run_id));
+        assert_eq!(
+            started.events_path,
+            root.join(EVENTS_FILE).display().to_string()
+        );
+        assert_eq!(started.pid, std::process::id());
     }
 
     #[test]

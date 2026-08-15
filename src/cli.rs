@@ -75,6 +75,10 @@ pub struct RunArgs {
     /// Repeatable.
     #[arg(long, value_name = "PATH=VALUE")]
     pub set: Vec<String>,
+    /// Keep only the events a filter admits, as a file path or inline JSON.
+    /// Wins over the graph's own `events.filter`.
+    #[arg(long, value_name = "SPEC")]
+    pub event_filter: Option<String>,
     /// How to render the events. `text` is a deterministic rendering of the same
     /// events, never separate content.
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]

@@ -111,6 +111,34 @@ pub enum EventKind {
     GraphSettled,
 }
 
+impl EventKind {
+    /// This kind's kebab-case spelling on the wire, which is what an
+    /// [`EventFilter`] globs against and what a rendering names.
+    ///
+    /// Stated rather than derived through serde, because a filter consults it
+    /// once per envelope and the derivation allocates a `Value` to read one
+    /// string out of. The test below walks every variant against serde's own
+    /// spelling, so the two cannot drift.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EventKind::GraphStarted => "graph-started",
+            EventKind::MemberStarted => "member-started",
+            EventKind::TurnStarted => "turn-started",
+            EventKind::TurnActivity => "turn-activity",
+            EventKind::TurnCompleted => "turn-completed",
+            EventKind::TurnInterrupted => "turn-interrupted",
+            EventKind::MemberHeartbeat => "member-heartbeat",
+            EventKind::FallbackAdvanced => "fallback-advanced",
+            EventKind::MemberDied => "member-died",
+            EventKind::CronFired => "cron-fired",
+            EventKind::CronReset => "cron-reset",
+            EventKind::MemberSettled => "member-settled",
+            EventKind::GraphSettled => "graph-settled",
+        }
+    }
+}
+
 /// The reserved label keys, plus whatever else a producer stamped.
 ///
 /// Reserved keys are absent rather than empty when unknown, so an enricher can
@@ -151,6 +179,248 @@ pub struct Artifact {
     pub kind: String,
     /// Size of the stored artifact.
     pub bytes: u64,
+}
+
+/// Which envelopes a run puts on its merged stream.
+///
+/// The grammar is shared across the stack — `onevcs`, `oneagentgraph`, and
+/// `onepipeline` read the same document — so a consumer with a narrow attention
+/// budget states its interest **once**, to the producer that owns the stream,
+/// rather than re-filtering everything downstream. Like the envelope above it,
+/// this type is duplicated per repository by design.
+///
+/// [`EventFilter::default`] — no matcher on either list — admits everything, so
+/// a run naming no filter streams exactly what it always did.
+///
+/// A filter decides what is *emitted*, never what the run acts on: the
+/// settlements, heartbeats, and deaths this crate's own liveness, scheduling,
+/// and settle detection read are the values [`Emitter::emit`] returns, which it
+/// returns whether or not the envelope reached the stream.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EventFilter {
+    /// Matchers an envelope satisfies one of to pass. Absent or empty admits
+    /// every envelope, so a filter that only rejects need name nothing here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<Matcher>,
+    /// Matchers that reject. A match here rejects whatever
+    /// [`include`](Self::include) said, so a broad include beside a narrow
+    /// exclude is how "all of this except that" is written.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclude: Vec<Matcher>,
+}
+
+/// One matcher: every field it names must hold of an envelope, and a field it
+/// does not name is not consulted.
+///
+/// Deliberately absent: `stream`, which identifies a producing process rather
+/// than anything a consumer means by an event; and payload fields — a turn's
+/// `role` lives in a payload rather than in the labels, and this stays a matcher
+/// over the envelope's addressing.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Matcher {
+    /// The producing library, by exact equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<Source>,
+    /// A glob over the kind's kebab-case wire string, where `*` stands for any
+    /// run of characters including none and every other character is itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The [`Labels::run_id`] the envelope was stamped with, by exact equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The [`Labels::node`] the envelope was stamped with, by exact equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// The [`Labels::step`] the envelope was stamped with, by exact equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// The [`Labels::member`] the envelope was stamped with, by exact equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    /// The [`Labels::persona`] the envelope was stamped with, by exact equality.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+}
+
+impl EventFilter {
+    /// Whether an envelope reaches the merged stream.
+    ///
+    /// `exclude` wins: a matcher there rejects whatever `include` admitted, and
+    /// an empty `include` admits everything.
+    ///
+    /// The kind arrives as its wire string rather than as an [`EventKind`],
+    /// because the merged stream carries what a sibling library relayed as well
+    /// as what this one produced. `onevcs` and `onepipeline` name kinds this
+    /// enum does not have, so a filter typed on the enum would have to either
+    /// silence every relayed event or refuse a spec for naming one. Everything
+    /// else a matcher reads — the [`Source`] and the reserved [`Labels`] — is
+    /// shared across the stack and stays typed.
+    #[must_use]
+    pub fn allows(&self, source: Source, kind: &str, labels: &Labels) -> bool {
+        if self
+            .exclude
+            .iter()
+            .any(|matcher| matcher.matches(source, kind, labels))
+        {
+            return false;
+        }
+        self.include.is_empty()
+            || self
+                .include
+                .iter()
+                .any(|matcher| matcher.matches(source, kind, labels))
+    }
+
+    /// Whether every matcher in this filter could match anything.
+    ///
+    /// A spec is external input — a graph document's `events.filter`, or the
+    /// `--event-filter` an operator typed — so this is its trust boundary, and a
+    /// run checks it before it starts rather than after a paid turn has been
+    /// spent streaming the wrong thing.
+    ///
+    /// # Errors
+    ///
+    /// A message naming the offending matcher — which list it is in, where in
+    /// that list, and what it says — for a matcher that names no field at all
+    /// (it matches *every* envelope, so one in `exclude` silences the stream
+    /// entirely), or one whose field is empty (nothing on the stream carries an
+    /// empty kind or an empty label, so it matches nothing).
+    pub fn validate(&self) -> Result<(), String> {
+        for (list, matchers) in [("include", &self.include), ("exclude", &self.exclude)] {
+            for (at, matcher) in matchers.iter().enumerate() {
+                matcher.check().map_err(|why| {
+                    format!(
+                        "{list}[{at}] {}: {why}",
+                        serde_json::to_string(matcher).unwrap_or_else(|_| "{}".to_string())
+                    )
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Matcher {
+    /// What this matcher asks of the reserved labels, in the order the grammar
+    /// lists them.
+    ///
+    /// One list rather than two, because `matches` and `check` must read exactly
+    /// the same keys: a key added to the grammar and to only one of them is
+    /// either unchecked or unmatched, and both are silent.
+    fn labels_asked(&self) -> [(&'static str, Option<&str>); 5] {
+        [
+            ("run_id", self.run_id.as_deref()),
+            ("node", self.node.as_deref()),
+            ("step", self.step.as_deref()),
+            ("member", self.member.as_deref()),
+            ("persona", self.persona.as_deref()),
+        ]
+    }
+
+    /// Whether every field this matcher names holds of the envelope.
+    fn matches(&self, source: Source, kind: &str, labels: &Labels) -> bool {
+        if self.source.is_some_and(|named| named != source) {
+            return false;
+        }
+        if self
+            .kind
+            .as_deref()
+            .is_some_and(|pattern| !glob(pattern, kind))
+        {
+            return false;
+        }
+        let typed = [
+            labels.run_id.as_deref(),
+            labels.node.as_deref(),
+            labels.step.as_deref(),
+            labels.member.as_deref(),
+            labels.persona.as_deref(),
+        ];
+        // A label the envelope never stamped is `None`, which no asked-for value
+        // equals — "a matcher naming a label the envelope did not stamp does not
+        // match it".
+        self.labels_asked()
+            .iter()
+            .zip(typed)
+            .all(|((key, asked), typed)| match asked {
+                None => true,
+                Some(asked) => stamped(labels, key, typed) == Some(*asked),
+            })
+    }
+
+    /// Whether this matcher could match anything; see [`EventFilter::validate`].
+    fn check(&self) -> Result<(), String> {
+        let mut named = usize::from(self.source.is_some());
+        for (field, asked) in
+            std::iter::once(("kind", self.kind.as_deref())).chain(self.labels_asked())
+        {
+            let Some(asked) = asked else { continue };
+            named += 1;
+            if asked.trim().is_empty() {
+                return Err(format!(
+                    "`{field}` is empty, and nothing on the stream carries an empty {field} — \
+                     omit the field to leave it unasked"
+                ));
+            }
+        }
+        if named == 0 {
+            return Err(
+                "a matcher naming no field matches every event — name at least one of `source`, \
+                 `kind`, `run_id`, `node`, `step`, `member`, or `persona`"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// What an envelope carries under one reserved label key.
+///
+/// The typed slot, or — where that is unset — the same key among the extras,
+/// because a matcher asks about the key *as the envelope carries it*. `Labels`
+/// flattens its extras beside the reserved fields, so a stamp an operator added
+/// by hand (`--label node=service`, which is not one this run stamps itself)
+/// reaches the wire under exactly the name the grammar names, and a filter that
+/// consulted only the typed slot would refuse to see a label its own consumer
+/// can plainly read. A non-string extra is not a label value and matches
+/// nothing.
+fn stamped<'a>(labels: &'a Labels, key: &str, typed: Option<&'a str>) -> Option<&'a str> {
+    typed.or_else(|| labels.extra.get(key).and_then(Value::as_str))
+}
+
+/// Whether `pattern` matches `text`, where `*` stands for any run of characters
+/// including none and every other character is itself.
+///
+/// The whole dialect, stated rather than inherited: this is a cross-repo grammar
+/// with no shared implementation, so a `?` or a `[a-z]` supported here and
+/// nowhere else would be a spec that filters differently depending on which
+/// producer read it. Kebab-case wire strings need neither.
+fn glob(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let (mut p, mut t) = (0, 0);
+    // Where to resume from if the run this `*` is currently standing for turns
+    // out to be one character too short.
+    let (mut star, mut resume) = (None, 0);
+    while t < text.len() {
+        if pattern.get(p) == Some(&'*') {
+            star = Some(p);
+            resume = t;
+            p += 1;
+        } else if pattern.get(p) == Some(&text[t]) {
+            p += 1;
+            t += 1;
+        } else if let Some(at) = star {
+            p = at + 1;
+            resume += 1;
+            t = resume;
+        } else {
+            return false;
+        }
+    }
+    pattern[p..].iter().all(|character| *character == '*')
 }
 
 /// The payload of an [`EventKind::MemberStarted`] event.
@@ -503,6 +773,7 @@ pub struct Emitter {
     seq: Arc<AtomicU64>,
     sink: Arc<Mutex<Box<dyn std::io::Write + Send>>>,
     labels: Labels,
+    filter: Arc<EventFilter>,
 }
 
 impl std::fmt::Debug for Emitter {
@@ -523,6 +794,21 @@ impl Emitter {
             seq: Arc::new(AtomicU64::new(0)),
             sink: Arc::new(Mutex::new(sink)),
             labels: Labels::default(),
+            filter: Arc::new(EventFilter::default()),
+        }
+    }
+
+    /// The same emitter, putting only what `filter` admits on the stream.
+    ///
+    /// Set once, at the run's own emitter, and inherited by every emitter
+    /// derived from it: one graph run is one merged stream, and a member whose
+    /// events escaped the run's filter would be exactly the noise the filter was
+    /// given to remove.
+    #[must_use]
+    pub fn with_filter(&self, filter: EventFilter) -> Self {
+        Self {
+            filter: Arc::new(filter),
+            ..self.clone()
         }
     }
 
@@ -547,10 +833,8 @@ impl Emitter {
                 .or_insert_with(|| value.clone());
         }
         Self {
-            stream: self.stream.clone(),
-            seq: Arc::clone(&self.seq),
-            sink: Arc::clone(&self.sink),
             labels: merged,
+            ..self.clone()
         }
     }
 
@@ -564,7 +848,11 @@ impl Emitter {
     ///
     /// A sink that cannot be written to is not a run failure — the events are
     /// also on disk — so the write is best-effort and the envelope is still
-    /// returned to whatever else the run does with it.
+    /// returned to whatever else the run does with it. An envelope this
+    /// emitter's [`EventFilter`] does not admit is returned on the same terms
+    /// and never written: filtering decides what a consumer *sees*, and the
+    /// run's own liveness, scheduling, and settle detection go on reading
+    /// everything.
     pub fn emit(&self, kind: EventKind, payload: Map<String, Value>) -> Envelope {
         self.emit_with(kind, payload, Vec::new())
     }
@@ -576,17 +864,33 @@ impl Emitter {
         payload: Map<String, Value>,
         artifacts: Vec<Artifact>,
     ) -> Envelope {
+        let admitted = self
+            .filter
+            .allows(Source::Agentgraph, kind.as_str(), &self.labels);
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
             ts: now_rfc3339(),
             stream: self.stream.clone(),
-            seq: self.seq.fetch_add(1, Ordering::SeqCst),
+            // `seq` numbers what the stream *carries*: the contract has a
+            // consumer detect loss through per-stream gaps, and a filtered event
+            // that took a number with it would report every deliberate omission
+            // as a dropped event. A suppressed envelope is returned carrying the
+            // number the next admitted one will take, which is the only honest
+            // answer for a line that was never on the wire.
+            seq: if admitted {
+                self.seq.fetch_add(1, Ordering::SeqCst)
+            } else {
+                self.seq.load(Ordering::SeqCst)
+            },
             source: Source::Agentgraph,
             kind,
             labels: self.labels.clone(),
             payload,
             artifacts,
         };
+        if !admitted {
+            return envelope;
+        }
         if let Ok(mut sink) = self.sink.lock() {
             let line = serde_json::to_string(&envelope).unwrap_or_default();
             let _ = writeln!(sink, "{line}");
@@ -748,6 +1052,326 @@ mod tests {
         assert_eq!(Cause::from(Disposition::Exited), Cause::Exited);
         assert_eq!(Cause::from(Disposition::Signaled), Cause::Signaled);
         assert_eq!(Cause::Unclassified.as_str(), "unclassified");
+    }
+
+    /// Every kind, for a filter test that must not miss one.
+    const ALL_KINDS: &[EventKind] = &[
+        EventKind::GraphStarted,
+        EventKind::MemberStarted,
+        EventKind::TurnStarted,
+        EventKind::TurnActivity,
+        EventKind::TurnCompleted,
+        EventKind::TurnInterrupted,
+        EventKind::MemberHeartbeat,
+        EventKind::FallbackAdvanced,
+        EventKind::MemberDied,
+        EventKind::CronFired,
+        EventKind::CronReset,
+        EventKind::MemberSettled,
+        EventKind::GraphSettled,
+    ];
+
+    /// Every kind spells itself on the wire the way serde does, which is what a
+    /// glob is matched against.
+    #[test]
+    fn every_event_kind_spells_itself_the_way_the_wire_does() {
+        for kind in ALL_KINDS {
+            assert_eq!(
+                Value::from(kind.as_str()),
+                serde_json::to_value(kind).expect("serializes"),
+                "{kind:?} spells itself two ways"
+            );
+        }
+    }
+
+    /// The filter every run has until one is named: every kind passes, and the
+    /// grammar's own empty lists mean the same thing.
+    #[test]
+    fn a_filter_naming_nothing_admits_everything() {
+        let empty: EventFilter = serde_json::from_str("{}").expect("an empty filter");
+        assert_eq!(empty, EventFilter::default());
+        let spelled: EventFilter =
+            serde_json::from_str(r#"{"include": [], "exclude": []}"#).expect("empty lists");
+        assert_eq!(spelled, EventFilter::default());
+        for kind in ALL_KINDS {
+            assert!(empty.allows(Source::Agentgraph, kind.as_str(), &Labels::default()));
+        }
+        // And it serializes back to nothing, so a filter that says nothing is
+        // not a document naming empty lists at every consumer downstream.
+        assert_eq!(
+            serde_json::to_string(&EventFilter::default()).expect("serializes"),
+            "{}"
+        );
+    }
+
+    /// A spec is external input: a key nobody declared is a typo, not something
+    /// to drop silently.
+    #[test]
+    fn a_filter_with_an_unknown_field_is_rejected() {
+        let error = serde_json::from_str::<EventFilter>(r#"{"includes": []}"#)
+            .expect_err("`includes` is not a list this grammar has");
+        assert!(error.to_string().contains("includes"), "{error}");
+        let error = serde_json::from_str::<Matcher>(r#"{"role": "agent"}"#)
+            .expect_err("a turn's role lives in a payload, not in this grammar");
+        assert!(error.to_string().contains("role"), "{error}");
+    }
+
+    /// Include names what passes, exclude names what does not, and a match in
+    /// exclude wins over anything include said.
+    #[test]
+    fn exclude_beats_include_and_an_empty_include_admits_everything() {
+        let kinds = |filter: &EventFilter| -> Vec<&str> {
+            ALL_KINDS
+                .iter()
+                .map(|kind| kind.as_str())
+                .filter(|kind| filter.allows(Source::Agentgraph, kind, &Labels::default()))
+                .collect()
+        };
+        let matcher = |kind: &str| Matcher {
+            kind: Some(kind.to_string()),
+            ..Matcher::default()
+        };
+
+        let include_only = EventFilter {
+            include: vec![matcher("graph-*")],
+            exclude: Vec::new(),
+        };
+        assert_eq!(kinds(&include_only), vec!["graph-started", "graph-settled"]);
+
+        let exclude_only = EventFilter {
+            include: Vec::new(),
+            exclude: vec![matcher("turn-*"), matcher("member-heartbeat")],
+        };
+        assert!(!kinds(&exclude_only)
+            .iter()
+            .any(|kind| kind.starts_with("turn-") || *kind == "member-heartbeat"));
+        assert!(kinds(&exclude_only).contains(&"member-started"));
+
+        // The precedence: a matcher on both lists is rejected, and the rest of
+        // a broad include survives.
+        let both = EventFilter {
+            include: vec![matcher("turn-*")],
+            exclude: vec![matcher("turn-activity")],
+        };
+        assert_eq!(
+            kinds(&both),
+            vec!["turn-started", "turn-completed", "turn-interrupted"]
+        );
+    }
+
+    /// A glob spans the wire strings it names and nothing else.
+    #[test]
+    fn a_kind_glob_spans_the_wire_strings_it_names() {
+        for (pattern, wanted) in [
+            ("turn-*", vec!["turn-started", "turn-activity"]),
+            ("*", vec!["turn-started", "graph-settled", ""]),
+            ("*-started", vec!["turn-started", "member-started"]),
+            ("member-*ed", vec!["member-started", "member-settled"]),
+            ("turn-activity", vec!["turn-activity"]),
+        ] {
+            for kind in wanted {
+                assert!(glob(pattern, kind), "{pattern:?} should match {kind:?}");
+            }
+        }
+        for (pattern, refused) in [
+            ("turn-*", vec!["member-started", "turn", "a-turn-started"]),
+            ("*-started", vec!["started-turn", "turn-startedly"]),
+            ("turn-activity", vec!["turn-activit", "turn-activityy"]),
+            // A glob that runs out of pattern before it runs out of text, which
+            // is the case a naive prefix walk gets wrong.
+            ("*-fired", vec!["cron-fired-again"]),
+            ("", vec!["cron-fired"]),
+        ] {
+            for kind in refused {
+                assert!(
+                    !glob(pattern, kind),
+                    "{pattern:?} should not match {kind:?}"
+                );
+            }
+        }
+        // Backtracking: the first run `*` stands for is too short, and it has to
+        // give characters back until the tail lines up.
+        assert!(glob("*-c", "a-b-c"));
+        assert!(glob("", ""));
+    }
+
+    /// Every field a matcher names must hold, and a label the envelope never
+    /// stamped is not one a matcher can name its way into.
+    #[test]
+    fn a_matcher_conjoins_its_fields_and_never_matches_a_label_that_was_not_stamped() {
+        let worker = Labels {
+            run_id: Some("R".into()),
+            member: Some("worker".into()),
+            persona: Some("engineer".into()),
+            ..Labels::default()
+        };
+        let filter = |matcher: Matcher| EventFilter {
+            include: vec![matcher],
+            exclude: Vec::new(),
+        };
+
+        let both = filter(Matcher {
+            member: Some("worker".into()),
+            persona: Some("engineer".into()),
+            ..Matcher::default()
+        });
+        assert!(both.allows(Source::Agentgraph, "turn-started", &worker));
+        // One field of the pair wrong is the whole matcher wrong.
+        let mismatched = filter(Matcher {
+            member: Some("worker".into()),
+            persona: Some("reviewer".into()),
+            ..Matcher::default()
+        });
+        assert!(!mismatched.allows(Source::Agentgraph, "turn-started", &worker));
+        // The graph's own events carry no member, and a matcher naming one does
+        // not reach them.
+        assert!(!both.allows(Source::Agentgraph, "graph-started", &Labels::default()));
+        // Nor does a matcher reach a *node* or *step* nothing here stamps.
+        let by_node = filter(Matcher {
+            node: Some("service".into()),
+            ..Matcher::default()
+        });
+        assert!(!by_node.allows(Source::Agentgraph, "turn-started", &worker));
+        assert!(by_node.allows(
+            Source::Agentgraph,
+            "turn-started",
+            &Labels {
+                node: Some("service".into()),
+                step: Some("implement".into()),
+                ..Labels::default()
+            }
+        ));
+        // A reserved key an operator stamped by hand lands among the extras and
+        // reaches the wire under that name, so a matcher naming it sees it.
+        let by_hand = Labels {
+            extra: [("node".to_string(), Value::from("service"))]
+                .into_iter()
+                .collect(),
+            ..worker.clone()
+        };
+        assert!(by_node.allows(Source::Agentgraph, "turn-started", &by_hand));
+        // But only a string is a label value: a number under that key is not one
+        // this grammar can be equal to.
+        let numeric = Labels {
+            extra: [("node".to_string(), Value::from(7))].into_iter().collect(),
+            ..worker.clone()
+        };
+        assert!(!by_node.allows(Source::Agentgraph, "turn-started", &numeric));
+
+        // And `source` is exact equality, not a family a sibling falls into.
+        let by_source = filter(Matcher {
+            source: Some(Source::Vcs),
+            ..Matcher::default()
+        });
+        assert!(by_source.allows(Source::Vcs, "turn-started", &worker));
+        assert!(!by_source.allows(Source::Agentgraph, "turn-started", &worker));
+    }
+
+    /// A relayed sibling's kind is matched as the wire string it arrived as: it
+    /// is not one of this crate's kinds, and naming one is not an error.
+    #[test]
+    fn a_relayed_siblings_kind_is_matched_as_a_wire_string() {
+        let spec = r#"{"include": [{"source": "vcs", "kind": "commit-*"}]}"#;
+        let filter: EventFilter = serde_json::from_str(spec).expect("a filter may name any kind");
+        filter.validate().expect("a kind this crate lacks is legal");
+
+        let relayed = Labels {
+            run_id: Some("R".into()),
+            member: Some("worker".into()),
+            ..Labels::default()
+        };
+        assert!(filter.allows(Source::Vcs, "commit-created", &relayed));
+        assert!(filter.allows(Source::Vcs, "commit-amended", &relayed));
+        // The same kind from another library is another event.
+        assert!(!filter.allows(Source::Pipeline, "commit-created", &relayed));
+        // And this crate's own kinds are outside a spec that named none of them.
+        for kind in ALL_KINDS {
+            assert!(!filter.allows(Source::Agentgraph, kind.as_str(), &relayed));
+        }
+    }
+
+    /// A matcher that could match nothing — or everything — is refused, naming
+    /// which list it is in, where, and what it says.
+    #[test]
+    fn a_matcher_that_names_nothing_usable_is_refused_by_name() {
+        let refused = |spec: &str| -> String {
+            serde_json::from_str::<EventFilter>(spec)
+                .expect("the spec parses")
+                .validate()
+                .expect_err("the spec is not usable")
+        };
+
+        let empty = refused(r#"{"exclude": [{"kind": "turn-*"}, {}]}"#);
+        assert!(empty.contains("exclude[1] {}"), "{empty}");
+        assert!(empty.contains("matches every event"), "{empty}");
+
+        let blank = refused(r#"{"include": [{"member": "  "}]}"#);
+        assert!(blank.contains(r#"include[0] {"member":"  "}"#), "{blank}");
+        assert!(blank.contains("`member` is empty"), "{blank}");
+
+        let no_kind = refused(r#"{"include": [{"source": "vcs"}, {"kind": ""}]}"#);
+        assert!(no_kind.contains(r#"include[1] {"kind":""}"#), "{no_kind}");
+        assert!(no_kind.contains("`kind` is empty"), "{no_kind}");
+
+        // A matcher naming one field is enough, whichever field it is.
+        for spec in [
+            r#"{"include": [{"source": "agentgraph"}]}"#,
+            r#"{"include": [{"kind": "*"}]}"#,
+            r#"{"exclude": [{"run_id": "R"}]}"#,
+            r#"{"exclude": [{"step": "implement"}]}"#,
+        ] {
+            serde_json::from_str::<EventFilter>(spec)
+                .expect("parses")
+                .validate()
+                .unwrap_or_else(|why| panic!("{spec}: {why}"));
+        }
+    }
+
+    /// An emitter writes only what its filter admits, numbers only what it
+    /// wrote, and hands every envelope back to the run either way.
+    ///
+    /// The `seq` half is the point: the contract has a consumer read per-stream
+    /// gaps as loss, so a filtered stream that skipped numbers would report
+    /// every deliberate omission as a dropped event.
+    #[test]
+    fn a_filter_decides_what_is_written_without_deciding_what_the_run_sees() {
+        let recorder = Recorder::default();
+        let emitter = Emitter::new("run-1", Box::new(recorder.clone())).with_filter(EventFilter {
+            include: Vec::new(),
+            exclude: vec![Matcher {
+                kind: Some("turn-*".to_string()),
+                ..Matcher::default()
+            }],
+        });
+        // A derived emitter inherits it: one run is one merged stream.
+        let member = emitter.with_labels(Labels {
+            member: Some("worker".into()),
+            ..Labels::default()
+        });
+
+        emitter.emit(EventKind::GraphStarted, Map::new());
+        let suppressed = member.emit(EventKind::TurnActivity, Map::new());
+        member.emit(EventKind::MemberSettled, Map::new());
+        emitter.emit(EventKind::GraphSettled, Map::new());
+
+        let written = lines(&recorder);
+        assert_eq!(
+            written.iter().map(|e| e.kind).collect::<Vec<_>>(),
+            vec![
+                EventKind::GraphStarted,
+                EventKind::MemberSettled,
+                EventKind::GraphSettled
+            ]
+        );
+        assert_eq!(
+            written.iter().map(|e| e.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        // The suppressed envelope still came back, fully formed, for the
+        // liveness and settle detection that read what `emit` returns.
+        assert_eq!(suppressed.kind, EventKind::TurnActivity);
+        assert_eq!(suppressed.labels.member.as_deref(), Some("worker"));
+        assert_eq!(suppressed.v, ENVELOPE_VERSION);
     }
 
     /// An emitter whose sink is gone still numbers and returns its events: the
