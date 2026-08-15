@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 
 use crate::support::{
     fake_harness, fake_provider, graph_with, labels, single_sided_graph, two_party_graph,
-    Workspace, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
+    Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// The whole happy path: a two-party member completes, and the stream carries
@@ -1515,14 +1515,10 @@ fn the_base_preamble_and_the_persona_role_both_reach_the_agent() {
 /// supervisor either, whatever the merge computed in memory.
 #[test]
 fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
-    /// The effective config a member is handed when its persona carries `extra`
-    /// beside its own bar.
-    fn effective_config(extra: &str) -> String {
-        with_base(crate::support::BASE, extra)
-    }
-
-    /// The same, over a base config of this journey's own.
-    fn with_base(base: &str, extra: &str) -> String {
+    /// One dispatch's own `onejudge.yaml`, read back out of the run's state
+    /// directory: what the merge computed matters only insofar as it reached the
+    /// document the member ran on.
+    fn effective_config(base: &str, extra: &str) -> String {
         let workspace = Workspace::new();
         workspace.write("base.yaml", base);
         workspace.write(
@@ -1546,7 +1542,7 @@ fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
         workspace.member_file("worker", "onejudge.yaml")
     }
 
-    let composed = effective_config("");
+    let composed = effective_config(BASE, "");
     assert!(
         composed.contains("the task is complete"),
         "the base's review bar was dropped by the persona: {composed}"
@@ -1558,7 +1554,7 @@ fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
 
     // And a persona that genuinely must stand in for the shared bar says so,
     // which is the one way the base's bar leaves the effective config.
-    let replaced = effective_config("  done_when_replaces_base: true\n");
+    let replaced = effective_config(BASE, "  done_when_replaces_base: true\n");
     assert!(
         !replaced.contains("the task is complete"),
         "an explicit replacement must be the only bar: {replaced}"
@@ -1571,10 +1567,7 @@ fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
     // A base whose bar is blank has no bar to compose with, and the persona's
     // stands alone rather than being numbered against nothing — the same reading
     // a base that names none at all gets.
-    let blank = with_base(
-        &crate::support::BASE.replace("\"the task is complete\"", "'   '"),
-        "",
-    );
+    let blank = effective_config(&BASE.replace("\"the task is complete\"", "'   '"), "");
     assert!(
         !blank.contains("Both of these must hold"),
         "one bar must not be handed over as two: {blank}"
@@ -1784,15 +1777,10 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
     }
 }
 
-/// The graph document a journey uses to dispatch `persona` out of its own
-/// catalog at `./personas`.
-fn catalogued_graph(persona: &str) -> String {
-    catalogued_graph_at("./personas", persona)
-}
-
-/// The same, for a journey that needs the catalog somewhere else — including
-/// somewhere there is nothing to read.
-fn catalogued_graph_at(catalog: &str, persona: &str) -> String {
+/// A graph whose member resolves its `persona` name against a catalog at
+/// `catalog` — a path the *graph document* is the base for, not the directory
+/// the CLI was invoked from.
+fn catalogued_graph(catalog: &str, persona: &str) -> String {
     graph_with(
         &format!(
             concat!(
@@ -1828,7 +1816,7 @@ fn a_graph_local_persona_catalog_is_dispatchable_by_name() {
             "user:\n  persona: |\n    Catalog supervisor: check the citations.\n",
         ),
     );
-    workspace.graph(&catalogued_graph("crozier/crozier-corpus"));
+    workspace.graph(&catalogued_graph("./personas", "crozier/crozier-corpus"));
 
     let record = workspace.at("prompts.txt");
     let run = workspace.run_task(&format!(
@@ -1858,13 +1846,70 @@ fn a_graph_local_persona_catalog_is_dispatchable_by_name() {
     // A catalog does not take the shipped personas away: a name it does not hold
     // resolves to the one this crate ships, which is what every graph written
     // before catalogs existed depends on.
-    workspace.graph(&catalogued_graph("reviewer"));
+    workspace.graph(&catalogued_graph("./personas", "reviewer"));
     let shipped = workspace.run_task("fake:complete-now: still shipped");
     shipped.expect_code(0);
     assert_eq!(
         labels(&shipped.of_kind("member-started")[0])["persona"],
         "reviewer"
     );
+}
+
+/// A relative catalog is resolved against the graph document, not the directory
+/// the CLI happened to be invoked from — and an absolute one is used as written.
+///
+/// The graph and its refs sit one level down while the run is started from the
+/// workspace root, with a decoy catalog at that root carrying a persona of the
+/// same name. A run resolving against the process's own directory would take the
+/// decoy, which is how a graph fetched or vendored from elsewhere ends up
+/// running under a neighbour's personas.
+#[test]
+fn a_catalog_is_resolved_against_the_graph_document_and_an_absolute_one_as_written() {
+    let workspace = Workspace::new();
+    let persona = |marker: &str| {
+        format!(
+            concat!(
+                "agent:\n  instructions: |\n    {} role.\n",
+                "user:\n  persona: |\n    {} supervisor.\n",
+            ),
+            marker, marker
+        )
+    };
+    workspace.write("personas/lead.yaml", &persona("Decoy"));
+    workspace.write("node/personas/lead.yaml", &persona("Beside the graph"));
+    workspace.write("elsewhere/lead.yaml", &persona("Named absolutely"));
+    for name in ["base.yaml", "oneharness.toml", "oneharness.judge.toml"] {
+        workspace.write(&format!("node/{name}"), &workspace.read(name));
+    }
+
+    let absolute = workspace.at("elsewhere");
+    for (catalog, marker) in [
+        ("./personas", "Beside the graph"),
+        (&absolute.display().to_string(), "Named absolutely"),
+    ] {
+        workspace.write("node/graph.yaml", &catalogued_graph(catalog, "lead"));
+        let record = workspace.at("prompts.txt");
+        workspace
+            .run(&[
+                "run",
+                "./node/graph.yaml",
+                "--task",
+                &format!(
+                    "fake:complete-now: which catalog fake:record-prompt={}",
+                    record.display()
+                ),
+                "--dir",
+                &workspace.dir().display().to_string(),
+            ])
+            .expect_code(0);
+        let delivered = std::fs::read_to_string(&record).expect("prompts");
+        assert!(
+            delivered.contains(&format!("{marker} role.")),
+            "{catalog}: {delivered}"
+        );
+        assert!(!delivered.contains("Decoy role."), "{catalog}: {delivered}");
+        std::fs::remove_file(&record).expect("the recorded prompts");
+    }
 }
 
 /// A catalog lookup that could not have meant what it says is refused before the
@@ -1881,14 +1926,20 @@ fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
         // A name neither catalog holds. Read as a *file* it would be a path
         // nobody wrote, so it says where it looked and what it found instead.
         (
-            catalogued_graph("crozier/crozier-corpus"),
+            catalogued_graph("./personas", "crozier/crozier-corpus"),
             "holds no crozier/crozier-corpus.yaml",
         ),
         // A catalog root that is not there at all: without this, a typo in the
         // path would send every name straight back to the shipped personas —
         // the silent shadowing the catalog exists to end.
         (
-            catalogued_graph_at("./persona", "ours"),
+            catalogued_graph("./persona", "ours"),
+            "is not a directory this run can read",
+        ),
+        // And one that is there and is not a catalog, which is the same
+        // mistake reached by the other half of the same typo.
+        (
+            catalogued_graph("./base.yaml", "ours"),
             "is not a directory this run can read",
         ),
     ] {
@@ -1920,7 +1971,7 @@ fn a_persona_name_in_both_catalogs_refuses_the_run() {
             "user:\n  persona: |\n    Local supervisor: our own bar.\n",
         ),
     );
-    workspace.graph(&catalogued_graph("reviewer"));
+    workspace.graph(&catalogued_graph("./personas", "reviewer"));
 
     let refused = workspace.run_task("fake:complete-now: never gets here");
     refused.expect_code(2);
@@ -1937,7 +1988,7 @@ fn a_persona_name_in_both_catalogs_refuses_the_run() {
 
     // The explicit selection: a path ref reaches the operator's file whatever it
     // is called, and the run goes through.
-    workspace.graph(&catalogued_graph("./personas/reviewer.yaml"));
+    workspace.graph(&catalogued_graph("./personas", "./personas/reviewer.yaml"));
     let record = workspace.at("prompts.txt");
     workspace
         .run_task(&format!(

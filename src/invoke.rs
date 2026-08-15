@@ -634,8 +634,12 @@ fn persona_document(
 /// [`Error::InvalidConfig`] when the graph named a catalog that is not a
 /// directory this run can read. Refused rather than treated as an empty catalog,
 /// because an empty one is indistinguishable from a correct lookup that missed:
-/// a typo in the path would send every name a member gives straight back to the
-/// shipped personas, which is the silent shadowing this catalog exists to end.
+/// a typo in the path, or a directory this process cannot search, would send
+/// every name a member gives straight back to the shipped personas, which is the
+/// silent shadowing this catalog exists to end.
+///
+/// Opened rather than asked about: a metadata check answers what a path *is*,
+/// and what this needs to know is whether the catalog can be read at all.
 fn catalog_root(context: &Context<'_>) -> Result<Option<PathBuf>, Error> {
     let Some(root) = context.personas else {
         return Ok(None);
@@ -644,10 +648,10 @@ fn catalog_root(context: &Context<'_>) -> Result<Option<PathBuf>, Error> {
         Some(graph_dir) if root.is_relative() => graph_dir.join(root),
         _ => root.to_path_buf(),
     };
-    if !root.is_dir() {
+    if let Err(err) = std::fs::read_dir(&root) {
         return Err(Error::InvalidConfig(format!(
-            "this graph's persona catalog ({}) is not a directory this run can read, so every \
-             name a member gives would resolve to a shipped persona or to nothing",
+            "this graph's persona catalog ({}) is not a directory this run can read ({err}), so \
+             every name a member gives would resolve to a shipped persona or to nothing",
             root.display()
         )));
     }
@@ -663,13 +667,25 @@ fn catalog_root(context: &Context<'_>) -> Result<Option<PathBuf>, Error> {
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] for a catalog root that is not readable — see
-/// [`catalog_root`].
+/// [`catalog_root`] — and for an entry the filesystem refused to describe. Only
+/// *absence* is a miss: an entry this process may not stat is a persona that may
+/// well be there, and reading it as absent would resolve the member to a shipped
+/// role instead of saying what went wrong.
 fn catalog_file(name: &str, context: &Context<'_>) -> Result<Option<PathBuf>, Error> {
     let Some(root) = catalog_root(context)? else {
         return Ok(None);
     };
     let file = root.join(format!("{name}.yaml"));
-    Ok(file.is_file().then_some(file))
+    match std::fs::metadata(&file) {
+        Ok(found) if found.is_file() => Ok(Some(file)),
+        // A directory by that name is not a persona, and neither is a device.
+        Ok(_) => Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(Error::InvalidConfig(format!(
+            "persona {name:?}: cannot read {} from this graph's catalog: {err}",
+            file.display()
+        ))),
+    }
 }
 
 /// Stamp `model` into every per-harness section of one side's config.

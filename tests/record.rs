@@ -192,7 +192,6 @@ fn a_version_five_graph_still_reads_and_is_refused_the_catalog_it_predates() {
     );
     assert_eq!(written, golden, "a version 5 document did not round-trip");
 
-    // The same document, naming the key its schema predates.
     let named = format!("personas: ./personas\n{golden}");
     let asking: GraphConfig = serde_norway::from_str(&named).expect("it still parses");
     let error = oneagentgraph::config::validate(&asking)
