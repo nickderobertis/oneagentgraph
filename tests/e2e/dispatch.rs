@@ -1994,6 +1994,25 @@ fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
             catalogued_graph("./base.yaml", "ours"),
             "is not a directory this run can read",
         ),
+        // And a broken catalog no member happens to look in is refused all the
+        // same, where it was written rather than a dispatch later when somebody
+        // gives a member a name.
+        (
+            graph_with(
+                concat!(
+                    "version: 6\nname: node-scope\n",
+                    "env: {}\n",
+                    "personas: ./persona\n",
+                    "members:\n  worker:\n    kind: onejudge\n",
+                    "    base_config: ./base.yaml\n    persona: ./personas/ours.yaml\n",
+                    "    agent:\n      oneharness_config: ./oneharness.toml\n",
+                    "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+                    "    mode: bypass\n",
+                ),
+                &[(FAKE_HARNESS_KEY, fake_harness())],
+            ),
+            "is not a directory this run can read",
+        ),
         // An entry of that name which is not a persona file is not a persona:
         // the catalog holds none by that name, and the answer says so rather
         // than trying to read a directory as a document.

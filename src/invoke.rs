@@ -230,6 +230,11 @@ pub fn build(
     context: &Context<'_>,
     resolver: &mut Resolver,
 ) -> Result<Invocation, Error> {
+    // A catalog the graph named is read whether or not this member looks in it:
+    // an unreadable one is the operator's mistake wherever it is found, and a run
+    // that only surfaced it once somebody wrote a name-shaped `persona:` would
+    // surface it a dispatch later than the graph it was written in.
+    catalog_root(context)?;
     match member {
         Member::Onejudge(member) => onejudge(member, context, resolver),
         Member::Oneharness(member) => {
