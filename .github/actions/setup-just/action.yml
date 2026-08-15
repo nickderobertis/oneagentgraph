@@ -1,0 +1,57 @@
+name: Set up just
+description: Restore a pinned just binary, or build it from crates.io on a cache miss
+
+inputs:
+  version:
+    description: >-
+      The just version this repository is pinned to. The one source for all three
+      places below — the cache key, the install, and the check that what landed
+      is what was asked for — so a bump cannot half-apply and leave a job
+      restoring one version and asserting another.
+    required: false
+    default: "1.53.0"
+
+runs:
+  using: composite
+  steps:
+    # Checked before the value reaches anything, and first so it is checked
+    # before the cache key below expands it: a pin that is not a version number
+    # produces a cache key nobody can hit and a `cargo install` failure that
+    # names the registry rather than the typo that caused it.
+    - name: The pin is a version number
+      shell: bash
+      env:
+        JUST_VERSION: ${{ inputs.version }}
+      run: |
+        if [[ ! $JUST_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::setup-just was given version '$JUST_VERSION', which is not a MAJOR.MINOR.PATCH pin" >&2
+          exit 1
+        fi
+    # The version is part of the immutable key: once one run has built this exact
+    # binary, a crates.io outage cannot take later required checks down. OS and
+    # architecture keep native executables from crossing runner boundaries.
+    - name: Restore just
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/just
+          ~/.cargo/bin/just.exe
+        key: just-${{ runner.os }}-${{ runner.arch }}-${{ inputs.version }}
+    # The version reaches both scripts as an environment value rather than as
+    # text pasted into them: an input is whatever a caller passes, and one
+    # carrying shell syntax would otherwise be interpolated into the source of
+    # the command before bash ever parses it.
+    - name: Install just from crates.io
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        JUST_VERSION: ${{ inputs.version }}
+      # rust-cache may have restored a different `just` into Cargo's bin dir.
+      # A miss in this action's versioned cache must replace it deterministically.
+      run: cargo install just --locked --version "$JUST_VERSION" --force
+    - name: Verify just is available
+      shell: bash
+      env:
+        JUST_VERSION: ${{ inputs.version }}
+      run: test "$(just --version)" = "just $JUST_VERSION"

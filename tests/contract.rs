@@ -15,8 +15,8 @@ use std::collections::BTreeSet;
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
-    Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_SCHEMA_VERSION, FIRST_START_AFTER_VERSION,
-    SCHEMA_VERSION,
+    Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION, FIRST_SCHEMA_VERSION,
+    FIRST_START_AFTER_VERSION, SCHEMA_VERSION,
 };
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
@@ -943,6 +943,10 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     assert_eq!(graph.name, "node-scope");
     assert_eq!(graph.env.get("MY_VAR").map(String::as_str), Some("value"));
     assert_eq!(
+        graph.personas.as_deref(),
+        Some(std::path::Path::new("./personas"))
+    );
+    assert_eq!(
         graph.members.keys().collect::<Vec<_>>(),
         vec!["reporter", "worker"]
     );
@@ -1067,7 +1071,10 @@ fn the_documented_event_block_is_omitted_when_unset_and_gated_when_set() {
             &format!("version: {SCHEMA_VERSION}"),
             &format!("version: {older}"),
         );
-        let graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        let mut graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        // The documented graph's `personas` catalog postdates every schema in
+        // this loop too; dropping it leaves the block as the one thing refused.
+        graph.personas = None;
         let error = oneagentgraph::config::validate(&graph)
             .expect_err("the block postdates this schema version");
         assert!(error.to_string().contains("`events`"), "{error}");
@@ -1076,6 +1083,66 @@ fn the_documented_event_block_is_omitted_when_unset_and_gated_when_set() {
                 "requires graph schema version {FIRST_EVENT_FILTER_VERSION}"
             )),
             "{error}"
+        );
+    }
+}
+
+/// The documented persona catalog is optional, gated on the schema that has it,
+/// and omitted from a graph that names none — so a document written before it
+/// existed round-trips byte-identically and keeps its old resolution rule.
+#[test]
+fn the_documented_persona_catalog_is_gated_and_omitted_when_unset() {
+    let documented = fenced_block("yaml");
+    assert!(
+        documented.contains("personas: ./personas"),
+        "the documented graph must show its own persona catalog"
+    );
+    let mut graph: GraphConfig =
+        serde_norway::from_str(&documented).expect("the documented graph parses");
+    graph.personas = None;
+    let rendered = serde_norway::to_string(&graph).expect("the graph serializes");
+    assert!(
+        !rendered.contains("personas:"),
+        "an absent catalog must stay absent for older consumers: {rendered}"
+    );
+
+    for older in FIRST_SCHEMA_VERSION..FIRST_PERSONA_CATALOG_VERSION {
+        let older = documented.replace(
+            &format!("version: {SCHEMA_VERSION}"),
+            &format!("version: {older}"),
+        );
+        let graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        let error = oneagentgraph::config::validate(&graph)
+            .expect_err("the key postdates this schema version");
+        assert!(error.to_string().contains("`personas`"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_PERSONA_CATALOG_VERSION}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// The document's rule for telling a catalog *name* from a path or URL is the
+/// crate's own [`is_persona_name`], and every form the document names is decided
+/// the way it says.
+#[test]
+fn the_documented_persona_names_are_the_ones_the_crate_looks_up() {
+    for name in ["engineer", "crozier/crozier-corpus"] {
+        assert!(
+            oneagentgraph::persona::is_persona_name(name),
+            "the document names {name:?} as a catalog name"
+        );
+    }
+    for reference in [
+        "./roles/lead.yaml",
+        "./reporter.yaml",
+        "https://example.com/engineer.yaml",
+    ] {
+        assert!(
+            !oneagentgraph::persona::is_persona_name(reference),
+            "{reference:?} is a ref, not a catalog name"
         );
     }
 }
@@ -1226,10 +1293,12 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
         );
         let mut graph: GraphConfig =
             serde_norway::from_str(&declared).expect("an older graph parses");
-        // The documented graph also carries an `events` block, which postdates
-        // every schema in this loop; dropping it leaves the schedule as the one
-        // thing being read under the older version.
+        // The documented graph also carries an `events` block and a `personas`
+        // catalog, both of which postdate every schema in this loop; dropping
+        // them leaves the schedule as the one thing being read under the older
+        // version.
         graph.events = None;
+        graph.personas = None;
         oneagentgraph::config::validate(&graph)
             .unwrap_or_else(|err| panic!("version {older} must still validate: {err}"));
         let named = document.replacen(
@@ -1239,6 +1308,7 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
         );
         let mut graph: GraphConfig = serde_norway::from_str(&named).expect("the graph parses");
         graph.events = None;
+        graph.personas = None;
         let refused =
             oneagentgraph::config::validate(&graph).expect_err("start_after postdates this schema");
         assert!(
@@ -1381,6 +1451,7 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         dir: workspace.path(),
         scratch: &scratch,
         graph_dir: Some(workspace.path()),
+        personas: None,
         task: Some("ship the release"),
         task_text: oneagentgraph::config::TaskText::under(SCHEMA_VERSION),
         session: "s",

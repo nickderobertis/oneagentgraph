@@ -255,6 +255,23 @@ impl Workspace {
         let raw = std::fs::read_to_string(run.join("record.json")).expect("a record");
         serde_json::from_str(&raw).expect("the record is JSON")
     }
+
+    /// One file the run generated for a member — the effective config a dispatch
+    /// was actually handed, read back from where the run wrote it.
+    pub fn member_file(&self, member: &str, name: &str) -> String {
+        let run_id = self.record()["run_id"]
+            .as_str()
+            .expect("the record names its run")
+            .to_string();
+        let path = self
+            .state()
+            .join(run_id)
+            .join("members")
+            .join(member)
+            .join(name);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("cannot read {} ({err})", path.display()))
+    }
 }
 
 /// A journey's own oneharness session store, kept **short** and outside the

@@ -1098,6 +1098,7 @@ fn run_announcing(
             dir: &request.dir,
             scratch: &scratch,
             graph_dir: graph_document.base_dir.as_deref(),
+            personas: graph.personas.as_deref(),
             task: request.task.as_deref(),
             task_text: TaskText::under(graph.version),
             session: &format!("{run_id}-{name}"),
