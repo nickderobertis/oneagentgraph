@@ -1799,6 +1799,10 @@ fn catalogued_graph(catalog: &str, persona: &str) -> String {
     )
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the three journeys below read the
+// prompt file the doubled harness recorded, at the observation point and for the
+// reason the block above states: which persona document reached the agent is not
+// on the stream, and a member dispatched under the wrong one settles identically.
 /// A graph's own persona catalog is dispatchable by name — the slash-qualified
 /// one included — and the role in that file is what the agent is actually run
 /// under.
@@ -1912,6 +1916,53 @@ fn a_catalog_is_resolved_against_the_graph_document_and_an_absolute_one_as_writt
     }
 }
 
+/// A local persona and a shipped one of the same name is refused before the
+/// graph starts, rather than resolved to the shipped one behind the operator's
+/// back — and naming the file by path is the way to say which was meant.
+#[test]
+fn a_persona_name_in_both_catalogs_refuses_the_run() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "personas/reviewer.yaml",
+        concat!(
+            "agent:\n  instructions: |\n    Local marker: our own reviewer.\n",
+            "user:\n  persona: |\n    Local supervisor: our own bar.\n",
+        ),
+    );
+    workspace.graph(&catalogued_graph("./personas", "reviewer"));
+
+    let refused = workspace.run_task("fake:complete-now: never gets here");
+    refused.expect_code(2);
+    assert!(refused.stderr.contains("names both"), "{}", refused.stderr);
+    assert!(
+        refused.stderr.contains("reviewer.yaml"),
+        "{}",
+        refused.stderr
+    );
+    assert!(
+        refused.stdout.is_empty(),
+        "a refusal must not read as an event stream"
+    );
+
+    // The explicit selection: a path ref reaches the operator's file whatever it
+    // is called, and the run goes through.
+    workspace.graph(&catalogued_graph("./personas", "./personas/reviewer.yaml"));
+    let record = workspace.at("prompts.txt");
+    workspace
+        .run_task(&format!(
+            "fake:complete-now: ours fake:record-prompt={}",
+            record.display()
+        ))
+        .expect_code(0);
+    let delivered = std::fs::read_to_string(&record).expect("prompts");
+    assert!(
+        delivered.contains("Local marker: our own reviewer."),
+        "{delivered}"
+    );
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A catalog lookup that could not have meant what it says is refused before the
 /// graph starts, with both catalogs named — never resolved to whatever happens
 /// to be reachable.
@@ -1992,51 +2043,6 @@ fn a_catalog_entry_that_cannot_be_described_is_reported_rather_than_missed() {
         refused.stderr
     );
     assert!(refused.stderr.contains("lead.yaml"), "{}", refused.stderr);
-}
-
-/// A local persona and a shipped one of the same name is refused before the
-/// graph starts, rather than resolved to the shipped one behind the operator's
-/// back — and naming the file by path is the way to say which was meant.
-#[test]
-fn a_persona_name_in_both_catalogs_refuses_the_run() {
-    let workspace = Workspace::new();
-    workspace.write(
-        "personas/reviewer.yaml",
-        concat!(
-            "agent:\n  instructions: |\n    Local marker: our own reviewer.\n",
-            "user:\n  persona: |\n    Local supervisor: our own bar.\n",
-        ),
-    );
-    workspace.graph(&catalogued_graph("./personas", "reviewer"));
-
-    let refused = workspace.run_task("fake:complete-now: never gets here");
-    refused.expect_code(2);
-    assert!(refused.stderr.contains("names both"), "{}", refused.stderr);
-    assert!(
-        refused.stderr.contains("reviewer.yaml"),
-        "{}",
-        refused.stderr
-    );
-    assert!(
-        refused.stdout.is_empty(),
-        "a refusal must not read as an event stream"
-    );
-
-    // The explicit selection: a path ref reaches the operator's file whatever it
-    // is called, and the run goes through.
-    workspace.graph(&catalogued_graph("./personas", "./personas/reviewer.yaml"));
-    let record = workspace.at("prompts.txt");
-    workspace
-        .run_task(&format!(
-            "fake:complete-now: ours fake:record-prompt={}",
-            record.display()
-        ))
-        .expect_code(0);
-    let delivered = std::fs::read_to_string(&record).expect("prompts");
-    assert!(
-        delivered.contains("Local marker: our own reviewer."),
-        "{delivered}"
-    );
 }
 
 /// A graph whose base config merges to something incomplete refuses, naming the
