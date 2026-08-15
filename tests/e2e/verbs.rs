@@ -180,6 +180,16 @@ fn validate_refuses_a_graph_that_could_never_run() {
             ),
             "names no directory",
         ),
+        // A graph's persona catalog is a directory too, and an empty one names
+        // wherever the launching process happened to be rather than the catalog
+        // whose personas the members were written against.
+        (
+            concat!(
+                "version: 6\nname: g\npersonas: ''\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+            ),
+            "`personas` names no directory",
+        ),
         // Each field replaces what the graph supplies, so an empty one asks for
         // nothing rather than for the graph's — and an empty task reached the
         // harness as a `--prompt` with no value at all.

@@ -587,7 +587,7 @@ fn persona_document(
 ) -> Result<(String, String), Error> {
     let name = &reference.0;
     if persona::is_persona_name(name) {
-        match (catalog_file(name, context), persona::shipped(name)) {
+        match (catalog_file(name, context)?, persona::shipped(name)) {
             (Some(path), Some(_)) => {
                 return Err(Error::InvalidConfig(format!(
                     "persona {name:?} names both {} in this graph's catalog and one this crate \
@@ -606,21 +606,20 @@ fn persona_document(
             // A graph that named a catalog meant a name to be looked up in it,
             // so a miss is refused with both catalogs named rather than falling
             // through to read a file called `crozier/crozier-corpus`.
-            (None, None) if context.personas.is_some() => {
-                return Err(Error::InvalidConfig(format!(
-                    "persona {name:?}: this graph's catalog ({}) holds no {name}.yaml, and it is \
-                     not one this crate ships ({}). Name a file by path to use one from anywhere \
-                     else.",
-                    catalog_root(context)
-                        .expect("the graph named a catalog")
-                        .display(),
-                    persona::shipped_names()
-                        .into_iter()
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )))
+            (None, None) => {
+                if let Some(root) = catalog_root(context)? {
+                    return Err(Error::InvalidConfig(format!(
+                        "persona {name:?}: this graph's catalog ({}) holds no {name}.yaml, and it \
+                         is not one this crate ships ({}). Name a file by path to use one from \
+                         anywhere else.",
+                        root.display(),
+                        persona::shipped_names()
+                            .into_iter()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
             }
-            (None, None) => {}
         }
     }
     let resolved = resolver.resolve(reference, context.graph_dir)?;
@@ -629,12 +628,30 @@ fn persona_document(
 
 /// This graph's persona catalog, resolved against the graph document the way
 /// every other relative ref in it is.
-fn catalog_root(context: &Context<'_>) -> Option<PathBuf> {
-    let root = context.personas?;
-    Some(match context.graph_dir {
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when the graph named a catalog that is not a
+/// directory this run can read. Refused rather than treated as an empty catalog,
+/// because an empty one is indistinguishable from a correct lookup that missed:
+/// a typo in the path would send every name a member gives straight back to the
+/// shipped personas, which is the silent shadowing this catalog exists to end.
+fn catalog_root(context: &Context<'_>) -> Result<Option<PathBuf>, Error> {
+    let Some(root) = context.personas else {
+        return Ok(None);
+    };
+    let root = match context.graph_dir {
         Some(graph_dir) if root.is_relative() => graph_dir.join(root),
         _ => root.to_path_buf(),
-    })
+    };
+    if !root.is_dir() {
+        return Err(Error::InvalidConfig(format!(
+            "this graph's persona catalog ({}) is not a directory this run can read, so every \
+             name a member gives would resolve to a shipped persona or to nothing",
+            root.display()
+        )));
+    }
+    Ok(Some(root))
 }
 
 /// The catalog file a persona name points at, when this graph named a catalog
@@ -642,9 +659,17 @@ fn catalog_root(context: &Context<'_>) -> Option<PathBuf> {
 ///
 /// The name has already been through [`persona::is_persona_name`], which is what
 /// keeps a slash-qualified one inside the catalog it is joined onto.
-fn catalog_file(name: &str, context: &Context<'_>) -> Option<PathBuf> {
-    let file = catalog_root(context)?.join(format!("{name}.yaml"));
-    file.is_file().then_some(file)
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] for a catalog root that is not readable — see
+/// [`catalog_root`].
+fn catalog_file(name: &str, context: &Context<'_>) -> Result<Option<PathBuf>, Error> {
+    let Some(root) = catalog_root(context)? else {
+        return Ok(None);
+    };
+    let file = root.join(format!("{name}.yaml"));
+    Ok(file.is_file().then_some(file))
 }
 
 /// Stamp `model` into every per-harness section of one side's config.

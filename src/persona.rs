@@ -123,23 +123,25 @@ pub struct PersonaUser {
     /// than instead of it — see [`merge`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_when: Option<String>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a flat key beside the
+    // bar it governs, rather than a shape in which `true` without a `done_when`
+    // cannot be written: a persona is a hand-written YAML document, and nesting
+    // the bar under a mapping so it can carry one boolean is a shape every author
+    // would have to learn in order to say the ordinary thing. The pair this
+    // leaves representable — replacing the shared bar with nothing — is refused
+    // by `Persona::validate`, which every load and `persona validate` goes
+    // through, before any config is merged.
     /// Whether this role's bar stands in for the base's instead of adding to it.
-    ///
-    /// A flat key beside the bar it governs, rather than a shape that makes
-    /// `true` without a [`done_when`](Self::done_when) unrepresentable: a persona
-    /// is a hand-written YAML document, and nesting the bar under a mapping to
-    /// carry one boolean is a shape every author would have to learn to say the
-    /// ordinary thing. The one invalid pair is refused by [`Persona::validate`],
-    /// which every load goes through.
     #[serde(default, skip_serializing_if = "is_not_set")]
     pub done_when_replaces_base: bool,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A role-specific turn cap, overriding the base's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
 }
 
-/// serde's `skip_serializing_if` for a flag that defaults off: a persona that
-/// never asked to replace the base's bar serializes without the key.
+/// serde's `skip_serializing_if` for the flag above, so a persona written before
+/// the key existed round-trips without gaining it.
 fn is_not_set(flag: &bool) -> bool {
     !flag
 }
@@ -175,7 +177,17 @@ impl Persona {
         if self.user.max_turns == Some(0) {
             errors.push("user.max_turns must be a positive integer".to_string());
         }
-        if self.user.done_when_replaces_base && self.user.done_when.is_none() {
+        // A blank bar is refused here rather than at the merge for the reason the
+        // whole replacement rule exists: `done_when: ''` with this key set is a
+        // persona that removes the operator's shared review bar and puts nothing
+        // in its place, which is the silent drop spelled out loud.
+        if self.user.done_when_replaces_base
+            && self
+                .user
+                .done_when
+                .as_deref()
+                .is_none_or(|bar| bar.trim().is_empty())
+        {
             errors.push(
                 "user.done_when_replaces_base names nothing to replace the base's bar with: give \
                  this persona its own user.done_when, or drop the key"
@@ -290,16 +302,20 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
     if let Some(text) = &persona.user.persona {
         user.insert("persona".into(), Value::String(text.clone()));
     }
-    if let Some(role_bar) = &persona.user.done_when {
-        let composed = match user.get("done_when").and_then(Value::as_str) {
-            Some(base_bar)
-                if !persona.user.done_when_replaces_base && !base_bar.trim().is_empty() =>
-            {
-                both_bars(base_bar, role_bar)
-            }
-            _ => role_bar.clone(),
-        };
-        user.insert("done_when".into(), Value::String(composed));
+    // The bars each side brought, blank ones dropped the way the two halves of
+    // the prompt above are: a bar of whitespace is a bar nobody wrote, and one
+    // that survived would be numbered and handed to a supervisor as a condition.
+    let role_bar = persona.user.done_when.as_deref().unwrap_or_default();
+    let base_bar = match persona.user.done_when_replaces_base {
+        true => "",
+        false => user.get("done_when").and_then(Value::as_str).unwrap_or(""),
+    };
+    let bars: Vec<&str> = [base_bar.trim(), role_bar.trim()]
+        .into_iter()
+        .filter(|bar| !bar.is_empty())
+        .collect();
+    if !role_bar.trim().is_empty() {
+        user.insert("done_when".into(), Value::String(both_bars(&bars)));
     }
     if let Some(cap) = persona.user.max_turns {
         user.insert("max_turns".into(), Value::Number(cap.into()));
@@ -311,17 +327,22 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
     Ok(config)
 }
 
-/// The shared completion bar and this role's own, as one bar that carries both.
+/// One completion bar out of every bar the merge kept.
 ///
 /// Numbered and paragraph-separated rather than joined by a conjunction, because
-/// either half may itself be several sentences: what a supervisor is handed has
-/// to say plainly that there are two bars and that neither is optional.
-fn both_bars(base: &str, role: &str) -> String {
-    format!(
-        "Both of these must hold:\n\n1. {}\n\n2. {}",
-        base.trim(),
-        role.trim()
-    )
+/// either bar may itself be several sentences: what a supervisor is handed has
+/// to say plainly that there is more than one and that neither is optional. One
+/// bar is handed over as it was written — there is nothing to conjoin.
+fn both_bars(bars: &[&str]) -> String {
+    if let [only] = bars {
+        return (*only).to_string();
+    }
+    let numbered: Vec<String> = bars
+        .iter()
+        .enumerate()
+        .map(|(index, bar)| format!("{}. {bar}", index + 1))
+        .collect();
+    format!("Both of these must hold:\n\n{}", numbered.join("\n\n"))
 }
 
 /// Everything a merged config still lacks to be runnable.

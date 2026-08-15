@@ -1518,7 +1518,13 @@ fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
     /// The effective config a member is handed when its persona carries `extra`
     /// beside its own bar.
     fn effective_config(extra: &str) -> String {
+        with_base(crate::support::BASE, extra)
+    }
+
+    /// The same, over a base config of this journey's own.
+    fn with_base(base: &str, extra: &str) -> String {
         let workspace = Workspace::new();
+        workspace.write("base.yaml", base);
         workspace.write(
             "roles/lead.yaml",
             &format!(
@@ -1541,7 +1547,6 @@ fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
     }
 
     let composed = effective_config("");
-    // `base.yaml`'s own bar, which is what the operator centralized.
     assert!(
         composed.contains("the task is complete"),
         "the base's review bar was dropped by the persona: {composed}"
@@ -1561,6 +1566,22 @@ fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
     assert!(
         replaced.contains("Role bar: every finding cites the code it names"),
         "{replaced}"
+    );
+
+    // A base whose bar is blank has no bar to compose with, and the persona's
+    // stands alone rather than being numbered against nothing — the same reading
+    // a base that names none at all gets.
+    let blank = with_base(
+        &crate::support::BASE.replace("\"the task is complete\"", "'   '"),
+        "",
+    );
+    assert!(
+        !blank.contains("Both of these must hold"),
+        "one bar must not be handed over as two: {blank}"
+    );
+    assert!(
+        blank.contains("Role bar: every finding cites the code it names"),
+        "{blank}"
     );
 }
 
@@ -1740,8 +1761,18 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
         ("./roles/empty.yaml", "agent.instructions is required"),
         ("./roles/nowhere.yaml", "cannot read"),
         ("./roles/typo.yaml", "unknown field"),
+        // Replacing the operator's shared review bar with nothing at all is the
+        // silent drop said out loud, and is refused as the mistake it is.
+        (
+            "./roles/replaces-nothing.yaml",
+            "names nothing to replace the base's bar with",
+        ),
     ];
     workspace.write("roles/typo.yaml", "agent:\n  instrucions: typo\n");
+    workspace.write(
+        "roles/replaces-nothing.yaml",
+        "agent:\n  instructions: r\nuser:\n  persona: p\n  done_when_replaces_base: true\n",
+    );
     for (reference, expected) in cases {
         workspace.graph(
             &two_party_graph(&fake_harness(), NO_ENV)
@@ -1756,19 +1787,25 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
 /// The graph document a journey uses to dispatch `persona` out of its own
 /// catalog at `./personas`.
 fn catalogued_graph(persona: &str) -> String {
+    catalogued_graph_at("./personas", persona)
+}
+
+/// The same, for a journey that needs the catalog somewhere else — including
+/// somewhere there is nothing to read.
+fn catalogued_graph_at(catalog: &str, persona: &str) -> String {
     graph_with(
         &format!(
             concat!(
                 "version: 6\nname: node-scope\n",
                 "env: {{}}\n",
-                "personas: ./personas\n",
+                "personas: {}\n",
                 "members:\n  worker:\n    kind: onejudge\n",
                 "    base_config: ./base.yaml\n    persona: {}\n",
                 "    agent:\n      oneharness_config: ./oneharness.toml\n",
                 "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
                 "    mode: bypass\n",
             ),
-            persona
+            catalog, persona
         ),
         &[(FAKE_HARNESS_KEY, fake_harness())],
     )
@@ -1809,7 +1846,6 @@ fn a_graph_local_persona_catalog_is_dispatchable_by_name() {
         delivered.contains("Catalog supervisor: check the citations."),
         "{delivered}"
     );
-    // The base's shared preamble is still underneath it.
     assert!(
         delivered.contains("Standing bar: verify before you claim done."),
         "{delivered}"
@@ -1818,6 +1854,57 @@ fn a_graph_local_persona_catalog_is_dispatchable_by_name() {
         labels(&run.of_kind("member-started")[0])["persona"],
         "crozier-corpus"
     );
+
+    // A catalog does not take the shipped personas away: a name it does not hold
+    // resolves to the one this crate ships, which is what every graph written
+    // before catalogs existed depends on.
+    workspace.graph(&catalogued_graph("reviewer"));
+    let shipped = workspace.run_task("fake:complete-now: still shipped");
+    shipped.expect_code(0);
+    assert_eq!(
+        labels(&shipped.of_kind("member-started")[0])["persona"],
+        "reviewer"
+    );
+}
+
+/// A catalog lookup that could not have meant what it says is refused before the
+/// graph starts, with both catalogs named — never resolved to whatever happens
+/// to be reachable.
+#[test]
+fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "personas/ours.yaml",
+        "agent:\n  instructions: ours\nuser:\n  persona: ours\n",
+    );
+    for (graph, expected) in [
+        // A name neither catalog holds. Read as a *file* it would be a path
+        // nobody wrote, so it says where it looked and what it found instead.
+        (
+            catalogued_graph("crozier/crozier-corpus"),
+            "holds no crozier/crozier-corpus.yaml",
+        ),
+        // A catalog root that is not there at all: without this, a typo in the
+        // path would send every name straight back to the shipped personas —
+        // the silent shadowing the catalog exists to end.
+        (
+            catalogued_graph_at("./persona", "ours"),
+            "is not a directory this run can read",
+        ),
+    ] {
+        workspace.graph(&graph);
+        let refused = workspace.run_task("fake:complete-now: never gets here");
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains(expected),
+            "{graph}: {}",
+            refused.stderr
+        );
+        assert!(
+            refused.stdout.is_empty(),
+            "a refusal must not read as an event stream"
+        );
+    }
 }
 
 /// A local persona and a shipped one of the same name is refused before the
