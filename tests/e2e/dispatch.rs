@@ -155,15 +155,18 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert!(settled[0]["payload"]["verdict"].is_array());
 }
 
-/// A single-sided member says the other thing: it is a child process, and it
-/// names the program and argv it was spawned with.
+/// A single-sided member says the same thing the two-party one above does, and
+/// differs only in the `engine`: it is driven in this process, through
+/// oneharness's own library, over the config this crate resolved for it.
 ///
-/// The pair with the journey above is the point. `member-started` now carries a
+/// The pair with the journey above is the point. `member-started` carries a
 /// `runner`, and a consumer branching on it has to be able to trust that the
-/// fields beside it match — a member reported as a process with no argv, or as a
-/// library call with one, is a stream that cannot be read.
+/// fields beside it match — a member reported as a library call with an argv, or
+/// as a process with none, is a stream that cannot be read. Both kinds are
+/// `library` now, so what a consumer branches on to tell them apart is the
+/// `engine`, which is the field the contract put there for exactly that.
 #[test]
-fn a_single_sided_member_reports_the_process_it_spawned() {
+fn a_single_sided_member_reports_the_library_it_is_driven_through() {
     let workspace = Workspace::new();
     workspace.graph(&single_sided_graph(&fake_harness()));
     let run = workspace.run_task("fake:complete-now: one sided");
@@ -172,24 +175,25 @@ fn a_single_sided_member_reports_the_process_it_spawned() {
     let started = run.of_kind("member-started");
     assert_eq!(started.len(), 1, "{started:?}");
     let payload = &started[0]["payload"];
-    assert_eq!(payload["runner"], serde_json::json!("process"));
+    assert_eq!(payload["runner"], serde_json::json!("library"));
+    assert_eq!(payload["engine"], serde_json::json!("oneharness"));
     assert!(
-        payload["program"]
+        payload["config"]
             .as_str()
-            .is_some_and(|program| program.contains("oneharness")),
-        "the member named no program: {payload}"
+            .is_some_and(|config| config.ends_with(".toml")),
+        "the member named no resolved config: {payload}"
     );
     assert!(
-        payload["args"]
-            .as_array()
-            .is_some_and(|args| args.iter().any(|arg| arg == "run")),
-        "the member named no argv: {payload}"
+        payload["worktree"]
+            .as_str()
+            .is_some_and(|worktree| !worktree.is_empty()),
+        "the member named no directory to work in: {payload}"
     );
-    assert!(
-        payload["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()),
-        "the child named no working directory: {payload}"
-    );
-    assert!(payload.get("engine").is_none(), "{payload}");
+    // None of the three a child process has. This member is not one — no
+    // `oneharness` process is spawned for its turn at all.
+    for absent in ["program", "args", "cwd"] {
+        assert!(payload.get(absent).is_none(), "{absent}: {payload}");
+    }
 
     // And this member stores its report where the settle says it is, the same as
     // a two-party one: the artifact the contract promises has something behind
@@ -324,19 +328,13 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
         "a member with no directory of its own must still run in the graph's"
     );
 
-    // The same answer in the stream, where a supervisor reads it: each member's
-    // argv names the directory it was told to work in.
+    // The same answer in the stream, where a supervisor reads it: each member
+    // names the directory it was told to work in.
     let started = run.of_kind("member-started");
     assert_eq!(started.len(), 2, "{started:?}");
     for event in &started {
-        let told = event["payload"]["args"]
-            .as_array()
-            .and_then(|args| {
-                args.iter()
-                    .position(|arg| arg == "--cwd")
-                    .and_then(|at| args.get(at + 1))
-            })
-            .and_then(serde_json::Value::as_str)
+        let told = event["payload"]["worktree"]
+            .as_str()
             .unwrap_or_default()
             .to_string();
         let expected = if labels(event)["member"] == "check_in" {
@@ -542,20 +540,32 @@ fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
         ),
     ]);
     single_run.expect_code(0);
-    let args = single_run.of_kind("member-started")[0]["payload"]["args"]
-        .as_array()
-        .expect("a single-sided member names its argv")
-        .clone();
-    let told = args
-        .iter()
-        .position(|arg| arg == "--cwd")
-        .and_then(|at| args.get(at + 1))
-        .expect("the argv carries a working directory")
-        .clone();
-    assert_eq!(told, serde_json::json!("."), "{args:?}");
-    // And resolved as it always was, against the scratch its child is spawned in.
-    // Unchanged by this fix, and asserted so a later change to it is a decision
-    // rather than a side effect.
+    // A resolved directory, unlike the two-party member's `.` above: nothing
+    // downstream resolves `RunRequest::cwd`, so the anchoring happens here.
+    let published = single_run.of_kind("member-started")[0]["payload"]["worktree"]
+        .as_str()
+        .expect("a single-sided member names its worktree")
+        .to_string();
+    assert!(
+        std::path::Path::new(&published).is_absolute(),
+        "a directory nothing downstream resolves was published unresolved: \
+         {published:?}"
+    );
+    // Compared canonically, because the two sides are spelled by different
+    // parties: `state` is this test's own path resolved, while `published` is the
+    // one the run built from `ONEAGENTGRAPH_STATE_DIR` as it was handed it. A
+    // host whose temporary directory is a symlink spells those differently and
+    // means the same directory — macOS's `/var` → `/private/var` is the case that
+    // fails a string comparison here while nothing is wrong.
+    let published = std::path::Path::new(&published)
+        .canonicalize()
+        .expect("the published worktree is a directory that exists");
+    assert!(
+        published.starts_with(&state),
+        "the published worktree is not the member's scratch: {published:?}"
+    );
+    // And the harness really ran there. The two kinds differ, and the difference
+    // is preserved rather than tidied away.
     let where_it_ran = recorded(&single_sided);
     assert_eq!(where_it_ran.len(), 1, "{where_it_ran:?}");
     assert!(
@@ -706,9 +716,12 @@ fn members_share_the_runs_task_where_they_name_it_and_replace_it_where_they_do_n
         "an escaped token interpolated the run's task anyway: {literal}"
     );
 
-    // And the invocation each member was launched with, byte for byte, which is
-    // where `plain` — the member carrying no task at all — is answered for: it is
-    // handed the run's task exactly as the run was given it.
+    // And the prompt each member's turn really ran, byte for byte, read off
+    // oneharness's **own** report — its `prompt` field, stored where each
+    // member's settle says it is. That is where `plain` (the member carrying no
+    // task at all) is answered for: it is handed the run's task exactly as the
+    // run was given it, and unlike the four above it writes no recording of its
+    // own to be read back from.
     let expected: BTreeMap<&str, String> = [
         ("orchestrator", orchestrator.replace("{task}", run_task)),
         ("check_in", check_in.replace("{task}", run_task)),
@@ -718,24 +731,17 @@ fn members_share_the_runs_task_where_they_name_it_and_replace_it_where_they_do_n
     ]
     .into_iter()
     .collect();
-    let started = run.of_kind("member-started");
-    assert_eq!(started.len(), expected.len(), "{started:?}");
-    for event in &started {
-        let member = labels(event)["member"].clone();
-        let args = event["payload"]["args"]
-            .as_array()
-            .expect("a single-sided member names its argv")
-            .clone();
-        let prompt = args
-            .iter()
-            .position(|arg| arg == "--prompt")
-            .and_then(|at| args.get(at + 1))
-            .and_then(serde_json::Value::as_str)
-            .expect("the argv carries a prompt");
+    assert_eq!(
+        run.of_kind("member-started").len(),
+        expected.len(),
+        "{:?}",
+        run.kinds()
+    );
+    for (member, prompt) in &expected {
         assert_eq!(
-            prompt,
-            expected[member.as_str()].as_str(),
-            "member {member:?} was launched with a prompt nobody wrote"
+            stored_report(&run, member)["prompt"],
+            serde_json::json!(prompt),
+            "member {member:?} ran a prompt nobody wrote"
         );
     }
 }
@@ -976,26 +982,13 @@ fn a_member_whose_whole_task_is_the_token_is_launched_with_an_empty_prompt() {
 
     let started = run.of_kind("member-started");
     assert_eq!(started.len(), 1, "{started:?}");
-    let args: Vec<String> = started[0]["payload"]["args"]
-        .as_array()
-        .expect("a single-sided member names its argv")
-        .iter()
-        .map(|arg| arg.as_str().unwrap_or_default().to_string())
-        .collect();
-    let at = args
-        .iter()
-        .position(|arg| arg == "--prompt")
-        .expect("the argv carries a prompt flag");
+    // The empty prompt is carried as a prompt rather than dropped: oneharness's
+    // report echoes exactly what it ran, so an empty one that had been elided on
+    // the way in would show up here as a run of something else.
     assert_eq!(
-        args.get(at + 1).map(String::as_str),
-        Some(""),
-        "the empty prompt lost its place in the argv: {args:?}"
-    );
-    assert_eq!(
-        at + 2,
-        args.len(),
-        "the prompt is the last argument, so anything after it is a value that \
-         shifted into its place: {args:?}"
+        stored_report(&run, "check_in")["prompt"],
+        serde_json::json!(""),
+        "the empty prompt did not reach the turn as one"
     );
     // And the member really was launched with it: what an empty prompt means is
     // oneharness's and the harness's to decide, and this run reaches that decision
@@ -1163,29 +1156,25 @@ fn a_member_s_own_job_carries_a_windows_path_exactly() {
 
     let started = run.of_kind("member-started");
     assert_eq!(started.len(), 1, "{started:?}");
-    let args = started[0]["payload"]["args"]
-        .as_array()
-        .expect("a child member names its argv")
-        .iter()
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-    assert!(
-        args.contains(&task),
-        "the member was handed something other than the task the document carried: {args:?}"
+    assert_eq!(
+        stored_report(&run, "check_in")["prompt"],
+        serde_json::json!(task),
+        "the member ran something other than the task the document carried"
     );
 }
 
 /// A single-sided member whose harness exits without publishing a report dies as
-/// a provider failure — and, because this member really *was* a process, its
-/// death carries the three facts one leaves behind alongside the typed cause.
+/// a provider failure, carrying the cause and the detail — and **none** of the
+/// three facts a child process leaves behind, because this member is not one.
 ///
 /// The pair with the two-party provider failure in `tests/e2e/liveness.rs` is the
-/// point: one member kind has an exit status and a stderr tail and the other does
-/// not, and `member-died` has to say which it is rather than reporting a process
-/// that never existed.
+/// point, and the conversion is what made the two agree: `docs/contract.md`
+/// scopes `exit_code`, `disposition` and `stderr_tail` to "a member that was one",
+/// and no member is now, so a consumer reads `cause` and `detail` whichever kind
+/// died. What the harness underneath actually did is still there — in the report
+/// oneharness returned, which is where its own accounting belongs.
 #[test]
-fn a_single_sided_member_that_crashes_carries_its_process_s_own_facts() {
+fn a_single_sided_member_that_crashes_dies_with_a_cause_and_no_process_facts() {
     let workspace = Workspace::new();
     workspace.graph(&single_sided_graph(&fake_harness()));
     let run = workspace.run_with(
@@ -1205,24 +1194,26 @@ fn a_single_sided_member_that_crashes_carries_its_process_s_own_facts() {
     assert_eq!(died.len(), 1, "{:?}", run.kinds());
     let payload = &died[0]["payload"];
     assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
-    // A process's own disposition, not a provider classification: an exit status
-    // is what a process failure *is*, and inventing a category from one would be
-    // this crate guessing at something oneharness already owns.
-    assert_eq!(payload["cause"], serde_json::json!("exited"));
-    assert_eq!(payload["disposition"], serde_json::json!("exited"));
+    // `unclassified`, not a category invented from an exit code: oneharness owns
+    // classification, and the four kinds it has that `cause` cannot spell are a
+    // contract change rather than a partial map — see
+    // `docs/oneharness-library.md`.
+    assert_eq!(payload["cause"], serde_json::json!("unclassified"));
+    for absent in ["exit_code", "disposition", "stderr_tail"] {
+        assert!(payload.get(absent).is_none(), "{absent}: {payload}");
+    }
+    // The detail is the run's own failure summary, which names the harness that
+    // did not succeed — the evidence an operator reads, in place of the stderr
+    // tail a spawned turn left behind.
+    let detail = payload["detail"].as_str().unwrap_or_default();
+    assert!(!detail.is_empty(), "a death with no evidence: {payload}");
     assert!(
-        payload["exit_code"].as_i64().is_some(),
-        "a child that exited reported no code: {payload}"
-    );
-    let tail = payload["stderr_tail"].as_str().unwrap_or_default();
-    assert!(!tail.is_empty(), "a death with no evidence: {payload}");
-    assert_eq!(
-        payload["detail"], payload["stderr_tail"],
-        "the detail every member carries must be this one's evidence too"
+        detail.contains("claude-code"),
+        "the death named no harness: {payload}"
     );
     assert!(
-        tail.len() <= 4096,
-        "the stderr tail outgrew its documented bound"
+        detail.len() <= 4096,
+        "the detail outgrew its documented bound"
     );
 }
 
@@ -2380,9 +2371,30 @@ fn a_dependant_member_starts_only_after_its_dependency_settles() {
 #[test]
 fn a_failed_dependency_skips_and_propagates_through_its_chain() {
     let workspace = Workspace::new();
-    workspace.graph(
-        "version: 2\nname: node-scope\nmembers:\n  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n  report:\n    kind: onejudge\n    base_config: ./base.yaml\n    persona: engineer\n    agent:\n      oneharness_config: ./oneharness.toml\n    judge:\n      oneharness_config: ./oneharness.judge.toml\n    mode: bypass\n    deps: [build]\n  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [report]\n",
-    );
+    // The doubled harness is wired in even though the failing member never
+    // produces an answer: the two members behind it are skipped rather than run,
+    // and a graph that reached a paid harness to prove a skip would be paying
+    // for the part of the journey that is not the point.
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 2\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n",
+            "  build:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  report:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [build]\n",
+            "  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    deps: [report]\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness().as_str())],
+    ));
+    // The first member fails because its **harness** does, which is the only way
+    // left to fail one: its turn is a library call, so there is no `oneharness`
+    // process to withhold. `FAKE_HARNESS_CRASH` is that failure — the harness
+    // exits having published nothing, and the chain has no other candidate.
     let run = workspace.run_with(
         &[
             "run",
@@ -2392,7 +2404,7 @@ fn a_failed_dependency_skips_and_propagates_through_its_chain() {
             "--dir",
             &workspace.dir().display().to_string(),
         ],
-        &[("ONEAGENTGRAPH_ONEHARNESS_BIN", "missing-oneharness")],
+        &[("FAKE_HARNESS_CRASH", "1")],
     );
     run.expect_code(1);
     let started: Vec<String> = run
@@ -2478,17 +2490,21 @@ fn an_unreadable_ref_refuses_with_the_path_it_could_not_read() {
     assert!(run.stderr.contains("nowhere.yaml"), "{}", run.stderr);
 }
 
-/// A single-sided member whose `oneharness` binary is not there dies as
-/// `unstartable`, with the stream saying so — rather than the run reporting a
-/// settled graph.
+/// **No `oneharness` process is spawned for a single-sided member's turn.**
 ///
-/// This is the member kind that still *is* a child process, so it is where a
-/// binary that cannot be spawned is still reachable. What it proves about the
-/// payload is the half the conversion changed: a member that never started has
-/// no exit code, no disposition, and no standard error, so it says why through
-/// `cause` and `detail` instead of reporting a process's facts as null.
+/// Proven by taking the binary away. `ONEAGENTGRAPH_ONEHARNESS_BIN` is the name
+/// this crate spawns `oneharness` under, and pointing it at something that is
+/// not installed used to kill a single-sided member outright — the turn *was*
+/// that process. The member settles now, because its turn is
+/// `oneharness_core::io::run::run_supervised` called here, and nothing on the
+/// turn path looks the binary up at all.
+///
+/// This is the acceptance criterion for the conversion, driven the only way that
+/// cannot pass by accident: an assertion that the member ran is worthless unless
+/// a spawn would have failed, and here one would have. The harness underneath is
+/// still a child process — it is just oneharness's to start, not this crate's.
 #[test]
-fn a_member_that_cannot_start_is_a_death_the_stream_names() {
+fn a_single_sided_members_turn_spawns_no_oneharness_process() {
     let workspace = Workspace::new();
     workspace.graph(&single_sided_graph(&fake_harness()));
     let run = workspace.run_with(
@@ -2496,7 +2512,7 @@ fn a_member_that_cannot_start_is_a_death_the_stream_names() {
             "run",
             "./graph.yaml",
             "--task",
-            "fake:complete-now: unstartable",
+            "fake:complete-now: no binary needed",
             "--dir",
             &workspace.dir().display().to_string(),
         ],
@@ -2505,6 +2521,46 @@ fn a_member_that_cannot_start_is_a_death_the_stream_names() {
             "oneharness-that-is-not-installed",
         )],
     );
+    run.expect_code(0);
+    assert!(
+        run.of_kind("member-died").is_empty(),
+        "a member died without an `oneharness` binary, so its turn still needed \
+         one: {:?}",
+        run.kinds()
+    );
+    let started = run.of_kind("member-started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(
+        started[0]["payload"]["engine"],
+        serde_json::json!("oneharness")
+    );
+    // And it really took its turn, through the doubled harness oneharness itself
+    // spawned — a member that settled having run nothing would prove nothing.
+    assert_eq!(
+        stored_report(&run, "reporter")["results"][0]["text"],
+        serde_json::json!("done"),
+    );
+}
+
+/// A single-sided member whose run oneharness **refuses** dies as `unstartable`,
+/// with the stream saying so — rather than the run reporting a settled graph.
+///
+/// A refusal is the request being unhonourable, decided before anything is
+/// spawned, and it is what replaces a `Command::spawn` that failed: the config
+/// here names a harness id that does not exist, which oneharness rejects when it
+/// loads the file. What this proves about the payload is the half the conversion
+/// settled: a member that never started has no exit code, no disposition, and no
+/// standard error, so it says why through `cause` and `detail` instead of
+/// reporting a process's facts as null.
+#[test]
+fn a_member_whose_run_is_refused_is_a_death_the_stream_names() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"not-a-real-harness\"]\n",
+    );
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_task("fake:complete-now: refused");
     run.expect_code(1);
     let died = run.of_kind("member-died");
     assert_eq!(died.len(), 1, "{died:?}");
@@ -2515,8 +2571,8 @@ fn a_member_that_cannot_start_is_a_death_the_stream_names() {
         payload["detail"]
             .as_str()
             .unwrap_or_default()
-            .contains("oneharness-that-is-not-installed"),
-        "{died:?}"
+            .contains("not-a-real-harness"),
+        "the refusal did not name what it refused: {died:?}"
     );
     for absent in ["exit_code", "disposition", "stderr_tail"] {
         assert!(
@@ -2590,25 +2646,6 @@ fn a_single_sided_member_runs_one_agent_with_no_judge() {
         "{:?}",
         run.kinds()
     );
-}
-
-/// The argv one member was started with, read off the stream it published.
-fn started_args(run: &crate::support::Run, member: &str) -> Vec<String> {
-    let started = run
-        .of_kind("member-started")
-        .into_iter()
-        .find(|event| {
-            labels(event)
-                .get("member")
-                .is_some_and(|name| name.as_str() == member)
-        })
-        .unwrap_or_else(|| panic!("{member} never started:\n{}", run.stdout));
-    started["payload"]["args"]
-        .as_array()
-        .unwrap_or_else(|| panic!("{member} named no argv: {started}"))
-        .iter()
-        .map(|arg| arg.as_str().unwrap_or_default().to_string())
-        .collect()
 }
 
 /// The report one member stored, read from the path its settle named.
@@ -2703,14 +2740,10 @@ fn a_single_sided_member_answers_with_the_structured_document_its_config_asks_fo
     run.expect_code(0);
 
     // The member the operator asked for a validated answer from is not streamed,
-    // because there is no such run one layer down.
-    let drafting = started_args(&run, "drafter");
-    assert!(
-        !drafting.contains(&"--stream".to_string()),
-        "the member's own config was overridden by a flag again: {drafting:?}"
-    );
-    assert!(drafting.contains(&"--compact".to_string()), "{drafting:?}");
-
+    // because there is no such run one layer down. Asserted where it shows —
+    // the `turn-activity` a streaming member publishes and this one does not,
+    // below — rather than on an argv there no longer is.
+    //
     // And the answer came back validated, in the report the settle stored.
     let report = stored_report(&run, "drafter");
     let result = &report["results"][0];
@@ -2734,17 +2767,8 @@ fn a_single_sided_member_answers_with_the_structured_document_its_config_asks_fo
     );
 
     // The member beside it declares neither a schema nor `stream`, and runs
-    // exactly as it did before: the streamed argv, and the tool events only a
-    // streamed member publishes.
-    let reporting = started_args(&run, "reporter");
-    assert!(
-        reporting.contains(&"--stream".to_string()),
-        "a member whose config says nothing stopped streaming: {reporting:?}"
-    );
-    assert!(
-        !reporting.contains(&"--compact".to_string()),
-        "{reporting:?}"
-    );
+    // exactly as it did before: the tool events only a streamed member
+    // publishes.
     let activity: Vec<String> = run
         .of_kind("turn-activity")
         .iter()
@@ -2779,14 +2803,10 @@ fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
     let run = workspace.run_task("fake:complete-now: one report at the end");
     run.expect_code(0);
 
-    let args = started_args(&run, "reporter");
-    assert!(
-        !args.contains(&"--stream".to_string()),
-        "`stream = false` was overridden on the argv: {args:?}"
-    );
     assert!(
         run.of_kind("turn-activity").is_empty(),
-        "a member that does not stream published streamed events: {:?}",
+        "`stream = false` was overridden: a member that does not stream published \
+         streamed events: {:?}",
         run.kinds()
     );
     let report = stored_report(&run, "reporter");
@@ -2815,9 +2835,9 @@ fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
     let both = workspace.run_task(&format!("draft it. fake:answer-file={}", answer.display()));
     both.expect_code(0);
     assert!(
-        !started_args(&both, "reporter").contains(&"--stream".to_string()),
-        "{:?}",
-        started_args(&both, "reporter")
+        both.of_kind("turn-activity").is_empty(),
+        "the pair a config may legally declare started streaming: {:?}",
+        both.kinds()
     );
     assert_eq!(
         stored_report(&both, "reporter")["results"][0]["structured"],

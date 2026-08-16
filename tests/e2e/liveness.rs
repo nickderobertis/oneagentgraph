@@ -1014,6 +1014,63 @@ fn a_cancelled_run_reaps_a_member_that_published_nothing() {
     );
 }
 
+/// A cancelled run reaps a **single-sided** member's harness — a process this
+/// crate never spawned, and the one every other cancel journey here misses.
+///
+/// Without the grouping hooks the harness carries no stamp, so this hangs rather
+/// than passing quietly.
+#[test]
+fn a_cancelled_run_reaps_a_single_sided_members_harness() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph());
+    let state = workspace.state();
+
+    let mut member = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:hang and publish nothing at all",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    until("the member's harness to be stamped for its group", || {
+        member_scratch(&state).is_some_and(|scratch| {
+            !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+        })
+    });
+    let scratch = member_scratch(&state).expect("a member scratch");
+    // The stamped process is the *harness*, not this crate's child: there is no
+    // `oneharness` process in this member's turn to have carried it.
+    assert!(
+        !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty(),
+        "the harness oneharness spawned in this process carries no group stamp"
+    );
+
+    let run_id = run_id(&state);
+    let cancelled = workspace.run(&["cancel", &run_id, "--kill"]);
+    cancelled.expect_code(0);
+    assert!(
+        cancelled.stdout.contains("signalled") && !cancelled.stdout.contains("0 process(es)"),
+        "a cancel of a single-sided member signalled nothing, so its harness is \
+         still billing: {}",
+        cancelled.stdout
+    );
+
+    until("the stamped harness to be gone", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+
+    let status = member.wait().expect("the run exits");
+    assert!(
+        status.code().is_some(),
+        "the cancelled run never exited: its harness still holds its streams"
+    );
+}
+
 /// A descendant that refuses `SIGTERM` is stopped anyway: the reap asks once,
 /// waits out its grace period, and kills whatever is still there.
 ///
@@ -1432,11 +1489,17 @@ fn tick_bytes_written(path: &Path) -> u64 {
 
 /// The first `owner.lock` under a state directory, once a run has claimed one.
 fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
+    // A lock that *exists* is not yet a lock that records anything:
+    // `scratch::Owned::claim` creates the file, takes the kernel lock, and only
+    // then writes the identity into it. A caller polling for existence can read
+    // the empty file in between and see a claim that identifies nobody — which
+    // is a race in the observer, not in the claim. So the file counts once it has
+    // content, and a caller waiting on this waits for a claim it can read.
     let lock = std::fs::read_dir(state)
         .ok()?
         .flatten()
         .map(|entry| entry.path().join("owner.lock"))
-        .find(|path| path.exists())?;
+        .find(|path| std::fs::metadata(path).is_ok_and(|recorded| recorded.len() > 0))?;
     Some(lock)
 }
 

@@ -146,23 +146,18 @@ fn a_deferred_schedule_starts_with_the_graph_and_takes_no_turn() {
         .next()
         .expect("the deferred member started");
     assert_eq!(started["payload"]["start_after"], 3600);
-    assert_eq!(started["payload"]["runner"], "process");
+    assert_eq!(started["payload"]["runner"], "library");
+    assert_eq!(started["payload"]["engine"], "oneharness");
     assert_eq!(
         crate::support::labels(&started).get("persona").cloned(),
         Some("reviewer".to_string()),
         "a deferred member that came up must carry the persona it resolved: {started}"
     );
-    // Its configuration is not a promise: the generated oneharness config its
-    // argv names is on disk, which is the work a bad ref would have failed at.
-    let config = started["payload"]["args"]
-        .as_array()
-        .and_then(|args| {
-            args.iter()
-                .position(|arg| arg == "--config")
-                .and_then(|at| args.get(at + 1))
-        })
-        .and_then(Value::as_str)
-        .expect("the argv names a config");
+    // Its configuration is not a promise: the generated oneharness config the
+    // event names is on disk, which is the work a bad ref would have failed at.
+    let config = started["payload"]["config"]
+        .as_str()
+        .expect("the deferred member names its config");
     assert!(
         std::path::Path::new(config).is_file(),
         "the deferred member's generated config was never written: {config}"

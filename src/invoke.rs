@@ -3,9 +3,10 @@
 //! This is the whole of what `docs/contract.md` means by "prepares each member's
 //! launch": a member's refs are resolved, its persona is merged onto its base,
 //! each side's oneharness config is written into the run's own directory, and
-//! what actually starts the member is assembled — a onejudge plan this
-//! process drives itself for a two-party member, an argv for the single-sided
-//! one. Nothing here selects a harness, a model chain, or a fallback order —
+//! what actually starts the member is assembled — a onejudge plan for a
+//! two-party member, an oneharness run request for the single-sided one, each
+//! driven by this process itself. Nothing here selects a harness, a model chain,
+//! or a fallback order —
 //! those live in the oneharness config files a graph names, and this module only
 //! ever *carries* them.
 //!
@@ -99,30 +100,47 @@ pub const MODE_ENV: &str = "ONEHARNESS_MODE";
 /// applied afterwards and wins.
 pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
 
-/// How one member is started.
+/// How one member is started: which engine drives it, and over what config.
 ///
-/// The contract's two member kinds are two different things to start, and this is
-/// the one place that difference lives. A `kind: onejudge` member is a onejudge
-/// run driven **through onejudge's library, in this process** — there is no
-/// `onejudge` binary in the chain, and so no argv, no exit status, and no stderr
-/// for it. A `kind: oneharness` member is still `oneharness run`, a child process
-/// of its own, for the one reason `crate::harness_process` names at that site.
-/// See `docs/contract.md`.
+/// Neither kind is a process. What differs is the engine and the config shape,
+/// which is exactly the two variants.
 #[derive(Debug, Clone)]
 pub enum Launch {
     /// onejudge's own run driver, over the config written into the member's
     /// scratch, driven in this process.
-    Library(Box<JudgeLaunch>),
-    /// A child process: the program, its arguments, and the directory it runs
-    /// in.
-    Process {
-        /// The program to run.
-        program: String,
-        /// Its arguments.
-        args: Vec<String>,
-        /// The child's working directory.
-        cwd: PathBuf,
-    },
+    Judge(Box<JudgeLaunch>),
+    /// oneharness's own run driver, over the resolved oneharness config written
+    /// into the member's scratch, driven in this process.
+    Harness(Box<HarnessLaunch>),
+}
+
+/// Everything driving one single-sided member in this process needs.
+///
+/// A value this crate builds and can assert on rather than a `RunRequest`
+/// assembled inline at the call, for the reason the argv it replaces was one: it
+/// is the record of what was decided, and it is what `member-started` reports.
+/// [`HarnessLaunch::request`](crate::harness) is the mapping onto oneharness's own
+/// request, field by field.
+#[derive(Debug, Clone)]
+pub struct HarnessLaunch {
+    /// The resolved oneharness config written into the member's scratch. Kept as
+    /// a path rather than parsed content because it is also the run's evidence:
+    /// an operator reads this file to see exactly what the member ran.
+    pub config: PathBuf,
+    /// The directory this member's harness works in — `member_dir`, and the value
+    /// that used to be `oneharness run --cwd`.
+    ///
+    /// Named to oneharness rather than entered, for [`JudgeLaunch::worktree`]'s
+    /// reason: it is not *this process's* working directory, which is shared with
+    /// every other member.
+    pub worktree: PathBuf,
+    /// The task prose this member's turn is given.
+    pub prompt: String,
+    /// How this member's turn reports what it did, which is **its own resolved
+    /// config's** decision — see [`Reporting`]. Carried as the decision rather
+    /// than re-derived at the call, because a run that asked the config twice
+    /// could answer differently the second time.
+    pub reporting: Reporting,
 }
 
 /// Everything driving one two-party member in this process needs.
@@ -247,34 +265,17 @@ pub fn build(
             )?;
             let path = context.scratch.join(AGENT_CONFIG_FILE);
             write(&path, &config)?;
-            // Every argument as computed, empty or not: there are no optional
-            // flags here, so dropping an empty entry can only shift a *value* out
-            // of the argv and leave oneharness reading the next flag as one. The
-            // one branch is over *which* flag, never over whether there is one.
-            let mut args = vec![
-                "run".to_string(),
-                "--config".to_string(),
-                path.display().to_string(),
-                "--cwd".to_string(),
-                member_dir(member.dir.as_deref(), context)
-                    .display()
-                    .to_string(),
-                "--events".to_string(),
-            ];
-            args.push(
-                reporting(&config, &member.oneharness_config.0)?
-                    .flag()
-                    .to_string(),
-            );
-            args.push("--prompt".to_string());
-            args.push(member_task(member.task.as_deref(), context)?);
             Ok(Invocation {
                 kind: crate::member::Kind::Oneharness,
-                launch: Launch::Process {
-                    program: context.oneharness_bin.to_string(),
-                    args,
-                    cwd: context.scratch.to_path_buf(),
-                },
+                launch: Launch::Harness(Box::new(HarnessLaunch {
+                    config: path,
+                    worktree: scratch_anchored(
+                        member_dir(member.dir.as_deref(), context),
+                        context.scratch,
+                    ),
+                    prompt: member_task(member.task.as_deref(), context)?,
+                    reporting: reporting(&config, &member.oneharness_config.0)?,
+                })),
                 persona: persona_label,
                 env: Vec::new(),
                 refs: resolver.inventory(),
@@ -347,7 +348,7 @@ fn onejudge(
 
     Ok(Invocation {
         kind: crate::member::Kind::Onejudge,
-        launch: Launch::Library(Box::new(JudgeLaunch {
+        launch: Launch::Judge(Box::new(JudgeLaunch {
             config: config_path,
             task: prose,
             // The graph's own directory, resolved exactly as a single-sided
@@ -470,29 +471,31 @@ fn separator_of(base: &str) -> char {
 
 /// How a single-sided member's turn reports what it did.
 ///
-/// The two are exclusive on the argv and on the wire — a turn either publishes
+/// The two are exclusive in oneharness and on the wire — a turn either publishes
 /// its events as they happen or publishes one report at the end — so they are
 /// one value with two states rather than a flag some later branch could read as
 /// neither or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Reporting {
-    /// `oneharness run --stream`.
+pub enum Reporting {
+    /// Events published to the run's sink as they occur
+    /// (`RunRequest::stream: Some(true)`).
     Streamed,
-    /// `oneharness run --compact`.
+    /// No incremental publishing: one report, returned by the run
+    /// (`RunRequest::stream: Some(false)`).
+    ///
+    /// This is where the argv this replaces carried `--compact`, and the flag has
+    /// no counterpart here by design: `--compact` is how the *CLI prints* a
+    /// buffered report onto a pipe a reader took a line at a time, and a library
+    /// call has the report as its return value with no printing in between.
     Buffered,
 }
 
 impl Reporting {
-    /// The flag that asks `oneharness run` for this shape.
-    fn flag(self) -> &'static str {
-        match self {
-            Self::Streamed => "--stream",
-            // One report, on one line. `oneharness run` pretty-prints a buffered
-            // report by default, and `crate::member` reads a member's stdout a
-            // line at a time — so the flag that makes the whole document one
-            // line is what keeps the member's report reaching its settle.
-            Self::Buffered => "--compact",
-        }
+    /// Whether this shape publishes its events as they happen, which is what
+    /// `RunRequest::stream` takes.
+    #[must_use]
+    pub fn streams(self) -> bool {
+        matches!(self, Self::Streamed)
     }
 }
 
@@ -1140,7 +1143,8 @@ fn task(context: &Context<'_>) -> Result<String, Error> {
 /// the graph's when it did not.
 ///
 /// **Both member kinds**, and by the same call. A single-sided member carries it
-/// to `oneharness run --cwd` on the argv this module builds; a two-party one
+/// on [`HarnessLaunch::worktree`], which reaches oneharness's own `cwd`; a
+/// two-party one
 /// carries it on [`JudgeLaunch::worktree`], which onejudge puts on the same flag.
 /// Only a `kind: oneharness` member can name a `dir` of its own — that is
 /// `docs/contract.md`'s scoping rather than this function's — so the two-party
@@ -1149,6 +1153,9 @@ fn task(context: &Context<'_>) -> Result<String, Error> {
 /// A member that named none gets `context.dir` **exactly as the run was given
 /// it**, relative or not, because that is what this crate has always passed to
 /// `oneharness run --cwd` and a member with no `dir` behaves as it did before.
+/// A single-sided member anchors that value before it reaches oneharness — see
+/// [`scratch_anchored`], which is what keeps "as the run was given it" meaning the same
+/// directory now that no child resolves it.
 ///
 /// A member's own `dir` is resolved rather than passed through, and the
 /// difference is not tidiness. The value goes to `--cwd` on a child spawned with
@@ -1166,6 +1173,26 @@ fn member_dir(named: Option<&Path>, context: &Context<'_>) -> PathBuf {
     };
     let joined = context.dir.join(named);
     std::path::absolute(&joined).unwrap_or(joined)
+}
+
+/// Resolve a single-sided member's directory in its **scratch**, which is where
+/// the child that used to run its turn resolved a relative `--cwd`.
+///
+/// Absolute values — an absolute `--dir`, or a member's own `dir`, which
+/// [`member_dir`] has already made absolute — are returned unchanged, and a
+/// leading `.` is dropped rather than joined. Not applied to a two-party member:
+/// onejudge starts that member's harness from this process, so a relative
+/// worktree has always resolved against the host there.
+fn scratch_anchored(dir: PathBuf, scratch: &Path) -> PathBuf {
+    if dir.is_absolute() {
+        return dir;
+    }
+    let mut anchored = scratch.to_path_buf();
+    anchored.extend(
+        dir.components()
+            .filter(|part| !matches!(part, std::path::Component::CurDir)),
+    );
+    anchored
 }
 
 /// Write one generated file, creating the directory that holds it.
@@ -1350,7 +1377,7 @@ mod tests {
     /// The two-party launch of `invocation`, or a panic naming what it was.
     fn judge_launch(invocation: &Invocation) -> &JudgeLaunch {
         match &invocation.launch {
-            Launch::Library(launch) => launch,
+            Launch::Judge(launch) => launch,
             other => panic!("expected a library launch, got {other:?}"),
         }
     }
@@ -1538,27 +1565,23 @@ mod tests {
         ))
         .expect("a member");
 
-        let default = process_args(&graph_wide, &context(dir.path(), &scratch));
-        assert_eq!(flag(&default, "--prompt").as_deref(), Some("do the thing"));
+        let default = harness_launch(&graph_wide, &context(dir.path(), &scratch));
+        assert_eq!(default.prompt, "do the thing");
         assert_eq!(
-            flag(&default, "--cwd").as_deref(),
-            Some(dir.path().display().to_string().as_str()),
+            default.worktree,
+            dir.path(),
             "a member with no directory of its own must be told the graph's, unchanged"
         );
 
-        let job = process_args(&own, &context(dir.path(), &scratch));
+        let job = harness_launch(&own, &context(dir.path(), &scratch));
         assert_eq!(
-            flag(&job, "--prompt").as_deref(),
-            Some("write one status update"),
+            job.prompt, "write one status update",
             "a member carrying its own task was handed the graph's"
         );
         // Joined onto the graph's directory and made absolute, so the value
-        // reaches oneharness meaning the same thing wherever the child is
-        // spawned — its working directory is the member's scratch, not this one.
-        assert_eq!(
-            flag(&job, "--cwd").map(std::path::PathBuf::from),
-            Some(dir.path().join("api")),
-        );
+        // reaches oneharness meaning the same thing however the turn is driven —
+        // nothing enters it, and this process's own directory never moves.
+        assert_eq!(job.worktree, dir.path().join("api"));
 
         // An absolute `dir` is used exactly as written: a member working
         // somewhere that is not below the graph's directory at all is the case a
@@ -1570,12 +1593,8 @@ mod tests {
         ))
         .expect("a member");
         assert_eq!(
-            flag(
-                &process_args(&absolute, &context(dir.path(), &scratch)),
-                "--cwd"
-            )
-            .map(std::path::PathBuf::from),
-            Some(elsewhere.path().to_path_buf()),
+            harness_launch(&absolute, &context(dir.path(), &scratch)).worktree,
+            elsewhere.path(),
         );
 
         // And a member with its own task needs no `--task` from the run at all,
@@ -1583,8 +1602,8 @@ mod tests {
         let mut taskless = context(dir.path(), &scratch);
         taskless.task = None;
         assert_eq!(
-            flag(&process_args(&own, &taskless), "--prompt").as_deref(),
-            Some("write one status update"),
+            harness_launch(&own, &taskless).prompt,
+            "write one status update",
         );
         let err = build(&graph_wide, &taskless, &mut Resolver::new()).unwrap_err();
         assert!(err.to_string().contains("no task"), "{err}");
@@ -1631,7 +1650,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                flag(&process_args(&single_sided(own), &given), "--prompt").as_deref(),
+                Some(harness_launch(&single_sided(own), &given).prompt.as_str()),
                 Some(expanded),
                 "{own:?}"
             );
@@ -1639,7 +1658,11 @@ mod tests {
             // than refusing: a member carrying its own task is the one shape that
             // never needed a run's.
             assert_eq!(
-                flag(&process_args(&single_sided(own), &taskless), "--prompt").as_deref(),
+                Some(
+                    harness_launch(&single_sided(own), &taskless)
+                        .prompt
+                        .as_str()
+                ),
                 Some(alone),
                 "{own:?} in a run with no task"
             );
@@ -1652,11 +1675,11 @@ mod tests {
             let mut before = context(dir.path(), &scratch);
             before.task_text = TaskText::under(older);
             assert_eq!(
-                flag(
-                    &process_args(&single_sided("{task}\n\nand report it"), &before),
-                    "--prompt"
-                )
-                .as_deref(),
+                Some(
+                    harness_launch(&single_sided("{task}\n\nand report it"), &before)
+                        .prompt
+                        .as_str()
+                ),
                 Some("{task}\n\nand report it"),
                 "version {older} expanded a token that schema never had"
             );
@@ -1670,7 +1693,7 @@ mod tests {
             serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
                 .expect("a member");
         assert_eq!(
-            flag(&process_args(&graph_wide, &literal), "--prompt").as_deref(),
+            Some(harness_launch(&graph_wide, &literal).prompt.as_str()),
             Some("mind the {task} in this sentence"),
         );
     }
@@ -1713,21 +1736,13 @@ mod tests {
         })
     }
 
-    /// The argv a single-sided member is launched with.
-    fn process_args(member: &Member, context: &Context<'_>) -> Vec<String> {
+    /// The launch a single-sided member is driven from.
+    fn harness_launch(member: &Member, context: &Context<'_>) -> HarnessLaunch {
         let invocation = build(member, context, &mut Resolver::new()).expect("built");
         match invocation.launch {
-            Launch::Process { args, .. } => args,
-            other => panic!("expected a child process, got {other:?}"),
+            Launch::Harness(launch) => *launch,
+            other => panic!("expected a single-sided member, got {other:?}"),
         }
-    }
-
-    /// One argv flag's value.
-    fn flag(args: &[String], name: &str) -> Option<String> {
-        args.iter()
-            .position(|arg| arg == name)
-            .and_then(|at| args.get(at + 1))
-            .cloned()
     }
 
     /// A command judge composes onejudge's `split` provider, and an empty
@@ -1929,10 +1944,11 @@ mod tests {
     /// that says nothing streams exactly as it always has, one asking for a
     /// schema does not, and `stream = false` is honoured rather than overridden.
     ///
-    /// Asserted on the argv, because a flag is what used to override the file:
-    /// `--stream` beats `stream` in oneharness and is mutually exclusive with a
-    /// schema there, so this crate carrying it unconditionally is precisely what
-    /// made both settings unreachable.
+    /// Asserted on the launch value, because that decision is what used to
+    /// override the file: `RunRequest::stream` beats `stream` in oneharness — as
+    /// the `--stream` flag it replaces did — and is mutually exclusive with a
+    /// schema there, so this crate carrying `Some(true)` unconditionally is
+    /// precisely what made both settings unreachable.
     #[test]
     fn a_single_sided_members_config_decides_whether_its_run_streams() {
         let dir = workspace();
@@ -1959,23 +1975,22 @@ mod tests {
             ),
         ] {
             std::fs::write(dir.path().join("oneharness.toml"), &config).expect("chain");
-            let args = process_args(&member, &context(dir.path(), &scratch));
+            let launch = harness_launch(&member, &context(dir.path(), &scratch));
             assert_eq!(
-                args.contains(&"--stream".to_string()),
+                launch.reporting.streams(),
                 streams,
-                "{config:?} produced {args:?}"
+                "{config:?} produced {launch:?}"
             );
-            // Never both, and never neither: a buffered report is pretty-printed
-            // unless asked for on one line, and `crate::member` reads a member's
-            // stdout a line at a time.
+            // Carried into the request as a decision in both directions, never
+            // as `None` — which would hand it back to the config layer that has
+            // already answered.
             assert_eq!(
-                args.contains(&"--compact".to_string()),
-                !streams,
-                "{config:?} produced {args:?}"
+                launch.request().stream,
+                Some(streams),
+                "{config:?} produced {launch:?}"
             );
-            // The prompt still arrives as its own flag's value, whichever branch
-            // was taken above.
-            assert_eq!(flag(&args, "--prompt").as_deref(), Some("do the thing"));
+            // The prompt still arrives, whichever branch was taken above.
+            assert_eq!(launch.prompt, "do the thing");
         }
     }
 

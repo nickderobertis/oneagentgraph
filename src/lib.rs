@@ -1,6 +1,6 @@
-//! `oneagentgraph` composes agents into a graph, drives onejudge in-process for
-//! each two-party member and `oneharness run` for each single-sided one, and
-//! merges their outputs into one NDJSON event stream.
+//! `oneagentgraph` composes agents into a graph, drives each member's engine
+//! in-process — onejudge for a two-party member, oneharness for a single-sided
+//! one — and merges their outputs into one NDJSON event stream.
 //!
 //! Every public item below is the surface named by
 //! [`docs/contract.md`](../../../docs/contract.md) — the approved contract,
@@ -17,13 +17,13 @@
 #![warn(missing_docs)]
 
 mod clock;
-mod harness_process;
 
 pub mod cli;
 pub mod config;
 pub mod control;
 pub mod error;
 pub mod event;
+pub mod harness;
 pub mod health;
 pub mod history;
 pub mod invoke;

@@ -1197,7 +1197,6 @@ fn run_announcing(
                 graph.clone(),
                 invocations.clone(),
                 emitter.clone(),
-                member_env.clone(),
                 bounds,
                 root.to_path_buf(),
                 Arc::clone(&non_cron_live),
@@ -1205,7 +1204,7 @@ fn run_announcing(
                 Arc::clone(&successful_members),
             ));
         }
-        let outcomes = run_wave(&runnable, &invocations, &emitter, &member_env, bounds);
+        let outcomes = run_wave(&runnable, &invocations, &emitter, bounds);
         for (name, outcome) in &outcomes {
             record.members.insert(name.clone(), describe(outcome));
             failed |= !outcome.is_success();
@@ -1230,7 +1229,6 @@ fn run_announcing(
                     graph.clone(),
                     invocations.clone(),
                     emitter.clone(),
-                    member_env.clone(),
                     bounds,
                     root.to_path_buf(),
                     Arc::clone(&non_cron_live),
@@ -1407,7 +1405,6 @@ fn spawn_cron(
     graph: GraphConfig,
     invocations: BTreeMap<String, (Invocation, PathBuf)>,
     emitter: Emitter,
-    env: BTreeMap<String, String>,
     bounds: Bounds,
     root: PathBuf,
     live: Arc<AtomicUsize>,
@@ -1428,7 +1425,6 @@ fn spawn_cron(
             &name,
             invocation,
             &member_emitter,
-            &env,
             bounds,
             scratch,
             &root.join(SIGNAL_DIR),
@@ -1443,7 +1439,6 @@ fn spawn_cron(
                     &graph,
                     &invocations,
                     &emitter,
-                    &env,
                     bounds,
                     &outcomes,
                     &successful,
@@ -1486,7 +1481,6 @@ fn run_cron_chain(
     graph: &GraphConfig,
     invocations: &BTreeMap<String, (Invocation, PathBuf)>,
     emitter: &Emitter,
-    env: &BTreeMap<String, String>,
     bounds: Bounds,
     outcomes: &mpsc::Sender<(String, Outcome)>,
     settled_successes: &Mutex<BTreeSet<String>>,
@@ -1509,7 +1503,7 @@ fn run_cron_chain(
                     .all(|dep| successful.contains(dep))
             })
             .collect();
-        for (name, outcome) in run_wave(&runnable, invocations, emitter, env, bounds) {
+        for (name, outcome) in run_wave(&runnable, invocations, emitter, bounds) {
             if outcome.is_success() {
                 successful.insert(name.clone());
             }
@@ -1523,7 +1517,6 @@ fn run_wave(
     wave: &[String],
     invocations: &BTreeMap<String, (Invocation, PathBuf)>,
     emitter: &Emitter,
-    env: &BTreeMap<String, String>,
     bounds: Bounds,
 ) -> Vec<(String, Outcome)> {
     let (tx, rx) = mpsc::channel();
@@ -1537,16 +1530,15 @@ fn run_wave(
             name,
             invocation.persona.as_deref(),
         ));
-        let (name, invocation, scratch, env, tx) = (
+        let (name, invocation, scratch, tx) = (
             name.clone(),
             invocation.clone(),
             scratch.clone(),
-            env.clone(),
             tx.clone(),
         );
         running += 1;
         std::thread::spawn(move || {
-            let outcome = member::run(&invocation, &member_emitter, &env, bounds, &scratch);
+            let outcome = member::run(&invocation, &member_emitter, bounds, &scratch);
             let _ = tx.send((name, outcome));
         });
     }
@@ -1569,9 +1561,9 @@ fn run_wave(
 /// operator cannot quietly defer a member whose author said its cadence is
 /// fixed.
 // Every parameter is one thing a firing needs and none is derivable from
-// another: its schedule, identity and invocation, event sink, environment,
-// bounds, scratch and signals, plus the liveness gate and successful-chain
-// callback. Bundling them would name the same values twice.
+// another: its schedule, identity and invocation, event sink, bounds, scratch
+// and signals, plus the liveness gate and successful-chain callback. Bundling
+// them would name the same values twice.
 #[allow(clippy::too_many_arguments)]
 fn cron(
     schedule: &crate::config::Schedule,
@@ -1579,7 +1571,6 @@ fn cron(
     name: &str,
     invocation: &Invocation,
     emitter: &Emitter,
-    env: &BTreeMap<String, String>,
     bounds: Bounds,
     scratch: &Path,
     signals: &Path,
@@ -1634,7 +1625,7 @@ fn cron(
             continue;
         }
         emitter.emit(EventKind::CronFired, Map::new());
-        let outcome = member::run(invocation, emitter, env, bounds, scratch);
+        let outcome = member::run(invocation, emitter, bounds, scratch);
         if outcome.is_success() {
             on_success();
         }
@@ -1670,11 +1661,17 @@ fn describe(outcome: &Outcome) -> MemberOutcome {
 
 /// Put the graph's `env` block into **this process's** environment.
 ///
-/// The contract says a graph's `env` is "exported to every member process", and a
-/// two-party member no longer *is* a process: it runs here, and the
-/// `oneharness run` it starts inherits this environment. So the block has to be
-/// on this process for that member to receive what the contract promises it —
-/// `ONEHARNESS_BIN_<ID>`, a proxy, a credential path.
+/// The contract says a graph's `env` is "exported to every member process", and
+/// **no member is a process**: both kinds run here, and the harness each of them
+/// starts — onejudge's `oneharness run` per side, or the harness
+/// `oneharness_core` spawns for a single-sided turn — inherits this environment.
+/// So the block has to be on this process for either member to receive what the
+/// contract promises it: `ONEHARNESS_BIN_<ID>`, a proxy, a credential path.
+///
+/// This is also what makes a `RunRequest` need no environment layer of its own.
+/// The `Command` that a single-sided member's turn used to be was built with
+/// `env_remove(PROCESS_WIDE_HARNESS_ENV).envs(graph_env)`; that is byte for byte
+/// what the two statements below do, once, to the process both engines read.
 ///
 /// Once, here, before the first member thread starts, and never again: an
 /// environment is process-wide, so a per-member write would race every sibling's
