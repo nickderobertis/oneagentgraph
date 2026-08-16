@@ -48,7 +48,7 @@
 //! here, while the directory it was written in is still known.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
@@ -387,23 +387,82 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
     let Some(named) = config.get("skill").and_then(Value::as_str) else {
         return;
     };
-    let path = Path::new(named);
-    if !path.is_relative() {
+    let Some(anchored) = anchored(base_dir, named) else {
         return;
+    };
+    config.insert("skill".into(), Value::String(anchored));
+}
+
+/// One relative path, anchored to the directory the config naming it was written
+/// in — the same string on every platform.
+///
+/// `None` when there is nothing to anchor: an empty value, or a path that
+/// already carries an anchor of its own — a root, or a Windows drive.
+///
+/// Nothing here comes from the host, and that is the whole of it. `Path::join`
+/// and [`std::path::absolute`] both answer for the platform they run on:
+/// `join` splices with that platform's separator, `absolute` resolves against
+/// this process's current *drive* on Windows, and — the sharp edge —
+/// `Path::is_relative` calls a rooted path an operator wrote (`/graphs/api`)
+/// *relative* there, because Windows counts a path absolute only with a drive on
+/// it. Anchoring through those three took a path an operator wrote and, on
+/// Windows alone, re-rooted it under a drive nobody named. So this is textual:
+/// the base is made absolute only when it is genuinely unanchored — this process
+/// is the one a relative base is resolved against, and the config is read from a
+/// scratch directory later — and the rest is spliced on.
+///
+/// Purely lexical, as the two callers' documentation promises: nothing is read,
+/// so a file that is not there is still the refusal oneharness or onejudge makes,
+/// by the name its author wrote.
+fn anchored(base_dir: &Path, written: &str) -> Option<String> {
+    let path = Path::new(written);
+    if written.is_empty() || is_anchored(path) {
+        return None;
     }
-    // Absolute, not merely joined: a graph named by a relative path has a
-    // relative `base_dir` too, and a relative skill would then be resolved a
-    // second time — against the scratch the merged copy sits in. This runs
-    // before any member starts, in the directory the operator's own paths were
-    // written against, so this process's own is the right one to anchor to.
-    // Purely lexical: nothing is read, so a skill that is not there is still
-    // onejudge's refusal to make, by the name the author wrote.
-    let joined = base_dir.join(path);
-    let anchored = std::path::absolute(&joined).unwrap_or(joined);
-    config.insert(
-        "skill".into(),
-        Value::String(anchored.display().to_string()),
-    );
+    let base = if is_anchored(base_dir) {
+        base_dir.to_path_buf()
+    } else {
+        std::path::absolute(base_dir).unwrap_or_else(|_| base_dir.to_path_buf())
+    };
+    let base = base.display().to_string();
+    let separator = separator_of(&base).to_string();
+    // A `.` says "the directory this config is in", which is what the base
+    // already names; every other component is carried exactly as written.
+    let relative: Vec<String> = path
+        .components()
+        .filter(|component| !matches!(component, Component::CurDir))
+        .map(|component| component.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let relative = relative.join(&separator);
+    Some(if base.ends_with(['/', '\\']) {
+        format!("{base}{relative}")
+    } else {
+        format!("{base}{separator}{relative}")
+    })
+}
+
+/// Whether a path names where it starts from, rather than leaving that to
+/// whatever directory it is read in.
+///
+/// A root answers on every platform; the Windows drive of a `C:foo` — a prefix
+/// with no root — answers only there, and is never produced elsewhere. Asked
+/// this way rather than through `Path::is_absolute`, which is the question
+/// *Windows* asks: a rooted path with no drive is not absolute there, and
+/// re-anchoring one under this process's drive is exactly the bug above.
+fn is_anchored(path: &Path) -> bool {
+    path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_)))
+}
+
+/// The separator to splice with: the one the base directory is already spelled
+/// with, so an anchored path reads as a path of the platform it was written on.
+///
+/// Windows resolves `/` and `\` alike, so this decides what an operator — and a
+/// refusal naming the path back to them — reads, never whether the file opens.
+fn separator_of(base: &str) -> char {
+    base.chars()
+        .rev()
+        .find(|character| matches!(character, '/' | '\\'))
+        .unwrap_or('/')
 }
 
 /// How a single-sided member's turn reports what it did.
@@ -614,20 +673,13 @@ fn anchor(
             "{origin}: `{named}` must be a path"
         )));
     };
-    if written.is_empty() {
+    // [`anchored`] answers `None` for the two values there is nothing to anchor:
+    // an empty one, which oneharness reads as unset, and one that already names
+    // where it starts from.
+    let Some(anchored) = anchored(base_dir, written) else {
         return Ok(());
-    }
-    let path = Path::new(written);
-    if !path.is_relative() {
-        return Ok(());
-    }
-    // Absolute for the reason [`anchor_skill`] is: a graph named by a relative
-    // path has a relative base directory too, and the child carrying this config
-    // is spawned in the member's scratch — so a still-relative result would be
-    // resolved a second time, against a directory nobody named.
-    let joined = base_dir.join(path);
-    let anchored = std::path::absolute(&joined).unwrap_or(joined);
-    *item = toml_edit::value(anchored.display().to_string());
+    };
+    *item = toml_edit::value(anchored);
     Ok(())
 }
 
