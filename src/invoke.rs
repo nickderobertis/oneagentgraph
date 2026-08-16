@@ -143,7 +143,8 @@ pub struct HarnessLaunch {
     /// The task prose this member's turn is given.
     pub prompt: String,
     /// Whether this member's turn publishes its events as they happen, which is
-    /// **its own resolved config's** decision — see [`reporting`]. Carried as the
+    /// **its own resolved config's** decision — see this module's `reporting`.
+    /// Carried as the
     /// decision rather than re-derived at the call, because a run that asked the
     /// config twice could answer differently the second time.
     pub stream: bool,
@@ -1635,7 +1636,11 @@ mod tests {
             // than refusing: a member carrying its own task is the one shape that
             // never needed a run's.
             assert_eq!(
-                Some(harness_launch(&single_sided(own), &taskless).prompt.as_str()),
+                Some(
+                    harness_launch(&single_sided(own), &taskless)
+                        .prompt
+                        .as_str()
+                ),
                 Some(alone),
                 "{own:?} in a run with no task"
             );
@@ -1648,7 +1653,11 @@ mod tests {
             let mut before = context(dir.path(), &scratch);
             before.task_text = TaskText::under(older);
             assert_eq!(
-                Some(harness_launch(&single_sided("{task}\n\nand report it"), &before).prompt.as_str()),
+                Some(
+                    harness_launch(&single_sided("{task}\n\nand report it"), &before)
+                        .prompt
+                        .as_str()
+                ),
                 Some("{task}\n\nand report it"),
                 "version {older} expanded a token that schema never had"
             );

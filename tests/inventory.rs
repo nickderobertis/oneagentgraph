@@ -63,6 +63,17 @@ impl ProcessSupervisor for BothHooks {
     }
 }
 
+/// The entry point that takes a caller's claim on each harness child, as the
+/// signature `src/harness.rs` calls it by.
+///
+/// Written as a type so the assertion below is a coercion the compiler checks:
+/// a parameter added, dropped or reordered upstream fails to compile here.
+type Supervised = fn(
+    &RunRequest,
+    RunControls<'_>,
+    Option<&dyn ProcessSupervisor>,
+) -> Result<RunOutcome, oneharness_core::errors::OneharnessError>;
+
 /// The seam the conversion rests on: a supervisor with both hooks, handed to a
 /// run through the entry point that takes one.
 ///
@@ -83,14 +94,12 @@ fn the_seam_the_conversion_rests_on_is_still_there() {
     );
 
     // The entry point, by signature: request, controls, and the caller's claim.
-    let entry: fn(
-        &RunRequest,
-        RunControls<'_>,
-        Option<&dyn ProcessSupervisor>,
-    ) -> Result<RunOutcome, oneharness_core::errors::OneharnessError> =
-        oneharness_core::io::run::run_supervised;
+    let entry: Supervised = oneharness_core::io::run::run_supervised;
     let supervised: Option<&dyn ProcessSupervisor> = Some(&hooks);
-    assert!(supervised.is_some(), "the supervisor is the caller's to pass");
+    assert!(
+        supervised.is_some(),
+        "the supervisor is the caller's to pass"
+    );
     // Named so an unused binding is not what keeps the signature honest.
     let _ = entry;
 

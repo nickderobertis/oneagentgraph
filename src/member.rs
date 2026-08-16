@@ -54,7 +54,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
 
-use crate::event::{bound_text, Cause, Emitter, EventKind, Labels, MemberDied, MemberStarted, Runner};
+use crate::event::{
+    bound_text, Cause, Emitter, EventKind, Labels, MemberDied, MemberStarted, Runner,
+};
 use crate::invoke::{Invocation, Launch};
 use crate::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
@@ -430,12 +432,7 @@ fn seconds(
 /// launched with — the graph's `env:` block applied over the inherited one, with
 /// [`crate::invoke::PROCESS_WIDE_HARNESS_ENV`] removed first.
 #[must_use]
-pub fn run(
-    invocation: &Invocation,
-    emitter: &Emitter,
-    bounds: Bounds,
-    scratch: &Path,
-) -> Outcome {
+pub fn run(invocation: &Invocation, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
     // One place says a member started, whichever runner it has and whether that
     // start is a turn beginning now or a deferred one announced ahead of time —
     // see `crate::run`, which publishes the deferred case from the same type.
@@ -484,7 +481,6 @@ pub(crate) fn started_payload(started: &MemberStarted) -> Map<String, Value> {
     }
 }
 
-
 /// The death of a member that could not be started at all.
 pub(crate) fn unstartable(reason: &str) -> MemberDied {
     let (detail, truncated) = bound_text(reason);
@@ -504,10 +500,7 @@ fn millis(span: Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
-
 // llmlint: ignore-end[boundary_inputs_validated]
-
-
 
 /// One tool event's structured input as the contract's bounded summary: what it
 /// acted on.
@@ -527,7 +520,6 @@ pub(crate) fn summarize(input: Option<&Value>) -> String {
         _ => String::new(),
     }
 }
-
 
 /// The file a member's full report is stored as, which its `member-settled`
 /// artifact names.
@@ -603,11 +595,6 @@ pub(crate) fn settle_report(
         Outcome::Incomplete
     }
 }
-
-
-
-
-
 
 /// A `member-died` payload as the wire carries it.
 pub(crate) fn died_payload(died: &MemberDied) -> Map<String, Value> {

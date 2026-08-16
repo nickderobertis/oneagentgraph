@@ -2525,7 +2525,10 @@ fn a_single_sided_members_turn_spawns_no_oneharness_process() {
     );
     let started = run.of_kind("member-started");
     assert_eq!(started.len(), 1, "{started:?}");
-    assert_eq!(started[0]["payload"]["engine"], serde_json::json!("oneharness"));
+    assert_eq!(
+        started[0]["payload"]["engine"],
+        serde_json::json!("oneharness")
+    );
     // And it really took its turn, through the doubled harness oneharness itself
     // spawned — a member that settled having run nothing would prove nothing.
     assert_eq!(

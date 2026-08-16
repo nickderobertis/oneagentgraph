@@ -21,8 +21,8 @@
 //! A spawned turn was a subtree a watchdog could see and a kill could reap.
 //! In-process, oneharness spawns the harness, so the only way this crate's
 //! [`crate::scratch::Group`] can hold it is a hook between the `Command` and the
-//! `Child` — `oneharness_core`'s [`ProcessSupervisor`], which is
-//! [`HarnessSpawn`] here and is exactly the two methods [`crate::judge`] hands
+//! `Child` — `oneharness_core`'s [`ProcessSupervisor`], which `HarnessSpawn`
+//! implements here and which is exactly the two methods [`crate::judge`] hands
 //! onejudge. Without it [`crate::scratch::work`] would see an empty tree and
 //! condemn a member whose harness is working, and [`crate::scratch::reap`] would
 //! report a cancelled member that is still billing.
@@ -41,8 +41,8 @@
 //!   which is what makes the assignment race-free: it cannot yet have started a
 //!   descendant outside the job. A job assignment nests, so the harness is in
 //!   oneharness's job *and* this member's, and either side's teardown ends it.
-//!   The resume is oneharness's — see [`crate::scratch::Group::join`], which is
-//!   the half of adoption that does not perform it.
+//!   The resume is oneharness's — `crate::scratch::Group::join` is the half of
+//!   adoption that does not perform it.
 //!
 //! A harness that could not be grouped is one no cancel could reach, so it is
 //! not left running: the hook cannot refuse a spawn (upstream's methods return
@@ -872,7 +872,10 @@ mod tests {
             stream: true,
         };
         let request = launch.request();
-        assert_eq!(request.config.as_deref(), Some(Path::new("/scratch/oneharness.toml")));
+        assert_eq!(
+            request.config.as_deref(),
+            Some(Path::new("/scratch/oneharness.toml"))
+        );
         assert_eq!(request.cwd.as_deref(), Some(Path::new("/work/api")));
         assert!(request.events, "the turn asked for no tool events");
         assert_eq!(request.stream, Some(true));
