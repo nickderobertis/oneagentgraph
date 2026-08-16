@@ -262,17 +262,9 @@ pub fn build(
                 "--events".to_string(),
             ];
             args.push(
-                if streams(&config, &member.oneharness_config.0)? {
-                    "--stream"
-                } else {
-                    // One report, on one line. `oneharness run` pretty-prints a
-                    // buffered report by default, and `crate::member` reads a
-                    // member's stdout a line at a time — so the flag that makes
-                    // the whole document one line is what keeps the member's
-                    // report reaching its settle.
-                    "--compact"
-                }
-                .to_string(),
+                reporting(&config, &member.oneharness_config.0)?
+                    .flag()
+                    .to_string(),
             );
             args.push("--prompt".to_string());
             args.push(member_task(member.task.as_deref(), context)?);
@@ -414,7 +406,35 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
     );
 }
 
-/// Whether a single-sided member's run streams, which is **its own resolved
+/// How a single-sided member's turn reports what it did.
+///
+/// The two are exclusive on the argv and on the wire — a turn either publishes
+/// its events as they happen or publishes one report at the end — so they are
+/// one value with two states rather than a flag some later branch could read as
+/// neither or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reporting {
+    /// `oneharness run --stream`.
+    Streamed,
+    /// `oneharness run --compact`.
+    Buffered,
+}
+
+impl Reporting {
+    /// The flag that asks `oneharness run` for this shape.
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Streamed => "--stream",
+            // One report, on one line. `oneharness run` pretty-prints a buffered
+            // report by default, and `crate::member` reads a member's stdout a
+            // line at a time — so the flag that makes the whole document one
+            // line is what keeps the member's report reaching its settle.
+            Self::Buffered => "--compact",
+        }
+    }
+}
+
+/// Which of those a single-sided member's run takes, which is **its own resolved
 /// config's** decision rather than this crate's.
 ///
 /// A flag beats config in oneharness, so the `--stream` this argv used to carry
@@ -447,7 +467,7 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
 ///
 /// [`Error::InvalidConfig`] when the config is not TOML, when either key holds a
 /// value this cannot read, or when the two contradict each other.
-fn streams(config: &str, origin: &str) -> Result<bool, Error> {
+fn reporting(config: &str, origin: &str) -> Result<Reporting, Error> {
     let document: DocumentMut = config
         .parse()
         .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
@@ -478,7 +498,8 @@ fn streams(config: &str, origin: &str) -> Result<bool, Error> {
                  validates a structured answer against the complete response, so a schema run \
                  does not stream. Drop one of them."
             ))),
-            Some(streams) => Ok(streams),
+            Some(true) => Ok(Reporting::Streamed),
+            Some(false) => Ok(Reporting::Buffered),
             None => Err(Error::InvalidConfig(format!(
                 "{origin}: `stream` must be true or false — it is whether this member's run \
                  streams its events"
@@ -486,7 +507,8 @@ fn streams(config: &str, origin: &str) -> Result<bool, Error> {
         },
         // A config that says nothing streams, as every graph already written
         // does; one asking for a validated answer cannot, so it does not.
-        None => Ok(!schema),
+        None if schema => Ok(Reporting::Buffered),
+        None => Ok(Reporting::Streamed),
     }
 }
 

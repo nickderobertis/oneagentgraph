@@ -512,11 +512,9 @@ fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::
 /// reads as a harness that ran and said nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shape {
-    /// `--output-format stream-json`: the turn as it happens, one JSON object
-    /// per line, ending in the terminal `result`.
+    /// `--output-format stream-json`.
     Stream,
-    /// `--output-format json`: one document, which is the terminal `result`
-    /// alone — a transcript has nowhere to go in it.
+    /// `--output-format json`.
     Single,
 }
 
@@ -651,9 +649,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
 /// been joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answered {
-    /// The turn published its terminal result.
     Yes,
-    /// It could not, and stderr says why.
     No,
 }
 
