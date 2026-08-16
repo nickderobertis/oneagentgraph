@@ -28,6 +28,15 @@
 //! the last four kilobytes of somebody's standard error. That is the whole reason
 //! `member-died` changed shape.
 //!
+//! **A panic is this member's death, not the graph's.** The engine runs on a
+//! thread and answers over an `mpsc::channel`, so a panic drops the sender and
+//! the supervision loop reads `RecvTimeoutError::Disconnected` as an engine that
+//! ended without answering — a `provider-failure` for this member, in a process
+//! that keeps running every other one. Starting that thread cannot panic either:
+//! a host that refuses one is a refused *member*. Both halves are
+//! [`crate::harness`]'s too, and deliberately identical — since that conversion
+//! neither member kind has a child process to crash instead.
+//!
 //! **A stalled member is stopped by escalation, not by one kill.** A thread
 //! cannot be killed the way a process can, so a watchdog here works the way an
 //! operator's `cancel --kill` already does, and in the same order:
@@ -140,10 +149,16 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
 
-    {
+    let engine = {
         let (emitter, activity, abort) =
             (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
-        std::thread::spawn(move || {
+        // `Builder`, not `thread::spawn`: a host that cannot give this run one
+        // more thread is a recoverable refusal, and the plain spawn answers it by
+        // panicking — which would take the whole graph down over one member. A
+        // run of many members is exactly where that limit is met. The same choice
+        // [`crate::harness`] makes, because since that conversion both member
+        // kinds put their engine on a thread of this one process.
+        std::thread::Builder::new().spawn(move || {
             let mut turn = 0usize;
             let mut sink = move |event: &StreamEvent<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
@@ -159,9 +174,44 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             // member and stopped listening; the engine still tore itself down on
             // the way here, which is what that teardown was waiting for.
             let _ = tx.send(answer);
-        });
+        })
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
+    // because no input a user can give reaches it: it is taken only when the OS
+    // refuses a thread, which is a host resource limit rather than anything a
+    // graph, a task or a config can ask for, and no seam this crate sanctions
+    // fakes `pthread_create`. What it decides is the direction of an unreachable
+    // failure, and it is the safe one — nothing was spawned, so the member is
+    // refused rather than reported as running.
+    if let Err(err) = engine {
+        let reason = format!("cannot start this member's engine thread: {err}");
+        emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+        return Outcome::Unstartable(reason);
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    supervise(&rx, &abort, emitter, bounds, scratch, started, &activity)
+}
+
+/// Watch a member's engine to its end: the two watchdogs, and the answer.
+///
+/// Split from [`run`] for [`crate::harness::run`]'s reason, which is now this
+/// module's too: the panic containment both members rely on can only be driven
+/// against a real thread that really panics — see
+/// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
+// Seven values, none derivable from another: where the answer arrives, the lever
+// that stops the engine, where the events go, the bounds, the member's scratch,
+// and the two halves of the activity clock.
+#[allow(clippy::too_many_arguments)]
+fn supervise(
+    rx: &mpsc::Receiver<Answer>,
+    abort: &Arc<AtomicBool>,
+    emitter: &Emitter,
+    bounds: Bounds,
+    scratch: &Path,
+    started: Instant,
+    activity: &Arc<AtomicU64>,
+) -> Outcome {
     let heartbeat_file = scratch.join("member.heartbeat");
     let mut last_heartbeat = Instant::now();
     // Published far more rarely than it is refreshed, for the reason
@@ -173,10 +223,15 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
             Ok(answer) => return finish(answer, emitter, scratch),
+            // A sender dropped without an answer means the engine thread
+            // panicked: this member's failure, not the graph's.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] nothing a graph,
+            // task or config can ask for makes `onejudge` panic, so this arm has
+            // no journey; forcing one would mean replacing the engine it
+            // protects. Covered by
+            // `tests::a_panicking_engine_kills_its_own_member_and_not_the_process`.
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The engine thread is gone without an answer, which only happens
-                // if it panicked. That is a member that produced no report, which
-                // is the failure below rather than a run this crate takes down.
                 return died(
                     emitter,
                     Rule::ProviderFailure,
@@ -184,12 +239,13 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
                     "the onejudge engine ended without answering",
                 );
             }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
         let now = Instant::now();
         if now.duration_since(last_heartbeat) > bounds.heartbeat {
-            return condemn(&rx, &abort, emitter, Rule::Heartbeat, scratch);
+            return condemn(rx, abort, emitter, Rule::Heartbeat, scratch);
         }
         last_heartbeat = now;
         if now.duration_since(published) >= publish_every {
@@ -197,7 +253,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
         if stall.condemns(activity.load(Ordering::SeqCst), scratch) {
-            return condemn(&rx, &abort, emitter, Rule::Activity, scratch);
+            return condemn(rx, abort, emitter, Rule::Activity, scratch);
         }
     }
 }
@@ -852,6 +908,59 @@ mod tests {
             processes: Vec::new(),
         };
         assert_eq!(provider_cause(&config), Cause::Unclassified);
+    }
+
+    /// A member whose engine thread **panics** fails that member and leaves the
+    /// process it shares with every other one running.
+    ///
+    /// Driven through the real supervision loop with a real panicking thread —
+    /// the panic drops the sender, which is what the loop reads as an engine that
+    /// ended without answering. Nothing here stands in for the loop; what is
+    /// substituted is the engine, because no config can make onejudge panic on
+    /// demand and the containment being proven is this crate's. The twin of
+    /// `crate::harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`,
+    /// because since that conversion both member kinds run their engine on a
+    /// thread of this one process and a panic in either is contained the same way.
+    #[test]
+    fn a_panicking_engine_kills_its_own_member_and_not_the_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+        let (tx, rx) = mpsc::channel::<Answer>();
+        let panicked = std::thread::spawn(move || {
+            let _tx = tx;
+            panic!("the engine came apart mid-turn");
+        });
+        assert!(panicked.join().is_err(), "the engine thread did not panic");
+
+        let outcome = supervise(
+            &rx,
+            &Arc::new(AtomicBool::new(false)),
+            &emitter,
+            Bounds::default(),
+            dir.path(),
+            Instant::now(),
+            &Arc::new(AtomicU64::new(0)),
+        );
+        let Outcome::Died(death) = outcome else {
+            panic!("a panicking engine did not kill its member: {outcome:?}");
+        };
+        assert_eq!(death.rule, Rule::ProviderFailure);
+        assert_eq!(death.payload.cause, Cause::Unclassified);
+        assert!(
+            death.payload.detail.contains("without answering"),
+            "{death:?}"
+        );
+        // None of the three a child process leaves behind: this member was not one.
+        assert!(death.payload.exit_code.is_none());
+        assert!(death.payload.disposition.is_none());
+        assert!(death.payload.stderr_tail.is_none());
+
+        let kinds: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert_eq!(kinds, vec![EventKind::MemberDied]);
     }
 
     /// A condemned member whose engine never answers is reported dead anyway, and
