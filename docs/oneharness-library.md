@@ -16,12 +16,16 @@
 > pre-spawn or post-spawn hook at which to put each harness child into the
 > member's named job object.
 >
-> **What unblocks it** is a `spawning(&mut Command)` / `spawned(&Child)` pair on
-> `RunControls`, or any equivalent seam that hands the caller the harness
-> `Command` before the fork and the `Child` after it. That is upstream's to add;
-> [the proposal](#the-proposal-which-is-upstreams-rather-than-this-crates-to-build)
-> is below. Converting without it silently breaks the activity watchdog and
-> leaves a killed run's paid harnesses billing.
+> **What unblocks it** is a `spawning(&mut Command)` / `spawned(&Child)` pair, or
+> any equivalent seam that hands the caller the harness `Command` before the fork
+> and the `Child` after it. That is upstream's to add, and it now **is** added —
+> as the "any equivalent seam" arm rather than the `RunControls` arm. It is
+> unpublished: oneharness PR #1260 is open, so the newest release crates.io serves
+> is still the 0.10.0 named above, which does not carry it.
+> [The proposal](#the-proposal-which-is-upstreams-rather-than-this-crates-to-build)
+> below records the shape upstream settled on. Converting before that release
+> exists silently breaks the activity watchdog and leaves a killed run's paid
+> harnesses billing.
 
 Why `src/harness_process.rs` is still a subprocess hop, what its process boundary
 provides, and the seam that would replace each of those things — written down
@@ -36,10 +40,25 @@ upstream's to add and this document is the proposal.
 
 Nothing here owns the names it argues from, so **`tests/inventory.rs` is the drift
 gate**: it reads this file at compile time and holds every upstream field against
-the real type and every wire name against `docs/contract.md`. The blocker itself is
-an *exhaustive* destructure of `RunControls`, so the day upstream adds the seam
-below, that suite stops compiling — which is the notice that this document is
-stale and the conversion can start.
+the real type and every wire name against `docs/contract.md`.
+
+**Which test in it is load-bearing has changed, and the reason is worth keeping.**
+This document used to rest that job on an *exhaustive* destructure of
+`RunControls` — add the seam upstream, the suite stops compiling, and the compile
+break is the notice. That signal can no longer fire. Upstream settled on an
+entry point instead of a field, and did so *because* embedders destructure and
+construct that struct exhaustively: a field there would break every literal
+already written, making a purely additive capability a major bump. So
+`RunControls` is now committed to staying the four fields it has, the destructure
+will pass forever, and it is a pin on that commitment rather than a tripwire.
+
+The signal is **`the_status_block_names_the_version_the_manifest_takes`** instead:
+the status block above blames a version, that test reads the version out of
+`Cargo.toml`, and the two have to agree. Bumping `oneharness-core` to the release
+carrying the seam therefore fails the suite until this document is rewritten —
+which is the same notice, taken from the one event that actually marks the
+unblock. The conversion needs a *published* engine, not a merged upstream commit,
+and the manifest is where that arrives.
 
 ## The call is there
 
@@ -173,12 +192,51 @@ Two guarantees drop with it, and neither is theoretical:
 
 ## The proposal, which is upstream's rather than this crate's to build
 
-A spawn hook on `RunControls`, mirroring `onejudge::SpawnHook` —
-`spawning(&mut Command)` before the fork and `spawned(&Child)` after it. That is
-precisely `scratch::Group`'s own `prepare` and `adopt`, split for this exact
-reason; it is the seam onejudge grew for the *second* of the two prior regressions;
-and `judge::MemberSpawn` is a working implementation of the same two methods.
-Rebuilding it here is not an option the composition rule leaves open.
+A spawn hook mirroring `onejudge::SpawnHook` — `spawning(&mut Command)` before the
+fork and `spawned(&Child)` after it. That is precisely `scratch::Group`'s own
+`prepare` and `adopt`, split for this exact reason; it is the seam onejudge grew
+for the *second* of the two prior regressions; and `judge::MemberSpawn` is a
+working implementation of the same two methods. Rebuilding it here is not an
+option the composition rule leaves open.
+
+**Upstream has built it, in that shape, and it is waiting on a release.** The two
+methods are the ones asked for, on a `ProcessSupervisor` trait in
+`oneharness_core::io::runner`; what differs from the ask is where a caller hands
+it over — not a fifth field on `RunControls` but a second entry point beside
+`run`, named `run_supervised`, which takes an optional supervisor and is `run`
+exactly when given none.
+
+**That sentence is a signpost, not a copy of the signature, and deliberately so.**
+The authority is
+[oneharness PR #1260](https://github.com/nickderobertis/oneharness/pull/1260),
+and until it releases there is nothing here that could check a restatement of it:
+the linked 0.10.0 engine has no such symbol, so a spelled-out signature in this
+file would be a second source no compiler and no gate could reconcile — the exact
+drift this document exists to avoid. Read the signature there. What is written
+down here is only what the conversion has to *decide*, which survives a
+signature tweak: which entry point to call, and what to pass it. When the release
+lands, `tests/inventory.rs` resolves these names against the real crate the same
+way it already resolves every `RunRequest` field, and this paragraph goes away.
+
+Upstream's stated reason for the entry point is the one recorded above —
+`RunControls` is exhaustively constructible by its embedders, so a field there
+would be a breaking change — and oneharness keeps owning teardown of every tree
+it spawns, with only the part a `spawning` hook re-parents moving to the caller.
+That is the division
+this crate wants: `scratch::Group::prepare` on `spawning` and `adopt` on
+`spawned`, leaving `RunControls::cancel` as the teardown seam the section above
+already assigns it.
+
+So when the conversion runs, the call is `run_supervised` with a supervisor
+wrapping the member's `scratch::Group`, and the POSIX/Windows split in the section
+above collapses: the stamp still rides `RunRequest::env`, and the Windows job
+object gets the `Child` it needs from `spawned`.
+
+**It is not adoptable yet.** PR #1260 is open with two red checks, so crates.io
+still serves 0.10.0 and the manifest still takes it. A git pin is not the
+workaround — `cargo deny`'s `unknown-git = "deny"` refuses one, by the rule in
+`AGENTS.md` that every cross-repo dependency is a published version. The
+conversion waits for the release.
 
 **The same gap is already filed upstream, by the other dependent, and it holds two
 hops rather than one.** onejudge drives a turn in process through `io::run::run` by

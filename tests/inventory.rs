@@ -10,10 +10,21 @@
 //! it blames is read out of `Cargo.toml`.
 //!
 //! The load-bearing one is
-//! [`the_inventorys_blocker_is_still_the_shape_of_run_controls`]: it destructures
-//! [`RunControls`] exhaustively, so the day upstream adds the spawn seam the
-//! document asks for, this file stops compiling. That failure *is* the signal —
-//! the blocker is lifted and the status block at the top of the document is stale.
+//! [`the_status_block_names_the_version_the_manifest_takes`], and it did not use
+//! to be. The signal was
+//! [`run_controls_keeps_the_four_fields_upstream_committed_to`], on the
+//! reasoning that an exhaustive [`RunControls`] destructure stops compiling the
+//! day upstream adds the spawn seam. Upstream then added the seam as a second
+//! entry point — `io::run::run_supervised`, taking an
+//! `io::runner::ProcessSupervisor` — and did it that way *because* embedders
+//! destructure that struct exhaustively, so a field would be a breaking change.
+//! [`RunControls`] is therefore committed to its four fields and that test can
+//! never fire; it is now a pin on the commitment.
+//!
+//! What marks the unblock instead is the manifest: the conversion needs a
+//! *published* engine carrying the seam, so it starts with a version bump, and
+//! the version test fails until the document's status block is rewritten to
+//! match.
 
 use std::collections::BTreeSet;
 
@@ -29,14 +40,21 @@ const CONTRACT: &str = include_str!("../docs/contract.md");
 /// The manifest, which owns the `oneharness-core` version the inventory names.
 const MANIFEST: &str = include_str!("../Cargo.toml");
 
-/// The blocker is that `RunControls` has no seam between building a harness
-/// process and having one, so this crate cannot join each one to the member's
-/// named job object. The exhaustive destructure below is what proves it: a field
-/// added upstream — a `spawning`/`spawned` pair, or anything else — breaks this
-/// compile, and the document's status block has to be rewritten before it builds
-/// again.
+/// `RunControls` has exactly four fields, and upstream has committed to keeping
+/// it that way. The exhaustive destructure below is what holds that.
+///
+/// It was written to hold the opposite — the blocker is that this struct offers
+/// no seam between building a harness process and having one, and a
+/// `spawning`/`spawned` pair added here would have broken the compile and
+/// announced the unblock. The unblock did not arrive that way. Upstream put the
+/// seam on its own entry point *because* embedders spell this struct out
+/// exhaustively, this test among them, so a field would break them all. The
+/// destructure therefore records a promise instead of waiting on one, which is
+/// why it is named for the promise; the test that fires on the unblock is
+/// [`the_status_block_names_the_version_the_manifest_takes`]. Keep it
+/// exhaustive — a broken promise is worth failing on.
 #[test]
-fn the_inventorys_blocker_is_still_the_shape_of_run_controls() {
+fn run_controls_keeps_the_four_fields_upstream_committed_to() {
     let controls = RunControls {
         events: None,
         cancel: CancelToken::new(),
@@ -153,6 +171,68 @@ fn the_status_block_names_the_version_the_manifest_takes() {
     assert_eq!(
         named, linked,
         "the inventory blames `oneharness-core` {named} for a blocker in the {linked} the manifest takes"
+    );
+}
+
+/// The document has to keep naming the seam upstream actually built, because the
+/// conversion reaches for it by name and the shape it reaches for is not the one
+/// originally proposed here.
+///
+/// The stale story — a field on `RunControls` — is the one a reader would infer
+/// from the blocker section alone, and it is now the wrong thing to write against:
+/// upstream ruled that shape out. Nothing else in this suite would notice the
+/// proposal reverting to it, since no name below resolves against the linked
+/// 0.10.0 engine.
+///
+/// So this is a string check, and it is deliberately a check on *names and a
+/// citation* rather than on a restated signature. An unreleased upstream API
+/// cannot have a drift gate here — there is no symbol to resolve and no artifact
+/// to diff — so the document carries the decision the conversion has to make
+/// (which entry point, what to pass it) and points at the upstream change for the
+/// declaration itself. The link is the half that keeps this from becoming a
+/// second source, which is why it is asserted alongside the names.
+#[test]
+fn the_proposal_names_the_seam_upstream_settled_on() {
+    let inventory = reflowed(INVENTORY);
+
+    // The authority for the signature, so the prose stays a signpost. When this
+    // releases, these names get resolved against the real crate by
+    // `every_upstream_field_the_inventory_names_is_still_there` instead.
+    assert!(
+        inventory.contains("https://github.com/nickderobertis/oneharness/pull/1260"),
+        "the proposal describes an unreleased upstream API without linking the change that declares it"
+    );
+
+    for name in [
+        // The entry point the conversion calls instead of `run`.
+        "run_supervised",
+        // The trait it takes, which carries the pair this crate already implements
+        // for onejudge as `judge::MemberSpawn`.
+        "ProcessSupervisor",
+        "spawning",
+        "spawned",
+        // Why it is an entry point and not a field — the reason that turned the
+        // `RunControls` destructure from a tripwire into a pin.
+        "exhaustively constructible",
+    ] {
+        assert!(
+            inventory.contains(name),
+            "the proposal stopped naming `{name}`, so it no longer describes the seam upstream built"
+        );
+    }
+
+    // The seam is real but unreleased, and the document says so. That claim and
+    // the manifest's version are checked against each other by
+    // `the_status_block_names_the_version_the_manifest_takes`; what is asserted
+    // here is only that the document has not quietly started claiming the
+    // conversion is adoptable while the blocker section still stands.
+    assert!(
+        inventory.contains("Status: blocked, and not started"),
+        "the status block is what tells a reader the code is unchanged"
+    );
+    assert!(
+        inventory.contains("PR #1260"),
+        "the document names the upstream change a reader has to check for a release"
     );
 }
 
