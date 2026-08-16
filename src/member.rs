@@ -775,9 +775,19 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
         // the same bar the `result` arm above applies: what is accepted must be
         // the document everything downstream reads as one, not merely something
         // shaped a bit like it.
+        // llmlint: ignore-block[changed_behavior_has_e2e] the arm this guard does
+        // *not* take has no journey because no input a user can give reaches it:
+        // a non-streaming member's stdout is `oneharness run --compact`, which
+        // prints its report or prints nothing at all. The nothing-at-all case is
+        // the one an operator can cause — a config oneharness refuses — and it is
+        // driven end to end by the schema and `env_file` journeys in
+        // tests/e2e/dispatch.rs, each asserting the provider-failure death this
+        // guard leads to. A line that is valid JSON and not a report would be an
+        // `oneharness` printing something no release prints.
         _ if is_report(&value) => {
             *held(report) = Some(value.clone());
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         _ => {}
     }
 }
@@ -797,15 +807,17 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
 /// applied, and every reader of the document downstream is a tolerant `get` —
 /// the report is *evidence*, stored and forwarded, never a value this crate
 /// branches on structurally.
-// llmlint: ignore[boundary_inputs_validated] the deliberate stopping point above:
-// a full typed parse of a neighbouring tool's report would refuse a member's own
-// answer whenever its `oneharness` is a release this build's types do not know,
-// which turns a member that settled into a member that died. Revisit if this
-// crate ever branches on a report field rather than storing and forwarding it.
+// llmlint: ignore-block[boundary_inputs_validated] the deliberate stopping point
+// the doc above states: a full typed parse of a neighbouring tool's report would
+// refuse a member's own answer whenever its `oneharness` is a release this
+// build's types do not know, which turns a member that settled into a member
+// that died. Revisit if this crate ever branches on a report field rather than
+// storing and forwarding it.
 fn is_report(value: &Value) -> bool {
     value.get("schema_version").is_some_and(Value::is_string)
         && value.get("results").is_some_and(Value::is_array)
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// What a member's shared state holds, whether or not a reader thread died
 /// holding it.
