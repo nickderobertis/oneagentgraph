@@ -60,6 +60,10 @@ fn validate_reads_every_ref_the_graph_names() {
             "`history_dir` must be a path",
         ),
         (
+            format!("{CHAIN}[harness.claude-code.variant.alternate]\nenv_file = true\n"),
+            "`harness.claude-code.variant.alternate.env_file` must be a path",
+        ),
+        (
             format!("{CHAIN}stream = true\nschema_file = \"./answer.json\"\n"),
             "cannot both hold",
         ),
