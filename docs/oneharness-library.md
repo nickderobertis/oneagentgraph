@@ -9,7 +9,7 @@
 > `docs/contract.md`.
 >
 > **The blocker** is Windows process grouping, and its cause is
-> `oneharness-core` 0.8.0's public API: [`RunControls`](#what-is-still-holding-the-hop-open-grouping-on-windows-only)
+> `oneharness-core` 0.10.0's public API: [`RunControls`](#what-is-still-holding-the-hop-open-grouping-on-windows-only)
 > exposes only `events`, `cancel`, `signal_cancel`, and `version`, and
 > `io::process::Process` — which holds the two moments a caller would need — is
 > `pub(crate)` inside a private `io::process` module. So an embedder has no
