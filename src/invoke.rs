@@ -396,8 +396,8 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
 /// One relative path, anchored to the directory the config naming it was written
 /// in — the same string on every platform.
 ///
-/// `None` when there is nothing to anchor: an empty value, or a path that
-/// already carries an anchor of its own — a root, or a Windows drive.
+/// `None` when there is nothing to anchor: an empty value, or a path that names
+/// its own root and so already says where it starts from.
 ///
 /// Nothing here comes from the host, and that is the whole of it. `Path::join`
 /// and [`std::path::absolute`] both answer for the platform they run on:
@@ -416,10 +416,10 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
 /// by the name its author wrote.
 fn anchored(base_dir: &Path, written: &str) -> Option<String> {
     let path = Path::new(written);
-    if written.is_empty() || is_anchored(path) {
+    if written.is_empty() || names_its_own_root(path) {
         return None;
     }
-    let base = if is_anchored(base_dir) {
+    let base = if names_its_own_root(base_dir) {
         base_dir.to_path_buf()
     } else {
         // An empty base is a config named by a bare filename — `Path::parent`
@@ -450,16 +450,16 @@ fn anchored(base_dir: &Path, written: &str) -> Option<String> {
     })
 }
 
-/// Whether a path names where it starts from, rather than leaving that to
-/// whatever directory it is read in.
+/// Whether a path carries a root of its own, and so says where it starts from
+/// rather than leaving that to whatever directory it is read in.
 ///
-/// A root answers on every platform; the Windows drive of a `C:foo` — a prefix
-/// with no root — answers only there, and is never produced elsewhere. Asked
-/// this way rather than through `Path::is_absolute`, which is the question
-/// *Windows* asks: a rooted path with no drive is not absolute there, and
-/// re-anchoring one under this process's drive is exactly the bug above.
-fn is_anchored(path: &Path) -> bool {
-    path.has_root() || matches!(path.components().next(), Some(Component::Prefix(_)))
+/// Asked this way rather than through `Path::is_absolute`, which is the question
+/// *Windows* asks: a rooted path with no drive on it is not absolute there, and
+/// re-rooting one under this process's drive is exactly the bug above. Every
+/// Windows form an operator writes carries a root — `C:\…`, `\\server\share\…`,
+/// a verbatim `\\?\…` — so nothing else needs asking.
+fn names_its_own_root(path: &Path) -> bool {
+    path.has_root()
 }
 
 /// The separator to splice with: the one the base directory is already spelled
