@@ -11,7 +11,8 @@
 use oneagentgraph::config::{FIRST_SCHEMA_VERSION, SCHEMA_VERSION};
 
 use crate::support::{
-    fake_harness, graph_with, two_party_graph, until, Workspace, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
+    fake_harness, graph_with, single_sided_graph, two_party_graph, until, Workspace, CHAIN,
+    FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// `validate` reads every ref the graph names, so a pass means the graph could
@@ -28,6 +29,61 @@ fn validate_reads_every_ref_the_graph_names() {
     let run = workspace.run(&["validate", "./graph.yaml"]);
     run.expect_code(2);
     assert!(run.stderr.contains("nowhere.toml"), "{}", run.stderr);
+
+    // A ref that is read but does not say what it has to is refused on the same
+    // terms. A single-sided member's argv is built from what its own oneharness
+    // config says — whether the run streams, and where the paths in it point —
+    // so a file that is not TOML, a setting that is not the type it claims to
+    // be, or two settings that cannot both hold is a graph that could never
+    // launch, and this is where an operator finds that out rather than in a
+    // member that died on a config error two processes down.
+    let broken = Workspace::new();
+    broken.graph(&single_sided_graph(&fake_harness()));
+    for (config, expected) in [
+        ("not = toml = here\n".to_string(), "not valid TOML"),
+        (
+            format!("{CHAIN}stream = \"yes\"\n"),
+            "`stream` must be true or false",
+        ),
+        (
+            format!("{CHAIN}schema_file = 3\n"),
+            "`schema_file` must be a path",
+        ),
+        // An empty path names no file, and oneharness reads it as the directory
+        // the harnesses run in rather than as unset — so it is refused here too.
+        (
+            format!("{CHAIN}schema_file = \"\"\n"),
+            "`schema_file` must be a path",
+        ),
+        // And the other path keys are checked the same way, by their whole
+        // dotted name, so an operator is told which of several is wrong.
+        (
+            format!("{CHAIN}history_dir = 3\n"),
+            "`history_dir` must be a path",
+        ),
+        (
+            format!("{CHAIN}[harness.claude-code.variant.alternate]\nenv_file = true\n"),
+            "`harness.claude-code.variant.alternate.env_file` must be a path",
+        ),
+        (
+            format!("{CHAIN}stream = true\nschema_file = \"./answer.json\"\n"),
+            "cannot both hold",
+        ),
+    ] {
+        broken.write("oneharness.toml", &config);
+        let refused = broken.run(&["validate", "./graph.yaml"]);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains(expected),
+            "{config:?}: {}",
+            refused.stderr
+        );
+        assert!(
+            refused.stderr.contains("oneharness.toml"),
+            "the refusal named no file: {}",
+            refused.stderr
+        );
+    }
 }
 
 /// A graph from another schema version, or one that could never run, is refused

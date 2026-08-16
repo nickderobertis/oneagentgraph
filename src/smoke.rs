@@ -4,6 +4,12 @@
 //! this host can still reach an identity that runs a turn. So it drives the real
 //! `oneharness run` in a throwaway directory and then reads the report back.
 //!
+//! The path has to be the *members'* path, which is why this spawn is not the one
+//! `docs/oneharness-library.md` inventories: it has no boundary of its own to
+//! convert, it just follows theirs. A smoke run on the linked engine would prove
+//! something no member depends on, and would pass on a host whose `oneharness` is
+//! missing — so this collapses when a member's turn does, and not before.
+//!
 //! What it judges is ported from ai-orchestrator, and the subtlety is worth
 //! keeping: a fallback chain records **every candidate it attempts**, and only
 //! the last of them is the launch path's outcome. A candidate counts as fallen

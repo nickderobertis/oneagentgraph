@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.16](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.15...v0.2.16) - 2026-08-16
+
+### Fixed
+
+- let a member's oneharness config decide its own run ([#46](https://github.com/nickderobertis/oneagentgraph/pull/46))
+
+## [0.2.15](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.14...v0.2.15) - 2026-08-15
+
+### Documentation
+
+- write down the blocked oneharness-run boundary inventory, and pin the cwd invariant ([#44](https://github.com/nickderobertis/oneagentgraph/pull/44))
+
 ## [0.2.14](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.13...v0.2.14) - 2026-08-15
 
 ### Fixed
