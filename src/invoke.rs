@@ -42,6 +42,10 @@
 //!   harness process it starts is given — so the stamp reaches the harness the
 //!   same way it always did: fixed at `exec`, on a process no walk from this one
 //!   would find once its parent is gone.
+//!
+//! Writing the operator's config somewhere else is also why `anchor_paths`
+//! below exists: a path written relative to that file has to be made absolute
+//! here, while the directory it was written in is still known.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -241,8 +245,9 @@ pub fn build(
             write(&path, &config)?;
             // Every argument as computed, empty or not: there are no optional
             // flags here, so dropping an empty entry can only shift a *value* out
-            // of the argv and leave oneharness reading the next flag as one.
-            let args = vec![
+            // of the argv and leave oneharness reading the next flag as one. The
+            // one branch is over *which* flag, never over whether there is one.
+            let mut args = vec![
                 "run".to_string(),
                 "--config".to_string(),
                 path.display().to_string(),
@@ -251,10 +256,22 @@ pub fn build(
                     .display()
                     .to_string(),
                 "--events".to_string(),
-                "--stream".to_string(),
-                "--prompt".to_string(),
-                member_task(member.task.as_deref(), context)?,
             ];
+            args.push(
+                if streams(&config, &member.oneharness_config.0)? {
+                    "--stream"
+                } else {
+                    // One report, on one line. `oneharness run` pretty-prints a
+                    // buffered report by default, and `crate::member` reads a
+                    // member's stdout a line at a time — so the flag that makes
+                    // the whole document one line is what keeps the member's
+                    // report reaching its settle.
+                    "--compact"
+                }
+                .to_string(),
+            );
+            args.push("--prompt".to_string());
+            args.push(member_task(member.task.as_deref(), context)?);
             Ok(Invocation {
                 kind: crate::member::Kind::Oneharness,
                 launch: Launch::Process {
@@ -393,6 +410,122 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
     );
 }
 
+/// Whether a single-sided member's run streams, which is **its own resolved
+/// config's** decision rather than this crate's.
+///
+/// A flag beats config in oneharness, so the `--stream` this argv used to carry
+/// unconditionally was not a default — it was an override, and one an operator
+/// had no way to win against. Two settings oneharness has shipped for releases
+/// were unreachable behind it: `stream = false`, which asks for the buffered
+/// report; and `schema_file`, which asks for a validated JSON answer and which
+/// oneharness refuses to *stream*, so declaring it turned the member into a
+/// usage error rather than a structured-output run.
+///
+/// So the config answers, and the default is what every graph already written
+/// does: a config that declares neither streams, exactly as before. A config
+/// declaring a schema does not, because there is no such run — the flag and the
+/// schema are mutually exclusive one layer down, and picking the schema is
+/// picking the setting the operator actually wrote.
+///
+/// A `stream` this cannot read as a boolean is left to oneharness, which parses
+/// that file for real and refuses it by name; guessing here would be this crate
+/// deciding a question it just handed back.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when the config is not TOML.
+fn streams(config: &str, origin: &str) -> Result<bool, Error> {
+    let document: DocumentMut = config
+        .parse()
+        .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
+    Ok(document
+        .get("stream")
+        .and_then(Item::as_bool)
+        .unwrap_or_else(|| document.get("schema_file").is_none()))
+}
+
+/// The keys of an oneharness config whose value is a **path**, and which
+/// oneharness resolves against the directory the harnesses run in rather than
+/// against the file that named them.
+///
+/// `docs/contract.md` names this set. It is deliberately not "every string that
+/// could be a path": `[harness.<id>] bin` is a program looked up on `PATH` and a
+/// `[[hooks]] command` is a command line, so anchoring either would turn a name
+/// that resolves into a path that does not exist.
+const ANCHORED_PATHS: [&str; 2] = ["schema_file", "history_dir"];
+
+/// The same, one level down: `[harness.<id>.variant.<name>] env_file`, the file
+/// an identity's environment is read out of.
+const ANCHORED_VARIANT_PATH: &str = "env_file";
+
+/// Anchor every relative path in one side's config to the directory that config
+/// was written in.
+///
+/// The same rule [`anchor_skill`] applies to a onejudge base, and for the same
+/// reason: the file oneharness reads is the stamped copy in the member's
+/// scratch, not the operator's own file. oneharness resolves a config-declared
+/// path against the directory the harnesses run in — `oneharness run --cwd`,
+/// which for a member is the directory that member works in — so a relative path
+/// written beside the config points at neither the file's own directory nor
+/// anywhere the operator can predict. Anchored here, it keeps meaning what it
+/// meant where it was written, which is the rule every other ref in a graph
+/// already follows.
+///
+/// A config fetched over https has no directory for a relative path to mean
+/// anything against, so its paths are left exactly as written and oneharness
+/// answers for them by name. Purely lexical, like [`anchor_skill`]: nothing is
+/// read, so a file that is not there is still oneharness's refusal to make.
+fn anchor_paths(document: &mut DocumentMut, base_dir: &Path) {
+    for key in ANCHORED_PATHS {
+        anchor(document.as_table_mut(), key, base_dir);
+    }
+    let Some(harnesses) = document
+        .get_mut("harness")
+        .and_then(Item::as_table_like_mut)
+    else {
+        return;
+    };
+    for (_, harness) in harnesses.iter_mut() {
+        let Some(variants) = harness
+            .as_table_like_mut()
+            .and_then(|harness| harness.get_mut("variant"))
+            .and_then(Item::as_table_like_mut)
+        else {
+            continue;
+        };
+        for (_, variant) in variants.iter_mut() {
+            if let Some(variant) = variant.as_table_like_mut() {
+                anchor(variant, ANCHORED_VARIANT_PATH, base_dir);
+            }
+        }
+    }
+}
+
+/// Anchor one path-valued key of one table, when it holds a relative path.
+///
+/// An empty value is left alone: oneharness reads it as "unset", and joining it
+/// onto a directory would turn a key that said nothing into one naming the
+/// config's own directory.
+fn anchor(table: &mut dyn toml_edit::TableLike, key: &str, base_dir: &Path) {
+    let Some(item) = table.get_mut(key) else {
+        return;
+    };
+    let Some(named) = item.as_str().filter(|named| !named.is_empty()) else {
+        return;
+    };
+    let path = Path::new(named);
+    if !path.is_relative() {
+        return;
+    }
+    // Absolute for the reason [`anchor_skill`] is: a graph named by a relative
+    // path has a relative base directory too, and the child carrying this config
+    // is spawned in the member's scratch — so a still-relative result would be
+    // resolved a second time, against a directory nobody named.
+    let joined = base_dir.join(path);
+    let anchored = std::path::absolute(&joined).unwrap_or(joined);
+    *item = toml_edit::value(anchored.display().to_string());
+}
+
 /// Every two-party member's agent side asks for a controllable turn, so
 /// `oneagentgraph interrupt` has a lever whenever the harness under it has one.
 ///
@@ -488,34 +621,51 @@ fn harness_side(
     context: &Context<'_>,
     resolver: &mut Resolver,
 ) -> Result<(String, Option<String>), Error> {
-    let text = resolver.resolve(config, context.graph_dir)?.content.clone();
+    let resolved = resolver.resolve(config, context.graph_dir)?;
+    let text = resolved.content.clone();
+    // The directory the operator wrote this file in, which is what a relative
+    // path inside it means — `None` for one fetched over https, which has none.
+    let base_dir = resolved.base_dir.clone();
     let label = match persona_ref {
         Some(_) => load_persona(persona_ref, context, resolver)?.1,
         None => None,
     };
-    Ok((stamp_side(&text, &config.0, side)?, label))
+    Ok((
+        stamp_side(&text, &config.0, base_dir.as_deref(), side)?,
+        label,
+    ))
 }
 
-/// Stamp one side's own values into its resolved config.
+/// Stamp one side's own values into its resolved config, and anchor the paths
+/// its author wrote relative to it.
 ///
 /// The rest of the operator's file — comments included — stays byte-identical,
-/// and a side with nothing to stamp is returned untouched.
+/// and a side with nothing to stamp and no directory to anchor against is
+/// returned untouched.
 ///
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when the config is not TOML, or when a `model` breaks
 /// the pairing rule — see [`stamp_model`].
-fn stamp_side(config: &str, origin: &str, side: Side<'_>) -> Result<String, Error> {
+fn stamp_side(
+    config: &str,
+    origin: &str,
+    base_dir: Option<&Path>,
+    side: Side<'_>,
+) -> Result<String, Error> {
     let stamped = match side.model {
         Some(model) => stamp_model(config, origin, model)?,
         None => config.to_string(),
     };
-    if side.mode.is_none() && side.scratch.is_none() {
+    if side.mode.is_none() && side.scratch.is_none() && base_dir.is_none() {
         return Ok(stamped);
     }
     let mut document: DocumentMut = stamped
         .parse()
         .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
+    if let Some(base_dir) = base_dir {
+        anchor_paths(&mut document, base_dir);
+    }
     if let Some(mode) = side.mode {
         document["mode"] = toml_edit::value(mode);
     }
@@ -1244,7 +1394,7 @@ mod tests {
     #[test]
     fn a_side_with_nothing_to_carry_is_untouched_and_one_that_cannot_hold_it_says_so() {
         assert_eq!(
-            stamp_side(ONE_FAMILY, "oneharness.toml", Side::default()).expect("untouched"),
+            stamp_side(ONE_FAMILY, "oneharness.toml", None, Side::default()).expect("untouched"),
             ONE_FAMILY,
             "a side with nothing to stamp must not be rewritten at all"
         );
@@ -1252,6 +1402,7 @@ mod tests {
         let err = stamp_side(
             "harnesses = [\"codex\"]\nenv = 3\n",
             "c.toml",
+            None,
             Side {
                 scratch: Some(Path::new("/state/run/members/worker")),
                 ..Side::default()
@@ -1263,6 +1414,7 @@ mod tests {
         let err = stamp_side(
             "not = toml = here\n",
             "c.toml",
+            None,
             Side {
                 mode: Some("bypass"),
                 ..Side::default()
@@ -1270,6 +1422,147 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not valid TOML"), "{err}");
+    }
+
+    /// A relative path in an operator's config keeps meaning what it meant where
+    /// that file was written, and an absolute one is left exactly as written.
+    ///
+    /// Every key the contract names, in one config: oneharness resolves each of
+    /// them against the directory the harnesses run in, which is not the
+    /// directory any of them was written in.
+    #[test]
+    fn a_relative_path_is_anchored_to_the_directory_its_config_was_written_in() {
+        let written = Path::new("/graphs/api");
+        let stamped = stamp_side(
+            concat!(
+                "harnesses = [\"claude-code\"]\n",
+                "schema_file = \"./answer.schema.json\"\n",
+                "history_dir = \"history\"\n",
+                "[harness.claude-code.variant.alternate]\n",
+                "env_file = \"../secrets/alternate.env\"\n",
+            ),
+            "oneharness.toml",
+            Some(written),
+            Side::default(),
+        )
+        .expect("stamped");
+        let document: DocumentMut = stamped.parse().expect("still TOML");
+        assert_eq!(
+            document["schema_file"].as_str(),
+            Some("/graphs/api/answer.schema.json"),
+            "{stamped}"
+        );
+        assert_eq!(
+            document["history_dir"].as_str(),
+            Some("/graphs/api/history"),
+            "{stamped}"
+        );
+        assert_eq!(
+            document["harness"]["claude-code"]["variant"]["alternate"]["env_file"].as_str(),
+            Some("/graphs/api/../secrets/alternate.env"),
+            "{stamped}"
+        );
+
+        // An absolute path, an empty value — which oneharness reads as unset —
+        // and a key whose value is not a path at all are all left alone.
+        let untouched = concat!(
+            "harnesses = [\"claude-code\"]\n",
+            "schema_file = \"/etc/answer.schema.json\"\n",
+            "history_dir = \"\"\n",
+            "[harness.claude-code]\nbin = \"claude\"\n",
+        );
+        assert_eq!(
+            stamp_side(untouched, "oneharness.toml", Some(written), Side::default())
+                .expect("stamped"),
+            untouched,
+        );
+
+        // A config fetched over https has no directory for a relative path to
+        // mean anything against, so it is carried exactly as written.
+        let remote = "harnesses = [\"claude-code\"]\nschema_file = \"answer.schema.json\"\n";
+        assert_eq!(
+            stamp_side(
+                remote,
+                "https://example.com/oneharness.toml",
+                None,
+                Side::default()
+            )
+            .expect("stamped"),
+            remote,
+        );
+    }
+
+    /// A single-sided member's own config decides whether its run streams: one
+    /// that says nothing streams exactly as it always has, one asking for a
+    /// schema does not, and `stream = false` is honoured rather than overridden.
+    ///
+    /// Asserted on the argv, because a flag is what used to override the file:
+    /// `--stream` beats `stream` in oneharness and is mutually exclusive with a
+    /// schema there, so this crate carrying it unconditionally is precisely what
+    /// made both settings unreachable.
+    #[test]
+    fn a_single_sided_members_config_decides_whether_its_run_streams() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let member: Member =
+            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+                .expect("a member");
+        // Top-level keys only, so a setting appended below is one and not the
+        // last line of a `[harness.…]` section.
+        let chain = "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n";
+
+        for (config, streams) in [
+            // What every graph already written does.
+            (chain.to_string(), true),
+            // The operator's own setting, in both directions.
+            (format!("{chain}stream = true\n"), true),
+            (format!("{chain}stream = false\n"), false),
+            // A schema run cannot stream, so declaring one is declaring that.
+            (format!("{chain}schema_file = \"./answer.json\"\n"), false),
+            // A `stream` this cannot read is left to oneharness, which parses
+            // the file for real; the default stands in the meantime.
+            (format!("{chain}stream = \"yes\"\n"), true),
+        ] {
+            std::fs::write(dir.path().join("oneharness.toml"), &config).expect("chain");
+            let args = process_args(&member, &context(dir.path(), &scratch));
+            assert_eq!(
+                args.contains(&"--stream".to_string()),
+                streams,
+                "{config:?} produced {args:?}"
+            );
+            // Never both, and never neither: a buffered report is pretty-printed
+            // unless asked for on one line, and `crate::member` reads a member's
+            // stdout a line at a time.
+            assert_eq!(
+                args.contains(&"--compact".to_string()),
+                !streams,
+                "{config:?} produced {args:?}"
+            );
+            // The prompt still arrives as its own flag's value, whichever branch
+            // was taken above.
+            assert_eq!(flag(&args, "--prompt").as_deref(), Some("do the thing"));
+        }
+    }
+
+    /// A single-sided member whose config is not TOML is refused before anything
+    /// is launched, naming the file — the same refusal the other side's stamp
+    /// makes, now that this side's argv depends on reading the file too.
+    #[test]
+    fn a_single_sided_member_whose_config_is_not_toml_is_refused_by_name() {
+        let dir = workspace();
+        std::fs::write(dir.path().join("oneharness.toml"), "not = toml = here\n").expect("chain");
+        let scratch = dir.path().join("scratch");
+        let member: Member =
+            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+                .expect("a member");
+        let err = build(
+            &member,
+            &context(dir.path(), &scratch),
+            &mut Resolver::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not valid TOML"), "{err}");
+        assert!(err.to_string().contains("./oneharness.toml"), "{err}");
     }
 
     /// A scratch path carrying backslashes round-trips through the stamp with
@@ -1290,6 +1583,7 @@ mod tests {
         let stamped = stamp_side(
             ONE_FAMILY,
             "oneharness.toml",
+            None,
             Side {
                 mode: Some("bypass"),
                 scratch: Some(Path::new(windows)),

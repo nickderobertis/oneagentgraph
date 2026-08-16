@@ -12,9 +12,9 @@
 //! | `--config <p>` | `config` |
 //! | `--cwd <d>` | `cwd` |
 //! | `--events` | `events` |
-//! | `--stream` | `stream: Some(true)` |
+//! | `--stream` / neither | `stream: Some(true)` / `None`, the member's own config deciding |
 //! | `--prompt <text>` | `prompt` |
-//! | `--compact` | none, by design: it is how the CLI *prints* a report |
+//! | `--compact` | none, by design: it is how the CLI *prints* a report — which is exactly why a non-streaming member needs it and a library call would not |
 //!
 //! Three things hold the hop open, none of them on the argv:
 //!

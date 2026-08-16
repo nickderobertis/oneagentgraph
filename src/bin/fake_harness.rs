@@ -17,6 +17,11 @@
 //! {"type":"result","subtype":"success","result":"…","usage":{…}}
 //! ```
 //!
+//! …unless the run asked for another one. oneharness picks the format per run
+//! and parses this process's stdout under it, so the format on the argv is read
+//! rather than assumed — see [`Shape`], which is what a structured-output run
+//! (`--output-format json`, one document) needs.
+//!
 //! The turn is steered by sentinels in the prompt (which arrives on the argv,
 //! after `-p`, because that is how oneharness spawns claude-code) and by
 //! `FAKE_HARNESS_*` variables, so one binary covers every journey.
@@ -31,6 +36,7 @@
 //! | sentinel / variable | what this turn does |
 //! | --- | --- |
 //! | `fake:complete-now` | the agent finishes on its first turn |
+//! | `fake:answer-file=<path>` | answer with that file's contents — a validated JSON document, for a structured-output run |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
@@ -358,7 +364,7 @@ fn main() -> std::process::ExitCode {
             return exit(1);
         }
     }
-    turn(&prompt, None);
+    turn(&prompt, None, Shape::asked_for(&argv));
     exit(0)
 }
 
@@ -435,7 +441,7 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
                 running = std::thread::Builder::new()
                     .spawn(move || {
                         recordings(&prompt, &argv);
-                        turn(&prompt, Some(&flag));
+                        turn(&prompt, Some(&flag), Shape::asked_for(&argv));
                     })
                     .ok();
             }
@@ -474,7 +480,36 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
 /// *stoppable*: the hold ends the moment it is set, the turn reports a terminal
 /// result having done none of its work, and the flag is cleared so the redirected
 /// turn that follows is not aborted by the same request.
-fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
+/// The output shape oneharness asked this turn for, on its own `--output-format`.
+///
+/// Not a detail a journey may ignore: oneharness selects the format per run and
+/// then *parses this process's stdout under it*. A structured-output run asks
+/// claude-code for `json` — one document, because that is where the answer it
+/// validates lives — and a double that answered the stream-json transcript
+/// anyway produced stdout oneharness could extract no answer from at all, which
+/// reads as a harness that ran and said nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// `--output-format stream-json`: the turn as it happens, one JSON object
+    /// per line, ending in the terminal `result`.
+    Stream,
+    /// `--output-format json`: one document, which is the terminal `result`
+    /// alone — a transcript has nowhere to go in it.
+    Single,
+}
+
+impl Shape {
+    /// The shape this launch was asked for, defaulting to the streamed one every
+    /// journey but a structured-output run gets.
+    fn asked_for(argv: &[String]) -> Self {
+        match flag(argv, "--output-format").as_deref() {
+            Some("json") => Shape::Single,
+            _ => Shape::Stream,
+        }
+    }
+}
+
+fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) {
     let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
     // Written before any wait, so a journey can wait for a turn that is really
     // in flight rather than for a process that has merely started.
@@ -505,7 +540,9 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
-    emit(&json!({"type": "system", "subtype": "init", "session_id": session}));
+    if shape == Shape::Stream {
+        emit(&json!({"type": "system", "subtype": "init", "session_id": session}));
+    }
     if stopped() {
         if let Some(flag) = interrupted {
             flag.store(false, Ordering::SeqCst);
@@ -522,11 +559,16 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
     if interrupted.is_some() {
         record(prompt, "did-work", prompt);
     }
-    emit(&json!({
-        "type": "assistant", "session_id": session,
-        "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
-            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
-    }));
+    // A tool transcript is a stream-json line and has nowhere to go in a single
+    // `json` document, which is exactly why oneharness upgrades the format for a
+    // run that asked for events.
+    if shape == Shape::Stream {
+        emit(&json!({
+            "type": "assistant", "session_id": session,
+            "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
+        }));
+    }
     emit(&json!({
         "type": "result", "subtype": "success", "is_error": false, "duration_ms": 5,
         "num_turns": 1, "result": answer(prompt), "session_id": session,
@@ -695,6 +737,26 @@ fn answer(prompt: &str) -> String {
     }
     if prompt.contains("Assessment request:") {
         return "None".into();
+    }
+    // Beside `complete-now` rather than above the judge-shaped branches, and for
+    // the same reason they are ordered that way: a judge side's prompt embeds the
+    // transcript, so a sentinel the operator's task carried arrives there a
+    // second time, and an answer-file that fired on it would hand the judge a
+    // document in the agent's shape.
+    if let Some(path) = sentinel_path(prompt, "answer-file") {
+        return match std::fs::read_to_string(&path) {
+            Ok(document) => document.trim().to_string(),
+            Err(err) => {
+                // Not a panic and not an invented answer: this reaches oneharness
+                // as a turn that answered nothing, which is what a journey
+                // asserting on a validated answer must see fail.
+                eprintln!(
+                    "fake-harness: cannot read the answer file {}: {err}",
+                    path.display()
+                );
+                String::new()
+            }
+        };
     }
     if steers(prompt, "complete-now") {
         "done".into()

@@ -2158,3 +2158,194 @@ fn a_single_sided_member_runs_one_agent_with_no_judge() {
         run.kinds()
     );
 }
+
+/// The argv one member was started with, read off the stream it published.
+fn started_args(run: &crate::support::Run, member: &str) -> Vec<String> {
+    let started = run
+        .of_kind("member-started")
+        .into_iter()
+        .find(|event| {
+            labels(event)
+                .get("member")
+                .is_some_and(|name| name.as_str() == member)
+        })
+        .unwrap_or_else(|| panic!("{member} never started:\n{}", run.stdout));
+    started["payload"]["args"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{member} named no argv: {started}"))
+        .iter()
+        .map(|arg| arg.as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The report one member stored, read from the path its settle named.
+fn stored_report(run: &crate::support::Run, member: &str) -> serde_json::Value {
+    let settled = run
+        .of_kind("member-settled")
+        .into_iter()
+        .find(|event| {
+            labels(event)
+                .get("member")
+                .is_some_and(|name| name.as_str() == member)
+        })
+        .unwrap_or_else(|| panic!("{member} never settled:\n{}", run.stdout));
+    let path = settled["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{member}'s settle named no stored report: {settled}"));
+    assert_eq!(
+        settled["payload"]["completed"],
+        serde_json::json!(true),
+        "{member} did not settle successfully: {settled}"
+    );
+    let raw = std::fs::read_to_string(path).expect("the stored report");
+    serde_json::from_str(&raw).expect("the stored report is JSON")
+}
+
+/// A member whose own oneharness config asks for structured output gets it: the
+/// run does not stream, the answer is validated against the schema that config
+/// names, and the settle stores the document carrying it.
+///
+/// Two overrides this crate used to make are what the journey is really about,
+/// and both are load-bearing here:
+///
+/// * The forced `--stream`. A flag beats config in oneharness and is mutually
+///   exclusive with a schema there, so a member declaring `schema_file` was a
+///   usage error rather than a structured-output run. The `reporter` beside the
+///   drafter is the other half of that: a config declaring neither still streams,
+///   argv for argv, which is what every graph already written depends on.
+/// * The relative path. The drafter's config lives **outside** the directory the
+///   member works in and names its schema relative to itself, which is where the
+///   operator wrote it. oneharness resolves a config-declared `schema_file`
+///   against `--cwd`, so without anchoring it looks for the schema under the work
+///   directory, finds nothing, and the member dies before a turn.
+#[test]
+fn a_single_sided_member_answers_with_the_structured_document_its_config_asks_for() {
+    let workspace = Workspace::new();
+    // Beside the config that names it, one directory away from where the member
+    // works — the arrangement an operator keeps their graph's configs in.
+    workspace.write(
+        "configs/oneharness.structured.toml",
+        &format!("{CHAIN}schema_file = \"./answer.schema.json\"\n"),
+    );
+    workspace.write(
+        "configs/answer.schema.json",
+        concat!(
+            "{\"type\": \"object\", \"required\": [\"title\", \"body\"],",
+            " \"properties\": {\"title\": {\"type\": \"string\"},",
+            " \"body\": {\"type\": \"string\"}},",
+            " \"additionalProperties\": false}\n"
+        ),
+    );
+    let answer = workspace.write(
+        "answer.json",
+        "{\"title\": \"take the config as written\", \"body\": \"one change request\"}",
+    );
+
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  drafter:\n    kind: oneharness\n",
+            "    oneharness_config: ./configs/oneharness.structured.toml\n",
+            "  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    task: \"fake:complete-now: say what changed\"\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.drafter.task".to_string(),
+                format!("draft the body. fake:answer-file={}", answer.display()),
+            ),
+        ],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    // The member the operator asked for a validated answer from is not streamed,
+    // because there is no such run one layer down.
+    let drafting = started_args(&run, "drafter");
+    assert!(
+        !drafting.contains(&"--stream".to_string()),
+        "the member's own config was overridden by a flag again: {drafting:?}"
+    );
+    assert!(drafting.contains(&"--compact".to_string()), "{drafting:?}");
+
+    // And the answer came back validated, in the report the settle stored.
+    let report = stored_report(&run, "drafter");
+    let result = &report["results"][0];
+    assert_eq!(result["schema_valid"], serde_json::json!(true), "{result}");
+    assert_eq!(
+        result["structured"],
+        serde_json::json!({"title": "take the config as written", "body": "one change request"}),
+        "the stored report carries no structured answer: {result}"
+    );
+
+    // The member beside it declares neither a schema nor `stream`, and runs
+    // exactly as it did before: the streamed argv, and the tool events only a
+    // streamed member publishes.
+    let reporting = started_args(&run, "reporter");
+    assert!(
+        reporting.contains(&"--stream".to_string()),
+        "a member whose config says nothing stopped streaming: {reporting:?}"
+    );
+    assert!(
+        !reporting.contains(&"--compact".to_string()),
+        "{reporting:?}"
+    );
+    let activity: Vec<String> = run
+        .of_kind("turn-activity")
+        .iter()
+        .filter_map(|event| labels(event).get("member").cloned())
+        .collect();
+    assert_eq!(
+        activity
+            .iter()
+            .filter(|member| member.as_str() == "reporter")
+            .count(),
+        1,
+        "the streaming member published no tool event: {activity:?}"
+    );
+    assert!(
+        !activity.iter().any(|member| member.as_str() == "drafter"),
+        "a member that does not stream published a streamed event: {activity:?}"
+    );
+}
+
+/// A member whose config says `stream = false` is honoured rather than
+/// overridden: it publishes one report at the end and settles on it.
+///
+/// The buffered report is not merely "the same run without events". `oneharness
+/// run` pretty-prints it, and this crate reads a member's stdout a line at a
+/// time — so a member that stopped streaming and lost its report would settle as
+/// a provider failure, which is exactly what this asserts it does not do.
+#[test]
+fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", &format!("{CHAIN}stream = false\n"));
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_task("fake:complete-now: one report at the end");
+    run.expect_code(0);
+
+    let args = started_args(&run, "reporter");
+    assert!(
+        !args.contains(&"--stream".to_string()),
+        "`stream = false` was overridden on the argv: {args:?}"
+    );
+    assert!(
+        run.of_kind("turn-activity").is_empty(),
+        "a member that does not stream published streamed events: {:?}",
+        run.kinds()
+    );
+    let report = stored_report(&run, "reporter");
+    assert_eq!(
+        report["results"][0]["text"],
+        serde_json::json!("done"),
+        "the buffered report never reached the settle: {report}"
+    );
+}

@@ -1,12 +1,12 @@
 //! Running one member, and turning what it publishes into envelopes.
 //!
-//! A **single-sided** member is one child process, `oneharness run --stream`, and
-//! this module is the whole of running it. A **two-party** member is onejudge's
-//! own run driver called in this process; [`crate::judge`] runs that one, and
-//! shares the settle, the death, and the two watchdogs below so both kinds reach
-//! the stream as the same events.
+//! A **single-sided** member is one child process, `oneharness run`, and this
+//! module is the whole of running it. A **two-party** member is onejudge's own
+//! run driver called in this process; [`crate::judge`] runs that one, and shares
+//! the settle, the death, and the two watchdogs below so both kinds reach the
+//! stream as the same events.
 //!
-//! A child member speaks two NDJSON envelopes on stdout (onejudge's
+//! A streaming child member speaks two NDJSON envelopes on stdout (onejudge's
 //! `docs/streaming.md`):
 //!
 //! ```text
@@ -17,6 +17,12 @@
 //! Each `event` line becomes a [`EventKind::TurnActivity`]; the first of a turn
 //! is preceded by a [`EventKind::TurnStarted`]; the terminal `result` line
 //! becomes a [`EventKind::TurnCompleted`] and a [`EventKind::MemberSettled`].
+//!
+//! Whether a member streams at all is **its own oneharness config's** decision —
+//! see [`crate::invoke`], which is where the argv is built. A member that does
+//! not (one asking for a schema-validated answer, or one that simply said
+//! `stream = false`) publishes no envelopes and one report, on one line: the same
+//! document, reaching the same settle, with no `turn-activity` before it.
 //!
 //! Two watchdogs run alongside, both ported from ai-orchestrator with their
 //! defaults and their environment overrides intact:
@@ -758,6 +764,15 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
             if let Some(document) = value.get("report").filter(|value| value.is_object()) {
                 *held(report) = Some(document.clone());
             }
+        }
+        // A member whose own config turned streaming off publishes no envelopes
+        // at all: `oneharness run --compact` writes its whole report as one
+        // line, and that document is the same one a streamed `result` carries.
+        // Recognized by its own shape — a `results` array is what a report has
+        // and nothing else on this stream does — rather than by position, so a
+        // line arriving before it cannot be mistaken for the report.
+        _ if value.get("results").is_some_and(Value::is_array) => {
+            *held(report) = Some(value.clone());
         }
         _ => {}
     }
