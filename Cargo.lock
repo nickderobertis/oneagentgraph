@@ -968,7 +968,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "libc",
- "oneharness-core 0.8.0",
+ "oneharness-core 0.10.0",
  "onejudge",
  "predicates",
  "rcgen",
@@ -981,27 +981,6 @@ dependencies = [
  "thiserror 2.0.19",
  "toml_edit",
  "ureq",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "oneharness-core"
-version = "0.6.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02380b0b6b8360a7d05f7008a23f61c1c028b40d7a7473beb9e98b0137f4e852"
-dependencies = [
- "fs2",
- "jsonschema",
- "libc",
- "regex",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.19",
- "toml",
- "uuid",
- "wait-timeout",
- "which",
  "windows-sys 0.61.2",
 ]
 
@@ -1027,13 +1006,34 @@ dependencies = [
 ]
 
 [[package]]
-name = "onejudge"
-version = "0.3.8"
+name = "oneharness-core"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fa0d4ba61cb7c8752af70d05dcb0af31394961e0585a73017988df92b88651d"
+checksum = "d63585d587ddbd2419274c67928d5718cae2da0a1dbfa159c9040e4581dfe3c8"
+dependencies = [
+ "fs2",
+ "jsonschema",
+ "libc",
+ "regex",
+ "schemars",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml",
+ "uuid",
+ "wait-timeout",
+ "which",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "onejudge"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c95a8421050c0d50a75df24fce139a14de23aaa971ec20806f2c8c2c3172ad4"
 dependencies = [
  "clap",
- "oneharness-core 0.6.13",
+ "oneharness-core 0.8.0",
  "rustix",
  "serde",
  "serde_json",

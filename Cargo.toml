@@ -111,7 +111,20 @@ test-doubles = []
 # `oneharness interrupt` process redirects that turn through, and the `null` that
 # tells a supervisor there is no lever. Below 0.3.8 the config key is rejected and
 # `Report::control` does not exist, so `crate::control` does not compile.
-onejudge = { version = "0.3.8", features = ["cli"] }
+#
+# 0.4.0 is the sixth raise and the only one of them that is not a compile floor:
+# every call above still resolves against 0.3.8. It is taken because the loop it
+# fixes is one *this* process now runs — a supervisor turn that produced no work
+# did not settle, and in-process that is a member sitting until this crate's own
+# activity watchdog condemns it rather than a subprocess reporting a finished
+# turn. The behaviour is onejudge's and so is its coverage; what is decided here
+# is only that a graph links the release carrying it.
+# llmlint: ignore-block[changed_behavior_has_e2e] the settling this release fixes
+# is onejudge's own loop, driven and covered by onejudge's suite; a journey here
+# would have to make a supervisor side produce no work and then time this crate's
+# watchdog against it, which asserts the dependency's behaviour through a race.
+onejudge = { version = "0.4.0", features = ["cli"] }
+# llmlint: ignore-end[changed_behavior_has_e2e]
 # oneharness's own typed report/stream contract. Everything this crate reads back
 # from an `oneharness run` — the fallback chain, the per-candidate accounting,
 # the normalized failure kind — is parsed into oneharness's declarations rather
@@ -126,15 +139,46 @@ onejudge = { version = "0.3.8", features = ["cli"] }
 # is left holding it open — so the version this crate reads that surface from has
 # to be one that has it.
 #
+# 0.10.0 is that release's successor, and what it changes here is the *reading*
+# rather than the running — worth being exact about, because the two are easy to
+# confuse. Upstream, 0.10.0 makes a **precondition refusal** (the harness
+# rejecting the working directory or the input's size before it makes a request)
+# a startup failure the chain steps past, with its own `untrusted-directory` /
+# `input-too-large` reason, instead of a plain non-zero failure that stopped the
+# chain with healthy candidates untried; and it keeps a control socket address
+# inside `sun_path`'s 104/108-byte budget so a long session name cannot leave a
+# run unreachable. Neither decision is made by this crate: a `kind: oneharness`
+# member is `oneharness run`, a child process, so the classifying is the
+# **installed CLI's** — `just`'s `oneharness-version` is what governs that, and
+# it is a separate pin for that reason. What linking 0.10.0 buys is that the
+# report those releases produce is read into the types that produced it, which is
+# also the API change adapted here: `FallThrough::reason` is the closed
+# `FallThroughReason` enum rather than free text, published through `as_str()` in
+# `src/member.rs`.
+#
 # The cost, which is what actually needs writing down: onejudge's own requirement
-# on this crate is a major version behind, so the graph carries **two** copies of
-# it. Sound because nothing crosses between them — every oneharness value onejudge
-# hands back arrives as JSON (`Report`, `FallThrough`, `Usage`) and is parsed into
-# *this* copy's types — and `cargo deny`'s `multiple-versions = "allow"` records
-# the choice. It collapses to one when onejudge raises its own; until then, do not
-# thread a `oneharness_core::` value through a `onejudge::` signature, because the
-# two spellings are different types and the compiler will say so.
-oneharness-core = "0.8.0"
+# on this crate is a semver-major behind (it asks for 0.8), so the graph carries
+# **two** copies of it. Sound because nothing crosses between them — every
+# oneharness value onejudge hands back arrives as JSON (`Report`, `FallThrough`,
+# `Usage`) and is parsed into *this* copy's types — and `cargo deny`'s
+# `multiple-versions = "allow"` records the choice. It collapses to one when
+# onejudge raises its own; until then, do not thread a `oneharness_core::` value
+# through a `onejudge::` signature, because the two spellings are different types
+# and the compiler will say so.
+#
+# The half of that split worth knowing before reading a run: since onejudge 0.3.9
+# it drives oneharness as a *library* too, so a two-party member's harness turn is
+# classified by onejudge's 0.8 copy and not by this 0.10 one. So there are three
+# oneharness builds in a graph — this one, onejudge's, and the installed CLI — and
+# an upstream harness fix reaches a dispatch only through the last two. Raising
+# this requirement is what keeps the reading in step; it is not what adopts them.
+# llmlint: ignore-block[changed_behavior_has_e2e] a journey for the two new
+# reasons needs a `oneharness` CLI that emits them, and there is none to install:
+# oneharness 0.10.0's `publish-crates` job failed, so crates.io serves the core at
+# 0.10.0 and the binary only at 0.9.0. The journey belongs with the
+# `oneharness-version` bump, once there is a version to bump it to.
+oneharness-core = "0.10.0"
+# llmlint: ignore-end[changed_behavior_has_e2e]
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
