@@ -7,11 +7,6 @@
 //! says which and why)", so a journey that only checked the code would leave the
 //! part a supervisor reads unproven.
 
-// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
-// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
-// contradicts is its owner's to correct, and no coupling test stands in for
-// that approval.
-
 // llmlint: ignore-file[e2e_not_mocked] see tests/e2e/support.rs: the paid harness
 // process is the single sanctioned double, replaced at oneharness's own
 // `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.

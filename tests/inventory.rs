@@ -15,12 +15,6 @@
 //! empty tree and a killed run's paid harnesses billing. It is written so that
 //! disappearing upstream is a failure here rather than a silent regression there.
 
-// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
-// open as blocker 1 in `docs/oneharness-library.md`: the launch-boundary sentence
-// the implementation contradicts is its owner's to correct. A gate here could
-// only stay green while the mismatch exists or demand the contract stay stale,
-// so there is deliberately none.
-
 use std::collections::BTreeSet;
 use std::process::{Child, Command};
 

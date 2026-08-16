@@ -125,9 +125,6 @@ test-doubles = []
 # watchdog against it, which asserts the dependency's behaviour through a race.
 onejudge = { version = "0.4.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
-# llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
-# open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
-# contradicts is its owner's to correct.
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
 # **0.10.1 is a compile floor.** It is the first release with

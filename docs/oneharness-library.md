@@ -1,10 +1,5 @@
 # The `oneharness run` boundary inventory
 
-<!-- llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] Accurate and
-open as blocker 1 below: correcting docs/contract.md is the contract owner's, and
-an edit made here was reverted on that rule. No coupling test, by design. -->
-
-
 > **Status: converted.** A `kind: oneharness` member's turn is
 > `oneharness_core::io::run::run_supervised`, called on a thread of this process.
 > No `oneharness` process is spawned for the turn itself — the harness the turn
@@ -245,28 +240,22 @@ that was one", and none is.
 Everything else is the same stream. Both `runner` values remain declared types —
 a consumer that reads `process` still parses one.
 
-**`docs/contract.md` is unedited**, and one sentence in it is now false as a
-result — see the blockers below. No *interface* moved, which is why the
-conversion needed nothing of the schema: `runner: library|process`, the `engine`
-that tells the two kinds apart, the `cause` set, and `member-died`'s three
-process-scoped facts are all exactly as they were.
+**`docs/contract.md`'s launch-boundary bullet is the one thing the conversion
+changed there**, and it is prose rather than schema: the contract owner approved
+replacing "still `oneharness run`, a child process" with what the code does. No
+*interface* moved, which is why the conversion needed nothing of the schema:
+`runner: library|process`, the `engine` that tells the two kinds apart, the
+`cause` set, and `member-died`'s three process-scoped facts are all exactly as
+they were. The evidence the bullet now rests on is `src/harness.rs`, which calls
+`oneharness_core::io::run::run_supervised` — a call that returns `RunOutcome` and
+takes `RunControls::events`, the two capabilities the old bullet named as its own
+sunset — and `tests/e2e/dispatch.rs`'s
+`a_single_sided_members_turn_spawns_no_oneharness_process`, which settles a member
+with `ONEAGENTGRAPH_ONEHARNESS_BIN` pointing at a binary that does not exist.
 
 ## Blockers
 
-Neither is resolvable from inside this crate.
-
-**1. `docs/contract.md` says a `kind: oneharness` member "is still `oneharness
-run`, a child process", and the code no longer does.** The evidence is
-`src/harness.rs`, which calls `oneharness_core::io::run::run_supervised` — a call
-that returns `RunOutcome` and takes `RunControls::events`, the two capabilities
-the same bullet names as its own sunset — and
-`tests/e2e/dispatch.rs`'s `a_single_sided_members_turn_spawns_no_oneharness_process`,
-which settles a member with `ONEAGENTGRAPH_ONEHARNESS_BIN` pointing at a binary
-that does not exist. A correction was written here and reverted, because that
-document is approved and its changes are its owner's. What clears this is that
-owner approving one bullet of prose; nothing in the code changes with it.
-
-**2. The panic-containment criterion has no real-interface journey, because
+**1. The panic-containment criterion has no real-interface journey, because
 nothing user-reachable panics.** The bar wants a member turn driven through the
 compiled binary whose library path panics. The `RunRequest` this crate builds is
 a closed template — only the config's content, the directory, the prompt text and

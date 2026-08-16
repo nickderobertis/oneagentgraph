@@ -1,16 +1,12 @@
 //! Preparing one member for launch.
 //!
-
-// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
-// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
-// contradicts is its owner's to correct, and no coupling test stands in for
-// that approval.
 //! This is the whole of what `docs/contract.md` means by "prepares each member's
 //! launch": a member's refs are resolved, its persona is merged onto its base,
 //! each side's oneharness config is written into the run's own directory, and
-//! what actually starts the member is assembled — a onejudge plan this
-//! process drives itself for a two-party member, an argv for the single-sided
-//! one. Nothing here selects a harness, a model chain, or a fallback order —
+//! what actually starts the member is assembled — a onejudge plan for a
+//! two-party member, an oneharness run request for the single-sided one, each
+//! driven by this process itself. Nothing here selects a harness, a model chain,
+//! or a fallback order —
 //! those live in the oneharness config files a graph names, and this module only
 //! ever *carries* them.
 //!
@@ -1147,7 +1143,8 @@ fn task(context: &Context<'_>) -> Result<String, Error> {
 /// the graph's when it did not.
 ///
 /// **Both member kinds**, and by the same call. A single-sided member carries it
-/// to `oneharness run --cwd` on the argv this module builds; a two-party one
+/// on [`HarnessLaunch::worktree`], which reaches oneharness's own `cwd`; a
+/// two-party one
 /// carries it on [`JudgeLaunch::worktree`], which onejudge puts on the same flag.
 /// Only a `kind: oneharness` member can name a `dir` of its own — that is
 /// `docs/contract.md`'s scoping rather than this function's — so the two-party

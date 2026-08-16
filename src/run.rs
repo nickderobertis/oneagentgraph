@@ -11,11 +11,6 @@
 //! settle, and `trigger` / `reset-timer` are how an operator moves that clock
 //! from outside the run.
 
-// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
-// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
-// contradicts is its owner's to correct, and no coupling test stands in for
-// that approval.
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};

@@ -7,11 +7,6 @@
 //!
 //! `docs/oneharness-library.md` owns why each seam below is shaped as it is.
 
-// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
-// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
-// contradicts is its owner's to correct, and no coupling test stands in for
-// that approval.
-
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
