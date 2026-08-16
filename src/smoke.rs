@@ -238,7 +238,8 @@ fn command(program: &str) -> Command {
     command
 }
 
-/// Spend one turn in `dir`, once.
+/// One attempt, with no retry of its own: [`launch`] owns the backoff, and it
+/// only re-enters here for a refusal that spent nothing.
 fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
     let output = command(oneharness_bin)
         .args(["run", "--cwd"])

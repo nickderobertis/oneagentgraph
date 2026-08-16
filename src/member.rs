@@ -500,15 +500,13 @@ fn millis(span: Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
-// llmlint: ignore-end[boundary_inputs_validated]
-
 /// One tool event's structured input as the contract's bounded summary: what it
 /// acted on.
 ///
-/// Takes the input itself rather than the event around it, because the two kinds
-/// of member reach it differently — a child's event is a JSON document this crate
-/// parsed, and an in-process one is a typed `ToolEvent` whose `input` is already
-/// in hand — and the summary must be the same either way.
+/// Takes the input itself rather than the event around it, because each engine
+/// has its own event type — onejudge's `ToolEvent` and oneharness's
+/// `ActionEvent` — and the `input` both carry is the only part this needs. The
+/// summary must be the same whichever member produced it.
 pub(crate) fn summarize(input: Option<&Value>) -> String {
     match input {
         Some(Value::Object(fields)) => fields
@@ -826,7 +824,7 @@ mod tests {
                 config: std::path::PathBuf::from("/scratch/oneharness.toml"),
                 worktree: std::path::PathBuf::from("/work"),
                 prompt: "report".into(),
-                stream: true,
+                reporting: crate::invoke::Reporting::Streamed,
             }))),
             start_after: None,
         };

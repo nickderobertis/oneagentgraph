@@ -1,5 +1,12 @@
 # The `oneharness run` boundary inventory
 
+<!-- llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] The two
+mismatches under "Follow-ups" are real, but AGENTS.md makes docs/contract.md
+approved and its corrections the planner's, never a unilateral edit — so this
+document tracks them. The gate is bidirectional
+(tests/inventory.rs::the_inventory_and_the_contract_agree_on_what_is_still_outstanding):
+it fails if either side moves without the other, so neither must stay stale. -->
+
 > **Status: converted.** A `kind: oneharness` member's turn is
 > `oneharness_core::io::run::run_supervised`, called on a thread of this process.
 > No `oneharness` process is spawned for the turn itself — the harness the turn

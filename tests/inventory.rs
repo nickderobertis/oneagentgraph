@@ -93,14 +93,12 @@ fn the_seam_the_conversion_rests_on_is_still_there() {
         "the pre-fork hook did not run"
     );
 
-    // The entry point, by signature: request, controls, and the caller's claim.
     let entry: Supervised = oneharness_core::io::run::run_supervised;
     let supervised: Option<&dyn ProcessSupervisor> = Some(&hooks);
     assert!(
         supervised.is_some(),
         "the supervisor is the caller's to pass"
     );
-    // Named so an unused binding is not what keeps the signature honest.
     let _ = entry;
 
     assert!(
@@ -229,42 +227,83 @@ fn the_status_block_names_the_version_the_manifest_takes() {
     );
 }
 
-/// The wire names the inventory restates belong to `docs/contract.md`, and its
-/// quotations of that document have to still be quotations.
+/// The inventory and `docs/contract.md` **agree on what is still outstanding**.
 ///
-/// Two of the three quoted sentences are the *stale* ones the inventory reports
-/// as a correction the contract owner still owes. That is the direction this
-/// gate is meant to run in: when the owner makes that correction, this fails, and
-/// the inventory's follow-up list has to be updated in the same change rather
-/// than left claiming a debt that has been paid.
+/// The conversion left the contract carrying two statements the code no longer
+/// matches, and correcting an approved contract is its owner's to do, not this
+/// crate's — so the inventory records each as a follow-up instead. This is the
+/// gate on that arrangement, and it is deliberately checked *both ways*: while
+/// the contract still carries a stale statement the inventory must list it as
+/// owed, and the moment the owner corrects it the inventory must stop claiming a
+/// debt that has been paid.
+///
+/// Written as an agreement rather than as "the contract still says X" on
+/// purpose. A gate asserting the quotation alone would need the contract to stay
+/// stale in order to stay green, which preserves the mismatch rather than
+/// preventing it. This one is green on either side of the correction and red
+/// only when the two documents disagree about which side of it they are on.
 #[test]
-fn the_contract_still_says_what_the_inventory_quotes_it_saying() {
-    // Both documents are hard-wrapped prose, so a quotation is matched against
+fn the_inventory_and_the_contract_agree_on_what_is_still_outstanding() {
+    // Both documents are hard-wrapped prose, so a statement is matched against
     // the reflowed text rather than against whichever line it happened to break
     // on. A rewrap on either side is not drift.
     let inventory = reflowed(INVENTORY);
     let contract = reflowed(CONTRACT);
-    for quotation in [
-        "is still `oneharness run`, a child process",
-        "neither returns the report nor accepts an event sink",
-        "when oneharness grows a non-printing run entrypoint or an event-sink parameter",
-        "onejudge's `ProviderErrorKind`, which is oneharness's own normalized `failure_kind`, \
-         mapped totally",
-    ] {
-        assert!(
-            inventory.contains(quotation),
-            "the inventory no longer quotes: {quotation}"
-        );
-        assert!(
-            contract.contains(quotation),
-            "the inventory quotes the contract on something it no longer says: {quotation}"
-        );
+    for (owed, statements) in OUTSTANDING {
+        let still_owed = inventory.contains(owed);
+        for statement in *statements {
+            assert_eq!(
+                contract.contains(statement),
+                still_owed,
+                "the contract and the inventory disagree about {owed:?}: the contract \
+                 {} say {statement:?}, and the inventory {} list it as outstanding",
+                if contract.contains(statement) {
+                    "does"
+                } else {
+                    "does not"
+                },
+                if still_owed { "does" } else { "does not" },
+            );
+        }
     }
+    assert!(
+        OUTSTANDING
+            .iter()
+            .any(|(owed, _)| inventory.contains(*owed)),
+        "the inventory lists no follow-up at all, so this gate is watching nothing \
+         — drop it with the last correction rather than leaving it green and idle"
+    );
+}
 
-    // `runner: library`'s three fields — what a single-sided member now
-    // publishes — and the three the contract scopes to a member that *was* a
-    // process, which no member is. Both are still declared types: a consumer
-    // reading an older stream still parses one.
+/// Each correction `docs/contract.md` still owes: how the inventory's follow-up
+/// list names it, and the statements in the contract that go with it.
+const OUTSTANDING: &[(&str, &[&str])] = &[
+    (
+        "`docs/contract.md`'s own sentence is now stale",
+        &[
+            "is still `oneharness run`, a child process",
+            "neither returns the report nor accepts an event sink",
+            "when oneharness grows a non-printing run entrypoint or an event-sink parameter",
+        ],
+    ),
+    (
+        "`cause` cannot name four of oneharness's failure kinds",
+        &[
+            "onejudge's `ProviderErrorKind`, which is oneharness's own normalized \
+             `failure_kind`, mapped totally",
+        ],
+    ),
+];
+
+/// The wire names both documents share still name the types this crate
+/// serializes.
+///
+/// Unlike the statements above, these are not in dispute: `runner: library`'s
+/// three fields are what a member of either kind now publishes, and the three
+/// the contract scopes to a member that *was* a process stay declared so a
+/// consumer reading an older stream still parses one.
+#[test]
+fn the_wire_names_the_inventory_restates_are_the_types_this_crate_serializes() {
     let library = Runner::Library {
         engine: "oneharness".to_owned(),
         config: "oneharness.toml".to_owned(),

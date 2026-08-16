@@ -125,66 +125,29 @@ test-doubles = []
 # watchdog against it, which asserts the dependency's behaviour through a race.
 onejudge = { version = "0.4.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
-# oneharness's own typed report/stream contract. Everything this crate reads back
-# from an `oneharness run` — the fallback chain, the per-candidate accounting,
-# the normalized failure kind — is parsed into oneharness's declarations rather
-# than guessed by field name, so an upstream change is a compile error here
-# instead of a silently-absent field.
+# oneharness's own typed report/stream contract, and — since the library
+# conversion — the engine that runs a `kind: oneharness` member's turn.
 #
-# The requirement below is the current release rather than whatever still
-# compiles, and the reason is `oneharness_core::io::run::run_supervised`:
-# `oneharness run` as a call that *returns* its report instead of printing it,
-# with an event sink, a cancel token, and — since 0.10.1 — the caller's own claim
-# on every harness child it spawns. That last one is a **compile floor** and the
-# whole reason for this bump: `ProcessSupervisor`'s `spawning`/`spawned` pair is
-# what puts each harness into the member's own process group / job object, and
-# `run_supervised` is the entry point that takes one. Below 0.10.1 neither name
-# exists, so `src/harness.rs` does not compile — which is the point. A build that
-# quietly fell back to `run` would leave the activity watchdog looking at an empty
-# tree and a killed run's paid harnesses billing, which is the regression this
-# whole conversion exists to prevent. `docs/oneharness-library.md` is the
-# boundary inventory that names every other guarantee the subprocess hop used to
-# provide and the seam that now replaces it.
+# **0.10.1 is a compile floor, not a preference.** It is the first release with
+# `io::run::run_supervised` and `io::runner::ProcessSupervisor`: the hooks that
+# put each harness child into the member's own process group / job object.
+# Without them the activity watchdog sees an empty tree and a killed run's paid
+# harnesses keep billing, so a build that could fall back to unsupervised `run`
+# is the regression to prevent — below 0.10.1 `src/harness.rs` does not compile.
+# `docs/oneharness-library.md` is the boundary inventory behind that conversion.
 #
-# 0.10.0 is that release's successor, and what it changes here is the *reading*
-# rather than the running — worth being exact about, because the two are easy to
-# confuse. Upstream, 0.10.0 makes a **precondition refusal** (the harness
-# rejecting the working directory or the input's size before it makes a request)
-# a startup failure the chain steps past, with its own `untrusted-directory` /
-# `input-too-large` reason, instead of a plain non-zero failure that stopped the
-# chain with healthy candidates untried; and it keeps a control socket address
-# inside `sun_path`'s 104/108-byte budget so a long session name cannot leave a
-# run unreachable. The API change that arrived with it is adapted in
-# `src/member.rs`: `FallThrough::reason` is the closed `FallThroughReason` enum
-# rather than free text, published through `as_str()`.
+# **Which oneharness a member meets depends on its kind**, and that is the thing
+# to know before reading a run. `kind: oneharness` meets *this* copy: it selects
+# the chain, classifies each refusal, and writes the report. `kind: onejudge`
+# meets onejudge's own copy, a semver-major behind (it asks for 0.8), because
+# onejudge drives oneharness as a library too. `interrupt` and `smoke` meet the
+# installed CLI, which is why `just`'s `oneharness-version` is a separate pin.
 #
-# Which of those decisions this pin governs changed with the conversion, and it
-# is the thing to know before reading a run. A `kind: oneharness` member's turn
-# used to be the **installed CLI's** to classify — `just`'s `oneharness-version`
-# pin — because the turn was that binary. It is this requirement's now: the turn
-# is `run_supervised`, called here, so the version below is the one that selects
-# the chain, classifies each refusal, and writes the report. The CLI pin still
-# governs the two hops that remain — `oneharness interrupt` (`src/control.rs`)
-# and the `oneharness run` onejudge starts per side per turn — so the two numbers
-# stay separate, but they no longer answer the same question.
-#
-# The cost, which is what actually needs writing down: onejudge's own requirement
-# on this crate is a semver-major behind (it asks for 0.8), so the graph carries
-# **two** copies of it. Sound because nothing crosses between them — every
-# oneharness value onejudge hands back arrives as JSON (`Report`, `FallThrough`,
-# `Usage`) and is parsed into *this* copy's types — and `cargo deny`'s
-# `multiple-versions = "allow"` records the choice. It collapses to one when
-# onejudge raises its own; until then, do not thread a `oneharness_core::` value
-# through a `onejudge::` signature, because the two spellings are different types
-# and the compiler will say so.
-#
-# The half of that split worth knowing before reading a run: since onejudge 0.3.9
-# it drives oneharness as a *library* too, so a two-party member's harness turn is
-# classified by onejudge's 0.8 copy and not by this 0.10 one. There are still
-# three oneharness builds in a graph — this one, onejudge's, and the installed
-# CLI — and which of them a member meets is now decided by the member's kind:
-# `kind: oneharness` meets this one, `kind: onejudge` meets onejudge's, and
-# `interrupt` meets the CLI.
+# Two copies in the graph is sound because nothing crosses between them: every
+# oneharness value onejudge hands back arrives as JSON and is parsed into this
+# copy's types. `cargo deny`'s `multiple-versions = "allow"` records the choice.
+# Do not thread a `oneharness_core::` value through a `onejudge::` signature —
+# the two spellings are different types, and the compiler will say so.
 oneharness-core = "0.10.1"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

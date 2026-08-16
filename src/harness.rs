@@ -1,69 +1,12 @@
 //! Running a single-sided member through oneharness's library, in this process.
 //!
 //! A `kind: oneharness` member's turn is `oneharness_core::io::run::run_supervised`
-//! called on a thread of this process. There is no `oneharness` binary in the
-//! chain for the turn itself — the harness the turn selects is still a child
-//! process, and it is oneharness that starts it — so the member has no argv, no
-//! exit status, and no stderr of its own, exactly as a two-party member has none.
+//! on a thread of this process, so the member has no argv, exit status or stderr
+//! of its own. [`crate::judge`] is this module for the other member kind and has
+//! the same shape; both reach the shared settle and death in [`crate::member`].
 //!
-//! [`crate::judge`] is the same module for the other member kind, and the two are
-//! deliberately the same shape: open the member's group, drive the engine on a
-//! thread, supervise it with the two watchdogs, and reach the shared settle and
-//! the shared death in [`crate::member`].
-//!
-//! `docs/oneharness-library.md` is the boundary inventory this conversion was
-//! written against — every guarantee the `oneharness run` subprocess used to
-//! provide, with the seam that replaces it, per platform. What follows is the
-//! short form of the three that are this module's own.
-//!
-//! # Grouping, which is why the engine takes a supervisor at all
-//!
-//! A spawned turn was a subtree a watchdog could see and a kill could reap.
-//! In-process, oneharness spawns the harness, so the only way this crate's
-//! [`crate::scratch::Group`] can hold it is a hook between the `Command` and the
-//! `Child` — `oneharness_core`'s [`ProcessSupervisor`], which `HarnessSpawn`
-//! implements here and which is exactly the two methods [`crate::judge`] hands
-//! onejudge. Without it [`crate::scratch::work`] would see an empty tree and
-//! condemn a member whose harness is working, and [`crate::scratch::reap`] would
-//! report a cancelled member that is still billing.
-//!
-//! **Which side tears down what**, because the two platforms answer differently
-//! and the division is upstream's rather than this crate's:
-//!
-//! * **POSIX** — the group *is* the [`crate::scratch::SCRATCH_ENV`] stamp, fixed
-//!   at `exec` and inherited by every descendant. `spawning` puts it on the
-//!   harness's own `Command`, so membership needs nothing of the child itself.
-//!   Nothing here re-parents a process group, so oneharness keeps owning the
-//!   teardown of the tree it spawned, and this crate's reap reaches the same
-//!   processes through the stamp.
-//! * **Windows** — the group is a named job object, and joining one needs the
-//!   `Child`. `spawned` is called while the harness is still `CREATE_SUSPENDED`,
-//!   which is what makes the assignment race-free: it cannot yet have started a
-//!   descendant outside the job. A job assignment nests, so the harness is in
-//!   oneharness's job *and* this member's, and either side's teardown ends it.
-//!   The resume is oneharness's — `crate::scratch::Group::join` is the half of
-//!   adoption that does not perform it.
-//!
-//! A harness that could not be grouped is one no cancel could reach, so it is
-//! not left running: the hook cannot refuse a spawn (upstream's methods return
-//! nothing), so it cancels the run instead and the member dies naming the reason.
-//!
-//! # Teardown, and what a condemned member costs
-//!
-//! [`oneharness_core::io::run::RunControls::cancel`] is the whole of it: cancelling
-//! terminates each harness tree through the same `Finish::Terminate` path a
-//! timeout takes, and the run still returns a report. So a watchdog here does not
-//! have to escalate the way [`crate::judge`] does — it cancels, reaps whatever the
-//! stamp still finds, and waits a bounded grace for the engine to answer.
-//!
-//! # Isolation of failure
-//!
-//! A crashed child process could not take the graph down; an in-process panic
-//! can. The answer is [`crate::judge`]'s, reused: the engine runs on
-//! `std::thread::spawn` and answers over an `mpsc::channel`, so a panic drops the
-//! sender and `RecvTimeoutError::Disconnected` becomes *that member's*
-//! `provider-failure` death while every other member keeps running.
-
+//! `docs/oneharness-library.md` is the boundary inventory behind the conversion.
+//! Read it before changing what this module hands the engine.
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -108,7 +51,10 @@ const TEARDOWN_POLL: Duration = Duration::from_millis(100);
 /// it.
 pub(crate) const ONEHARNESS_ENGINE: &str = "oneharness";
 
-/// Run one single-sided member to its end, publishing every envelope it produces.
+/// Run one single-sided member to its end.
+///
+/// Returns only when the member has settled or been condemned: the engine runs
+/// on its own thread, and this call is the supervision around it.
 #[must_use]
 pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
     // Opened before the engine is driven for the reason [`crate::judge`] opens
@@ -139,14 +85,18 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
 
-    {
+    let engine = {
         let (emitter, activity, cancel, group) = (
             emitter.clone(),
             Arc::clone(&activity),
             cancel.clone(),
             Arc::clone(&group),
         );
-        std::thread::spawn(move || {
+        // `Builder`, not `thread::spawn`: a host that cannot give this run one
+        // more thread is a recoverable refusal, and the plain spawn answers it by
+        // panicking — which would take the whole graph down over one member. A
+        // run of many members is exactly where that limit is met.
+        std::thread::Builder::new().spawn(move || {
             let supervisor = HarnessSpawn {
                 group,
                 cancel: cancel.clone(),
@@ -157,7 +107,7 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 activity,
                 started,
                 cancel: cancel.clone(),
-                turn: 0,
+                opened: false,
             };
             let outcome = run_supervised(
                 &request,
@@ -181,8 +131,21 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 outcome: outcome.map_err(|err| err.to_string()),
                 ungrouped: supervisor.ungrouped(),
             });
-        });
+        })
+    };
+    // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey
+    // because no input a user can give reaches it: it is taken only when the OS
+    // refuses a thread, which is a host resource limit rather than anything a
+    // graph, a task or a config can ask for, and no seam this crate sanctions
+    // fakes `pthread_create`. What it decides is the direction of an unreachable
+    // failure, and it is the safe one — nothing was spawned, so the member is
+    // refused rather than reported as running.
+    if let Err(err) = engine {
+        let reason = format!("cannot start this member's engine thread: {err}");
+        emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+        return Outcome::Unstartable(reason);
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     supervise(&rx, &cancel, emitter, bounds, scratch, started, &activity)
 }
@@ -216,10 +179,15 @@ fn supervise(
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
             Ok(answer) => return finish(answer, emitter, scratch),
+            // A sender dropped without an answer means the engine thread
+            // panicked: this member's failure, not the graph's.
+            //
+            // llmlint: ignore-block[changed_behavior_has_e2e] nothing a graph,
+            // task or config can ask for makes `oneharness_core` panic, so this
+            // arm has no journey; forcing one would mean replacing the engine it
+            // protects. Covered by
+            // `tests::a_panicking_engine_kills_its_own_member_and_not_the_process`.
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                // The engine thread is gone without an answer, which only happens
-                // if it panicked. That is this member's failure, reported as one,
-                // rather than a run this crate takes down with it.
                 return died(
                     emitter,
                     Rule::ProviderFailure,
@@ -227,6 +195,7 @@ fn supervise(
                     "the oneharness engine ended without answering",
                 );
             }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
@@ -245,7 +214,6 @@ fn supervise(
     }
 }
 
-/// What the engine thread sends back.
 struct Answer {
     /// The run, or the reason oneharness refused the *request* — a shape it will
     /// not honour, reported before anything was spawned. A harness's own
@@ -258,28 +226,15 @@ struct Answer {
     ungrouped: Option<String>,
 }
 
-/// This crate's claim on every harness process oneharness starts for this member:
-/// put it in the member's [`crate::scratch::Group`].
+/// Puts every harness oneharness starts for this member into the member's
+/// [`crate::scratch::Group`] — the same pair of moments
+/// [`crate::judge::MemberSpawn`] hands onejudge.
 ///
-/// The group is what `cancel --kill`, the reap, and the activity watchdog reach a
-/// member's tree through, and in-process the harness is spawned by this process
-/// rather than into a group of its own. It is the same pair of moments
-/// [`crate::judge::MemberSpawn`] hands onejudge, against the same
-/// [`crate::scratch::Group`] — one seam, two engines.
-///
-/// **Neither hook can refuse a spawn**: upstream's methods return nothing, by
-/// design, because the run owns the child's lifetime. So a grouping failure
-/// cancels the run instead. That is the same direction the other two call sites
-/// choose — a harness this process cannot reach is not left running — reached by
-/// the only lever a hook has. oneharness still owns the tree it spawned, so the
-/// cancellation is what ends the ungrouped harness; the reason is kept here and
-/// becomes the member's death.
+/// Neither hook can refuse a spawn (upstream's methods return nothing), so a
+/// grouping failure cancels the run instead and is kept for the death it becomes.
 struct HarnessSpawn {
-    /// The group every harness this member runs joins.
     group: Arc<crate::scratch::Group>,
-    /// Cancels the run when one could not be made to join it.
     cancel: CancelToken,
-    /// The first grouping failure, kept for the death it becomes.
     ungrouped: Mutex<Option<String>>,
 }
 
@@ -301,7 +256,6 @@ impl HarnessSpawn {
         self.cancel.cancel();
     }
 
-    /// The grouping failure this run met, if it met one.
     fn ungrouped(&self) -> Option<String> {
         self.ungrouped
             .lock()
@@ -340,18 +294,17 @@ impl ProcessSupervisor for HarnessSpawn {
 /// events the `--stream` lines carried, arriving typed instead of as a document
 /// this crate parsed back apart.
 struct Events {
-    /// This member's labelled emitter.
     emitter: Emitter,
-    /// When the member last did something, as the watchdogs count it.
     activity: Arc<AtomicU64>,
-    /// When the member started, which the count above is relative to.
     started: Instant,
     /// Answered as [`SinkStep::Stop`] once cancelled, which is oneharness's own
     /// documented short-circuit — a condemned member stops at its next event
     /// rather than only when the terminate path reaches it.
     cancel: CancelToken,
-    /// The turn currently open; see [`Events::event`] for why it is one.
-    turn: u64,
+    /// Whether this member's one turn has been opened. Not a counter: an
+    /// `oneharness run` is a single turn, so the only two states are before the
+    /// first event and after it — see [`Events::event`].
+    opened: bool,
 }
 
 impl EventSink for Events {
@@ -362,9 +315,9 @@ impl EventSink for Events {
         // envelope carries no turn index — the NDJSON reader this replaces
         // defaulted every event to turn 1 for exactly that reason. So the first
         // event a member publishes opens its turn and nothing renumbers it.
-        if self.turn == 0 {
-            self.turn = 1;
-            emit_turn_started(&self.emitter, self.turn);
+        if !self.opened {
+            self.opened = true;
+            emit_turn_started(&self.emitter, THE_ONLY_TURN);
         }
         ingest(event, &self.emitter);
         if self.cancel.is_cancelled() {
@@ -375,7 +328,12 @@ impl EventSink for Events {
     }
 }
 
-/// Publish the envelope that opens a turn.
+/// The turn index every event of a single-sided member's run is attributed to.
+///
+/// `oneharness run` is one turn and its stream envelope carries no index, so
+/// this is the number the NDJSON reader this replaces defaulted to.
+const THE_ONLY_TURN: u64 = 1;
+
 fn emit_turn_started(emitter: &Emitter, turn: u64) {
     emitter.emit(
         EventKind::TurnStarted,
@@ -406,7 +364,8 @@ fn ingest(event: &ActionEvent, emitter: &Emitter) {
     );
 }
 
-/// Settle or condemn a member whose engine answered.
+/// An answered run is not automatically a settled member: a grouping failure or
+/// a non-zero exit outranks whatever report came back with it.
 fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
     let Answer { outcome, ungrouped } = answer;
     let outcome = match outcome {
@@ -435,15 +394,14 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
         return died(
             emitter,
             Rule::ProviderFailure,
-            // `unclassified` on purpose. oneharness classifies each result with
-            // its own `failure_kind`, but that set is wider than the `cause`
-            // vocabulary `docs/contract.md` closes over — `session_not_found`,
-            // `tool_deferred`, `untrusted_directory` and `input_too_large` have
-            // no spelling there — and a partial map would quietly report four of
-            // them as something they are not. Naming the class needs those
-            // values, which is the contract owner's to add; until then the
-            // summary below says which harnesses did not succeed, which is what
-            // the stderr tail this replaces was read for.
+            // Four of oneharness's eight `FailureKind`s have no `cause` in
+            // `docs/contract.md`, so the honest answer inside that closed
+            // vocabulary is `unclassified`; the summary below names the harness.
+            //
+            // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] adding
+            // those four causes is the contract owner's, not this crate's. The
+            // gap is a tracked follow-up in `docs/oneharness-library.md`, gated
+            // both ways by `tests/inventory.rs`.
             Cause::Unclassified,
             &outcome.failure_summary.unwrap_or_else(|| {
                 format!("the turn exited {} without a report", outcome.exit_code)
@@ -476,7 +434,6 @@ fn advance(emitter: &Emitter, fallback: Option<&FallbackReport>) {
     }
 }
 
-/// One payload struct as the map the wire carries.
 fn as_payload(advanced: &FallbackAdvanced) -> Map<String, Value> {
     match serde_json::to_value(advanced) {
         Ok(Value::Object(map)) => map,
@@ -526,6 +483,10 @@ fn condemn(
             Err(mpsc::RecvTimeoutError::Timeout) => reaped += crate::scratch::reap(scratch),
         }
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] reaching this sentence
+    // means holding `oneharness_core` past its own bounded teardown, which would
+    // mean replacing the layer under test. Covered by
+    // `tests::a_condemned_member_whose_engine_never_answers_is_still_reported_dead`.
     died(
         emitter,
         rule,
@@ -537,9 +498,9 @@ fn condemn(
             TEARDOWN_GRACE.as_secs()
         ),
     )
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
-/// Report a member that died, and say which rule found it and what caused it.
 fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
     let (detail, truncated) = bound_text(detail.trim());
     let payload = MemberDied {
@@ -558,7 +519,6 @@ fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
     Outcome::Died(Death { rule, payload })
 }
 
-/// Milliseconds since the member started, as the watchdogs count them.
 fn elapsed_millis(since: Instant) -> u64 {
     u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -570,7 +530,6 @@ fn elapsed_millis(since: Instant) -> u64 {
 /// `docs/oneharness-library.md`'s table, and `tests/inventory.rs` holds this
 /// literal's field names against it.
 impl HarnessLaunch {
-    /// This member's turn, as the request oneharness takes.
     pub(crate) fn request(&self) -> RunRequest {
         RunRequest {
             config: Some(self.config.clone()),
@@ -580,10 +539,10 @@ impl HarnessLaunch {
             cwd: Some(self.worktree.clone()),
             events: true,
             // The member's own resolved config decided this — see
-            // `crate::invoke::HarnessLaunch::stream`. `Some` either way, because
-            // a flag beat config on the argv this replaces and leaving it `None`
-            // would hand the decision back to a layer that already made it.
-            stream: Some(self.stream),
+            // `crate::invoke::Reporting`. `Some` either way, because a flag beat
+            // config on the argv this replaces and leaving it `None` would hand
+            // the decision back to a layer that already made it.
+            stream: Some(self.reporting.streams()),
             prompt: vec![self.prompt.clone()],
             ..RunRequest::default()
         }
@@ -598,6 +557,7 @@ mod tests {
 
     use super::*;
     use crate::event::Envelope;
+    use crate::invoke::Reporting;
 
     /// A sink a test can read its own events back out of.
     #[derive(Clone, Default)]
@@ -659,7 +619,7 @@ mod tests {
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             cancel: CancelToken::new(),
-            turn: 0,
+            opened: false,
         };
         for _ in 0..3 {
             assert!(matches!(
@@ -711,7 +671,7 @@ mod tests {
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             cancel: cancel.clone(),
-            turn: 0,
+            opened: false,
         };
         assert!(matches!(
             sink.event("claude-code", &call(Some("bash"))),
@@ -869,7 +829,7 @@ mod tests {
             config: std::path::PathBuf::from("/scratch/oneharness.toml"),
             worktree: std::path::PathBuf::from("/work/api"),
             prompt: "report in".to_string(),
-            stream: true,
+            reporting: Reporting::Streamed,
         };
         let request = launch.request();
         assert_eq!(
@@ -889,7 +849,7 @@ mod tests {
         // A member whose own config asked for a buffered report carries that
         // decision rather than deferring it back to the layer that made it.
         let buffered = HarnessLaunch {
-            stream: false,
+            reporting: Reporting::Buffered,
             ..launch
         };
         assert_eq!(buffered.request().stream, Some(false));

@@ -142,12 +142,11 @@ pub struct HarnessLaunch {
     pub worktree: PathBuf,
     /// The task prose this member's turn is given.
     pub prompt: String,
-    /// Whether this member's turn publishes its events as they happen, which is
-    /// **its own resolved config's** decision — see this module's `reporting`.
-    /// Carried as the
-    /// decision rather than re-derived at the call, because a run that asked the
-    /// config twice could answer differently the second time.
-    pub stream: bool,
+    /// How this member's turn reports what it did, which is **its own resolved
+    /// config's** decision — see [`Reporting`]. Carried as the decision rather
+    /// than re-derived at the call, because a run that asked the config twice
+    /// could answer differently the second time.
+    pub reporting: Reporting,
 }
 
 /// Everything driving one two-party member in this process needs.
@@ -278,7 +277,7 @@ pub fn build(
                     config: path,
                     worktree: member_dir(member.dir.as_deref(), context),
                     prompt: member_task(member.task.as_deref(), context)?,
-                    stream: reporting(&config, &member.oneharness_config.0)?.streams(),
+                    reporting: reporting(&config, &member.oneharness_config.0)?,
                 })),
                 persona: persona_label,
                 env: Vec::new(),
@@ -480,7 +479,7 @@ fn separator_of(base: &str) -> char {
 /// one value with two states rather than a flag some later branch could read as
 /// neither or both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Reporting {
+pub enum Reporting {
     /// Events published to the run's sink as they occur
     /// (`RunRequest::stream: Some(true)`).
     Streamed,
@@ -495,8 +494,10 @@ enum Reporting {
 }
 
 impl Reporting {
-    /// Whether this shape publishes its events as they happen.
-    fn streams(self) -> bool {
+    /// Whether this shape publishes its events as they happen, which is what
+    /// `RunRequest::stream` takes.
+    #[must_use]
+    pub fn streams(self) -> bool {
         matches!(self, Self::Streamed)
     }
 }
@@ -1954,7 +1955,11 @@ mod tests {
         ] {
             std::fs::write(dir.path().join("oneharness.toml"), &config).expect("chain");
             let launch = harness_launch(&member, &context(dir.path(), &scratch));
-            assert_eq!(launch.stream, streams, "{config:?} produced {launch:?}");
+            assert_eq!(
+                launch.reporting.streams(),
+                streams,
+                "{config:?} produced {launch:?}"
+            );
             // Carried into the request as a decision in both directions, never
             // as `None` — which would hand it back to the config layer that has
             // already answered.
