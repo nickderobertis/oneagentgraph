@@ -605,8 +605,10 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
                 {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
         }));
     }
-    // Decided before anything is emitted: a turn this process cannot answer must
-    // not first publish half of one.
+    // Resolved before the terminal line rather than inside it: a turn this
+    // process cannot answer publishes no `result` at all, which is what a
+    // harness that failed looks like — never a `result` carrying whatever an
+    // unreadable file left behind.
     let answer = match answer(prompt) {
         Ok(answer) => answer,
         Err(reason) => {
@@ -627,10 +629,13 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
 /// Whether a turn was one this double could take.
 ///
 /// [`Answered::No`] is a journey's own mistake — an answer file that is not
-/// there — and it reaches the caller so the process exits on it. A double that
-/// exited 0 having published nothing would be classified by oneharness as a
-/// harness that ran and said nothing, which is a journey failing several layers
-/// away from the sentinel that caused it.
+/// there — and it is returned rather than swallowed so the single-sided path can
+/// exit on it: a double that exited 0 having published nothing reaches oneharness
+/// as a harness that ran and said nothing, which is a journey failing several
+/// layers away from the sentinel that caused it. A **controlled** turn runs on a
+/// thread of its own and cannot decide this process's exit code — its loop ends
+/// when oneharness closes stdin — so there it is the stderr line that says what
+/// happened, and the turn that published no result is what oneharness classifies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answered {
     /// The turn published its terminal result.
