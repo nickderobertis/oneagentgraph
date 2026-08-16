@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.18](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.17...v0.2.18) - 2026-08-16
+
+### Added
+
+- drive a single-sided member's turn through the oneharness library ([#50](https://github.com/nickderobertis/oneagentgraph/pull/50))
+
 ## [0.2.16](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.15...v0.2.16) - 2026-08-16
 
 ### Fixed
