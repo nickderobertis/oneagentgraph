@@ -952,12 +952,26 @@ fn fallback_advances(report: Option<&Value>) -> Vec<Map<String, Value>> {
                     )
                     .ok()
                 })
+                // llmlint: ignore-block[changed_behavior_has_e2e] the narrowing
+                // this arm gained with oneharness-core 0.10 — `reason` is that
+                // crate's closed enum now, so a candidate naming a
+                // classification outside the set is dropped by the `from_value`
+                // above — has no journey because no real oneharness can produce
+                // one: the set is exhaustive for the release this crate links,
+                // and a wider one arrives with a report schema bump, which is a
+                // future build's document, not a run any flag or fake here can
+                // ask for. The reachable half — every classification a chain
+                // does emit, published with its identity — is driven through the
+                // CLI in tests/e2e/selection.rs.
                 .map(|candidate| {
                     payload([
                         ("identity", Value::String(candidate.harness)),
-                        ("reason", Value::String(candidate.reason)),
+                        // Serialized by the enum, so the token on the wire is
+                        // oneharness's spelling rather than one chosen here.
+                        ("reason", Value::String(candidate.reason.as_str().into())),
                     ])
                 })
+                // llmlint: ignore-end[changed_behavior_has_e2e]
                 .collect()
         })
         .unwrap_or_default()
@@ -1438,16 +1452,21 @@ mod tests {
     /// hole in it, and it does not take the readable candidates beside it down.
     ///
     /// The document is another process's stdout, so every shape here is one a
-    /// future oneharness could emit: a missing field, and a field that is JSON but
-    /// not the text the contract says a consumer displays.
+    /// future oneharness could emit: a missing field, a field that is JSON but not
+    /// the text the contract says a consumer displays, and — since oneharness-core
+    /// 0.10 made `reason` a closed enum — a reason that *is* text but names no
+    /// classification in the set this build knows. That last one is the version's
+    /// own rule: a new reason arrives with a report schema bump, so a build
+    /// predating it cannot claim to have classified what it is reading.
     #[test]
-    fn a_fallback_candidate_that_is_not_two_strings_is_not_published() {
+    fn a_fallback_candidate_that_is_not_an_identity_and_a_known_reason_is_not_published() {
         let report = serde_json::json!({
             "fallback": {"fell_through": [
                 {"reason": "auth"},
                 {"harness": "codex"},
                 {"harness": 7, "reason": "quota"},
                 {"harness": "codex", "reason": {"code": 429}},
+                {"harness": "codex", "reason": "a-reason-from-a-newer-oneharness"},
                 {"harness": "claude-code", "reason": "quota"},
             ]}
         });
@@ -1455,6 +1474,34 @@ mod tests {
         assert_eq!(advances.len(), 1, "{advances:?}");
         assert_eq!(advances[0]["identity"], Value::from("claude-code"));
         assert_eq!(advances[0]["reason"], Value::from("quota"));
+    }
+
+    /// The reasons a **precondition refusal** classifies as, published as the
+    /// tokens oneharness spells them with.
+    ///
+    /// These two are what oneharness-core 0.10 added: a harness refusing the
+    /// working directory or the input's size before making a request now falls the
+    /// chain through to the next candidate instead of ending it, so they are
+    /// reasons a report can carry and a consumer joins on. Pinned as the tokens
+    /// rather than the variants because the token is what crosses the wire.
+    #[test]
+    fn a_precondition_refusal_publishes_its_own_reason() {
+        let report = serde_json::json!({
+            "fallback": {"ran": "codex", "fell_through": [
+                {"harness": "claude-code", "reason": "untrusted-directory"},
+                {"harness": "cursor-agent", "reason": "input-too-large"},
+            ]}
+        });
+        let advances = fallback_advances(Some(&report));
+        let reasons: Vec<&Value> = advances.iter().map(|a| &a["reason"]).collect();
+        assert_eq!(
+            reasons,
+            vec![
+                &Value::from("untrusted-directory"),
+                &Value::from("input-too-large")
+            ],
+            "{advances:?}"
+        );
     }
 
     /// The two programs' exit codes are read by their own contracts. `onejudge`
