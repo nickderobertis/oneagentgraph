@@ -422,7 +422,16 @@ fn anchored(base_dir: &Path, written: &str) -> Option<String> {
     let base = if is_anchored(base_dir) {
         base_dir.to_path_buf()
     } else {
-        std::path::absolute(base_dir).unwrap_or_else(|_| base_dir.to_path_buf())
+        // An empty base is a config named by a bare filename — `Path::parent`
+        // answers `""` for one — so the directory it was written in is the
+        // directory this process runs in. Named as `.` because that is the same
+        // directory and [`std::path::absolute`] refuses an empty path.
+        let base = if base_dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            base_dir
+        };
+        std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf())
     };
     let base = base.display().to_string();
     let separator = separator_of(&base).to_string();
@@ -1891,6 +1900,34 @@ mod tests {
             )
             .expect("stamped"),
             remote,
+        );
+    }
+
+    /// A config named by a bare filename was written in the directory this
+    /// process runs in, and a relative path beside it is anchored there.
+    ///
+    /// `Path::parent` answers `""` for such a ref — `oneharness_config:
+    /// oneharness.toml` beside a graph named the same way — and an empty
+    /// directory is the one place a *textual* splice has nothing to splice onto:
+    /// it would produce a rooted path pointing at the filesystem root. The
+    /// expectation is built with `join` rather than typed out, because the claim
+    /// is the directory, and its spelling belongs to whichever platform is
+    /// running this.
+    #[test]
+    fn a_path_beside_a_config_named_by_a_bare_filename_is_anchored_to_this_process() {
+        let stamped = stamp_side(
+            "harnesses = [\"claude-code\"]\nhistory_dir = \"history\"\n",
+            "oneharness.toml",
+            Some(Path::new("")),
+            Side::default(),
+        )
+        .expect("stamped");
+        let document: DocumentMut = stamped.parse().expect("still TOML");
+        let here = std::env::current_dir().expect("a working directory");
+        assert_eq!(
+            document["history_dir"].as_str(),
+            Some(here.join("history").display().to_string().as_str()),
+            "{stamped}"
         );
     }
 
