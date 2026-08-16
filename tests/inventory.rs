@@ -4,10 +4,16 @@
 //! rests that claim on names it does not own: `oneharness-core`'s public API on
 //! one side, `docs/contract.md`'s wire schema and this crate's manifest on the
 //! other. Neither copy can be generated — the document is prose written for a
-//! reader — so this suite is the drift gate instead. Every upstream field the
+//! reader — so this suite holds it against them. Every upstream field the
 //! document names is resolved by the compiler against the real type, every wire
 //! name it restates is built as the type this crate serializes, and the version
 //! it credits is read out of `Cargo.toml`.
+//!
+//! What this suite deliberately does **not** do is gate the launch-boundary
+//! sentence `docs/contract.md` and the implementation now disagree about. That
+//! disagreement is a blocker recorded in the inventory, and a token-presence
+//! check across the two documents would stay green through it — which would read
+//! as reconciliation while reconciling nothing.
 //!
 //! The load-bearing one is [`the_seam_the_conversion_rests_on_is_still_there`]:
 //! the grouping hooks are the entire reason this conversion was safe to make, and
@@ -230,7 +236,7 @@ fn the_status_block_names_the_version_the_manifest_takes() {
 /// The wire names both documents share still name the types this crate
 /// serializes.
 ///
-/// Unlike the statements above, these are not in dispute: `runner: library`'s
+/// A vocabulary check, not a boundary gate: `runner: library`'s
 /// three fields are what a member of either kind now publishes, and the three
 /// the contract scopes to a member that *was* a process stay declared so a
 /// consumer reading an older stream still parses one.

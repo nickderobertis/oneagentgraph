@@ -1500,11 +1500,17 @@ fn tick_bytes_written(path: &Path) -> u64 {
 
 /// The first `owner.lock` under a state directory, once a run has claimed one.
 fn first_lock(state: &Path) -> Option<std::path::PathBuf> {
+    // A lock that *exists* is not yet a lock that records anything:
+    // `scratch::Owned::claim` creates the file, takes the kernel lock, and only
+    // then writes the identity into it. A caller polling for existence can read
+    // the empty file in between and see a claim that identifies nobody — which
+    // is a race in the observer, not in the claim. So the file counts once it has
+    // content, and a caller waiting on this waits for a claim it can read.
     let lock = std::fs::read_dir(state)
         .ok()?
         .flatten()
         .map(|entry| entry.path().join("owner.lock"))
-        .find(|path| path.exists())?;
+        .find(|path| std::fs::metadata(path).is_ok_and(|recorded| recorded.len() > 0))?;
     Some(lock)
 }
 

@@ -5,8 +5,11 @@
 //! of its own. [`crate::judge`] is this module for the other member kind and has
 //! the same shape; both reach the shared settle and death in [`crate::member`].
 //!
-//! `docs/oneharness-library.md` is the boundary inventory behind the conversion.
-//! Read it before changing what this module hands the engine.
+//! What this module hands the engine is constrained by guarantees the deleted
+//! subprocess used to provide — grouping, teardown, cwd resolution, panic
+//! containment — each with its own seam here and its reasoning in
+//! `docs/oneharness-library.md`, which also records the blockers this conversion
+//! left open.
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,6 +58,11 @@ pub(crate) const ONEHARNESS_ENGINE: &str = "oneharness";
 ///
 /// Returns only when the member has settled or been condemned: the engine runs
 /// on its own thread, and this call is the supervision around it.
+//
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] accurate, and open
+// as blocker 1 in `docs/oneharness-library.md`: correcting the contract sentence
+// this contradicts is the owner's, an edit was reverted on that rule, and no
+// coupling test stands in for the approval.
 #[must_use]
 pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
     // Opened before the engine is driven for the reason [`crate::judge`] opens

@@ -556,8 +556,17 @@ fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
         "a directory nothing downstream resolves was published unresolved: \
          {published:?}"
     );
+    // Compared canonically, because the two sides are spelled by different
+    // parties: `state` is this test's own path resolved, while `published` is the
+    // one the run built from `ONEAGENTGRAPH_STATE_DIR` as it was handed it. A
+    // host whose temporary directory is a symlink spells those differently and
+    // means the same directory — macOS's `/var` → `/private/var` is the case that
+    // fails a string comparison here while nothing is wrong.
+    let published = std::path::Path::new(&published)
+        .canonicalize()
+        .expect("the published worktree is a directory that exists");
     assert!(
-        std::path::Path::new(&published).starts_with(&state),
+        published.starts_with(&state),
         "the published worktree is not the member's scratch: {published:?}"
     );
     // And resolved as it always was, against the member's own scratch. The two

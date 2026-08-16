@@ -129,25 +129,18 @@ onejudge = { version = "0.4.0", features = ["cli"] }
 # conversion — the engine that runs a `kind: oneharness` member's turn.
 #
 # **0.10.1 is a compile floor, not a preference.** It is the first release with
-# `io::run::run_supervised` and `io::runner::ProcessSupervisor`: the hooks that
-# put each harness child into the member's own process group / job object.
-# Without them the activity watchdog sees an empty tree and a killed run's paid
-# harnesses keep billing, so a build that could fall back to unsupervised `run`
-# is the regression to prevent — below 0.10.1 `src/harness.rs` does not compile.
-# `docs/oneharness-library.md` is the boundary inventory behind that conversion.
+# `io::run::run_supervised` and `io::runner::ProcessSupervisor`, the hooks that
+# put each harness child into the member's process group / job object. Without
+# them the activity watchdog sees an empty tree and a killed run's paid harnesses
+# keep billing, so below 0.10.1 `src/harness.rs` deliberately does not compile.
 #
-# **Which oneharness a member meets depends on its kind**, and that is the thing
-# to know before reading a run. `kind: oneharness` meets *this* copy: it selects
-# the chain, classifies each refusal, and writes the report. `kind: onejudge`
-# meets onejudge's own copy, a semver-major behind (it asks for 0.8), because
-# onejudge drives oneharness as a library too. `interrupt` and `smoke` meet the
-# installed CLI, which is why `just`'s `oneharness-version` is a separate pin.
-#
-# Two copies in the graph is sound because nothing crosses between them: every
-# oneharness value onejudge hands back arrives as JSON and is parsed into this
-# copy's types. `cargo deny`'s `multiple-versions = "allow"` records the choice.
-# Do not thread a `oneharness_core::` value through a `onejudge::` signature —
-# the two spellings are different types, and the compiler will say so.
+# Two copies of this crate are in the graph: onejudge asks for 0.8 and drives
+# oneharness itself. Sound because nothing crosses between them — every value
+# onejudge hands back arrives as JSON and is parsed into this copy's types — and
+# `cargo deny`'s `multiple-versions = "allow"` records the choice. Do not thread a
+# `oneharness_core::` value through a `onejudge::` signature; they are different
+# types and the compiler will say so. `docs/oneharness-library.md` has the rest,
+# including which oneharness each member kind meets.
 oneharness-core = "0.10.1"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

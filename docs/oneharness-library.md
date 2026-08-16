@@ -1,5 +1,9 @@
 # The `oneharness run` boundary inventory
 
+<!-- llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] Accurate and
+open as blocker 1 below: correcting docs/contract.md is the contract owner's, and
+an edit made here was reverted on that rule. No coupling test, by design. -->
+
 
 > **Status: converted.** A `kind: oneharness` member's turn is
 > `oneharness_core::io::run::run_supervised`, called on a thread of this process.
@@ -241,16 +245,68 @@ that was one", and none is.
 Everything else is the same stream. Both `runner` values remain declared types —
 a consumer that reads `process` still parses one.
 
-**`docs/contract.md` was corrected with this change**, in one place: the bullet
-describing how a `kind: oneharness` member is launched. It said the member "is
-still `oneharness run`, a child process" and named its own sunset — "the hop
-collapses when oneharness grows a non-printing run entrypoint or an event-sink
-parameter" — and that condition is met, so leaving it would have been a knowingly
-false statement in the document this repository treats as the source of truth.
-The edit is confined to that description. No interface moved: `runner:
-library|process`, the `engine` that tells the two kinds apart, the `cause` set,
-and `member-died`'s three process-scoped facts are all exactly as they were,
-which is why the conversion needed nothing of the schema.
+**`docs/contract.md` is unedited**, and one sentence in it is now false as a
+result — see the blockers below. No *interface* moved, which is why the
+conversion needed nothing of the schema: `runner: library|process`, the `engine`
+that tells the two kinds apart, the `cause` set, and `member-died`'s three
+process-scoped facts are all exactly as they were.
+
+## Blockers
+
+Neither is resolvable from inside this crate.
+
+**1. `docs/contract.md` states something the code contradicts, and correcting it
+needs the contract owner.** The launch bullet says a `kind: oneharness` member
+"is still `oneharness run`, a child process", resting that on oneharness's
+library surface "neither returns the report nor accepts an event sink", and names
+its own sunset: "the hop collapses when oneharness grows a non-printing run
+entrypoint or an event-sink parameter". The evidence that the sentence is now
+false is the code beside it — `src/harness.rs` calls
+`oneharness_core::io::run::run_supervised`, which returns `RunOutcome` and takes
+`RunControls::events` — and `tests/e2e/dispatch.rs`'s
+`a_single_sided_members_turn_spawns_no_oneharness_process`, which settles a member
+with `ONEAGENTGRAPH_ONEHARNESS_BIN` pointing at a binary that does not exist.
+A correction was written and then **reverted**, because AGENTS.md says the
+approved contract "is not edited to match the code" and that changing it "is a
+proposal to the planner who owns that contract, never a unilateral edit". What
+unblocks it is that planner approving the one-bullet prose change; it is a
+description of which process runs a member, not an interface change, and the
+sunset condition the bullet itself names has been met.
+
+**2. The panic-containment criterion has no real-interface journey, because
+nothing user-reachable panics.** The requirement is a member turn driven through
+the compiled binary whose library path panics, proving that member dies while the
+graph survives. The `RunRequest` this crate builds is a closed template — only the
+config's content, the directory, the prompt text and one boolean vary with graph
+input — and every layer between that input and the engine is total: `bound_detail`
+counts `chars`, `summarize` matches every `Value` shape, `Emitter` holds a
+poison-tolerant lock, and `oneharness_core` documents request problems as
+`OneharnessError` and harness behaviour as a report, never a panic. So no graph,
+task or config reaches the arm. Driving one would need a fault-injection seam in
+the production path, and AGENTS.md allows exactly one fake — "the paid harness
+process, at oneharness's own `ONEHARNESS_BIN_<ID>` binary override. Everything
+else in a journey is real" — which is an invariant rather than something to widen
+for a test. What unblocks it is either that invariant being widened by its owner,
+or an upstream test hook on `oneharness_core` that makes a run panic on demand.
+Until then the containment is covered at the supervision loop only, by
+`harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`,
+which drives the real loop against a real panicking thread — and that is a unit
+test, not the journey the bar asks for.
+
+**3. `selection::a_chain_that_refuses_every_candidate_reports_each_one_and_fails`
+fails on Windows only, in the dependency's classification.** With every candidate
+refusing on `auth`, the report names two fallen-through candidates on Linux and
+macOS and **one** on Windows, so the second is never published. The conversion is
+what exposes it: this member's chain used to be classified by the *installed*
+`oneharness` CLI (`just`'s `oneharness-version`, 0.6.15) and is now classified by
+the linked `oneharness-core` 0.10.1, and the two disagree there. It is not a
+grouping fault — `liveness::a_cancelled_run_reaps_a_single_sided_members_harness`
+passes on Windows in the same run, which is the job object holding and reaping a
+harness this process never spawned. Fallback classification is upstream's by
+`docs/contract.md`'s own rule that this crate "owns NO harness/model/fallback
+logic", so the test is left asserting the behaviour that is correct rather than
+relaxed to match one platform. Unblocking needs a Windows host to diagnose on and,
+most likely, an upstream fix.
 
 ## Follow-ups this change deliberately did not make
 
