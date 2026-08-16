@@ -28,26 +28,44 @@ fn validate_reads_every_ref_the_graph_names() {
     run.expect_code(2);
     assert!(run.stderr.contains("nowhere.toml"), "{}", run.stderr);
 
-    // A ref that is read but is not the document it claims to be is refused on
-    // the same terms. A single-sided member's argv is built from what its own
-    // oneharness config says — whether the run streams, and where the paths in
-    // it point — so a file that is not TOML is a graph that could never launch,
-    // and this is where an operator finds that out.
+    // A ref that is read but does not say what it has to is refused on the same
+    // terms. A single-sided member's argv is built from what its own oneharness
+    // config says — whether the run streams, and where the paths in it point —
+    // so a file that is not TOML, a setting that is not the type it claims to
+    // be, or two settings that cannot both hold is a graph that could never
+    // launch, and this is where an operator finds that out rather than in a
+    // member that died on a config error two processes down.
     let broken = Workspace::new();
-    broken.write("oneharness.toml", "not = toml = here\n");
     broken.graph(&single_sided_graph(&fake_harness()));
-    let refused = broken.run(&["validate", "./graph.yaml"]);
-    refused.expect_code(2);
-    assert!(
-        refused.stderr.contains("not valid TOML"),
-        "{}",
-        refused.stderr
-    );
-    assert!(
-        refused.stderr.contains("oneharness.toml"),
-        "the refusal named no file: {}",
-        refused.stderr
-    );
+    for (config, expected) in [
+        ("not = toml = here\n".to_string(), "not valid TOML"),
+        (
+            format!("{CHAIN}stream = \"yes\"\n"),
+            "`stream` must be true or false",
+        ),
+        (
+            format!("{CHAIN}schema_file = 3\n"),
+            "`schema_file` must be the path",
+        ),
+        (
+            format!("{CHAIN}stream = true\nschema_file = \"./answer.json\"\n"),
+            "cannot both hold",
+        ),
+    ] {
+        broken.write("oneharness.toml", &config);
+        let refused = broken.run(&["validate", "./graph.yaml"]);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains(expected),
+            "{config:?}: {}",
+            refused.stderr
+        );
+        assert!(
+            refused.stderr.contains("oneharness.toml"),
+            "the refusal named no file: {}",
+            refused.stderr
+        );
+    }
 }
 
 /// A graph from another schema version, or one that could never run, is refused

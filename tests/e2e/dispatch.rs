@@ -2523,3 +2523,71 @@ fn a_two_party_members_side_config_keeps_its_paths_where_they_were_written() {
             .collect::<Vec<_>>()
     );
 }
+
+/// A path that already means one thing is carried through untouched: an absolute
+/// one, and an empty value oneharness reads as unset.
+///
+/// The other side of anchoring, and the half that would break silently. An
+/// absolute `schema_file` joined onto the config's directory would name a file
+/// nobody wrote, and an empty `history_dir` joined onto it would turn a key that
+/// said nothing into one naming that directory — so this asserts the run
+/// answered on the schema its author named *and* that the history landed in
+/// oneharness's own default store rather than beside the config.
+#[test]
+fn a_config_whose_paths_are_already_unambiguous_is_carried_through_as_written() {
+    let workspace = Workspace::new();
+    let schema = workspace.write(
+        "schemas/answer.schema.json",
+        concat!(
+            "{\"type\": \"object\", \"required\": [\"title\"],",
+            " \"properties\": {\"title\": {\"type\": \"string\"}},",
+            " \"additionalProperties\": false}\n"
+        ),
+    );
+    workspace.write(
+        "configs/oneharness.absolute.toml",
+        &format!(
+            "{CHAIN}schema_file = {}\nhistory = true\nhistory_dir = \"\"\n",
+            // Quoted as TOML quotes it, so a Windows path's backslashes are not
+            // read as escapes by the file this writes.
+            toml_edit::Value::from(schema.display().to_string())
+        ),
+    );
+    let answer = workspace.write("answer.json", "{\"title\": \"already unambiguous\"}");
+
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  drafter:\n    kind: oneharness\n",
+            "    oneharness_config: ./configs/oneharness.absolute.toml\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!("draft it. fake:answer-file={}", answer.display()),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    // The absolute schema was read where it was written, so the answer validated.
+    let report = stored_report(&run, "drafter");
+    assert_eq!(
+        report["results"][0]["structured"],
+        serde_json::json!({"title": "already unambiguous"}),
+        "{report}"
+    );
+    // And the empty history directory stayed unset, so oneharness resolved its
+    // own default store for it: nothing was written beside the config, which is
+    // the one place anchoring an empty value could have put it. Where that
+    // default *is* is oneharness's own question and differs per platform, so it
+    // is deliberately not asserted here.
+    assert!(
+        !workspace.at("configs/history").exists(),
+        "an empty `history_dir` was turned into the config's own directory"
+    );
+}

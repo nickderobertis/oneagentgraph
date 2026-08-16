@@ -314,3 +314,62 @@ fn digest(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
+
+/// A **oneharness** config fetched over https carries its relative paths exactly
+/// as written, because a document that came from a URL has no directory for one
+/// to mean anything against.
+///
+/// The complement of the local rule: a path beside a local config is anchored to
+/// that config's own directory, and there is nothing here to anchor to — so the
+/// path is handed on untouched and oneharness answers for it by the name its
+/// author wrote. The refusal is the observation point: it names the path
+/// oneharness looked for, which is that name resolved against the directory the
+/// member works in, and not one this crate invented under the served document.
+#[test]
+fn a_oneharness_config_served_over_https_carries_its_paths_as_written() {
+    let workspace = Workspace::new();
+    let served = "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n\
+                  schema_file = \"./served.schema.json\"\n";
+    let origin = Origin::start(
+        vec![("/oneharness.toml".to_string(), served.as_bytes().to_vec())],
+        Trust::Trusted,
+    );
+    let url = origin.url("/oneharness.toml");
+    workspace.graph(&crate::support::graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  drafter:\n    kind: oneharness\n",
+            "    oneharness_config: replaced-below\n",
+        ),
+        &[
+            (crate::support::FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            ("members.drafter.oneharness_config".to_string(), url.clone()),
+        ],
+    ));
+
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: never gets a schema",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[("SSL_CERT_FILE", &origin.ca_file().display().to_string())],
+    );
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{died:?}");
+    let detail = died[0]["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("served.schema.json"),
+        "the served config's own path never reached oneharness: {detail}"
+    );
+    assert!(
+        detail.contains(&workspace.dir().display().to_string()),
+        "a path from a document with no directory was resolved against one anyway: {detail}"
+    );
+}

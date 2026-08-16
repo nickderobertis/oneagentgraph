@@ -434,17 +434,22 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
 /// reads the reason, and one sentence naming the file and the key beats a member
 /// that died on a config error two processes down.
 ///
+/// A config asking for **both** — `stream = true` beside a `schema_file` — is
+/// refused here rather than assembled into an argv oneharness would reject: the
+/// two are mutually exclusive there, so honouring one of them would be this
+/// crate picking which of the operator's settings to drop.
+///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when the config is not TOML, or when either key
-/// holds a value this cannot read.
+/// [`Error::InvalidConfig`] when the config is not TOML, when either key holds a
+/// value this cannot read, or when the two contradict each other.
 fn streams(config: &str, origin: &str) -> Result<bool, Error> {
     let document: DocumentMut = config
         .parse()
         .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
     let schema = match document.get("schema_file") {
-        None => None,
-        Some(named) if named.is_str() => Some(named),
+        None => false,
+        Some(named) if named.is_str() => true,
         Some(_) => {
             return Err(Error::InvalidConfig(format!(
                 "{origin}: `schema_file` must be the path of a JSON Schema file"
@@ -452,16 +457,23 @@ fn streams(config: &str, origin: &str) -> Result<bool, Error> {
         }
     };
     match document.get("stream") {
-        // The operator's own answer, either way.
-        Some(declared) => declared.as_bool().ok_or_else(|| {
-            Error::InvalidConfig(format!(
+        // The operator's own answer — except for the one pairing that is not an
+        // answer at all, which is refused by naming both keys.
+        Some(declared) => match declared.as_bool() {
+            Some(true) if schema => Err(Error::InvalidConfig(format!(
+                "{origin}: `stream = true` and `schema_file` cannot both hold — oneharness \
+                 validates a structured answer against the complete response, so a schema run \
+                 does not stream. Drop one of them."
+            ))),
+            Some(streams) => Ok(streams),
+            None => Err(Error::InvalidConfig(format!(
                 "{origin}: `stream` must be true or false — it is whether this member's run \
                  streams its events"
-            ))
-        }),
+            ))),
+        },
         // A config that says nothing streams, as every graph already written
         // does; one asking for a validated answer cannot, so it does not.
-        None => Ok(schema.is_none()),
+        None => Ok(!schema),
     }
 }
 
@@ -1586,6 +1598,10 @@ mod tests {
             (
                 "harnesses = [\"codex\"]\nschema_file = 3\n",
                 "`schema_file` must be the path",
+            ),
+            (
+                "harnesses = [\"codex\"]\nstream = true\nschema_file = \"./a.json\"\n",
+                "cannot both hold",
             ),
         ] {
             std::fs::write(dir.path().join("oneharness.toml"), config).expect("chain");

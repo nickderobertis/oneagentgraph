@@ -787,11 +787,21 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
 /// The two fields every report carries and nothing else this crate reads does:
 /// the `schema_version` that says which report contract it is written to, and
 /// the `results` array everything downstream — the settle, the fallback chain,
-/// the structured answer — is read out of. Checked by name rather than by
-/// deserializing into `oneharness_core`'s `Report`, because a member runs
-/// whichever `oneharness` an operator installed: a report from a build whose
-/// schema this one cannot parse is still that member's report, and refusing it
-/// would report a member that answered as one that died.
+/// the structured answer — is read out of.
+///
+/// Checked by name rather than by deserializing into `oneharness_core`'s
+/// `Report`, because a member runs whichever `oneharness` an operator installed:
+/// a report from a build whose schema this one cannot parse is still that
+/// member's report, and refusing it would report a member that answered as one
+/// that died. That is the same trust level the streamed `result` arm has always
+/// applied, and every reader of the document downstream is a tolerant `get` —
+/// the report is *evidence*, stored and forwarded, never a value this crate
+/// branches on structurally.
+// llmlint: ignore[boundary_inputs_validated] the deliberate stopping point above:
+// a full typed parse of a neighbouring tool's report would refuse a member's own
+// answer whenever its `oneharness` is a release this build's types do not know,
+// which turns a member that settled into a member that died. Revisit if this
+// crate ever branches on a report field rather than storing and forwarding it.
 fn is_report(value: &Value) -> bool {
     value.get("schema_version").is_some_and(Value::is_string)
         && value.get("results").is_some_and(Value::is_array)

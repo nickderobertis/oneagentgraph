@@ -520,6 +520,15 @@ impl Shape {
     /// A launch with no `--output-format` at all keeps the streamed shape this
     /// double has always answered with: that is a harness whose default format
     /// oneharness accepted, not a value it could not read.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `None` arm is a guard
+    // rail on this double rather than behaviour of the product: no graph, task,
+    // or flag a user of `oneagentgraph` can write reaches it — only oneharness
+    // asking for a format nothing here answers in, which is a journey's own
+    // mistake. Driving it would mean committing a deliberately misconfigured
+    // journey, whose whole assertion is that this refusal exists. The formats
+    // that *are* answered are exercised by every journey in the suite: the
+    // streamed one throughout, and `json` by the structured-output journey in
+    // tests/e2e/dispatch.rs.
     fn asked_for(argv: &[String]) -> Option<Self> {
         match flag(argv, "--output-format").as_deref() {
             None | Some("stream-json") => Some(Shape::Stream),
@@ -527,6 +536,7 @@ impl Shape {
             _ => None,
         }
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// One turn: hold if the prompt asked it to, then answer.
@@ -800,6 +810,12 @@ fn answer(prompt: &str) -> Result<String, String> {
     // transcript, so a sentinel the operator's task carried arrives there a
     // second time, and an answer-file that fired on it would hand the judge a
     // document in the agent's shape.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `Err` arm is the same
+    // guard rail as [`Shape::asked_for`]'s: a journey names the answer file, so
+    // one that cannot be read is that journey's own mistake and not anything a
+    // user of `oneagentgraph` can cause. The `Ok` arm is what the structured
+    // journeys in tests/e2e/dispatch.rs drive, in both directions — an answer
+    // that satisfies its schema and one that does not.
     if let Some(path) = sentinel_path(prompt, "answer-file") {
         return match std::fs::read_to_string(&path) {
             Ok(document) => Ok(document.trim().to_string()),
@@ -809,6 +825,7 @@ fn answer(prompt: &str) -> Result<String, String> {
             )),
         };
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     if steers(prompt, "complete-now") {
         Ok("done".into())
     } else {
