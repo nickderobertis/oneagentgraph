@@ -2852,13 +2852,13 @@ fn a_relative_env_file_in_a_members_config_is_read_beside_that_config() {
             concat!(
                 "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\"]\n",
                 "\n[harness.claude-code.variant.alternate]\n",
-                // A TOML *literal* string: a Windows path is full of
-                // backslashes, and a basic string would read each as an escape.
-                "bin = '{bin}'\nenv_file = \"./identity.env\"\n",
+                "bin = {bin}\nenv_file = \"./identity.env\"\n",
                 "\n[harness.claude-code.variant.alternate.env]\n",
                 "ONEHARNESS_INTERNAL_MOCK_HARNESS = \"1\"\n",
             ),
-            bin = oneharness_bin(),
+            // Quoted as TOML quotes it, so a Windows path's backslashes are not
+            // read as escapes by the file this writes.
+            bin = toml_edit::Value::from(oneharness_bin()),
         ),
     );
     workspace.graph(&graph_with(
