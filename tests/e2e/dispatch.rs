@@ -14,8 +14,8 @@
 use std::collections::BTreeMap;
 
 use crate::support::{
-    fake_harness, fake_provider, graph_with, labels, single_sided_graph, two_party_graph,
-    Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
+    fake_harness, fake_provider, graph_with, labels, oneharness_bin, single_sided_graph,
+    two_party_graph, Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// The whole happy path: a two-party member completes, and the stream carries
@@ -2830,19 +2830,35 @@ fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
 /// identity's environment, so the path it names is the path it looked in.
 ///
 /// Deliberately the *missing* file. oneharness resolves a variant's environment
-/// before it spawns anything, so this journey reaches the resolution and stops —
-/// the alternative, a file that is there, is a chain naming a variant, which no
-/// `ONEHARNESS_BIN_<ID>` override reaches and which would therefore spawn the
-/// real paid provider. What is asserted is the directory in the refusal: the one
-/// the config was written in, never the one the member works in.
+/// before it spawns anything, so this journey reaches the resolution and stops.
+///
+/// The candidate still has to be **installed** to get that far — a chain whose
+/// only candidate has no binary fails as `not-installed` having resolved
+/// nothing, which is what this asserted against on a host that happened to have
+/// the paid CLI and nowhere else. A variant is not reachable by the
+/// `ONEHARNESS_BIN_<ID>` override every other journey uses (that keys on a
+/// harness id, and there is no spelling of it that carries a variant), so this
+/// one names its provider where a variant can: oneharness's own deterministic
+/// responder, `mock-harness`, which ships inside the `oneharness` this suite
+/// already drives and is selected by the variable its own `run --mock-harness`
+/// sets. Nothing paid is reachable from this config, on any machine, and no
+/// journey turns on a harness being installed.
 #[test]
 fn a_relative_env_file_in_a_members_config_is_read_beside_that_config() {
     let workspace = Workspace::new();
     workspace.write(
         "configs/oneharness.identity.toml",
-        concat!(
-            "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\"]\n",
-            "\n[harness.claude-code.variant.alternate]\nenv_file = \"./identity.env\"\n",
+        &format!(
+            concat!(
+                "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\"]\n",
+                "\n[harness.claude-code.variant.alternate]\n",
+                // A TOML *literal* string: a Windows path is full of
+                // backslashes, and a basic string would read each as an escape.
+                "bin = '{bin}'\nenv_file = \"./identity.env\"\n",
+                "\n[harness.claude-code.variant.alternate.env]\n",
+                "ONEHARNESS_INTERNAL_MOCK_HARNESS = \"1\"\n",
+            ),
+            bin = oneharness_bin(),
         ),
     );
     workspace.graph(&graph_with(
