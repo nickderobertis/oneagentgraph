@@ -2362,6 +2362,34 @@ fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
         serde_json::json!("done"),
         "the buffered report never reached the settle: {report}"
     );
+
+    // And saying it beside a schema is the same run, not a contradiction: the
+    // pair a config may legally declare — the operator asking for the buffered
+    // report the schema already implies — runs and answers validated JSON.
+    workspace.write(
+        "answer.schema.json",
+        concat!(
+            "{\"type\": \"object\", \"required\": [\"title\"],",
+            " \"properties\": {\"title\": {\"type\": \"string\"}},",
+            " \"additionalProperties\": false}\n"
+        ),
+    );
+    let answer = workspace.write("answer.json", "{\"title\": \"said out loud\"}");
+    workspace.write(
+        "oneharness.toml",
+        &format!("{CHAIN}stream = false\nschema_file = \"./answer.schema.json\"\n"),
+    );
+    let both = workspace.run_task(&format!("draft it. fake:answer-file={}", answer.display()));
+    both.expect_code(0);
+    assert!(
+        !started_args(&both, "reporter").contains(&"--stream".to_string()),
+        "{:?}",
+        started_args(&both, "reporter")
+    );
+    assert_eq!(
+        stored_report(&both, "reporter")["results"][0]["structured"],
+        serde_json::json!({"title": "said out loud"}),
+    );
 }
 
 /// A relative `env_file` in a member's config is anchored the same way, and the

@@ -1555,8 +1555,13 @@ mod tests {
             // The operator's own setting, in both directions.
             (format!("{chain}stream = true\n"), true),
             (format!("{chain}stream = false\n"), false),
-            // A schema run cannot stream, so declaring one is declaring that.
+            // A schema run cannot stream, so declaring one is declaring that —
+            // and saying it out loud beside the schema is the same run.
             (format!("{chain}schema_file = \"./answer.json\"\n"), false),
+            (
+                format!("{chain}stream = false\nschema_file = \"./answer.json\"\n"),
+                false,
+            ),
         ] {
             std::fs::write(dir.path().join("oneharness.toml"), &config).expect("chain");
             let args = process_args(&member, &context(dir.path(), &scratch));
