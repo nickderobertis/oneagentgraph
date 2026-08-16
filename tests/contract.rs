@@ -15,15 +15,16 @@ use std::collections::BTreeSet;
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
-    Schedule, FIRST_SCHEMA_VERSION, FIRST_START_AFTER_VERSION, SCHEMA_VERSION,
+    Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION, FIRST_SCHEMA_VERSION,
+    FIRST_START_AFTER_VERSION, SCHEMA_VERSION,
 };
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
 use oneagentgraph::event::{
-    Artifact, Cause, Disposition, Envelope, EventKind, FallbackAdvanced, MemberDied, MemberStarted,
-    Role, Runner, Source, TurnActivity, TurnCompleted, TurnInterrupted, Usage, ENVELOPE_VERSION,
-    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES,
+    Artifact, Cause, Disposition, Envelope, EventFilter, EventKind, FallbackAdvanced, Labels,
+    Matcher, MemberDied, MemberStarted, Role, Runner, Source, TurnActivity, TurnCompleted,
+    TurnInterrupted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES,
 };
 use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
@@ -947,6 +948,10 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     assert_eq!(graph.name, "node-scope");
     assert_eq!(graph.env.get("MY_VAR").map(String::as_str), Some("value"));
     assert_eq!(
+        graph.personas.as_deref(),
+        Some(std::path::Path::new("./personas"))
+    );
+    assert_eq!(
         graph.members.keys().collect::<Vec<_>>(),
         vec!["reporter", "worker"]
     );
@@ -998,6 +1003,153 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
     let reparsed: GraphConfig =
         serde_norway::from_str(&reserialized).expect("the serialized graph does not parse back");
     assert_eq!(reparsed, graph, "the graph schema must round-trip");
+}
+
+/// The documented `events.filter` is the shared grammar, and it decides the same
+/// envelopes through the public type that the document says it does.
+#[test]
+fn the_documented_event_filter_is_the_grammar_the_crate_applies() {
+    let graph: GraphConfig =
+        serde_norway::from_str(&fenced_block("yaml")).expect("the documented graph parses");
+    let filter = graph
+        .events
+        .as_ref()
+        .and_then(|events| events.filter.as_ref())
+        .expect("the documented graph names a filter");
+    assert_eq!(
+        filter,
+        &EventFilter {
+            include: vec![
+                Matcher {
+                    kind: Some("member-*".to_string()),
+                    ..Matcher::default()
+                },
+                Matcher {
+                    member: Some("worker".to_string()),
+                    persona: Some("engineer".to_string()),
+                    ..Matcher::default()
+                },
+            ],
+            exclude: vec![Matcher {
+                kind: Some("turn-activity".to_string()),
+                ..Matcher::default()
+            }],
+        }
+    );
+    filter.validate().expect("the documented filter is usable");
+
+    let worker = Labels {
+        member: Some("worker".to_string()),
+        persona: Some("engineer".to_string()),
+        ..Labels::default()
+    };
+    // The glob admits every kind it spans, the labels admit the member's own
+    // turns, and the exclusion beats both.
+    assert!(filter.allows(Source::Agentgraph, "member-started", &worker));
+    assert!(filter.allows(Source::Agentgraph, "member-settled", &worker));
+    assert!(filter.allows(Source::Agentgraph, "turn-completed", &worker));
+    assert!(!filter.allows(Source::Agentgraph, "turn-activity", &worker));
+    // A `member-*` kind still passes on an envelope carrying neither label,
+    // because a matcher list is a disjunction...
+    assert!(filter.allows(Source::Agentgraph, "member-died", &Labels::default()));
+    // ...and the graph's own events, which match no matcher, do not.
+    assert!(!filter.allows(Source::Agentgraph, "graph-started", &Labels::default()));
+}
+
+/// A graph that names no `events` block serializes without one, so a document
+/// written before the block existed round-trips byte-identically — and one that
+/// declares an older schema and names it anyway is refused by the block's name.
+#[test]
+fn the_documented_event_block_is_omitted_when_unset_and_gated_when_set() {
+    let documented = fenced_block("yaml");
+    let mut graph: GraphConfig =
+        serde_norway::from_str(&documented).expect("the documented graph parses");
+    graph.events = None;
+    let rendered = serde_norway::to_string(&graph).expect("the graph serializes");
+    assert!(
+        !rendered.contains("events:"),
+        "an absent events block must stay absent for older consumers: {rendered}"
+    );
+
+    for older in FIRST_SCHEMA_VERSION..FIRST_EVENT_FILTER_VERSION {
+        let older = documented.replace(
+            &format!("version: {SCHEMA_VERSION}"),
+            &format!("version: {older}"),
+        );
+        let mut graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        // The documented graph's `personas` catalog postdates every schema in
+        // this loop too; dropping it leaves the block as the one thing refused.
+        graph.personas = None;
+        let error = oneagentgraph::config::validate(&graph)
+            .expect_err("the block postdates this schema version");
+        assert!(error.to_string().contains("`events`"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_EVENT_FILTER_VERSION}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// The documented persona catalog is optional, gated on the schema that has it,
+/// and omitted from a graph that names none — so a document written before it
+/// existed round-trips byte-identically and keeps its old resolution rule.
+#[test]
+fn the_documented_persona_catalog_is_gated_and_omitted_when_unset() {
+    let documented = fenced_block("yaml");
+    assert!(
+        documented.contains("personas: ./personas"),
+        "the documented graph must show its own persona catalog"
+    );
+    let mut graph: GraphConfig =
+        serde_norway::from_str(&documented).expect("the documented graph parses");
+    graph.personas = None;
+    let rendered = serde_norway::to_string(&graph).expect("the graph serializes");
+    assert!(
+        !rendered.contains("personas:"),
+        "an absent catalog must stay absent for older consumers: {rendered}"
+    );
+
+    for older in FIRST_SCHEMA_VERSION..FIRST_PERSONA_CATALOG_VERSION {
+        let older = documented.replace(
+            &format!("version: {SCHEMA_VERSION}"),
+            &format!("version: {older}"),
+        );
+        let graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        let error = oneagentgraph::config::validate(&graph)
+            .expect_err("the key postdates this schema version");
+        assert!(error.to_string().contains("`personas`"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_PERSONA_CATALOG_VERSION}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// The document's rule for telling a catalog *name* from a path or URL is the
+/// crate's own [`is_persona_name`], and every form the document names is decided
+/// the way it says.
+#[test]
+fn the_documented_persona_names_are_the_ones_the_crate_looks_up() {
+    for name in ["engineer", "crozier/crozier-corpus"] {
+        assert!(
+            oneagentgraph::persona::is_persona_name(name),
+            "the document names {name:?} as a catalog name"
+        );
+    }
+    for reference in [
+        "./roles/lead.yaml",
+        "./reporter.yaml",
+        "https://example.com/engineer.yaml",
+    ] {
+        assert!(
+            !oneagentgraph::persona::is_persona_name(reference),
+            "{reference:?} is a ref, not a catalog name"
+        );
+    }
 }
 
 #[test]
@@ -1144,7 +1296,14 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
             &format!("version: {older}"),
             1,
         );
-        let graph: GraphConfig = serde_norway::from_str(&declared).expect("an older graph parses");
+        let mut graph: GraphConfig =
+            serde_norway::from_str(&declared).expect("an older graph parses");
+        // The documented graph also carries an `events` block and a `personas`
+        // catalog, both of which postdate every schema in this loop; dropping
+        // them leaves the schedule as the one thing being read under the older
+        // version.
+        graph.events = None;
+        graph.personas = None;
         oneagentgraph::config::validate(&graph)
             .unwrap_or_else(|err| panic!("version {older} must still validate: {err}"));
         let named = document.replacen(
@@ -1152,7 +1311,9 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
             &format!("version: {older}"),
             1,
         );
-        let graph: GraphConfig = serde_norway::from_str(&named).expect("the graph parses");
+        let mut graph: GraphConfig = serde_norway::from_str(&named).expect("the graph parses");
+        graph.events = None;
+        graph.personas = None;
         let refused =
             oneagentgraph::config::validate(&graph).expect_err("start_after postdates this schema");
         assert!(
@@ -1295,6 +1456,7 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         dir: workspace.path(),
         scratch: &scratch,
         graph_dir: Some(workspace.path()),
+        personas: None,
         task: Some("ship the release"),
         task_text: oneagentgraph::config::TaskText::under(SCHEMA_VERSION),
         session: "s",
@@ -1419,6 +1581,7 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "--dir",
         "--label",
         "--set",
+        "--event-filter",
         "--output",
         "--detach",
         "--kill",

@@ -8,6 +8,8 @@
 // process is the single sanctioned double, and the wrapper scripts here are that
 // same double reached under a second `ONEHARNESS_BIN_*` key.
 
+use oneagentgraph::config::{FIRST_SCHEMA_VERSION, SCHEMA_VERSION};
+
 use crate::support::{
     fake_harness, graph_with, single_sided_graph, two_party_graph, until, Workspace, CHAIN,
     FAKE_HARNESS_KEY, NO_ENV,
@@ -89,11 +91,23 @@ fn validate_reads_every_ref_the_graph_names() {
 #[test]
 fn validate_refuses_a_graph_that_could_never_run() {
     let workspace = Workspace::new();
+    // A version past the ones this build reads, derived rather than typed: it
+    // moves with every schema this crate adds, and a literal here made the next
+    // bump refuse the schema it had just started reading.
+    let ahead = SCHEMA_VERSION + 1;
+    let document = format!("version: {ahead}\nname: g\nmembers: {{}}\n");
+    workspace.graph(&document);
+    let run = workspace.run(&["validate", "./graph.yaml"]);
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains(&format!(
+            "reads versions {FIRST_SCHEMA_VERSION} through {SCHEMA_VERSION}"
+        )),
+        "{document}: {}",
+        run.stderr
+    );
+
     for (document, expected) in [
-        (
-            "version: 5\nname: g\nmembers: {}\n",
-            "reads versions 1 through 4",
-        ),
         ("version: 1\nname: g\nmembers: {}\n", "has no members"),
         (
             concat!(
@@ -221,6 +235,26 @@ fn validate_refuses_a_graph_that_could_never_run() {
                 "    oneharness_config: ./oneharness.toml\n    dir: ''\n",
             ),
             "names no directory",
+        ),
+        // A graph's persona catalog is a directory too, and an empty one names
+        // wherever the launching process happened to be rather than the catalog
+        // whose personas the members were written against.
+        (
+            concat!(
+                "version: 6\nname: g\npersonas: ''\nmembers:\n  a:\n    kind: oneharness\n",
+                "    oneharness_config: ./oneharness.toml\n",
+            ),
+            "`personas` names no directory",
+        ),
+        // The key changes what a member's bare `persona: NAME` resolves to, so a
+        // document declaring a schema that predates it is refused by the key's
+        // name rather than run under a rule that schema never had.
+        (
+            concat!(
+                "version: 5\nname: g\npersonas: ./personas\nmembers:\n  a:\n",
+                "    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            ),
+            "requires graph schema version 6",
         ),
         // Each field replaces what the graph supplies, so an empty one asks for
         // nothing rather than for the graph's — and an empty task reached the

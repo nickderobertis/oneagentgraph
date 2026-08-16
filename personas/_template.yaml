@@ -9,7 +9,11 @@
 #   REQUIRED  agent.instructions   the role, appended after the base preamble
 #   REQUIRED  user.persona         how the supervisor reviews this kind of work
 #   optional  agent.name           the role label stamped on this member's events
-#   optional  user.done_when       role-specific completion bar (else base default)
+#   optional  user.done_when       a second completion bar, enforced ALONGSIDE the
+#                                  base's rather than instead of it
+#   optional  user.done_when_replaces_base
+#                                  true when this role's bar must stand in for the
+#                                  base's; needs a user.done_when to stand in with
 #   optional  user.max_turns       role-specific turn cap (else base default)
 #   optional  evals                extra transcript checks for this role
 # No other top-level keys — the task comes from `--task`, shared settings from
@@ -25,5 +29,6 @@ user:
   persona: |
     The supervisor's stance for reviewing this role's work — what to push on, and
     what "not done yet" looks like for this kind of task.
-  # done_when: "override the base completion bar if this role needs a stricter one"
+  # done_when: "a bar this role adds to the base's; both are enforced"
+  # done_when_replaces_base: true   # only when the base's bar must NOT apply here
   # max_turns: 12

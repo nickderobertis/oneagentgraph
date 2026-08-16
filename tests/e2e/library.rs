@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use oneagentgraph::config::ConfigRef;
-use oneagentgraph::event::{Envelope, EventKind};
+use oneagentgraph::event::{Envelope, EventFilter, EventKind, Matcher};
 use oneagentgraph::run::{self, MemberName, Request, Signal};
 
 use crate::support::{fake_harness, graph_with, oneharness_bin, Workspace, FAKE_HARNESS_KEY};
@@ -48,6 +48,7 @@ fn a_library_caller_watches_cancels_and_waits_for_a_live_graph() {
         dir: workspace.dir(),
         labels: Vec::new(),
         overrides: Vec::new(),
+        filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
     };
@@ -156,6 +157,7 @@ fn starting_an_invalid_graph_returns_the_scheduler_error() {
         dir: workspace.dir(),
         labels: Vec::new(),
         overrides: Vec::new(),
+        filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
     };
@@ -164,6 +166,202 @@ fn starting_an_invalid_graph_returns_the_scheduler_error() {
         .err()
         .expect("an empty graph cannot start");
     assert!(error.to_string().contains("has no members"), "{error}");
+}
+
+/// A library caller's own filter narrows the live stream it receives, and one it
+/// could not honour is the scheduler's refusal rather than a run that starts.
+///
+/// The library path is the one `onepipeline` will reach through when it stops
+/// spawning this binary, and it is not the CLI's: nothing here parses a `SPEC`,
+/// so a filter that only the flag consulted would leave this caller unfiltered
+/// with no way to tell.
+#[test]
+fn a_library_callers_own_filter_narrows_the_stream_it_receives() {
+    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::two_party_graph(
+        &fake_harness(),
+        &[(
+            "XDG_STATE_HOME",
+            workspace.session_store().display().to_string(),
+        )],
+    ));
+    let request = |filter: Option<EventFilter>| Request {
+        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
+        task: Some("fake:complete-now".into()),
+        dir: workspace.dir(),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter,
+        state_dir: workspace.state(),
+        oneharness_bin: oneharness_bin(),
+    };
+    let matching = |kind: &str| Matcher {
+        kind: Some(kind.to_string()),
+        ..Matcher::default()
+    };
+
+    // A matcher that names no field matches everything, so one in `exclude`
+    // silences the stream — refused with the matcher named, before the run.
+    let error = run::start(
+        &request(Some(EventFilter {
+            include: Vec::new(),
+            exclude: vec![Matcher::default()],
+        })),
+        &BTreeMap::new(),
+    )
+    .err()
+    .expect("a filter the run cannot honour stops it starting");
+    assert!(error.to_string().contains("exclude[0] {}"), "{error}");
+    assert!(
+        std::fs::read_dir(workspace.state())
+            .expect("the state directory")
+            .next()
+            .is_none(),
+        "a refused filter still left a run behind"
+    );
+
+    let running = run::start(
+        &request(Some(EventFilter {
+            include: Vec::new(),
+            exclude: vec![matching("turn-*")],
+        })),
+        &BTreeMap::new(),
+    )
+    .expect("the graph starts");
+    let mut streamed = Vec::new();
+    loop {
+        match running.recv_timeout(Duration::from_secs(10)) {
+            Ok(Some(event)) => streamed.push(event),
+            Ok(None) => panic!("the run stopped publishing without ending"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(error) => panic!("the live stream failed: {error}"),
+        }
+    }
+    assert_eq!(running.wait().expect("the graph settles"), 0);
+    assert!(
+        !streamed
+            .iter()
+            .any(|event| event.kind.as_str().starts_with("turn-")),
+        "the caller's filter did not reach the stream it receives: {:?}",
+        streamed.iter().map(|e| e.kind).collect::<Vec<_>>()
+    );
+    assert!(
+        streamed
+            .iter()
+            .any(|event| event.kind == EventKind::MemberSettled),
+        "filtering the turns took the settlement with them"
+    );
+    // The events file is the same merged stream, so the two agree — a caller
+    // that read the file back would otherwise see what its filter removed.
+    let on_disk: Vec<Envelope> = std::fs::read_to_string(running_path(&workspace))
+        .expect("the merged stream remains on disk")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a typed envelope"))
+        .collect();
+    assert_eq!(streamed, on_disk);
+}
+
+/// A filter that omits `graph-started` still yields a live handle, and the run
+/// under it starts, schedules, and settles exactly as it would have.
+///
+/// `graph-started` is the envelope this handle used to be *built* from, so a
+/// caller narrowing the stream to the events it cares about was answered with a
+/// refusal for a graph that had started perfectly well. What the handle reports
+/// is where the run is, which no filter touches; what the run does internally is
+/// unfiltered by construction, which the settlement and the record prove.
+#[test]
+fn a_run_whose_filter_omits_graph_started_still_starts_and_settles() {
+    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::two_party_graph(
+        &fake_harness(),
+        &[(
+            "XDG_STATE_HOME",
+            workspace.session_store().display().to_string(),
+        )],
+    ));
+    let request = Request {
+        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
+        task: Some("fake:complete-now".into()),
+        dir: workspace.dir(),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter: Some(EventFilter {
+            include: Vec::new(),
+            exclude: vec![Matcher {
+                kind: Some("graph-started".to_string()),
+                ..Matcher::default()
+            }],
+        }),
+        state_dir: workspace.state(),
+        oneharness_bin: oneharness_bin(),
+    };
+
+    let running = run::start(&request, &BTreeMap::new())
+        .expect("a filter that omits graph-started does not stop the graph starting");
+    let started = running.started().clone();
+    assert!(
+        !started.run_id.as_str().is_empty(),
+        "the handle named no run"
+    );
+    assert_eq!(
+        started.events_path,
+        workspace
+            .state()
+            .join(&started.run_id)
+            .join(run::EVENTS_FILE)
+            .display()
+            .to_string(),
+        "the handle points at a stream that is not this run's"
+    );
+
+    let mut streamed = Vec::new();
+    loop {
+        match running.recv_timeout(Duration::from_secs(10)) {
+            Ok(Some(event)) => streamed.push(event),
+            Ok(None) => panic!("the run stopped publishing without ending"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(error) => panic!("the live stream failed: {error}"),
+        }
+    }
+    // Settle detection is internal and reads what `emit` returns, not what the
+    // stream carried: the run settles successfully with the envelope missing.
+    assert_eq!(running.wait().expect("the graph settles"), 0);
+    assert!(
+        !streamed
+            .iter()
+            .any(|event| event.kind == EventKind::GraphStarted),
+        "the excluded envelope reached the stream after all"
+    );
+    // Scheduling ran the wave and the member settled, both of which the stream
+    // still says — the filter took one kind, not the run's account of itself.
+    for expected in [EventKind::MemberStarted, EventKind::MemberSettled] {
+        assert!(
+            streamed.iter().any(|event| event.kind == expected),
+            "{expected:?} never arrived: {:?}",
+            streamed.iter().map(|e| e.kind).collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(
+        streamed.last().map(|event| event.kind),
+        Some(EventKind::GraphSettled)
+    );
+    // And `seq` still numbers from zero with no gap, so the missing envelope is
+    // not readable as a dropped one.
+    assert_eq!(
+        streamed.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        (0..streamed.len() as u64).collect::<Vec<_>>()
+    );
+
+    let record = workspace.record();
+    assert_eq!(record["members"]["worker"], serde_json::json!("settled"));
+    assert_eq!(record["exit_code"], serde_json::json!(0));
+    assert_eq!(
+        record["run_id"],
+        serde_json::json!(started.run_id.as_str()),
+        "the handle and the record disagree about which run this is"
+    );
 }
 
 #[test]
@@ -183,6 +381,7 @@ fn a_successful_live_run_returns_the_blocking_exit_status() {
         dir: workspace.dir(),
         labels: Vec::new(),
         overrides: Vec::new(),
+        filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
     };
@@ -233,6 +432,7 @@ fn a_library_caller_redirects_a_members_in_flight_turn() {
         dir: workspace.dir(),
         labels: Vec::new(),
         overrides: Vec::new(),
+        filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
     };
@@ -366,6 +566,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
         dir: workspace.dir(),
         labels: Vec::new(),
         overrides: Vec::new(),
+        filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
     };
@@ -410,6 +611,131 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
 
     std::fs::write(&release, "release").expect("release the keeper");
     assert_eq!(running.wait().expect("the run ends"), 0);
+}
+
+/// Every member's harness runs where the graph told it to, and the process
+/// hosting them all stays where it started.
+///
+/// A member's directory is a **value** on the way to a harness — a single-sided
+/// member's `oneharness run --cwd`, a two-party member's
+/// `invoke::JudgeLaunch::worktree`, which onejudge puts on the same flag — because
+/// one process hosts every member: a `set_current_dir` anywhere in the run path
+/// moves the members that never asked, and moves them mid-run. This is the only
+/// suite that can say so. The CLI journeys already prove where each harness ran
+/// (`tests/e2e/dispatch.rs`), but they watch a process that has since exited, and
+/// its working directory with it; here the run happens in *this* process, so the
+/// directory it kept is readable on both sides of the run — and a side that
+/// inherits rather than being told one reports it from inside.
+///
+/// It is also the invariant the last `oneharness run` hop has to keep when it
+/// collapses into `oneharness_core::io::run::run`, whose `cwd` is a `RunRequest`
+/// field rather than a process state for exactly this reason — see
+/// `src/harness_process.rs`, which carries that boundary inventory.
+#[test]
+fn the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere() {
+    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let workspace = Workspace::new();
+    let own = workspace.dir().join("api");
+    std::fs::create_dir_all(&own).expect("the member's own directory");
+    let single_sided = workspace.at("reporter.cwd");
+    let two_party = workspace.at("worker.cwd");
+
+    // Both member kinds in one graph, because they reach a directory by
+    // different routes and only one of them is a child process today.
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n",
+            "  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    dir: ./api\n",
+            "  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "env.XDG_STATE_HOME".to_string(),
+                workspace.session_store().display().to_string(),
+            ),
+            (
+                "members.reporter.task".to_string(),
+                format!(
+                    "fake:complete-now report in. fake:record-cwd={}",
+                    single_sided.display()
+                ),
+            ),
+        ],
+    ));
+    let request = Request {
+        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
+        task: Some(format!(
+            "fake:complete-now drive this run to settlement. fake:record-cwd={}",
+            two_party.display()
+        )),
+        dir: workspace.dir(),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter: None,
+        state_dir: workspace.state(),
+        oneharness_bin: oneharness_bin(),
+    };
+
+    let before = std::env::current_dir().expect("the hosting process has a working directory");
+    let running = run::start(&request, &BTreeMap::new()).expect("the graph starts");
+    assert_eq!(running.wait().expect("the graph settles"), 0);
+    assert_eq!(
+        std::env::current_dir().expect("the hosting process still has a working directory"),
+        before,
+        "the run moved the working directory of the process that hosts every member"
+    );
+
+    // And the members really did work elsewhere, so the assertion above is about
+    // a directory something was asked to change rather than one nobody used.
+    assert_eq!(recorded(&single_sided), vec![canonical(&own)]);
+
+    // The two-party member's own turns are told the graph's directory — and the
+    // sides onejudge tells nothing (its judge side takes no `--cwd`, having its
+    // config by name) inherit this process's, which is what makes the invariant
+    // observable from *inside* the run: a `set_current_dir` that moved the host
+    // mid-run is recorded here by a harness that started after it, where reading
+    // `current_dir()` afterwards would be fooled by one that put it back.
+    let sides = recorded(&two_party);
+    let told = canonical(&workspace.dir());
+    let inherited = canonical(&before);
+    assert!(
+        sides.contains(&told),
+        "no side of the two-party member ran in the directory the graph named: {sides:?}"
+    );
+    assert!(
+        sides.iter().all(|dir| *dir == told || *dir == inherited),
+        "a side ran somewhere neither the graph nor this process named: {sides:?}"
+    );
+}
+
+/// Every directory a harness recorded through `fake:record-cwd`, canonical so a
+/// host whose temporary directory is a symlink (macOS: `/var` → `/private/var`)
+/// compares equal to what the graph named.
+fn recorded(path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|err| {
+            panic!(
+                "no harness recorded a directory in {}: {err}",
+                path.display()
+            )
+        })
+        .lines()
+        .map(|line| canonical(std::path::Path::new(line.trim())))
+        .collect()
+}
+
+fn canonical(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|err| panic!("{} cannot be resolved: {err}", path.display()))
 }
 
 /// Read the live stream until an envelope satisfies `wanted`, or the run stops

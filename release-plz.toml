@@ -21,11 +21,13 @@
 # strand the tag.
 publish = false
 
-# API breaking-change detection (cargo-semver-checks) needs an extra tool and
-# would block releases on any surface change — which, for a crate whose whole
-# current job is to publish an interface, is every release. Rely on review and
-# the conventional-commit type instead (a `!` or `BREAKING CHANGE:` still bumps).
-semver_check = false
+# API breaking-change detection (cargo-semver-checks). On, because this crate is
+# a published library as well as a binary: a breaking change to its public
+# surface that lands under a `fix` or `feat` type is one every consumer discovers
+# at `cargo update`, and the conventional-commit type alone is an author's claim
+# rather than a check. It reads the surface itself and raises the bump release-plz
+# proposes accordingly.
+semver_check = true
 
 git_tag_name = "v{{ version }}"
 git_release_name = "v{{ version }}"

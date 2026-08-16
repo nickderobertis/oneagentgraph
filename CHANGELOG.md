@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.15](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.14...v0.2.15) - 2026-08-15
+
+### Documentation
+
+- write down the blocked oneharness-run boundary inventory, and pin the cwd invariant ([#44](https://github.com/nickderobertis/oneagentgraph/pull/44))
+
+## [0.2.14](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.13...v0.2.14) - 2026-08-15
+
+### Fixed
+
+- *(persona)* dispatch repo-local personas and keep the shared bar ([#42](https://github.com/nickderobertis/oneagentgraph/pull/42))
+
+## [0.2.13](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.12...v0.2.13) - 2026-08-15
+
+### Added
+
+- filter a run's merged event stream, from the graph or the CLI ([#40](https://github.com/nickderobertis/oneagentgraph/pull/40))
+
 ## [0.2.11](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.10...v0.2.11) - 2026-08-14
 
 ### Added

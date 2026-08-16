@@ -119,12 +119,31 @@ pub struct PersonaUser {
     /// The supervisor's stance for reviewing this role's work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona: Option<String>,
-    /// A role-specific completion bar, overriding the base's.
+    /// A role-specific completion bar, enforced **alongside** the base's rather
+    /// than instead of it — see [`merge`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_when: Option<String>,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a flat key beside the
+    // bar it governs, rather than a shape in which `true` without a `done_when`
+    // cannot be written: a persona is a hand-written YAML document, and nesting
+    // the bar under a mapping so it can carry one boolean is a shape every author
+    // would have to learn in order to say the ordinary thing. The pair this
+    // leaves representable — replacing the shared bar with nothing — is refused
+    // by `Persona::validate`, which every load and `persona validate` goes
+    // through, before any config is merged.
+    /// Whether this role's bar stands in for the base's instead of adding to it.
+    #[serde(default, skip_serializing_if = "is_not_set")]
+    pub done_when_replaces_base: bool,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     /// A role-specific turn cap, overriding the base's.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+}
+
+/// serde's `skip_serializing_if` for the flag above, so a persona written before
+/// the key existed round-trips without gaining it.
+fn is_not_set(flag: &bool) -> bool {
+    !flag
 }
 
 impl Persona {
@@ -157,6 +176,23 @@ impl Persona {
         }
         if self.user.max_turns == Some(0) {
             errors.push("user.max_turns must be a positive integer".to_string());
+        }
+        // A blank bar is refused here rather than at the merge for the reason the
+        // whole replacement rule exists: `done_when: ''` with this key set is a
+        // persona that removes the operator's shared review bar and puts nothing
+        // in its place, which is the silent drop spelled out loud.
+        if self.user.done_when_replaces_base
+            && self
+                .user
+                .done_when
+                .as_deref()
+                .is_none_or(|bar| bar.trim().is_empty())
+        {
+            errors.push(
+                "user.done_when_replaces_base names nothing to replace the base's bar with: give \
+                 this persona its own user.done_when, or drop the key"
+                    .to_string(),
+            );
         }
         errors
     }
@@ -203,7 +239,15 @@ pub fn shipped(name: &str) -> Option<&'static str> {
 ///   the persona's role appended after it. Both are kept; neither replaces the
 ///   other, because the preamble is the standing bar and the role is what makes
 ///   this member different.
-/// * `user` — persona keys override base keys.
+/// * `user.done_when` — the base's bar with the persona's added to it, and both
+///   enforced. A base's `done_when` is where an operator centralizes the review
+///   bar for *every* dispatch, so a role carrying one of its own is asking for a
+///   second bar rather than for the shared one to go away — which is what
+///   inserting over it silently did. A persona that genuinely must stand in for
+///   the shared bar says
+///   [`done_when_replaces_base`](PersonaUser::done_when_replaces_base), and then
+///   only its own is enforced.
+/// * `user` — the persona's other keys override the base's.
 /// * `evals` — the persona replaces the base's list when it brings one.
 /// * `task` — dropped. It reaches onejudge over the CLI, never through a file,
 ///   so a base that happens to carry one cannot leak into every member.
@@ -258,8 +302,35 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
     if let Some(text) = &persona.user.persona {
         user.insert("persona".into(), Value::String(text.clone()));
     }
-    if let Some(text) = &persona.user.done_when {
-        user.insert("done_when".into(), Value::String(text.clone()));
+    // The base's own bar, read as the string it has to be. A base is external
+    // input and this is the value the whole composition rests on, so a
+    // `done_when:` of some other shape is refused with what was found rather
+    // than read as no bar at all — which is the shared review bar going missing
+    // silently, the very thing composing them is here to stop.
+    let base_bar = match user.get("done_when") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(other) => {
+            return Err(Error::InvalidConfig(format!(
+                "{base_origin}: `user.done_when` must be a string, got {}",
+                kind_of(other)
+            )))
+        }
+    };
+    // Blank bars are dropped the way the two halves of the prompt above are: a
+    // bar of whitespace is a bar nobody wrote, and one that survived would be
+    // numbered and handed to a supervisor as a condition of its own.
+    let role_bar = persona.user.done_when.as_deref().unwrap_or_default();
+    let kept = match persona.user.done_when_replaces_base {
+        true => "",
+        false => base_bar.trim(),
+    };
+    let bars: Vec<&str> = [kept, role_bar.trim()]
+        .into_iter()
+        .filter(|bar| !bar.is_empty())
+        .collect();
+    if !role_bar.trim().is_empty() {
+        user.insert("done_when".into(), Value::String(one_bar_from(&bars)));
     }
     if let Some(cap) = persona.user.max_turns {
         user.insert("max_turns".into(), Value::Number(cap.into()));
@@ -269,6 +340,24 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
         map.insert("evals".into(), Value::Array(evals.clone()));
     }
     Ok(config)
+}
+
+/// One completion bar out of every bar the merge kept.
+///
+/// Numbered and paragraph-separated rather than joined by a conjunction, because
+/// either bar may itself be several sentences: what a supervisor is handed has
+/// to say plainly that there is more than one and that neither is optional. One
+/// bar is handed over as it was written — there is nothing to conjoin.
+fn one_bar_from(bars: &[&str]) -> String {
+    if let [only] = bars {
+        return (*only).to_string();
+    }
+    let numbered: Vec<String> = bars
+        .iter()
+        .enumerate()
+        .map(|(index, bar)| format!("{}. {bar}", index + 1))
+        .collect();
+    format!("Both of these must hold:\n\n{}", numbered.join("\n\n"))
 }
 
 /// Everything a merged config still lacks to be runnable.
@@ -361,7 +450,8 @@ mod tests {
         assert!(merged.get("task").is_none());
     }
 
-    /// A persona's own `done_when` / `max_turns` / `evals` beat the base's.
+    /// A persona's own `max_turns` / `evals` beat the base's, and its own bar is
+    /// added to the base's rather than standing in for it.
     #[test]
     fn a_persona_overrides_what_it_brings() {
         let persona = Persona::parse(
@@ -370,9 +460,77 @@ mod tests {
         )
         .unwrap();
         let merged = merge(BASE, "base", &persona).unwrap();
-        assert_eq!(merged["user"]["done_when"].as_str().unwrap(), "stricter");
+        let bar = merged["user"]["done_when"].as_str().unwrap();
+        assert!(
+            bar.contains("base bar"),
+            "the base's bar was dropped: {bar}"
+        );
+        assert!(bar.contains("stricter"), "{bar}");
         assert_eq!(merged["user"]["max_turns"].as_u64().unwrap(), 3);
         assert_eq!(merged["evals"].as_array().unwrap().len(), 1);
+    }
+
+    /// The base's review bar survives a persona that brings its own, because the
+    /// base is where an operator centralizes the bar for *every* dispatch — and a
+    /// persona that must stand in for it says so, visibly, in the merged config.
+    #[test]
+    fn a_persona_adds_to_the_base_bar_unless_it_says_it_replaces_it() {
+        let composing = Persona::parse(
+            "agent:\n  instructions: r\nuser:\n  persona: p\n  done_when: the review is signed off\n",
+            "p",
+        )
+        .unwrap();
+        let bar = merge(BASE, "base", &composing).unwrap()["user"]["done_when"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(bar.contains("base bar"), "{bar}");
+        assert!(bar.contains("the review is signed off"), "{bar}");
+        // And the composition says plainly that neither half is optional.
+        assert!(bar.contains("Both of these must hold"), "{bar}");
+
+        let replacing = Persona::parse(
+            concat!(
+                "agent:\n  instructions: r\nuser:\n  persona: p\n",
+                "  done_when: the review is signed off\n  done_when_replaces_base: true\n",
+            ),
+            "p",
+        )
+        .unwrap();
+        let replaced = merge(BASE, "base", &replacing).unwrap();
+        assert_eq!(
+            replaced["user"]["done_when"].as_str().unwrap(),
+            "the review is signed off"
+        );
+
+        // A base with no bar of its own leaves the persona's standing alone
+        // rather than composed with nothing.
+        let bare = merge("user:\n  done_when: '  '\n", "bare", &composing).unwrap();
+        assert_eq!(
+            bare["user"]["done_when"].as_str().unwrap(),
+            "the review is signed off"
+        );
+
+        // Replacing without a bar to replace it with is the one invalid pair the
+        // flat key allows, and it is refused at load rather than silently
+        // dropping the shared bar for nothing.
+        let empty = Persona::parse(
+            "agent:\n  instructions: r\nuser:\n  persona: p\n  done_when_replaces_base: true\n",
+            "p",
+        )
+        .unwrap();
+        assert!(
+            empty
+                .validate()
+                .iter()
+                .any(|error| error.contains("done_when_replaces_base")),
+            "{:?}",
+            empty.validate()
+        );
+        // A persona that never asked to replace anything serializes without the
+        // key, so an existing document round-trips unchanged.
+        let rendered = serde_norway::to_string(&composing).expect("a persona serializes");
+        assert!(!rendered.contains("done_when_replaces_base"), "{rendered}");
     }
 
     /// A base that never supplied a shared default is named at validation, not
@@ -450,6 +608,15 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("`user` must be a mapping, got a number"),
+            "{err}"
+        );
+        // And the one value the composition rests on: a bar of another shape is
+        // refused rather than read as a base that never set one, which would
+        // drop the shared review bar without saying so.
+        let err = merge("user:\n  done_when: [a]\n", "list.yaml", &persona).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("`user.done_when` must be a string, got a list"),
             "{err}"
         );
         // An empty document is a base with nothing in it, not a failure.
