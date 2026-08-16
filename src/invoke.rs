@@ -399,21 +399,15 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
 /// `None` when there is nothing to anchor: an empty value, or a path that names
 /// its own root and so already says where it starts from.
 ///
-/// Nothing here comes from the host, and that is the whole of it. `Path::join`
-/// and [`std::path::absolute`] both answer for the platform they run on:
-/// `join` splices with that platform's separator, `absolute` resolves against
-/// this process's current *drive* on Windows, and — the sharp edge —
-/// `Path::is_relative` calls a rooted path an operator wrote (`/graphs/api`)
-/// *relative* there, because Windows counts a path absolute only with a drive on
-/// it. Anchoring through those three took a path an operator wrote and, on
-/// Windows alone, re-rooted it under a drive nobody named. So this is textual:
-/// the base is made absolute only when it is genuinely unanchored — this process
-/// is the one a relative base is resolved against, and the config is read from a
-/// scratch directory later — and the rest is spliced on.
+/// The splice is textual because `Path::join` and [`std::path::absolute`] answer
+/// for the host: on Windows they spell the separator differently and re-root a
+/// path that carries no drive — `Path::is_relative` calls `/graphs/api`
+/// *relative* there — under this process's own drive, naming a file its author
+/// never wrote. Only a base with no root of its own is made absolute, against
+/// the directory this process runs in, because that is the one it was written
+/// against.
 ///
-/// Purely lexical, as the two callers' documentation promises: nothing is read,
-/// so a file that is not there is still the refusal oneharness or onejudge makes,
-/// by the name its author wrote.
+/// Purely lexical, as both callers' documentation promises: nothing is read.
 fn anchored(base_dir: &Path, written: &str) -> Option<String> {
     let path = Path::new(written);
     if written.is_empty() || names_its_own_root(path) {
