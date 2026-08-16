@@ -425,6 +425,11 @@ fn controlled(argv: &[String]) -> bool {
 /// stops where it was, and the replacement really is a second turn.
 fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::ExitCode {
     let interrupted = Arc::new(AtomicBool::new(false));
+    // A turn runs on a thread, so it cannot return this process's exit code —
+    // it records that it could not be taken here instead, and the exit below is
+    // the one place that decides. Every turn of the stream shares the flag: a
+    // process that answered one request and refused another did not succeed.
+    let refused = Arc::new(AtomicBool::new(false));
     let mut running: Option<std::thread::JoinHandle<()>> = None;
     let argv = Arc::new(argv.to_vec());
     for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -447,6 +452,7 @@ fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::
                 };
                 let prompt = format!("{system}\n{text}");
                 let flag = Arc::clone(&interrupted);
+                let failed = Arc::clone(&refused);
                 let argv = Arc::clone(&argv);
                 // On a thread of its own so this loop keeps reading: the frame
                 // that aborts the turn arrives *while* it runs, which is the
@@ -454,9 +460,9 @@ fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::
                 running = std::thread::Builder::new()
                     .spawn(move || {
                         recordings(&prompt, &argv);
-                        // The exit is the loop's below: this turn runs on a
-                        // thread, and stderr already carries the reason.
-                        let _ = turn(&prompt, Some(&flag), shape);
+                        if turn(&prompt, Some(&flag), shape) == Answered::No {
+                            failed.store(true, Ordering::SeqCst);
+                        }
                     })
                     .ok();
             }
@@ -485,6 +491,13 @@ fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::
     // flight is still this process's to finish reporting on.
     if let Some(handle) = running {
         let _ = handle.join();
+    }
+    // Joined first, so a turn that refused on its way out is counted: exiting 0
+    // having published no result reaches oneharness as a harness that ran and
+    // said nothing, which is a journey failing far from the sentinel that caused
+    // it.
+    if refused.load(Ordering::SeqCst) {
+        return exit(2);
     }
     exit(0)
 }
@@ -633,9 +646,9 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
 /// exit on it: a double that exited 0 having published nothing reaches oneharness
 /// as a harness that ran and said nothing, which is a journey failing several
 /// layers away from the sentinel that caused it. A **controlled** turn runs on a
-/// thread of its own and cannot decide this process's exit code — its loop ends
-/// when oneharness closes stdin — so there it is the stderr line that says what
-/// happened, and the turn that published no result is what oneharness classifies.
+/// thread of its own and so cannot return that code directly; it records the
+/// refusal for the stream loop, which exits on it once the turn in flight has
+/// been joined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Answered {
     /// The turn published its terminal result.

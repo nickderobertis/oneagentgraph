@@ -45,13 +45,19 @@ fn validate_reads_every_ref_the_graph_names() {
         ),
         (
             format!("{CHAIN}schema_file = 3\n"),
-            "`schema_file` must be the path",
+            "`schema_file` must be a path",
         ),
         // An empty path names no file, and oneharness reads it as the directory
         // the harnesses run in rather than as unset — so it is refused here too.
         (
             format!("{CHAIN}schema_file = \"\"\n"),
-            "`schema_file` must be the path",
+            "`schema_file` must be a path",
+        ),
+        // And the other path keys are checked the same way, by their whole
+        // dotted name, so an operator is told which of several is wrong.
+        (
+            format!("{CHAIN}history_dir = 3\n"),
+            "`history_dir` must be a path",
         ),
         (
             format!("{CHAIN}stream = true\nschema_file = \"./answer.json\"\n"),

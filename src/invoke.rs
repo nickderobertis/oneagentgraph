@@ -450,12 +450,18 @@ fn streams(config: &str, origin: &str) -> Result<bool, Error> {
     let schema = match document.get("schema_file") {
         None => false,
         // A value that names a file. An empty one names none — oneharness reads
-        // it as the working directory and dies on it, so it is refused here with
-        // the rest, rather than quietly deciding this member's run for it.
+        // it as the directory the harnesses run in and dies on that — and a
+        // value that is not a string at all is not a path; both are refused
+        // rather than quietly deciding this member's run for it.
+        //
+        // Checked here as well as in [`anchor`], which type-checks the same key
+        // while stamping, because a config fetched over https is never anchored:
+        // it has no directory to anchor to, and this is then the only place its
+        // `schema_file` is read at all.
         Some(named) if named.as_str().is_some_and(|path| !path.is_empty()) => true,
         Some(_) => {
             return Err(Error::InvalidConfig(format!(
-                "{origin}: `schema_file` must be the path of a JSON Schema file"
+                "{origin}: `schema_file` must be a path — the JSON Schema this member's answer                  is validated against"
             )))
         }
     };
@@ -513,17 +519,24 @@ pub const ANCHORED_VARIANT_PATH: &str = "env_file";
 /// anything against, so its paths are left exactly as written and oneharness
 /// answers for them by name. Purely lexical, like [`anchor_skill`]: nothing is
 /// read, so a file that is not there is still oneharness's refusal to make.
-fn anchor_paths(document: &mut DocumentMut, base_dir: &Path) {
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when one of those keys holds something that is not a
+/// path at all. Every key this reads is checked where it is read: a value that
+/// cannot be anchored would otherwise be carried into the member's scratch
+/// unexamined and die two processes down.
+fn anchor_paths(document: &mut DocumentMut, base_dir: &Path, origin: &str) -> Result<(), Error> {
     for key in ANCHORED_PATHS {
-        anchor(document.as_table_mut(), key, base_dir);
+        anchor(document.as_table_mut(), key, base_dir, origin, key)?;
     }
     let Some(harnesses) = document
         .get_mut("harness")
         .and_then(Item::as_table_like_mut)
     else {
-        return;
+        return Ok(());
     };
-    for (_, harness) in harnesses.iter_mut() {
+    for (harness_name, harness) in harnesses.iter_mut() {
         let Some(variants) = harness
             .as_table_like_mut()
             .and_then(|harness| harness.get_mut("variant"))
@@ -531,29 +544,56 @@ fn anchor_paths(document: &mut DocumentMut, base_dir: &Path) {
         else {
             continue;
         };
-        for (_, variant) in variants.iter_mut() {
+        for (variant_name, variant) in variants.iter_mut() {
             if let Some(variant) = variant.as_table_like_mut() {
-                anchor(variant, ANCHORED_VARIANT_PATH, base_dir);
+                anchor(
+                    variant,
+                    ANCHORED_VARIANT_PATH,
+                    base_dir,
+                    origin,
+                    &format!(
+                        "harness.{harness_name}.variant.{variant_name}.{ANCHORED_VARIANT_PATH}"
+                    ),
+                )?;
             }
         }
     }
+    Ok(())
 }
 
 /// Anchor one path-valued key of one table, when it holds a relative path.
 ///
-/// An empty value is left alone: oneharness reads it as "unset", and joining it
-/// onto a directory would turn a key that said nothing into one naming the
-/// config's own directory.
-fn anchor(table: &mut dyn toml_edit::TableLike, key: &str, base_dir: &Path) {
+/// An empty value is left alone: oneharness reads `history_dir = ""` as unset,
+/// and joining it onto a directory would turn a key that said nothing into one
+/// naming the config's own directory.
+///
+/// `named` is how the key is spelled in a refusal — the whole dotted path for one
+/// inside a table, so an operator is told which of several to look at.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when the key holds a value that is not a string.
+fn anchor(
+    table: &mut dyn toml_edit::TableLike,
+    key: &str,
+    base_dir: &Path,
+    origin: &str,
+    named: &str,
+) -> Result<(), Error> {
     let Some(item) = table.get_mut(key) else {
-        return;
+        return Ok(());
     };
-    let Some(named) = item.as_str().filter(|named| !named.is_empty()) else {
-        return;
+    let Some(written) = item.as_str() else {
+        return Err(Error::InvalidConfig(format!(
+            "{origin}: `{named}` must be a path"
+        )));
     };
-    let path = Path::new(named);
+    if written.is_empty() {
+        return Ok(());
+    }
+    let path = Path::new(written);
     if !path.is_relative() {
-        return;
+        return Ok(());
     }
     // Absolute for the reason [`anchor_skill`] is: a graph named by a relative
     // path has a relative base directory too, and the child carrying this config
@@ -562,6 +602,7 @@ fn anchor(table: &mut dyn toml_edit::TableLike, key: &str, base_dir: &Path) {
     let joined = base_dir.join(path);
     let anchored = std::path::absolute(&joined).unwrap_or(joined);
     *item = toml_edit::value(anchored.display().to_string());
+    Ok(())
 }
 
 /// Every two-party member's agent side asks for a controllable turn, so
@@ -702,7 +743,7 @@ fn stamp_side(
         .parse()
         .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
     if let Some(base_dir) = base_dir {
-        anchor_paths(&mut document, base_dir);
+        anchor_paths(&mut document, base_dir, origin)?;
     }
     if let Some(mode) = side.mode {
         document["mode"] = toml_edit::value(mode);
@@ -1515,6 +1556,26 @@ mod tests {
             untouched,
         );
 
+        // A key that is not a path at all is refused where it is read, naming
+        // the whole dotted key so an operator knows which of several to look at.
+        for (config, expected) in [
+            (
+                "harnesses = [\"claude-code\"]\nhistory_dir = 3\n",
+                "`history_dir` must be a path",
+            ),
+            (
+                concat!(
+                    "harnesses = [\"claude-code\"]\n",
+                    "[harness.claude-code.variant.alternate]\nenv_file = true\n",
+                ),
+                "`harness.claude-code.variant.alternate.env_file` must be a path",
+            ),
+        ] {
+            let err =
+                stamp_side(config, "oneharness.toml", Some(written), Side::default()).unwrap_err();
+            assert!(err.to_string().contains(expected), "{config:?}: {err}");
+        }
+
         // A config fetched over https has no directory for a relative path to
         // mean anything against, so it is carried exactly as written.
         let remote = "harnesses = [\"claude-code\"]\nschema_file = \"answer.schema.json\"\n";
@@ -1605,11 +1666,11 @@ mod tests {
             ),
             (
                 "harnesses = [\"codex\"]\nschema_file = 3\n",
-                "`schema_file` must be the path",
+                "`schema_file` must be a path",
             ),
             (
                 "harnesses = [\"codex\"]\nschema_file = \"\"\n",
-                "`schema_file` must be the path",
+                "`schema_file` must be a path",
             ),
             (
                 "harnesses = [\"codex\"]\nstream = true\nschema_file = \"./a.json\"\n",
