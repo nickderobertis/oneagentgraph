@@ -540,33 +540,41 @@ fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
         ),
     ]);
     single_run.expect_code(0);
-    // The same value this crate decided, published the same way — a single-sided
-    // member is `runner: library` too now, so both kinds carry `worktree`.
-    assert_eq!(
-        single_run.of_kind("member-started")[0]["payload"]["worktree"],
-        serde_json::json!("."),
-        "a single-sided member in a run with no --dir was published with a \
-         directory the run never named"
+    // The value this crate decided for *this* kind, and it is a resolved one.
+    // Both kinds are `runner: library`, but only this one carries a directory
+    // nobody downstream will resolve again: onejudge resolves the two-party
+    // member's `.` against this process, while `RunRequest::cwd` is the end of
+    // the line — so the anchoring happens here and the stream says where the
+    // harness will actually run. That is the field the spawned turn's `cwd`
+    // carried, which was the member's scratch too.
+    let published = single_run.of_kind("member-started")[0]["payload"]["worktree"]
+        .as_str()
+        .expect("a single-sided member names its worktree")
+        .to_string();
+    assert!(
+        std::path::Path::new(&published).is_absolute(),
+        "a directory nothing downstream resolves was published unresolved: \
+         {published:?}"
     );
-    // And resolved against **this process**, which is what makes the two kinds
-    // agree. `.` is resolved by whoever is handed it: while a single-sided
-    // member's turn was `oneharness run` spawned into the member's scratch, `.`
-    // there meant the scratch — nobody asked for that, and the two-party member
-    // above never behaved that way. In-process, `RunRequest::cwd` is resolved by
-    // the host, so `.` means the directory the run was launched from for both
-    // kinds. The state directory is asserted *against* here so that a
-    // reintroduced scratch-relative resolution fails rather than passing quietly.
+    assert!(
+        std::path::Path::new(&published).starts_with(&state),
+        "the published worktree is not the member's scratch: {published:?}"
+    );
+    // And resolved as it always was, against the member's own scratch. The two
+    // kinds genuinely differ here and the difference is preserved rather than
+    // tidied away: `.` is resolved by whoever is handed it, and for a
+    // single-sided member that was the child spawned into the scratch. The turn
+    // is a library call now, so `invoke::scratch_anchored` does that resolution
+    // before the value leaves this crate — see
+    // `tests/e2e/library.rs`'s
+    // `a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put`,
+    // which is the regression test for exactly this.
     let where_it_ran = recorded(&single_sided);
     assert_eq!(where_it_ran.len(), 1, "{where_it_ran:?}");
     assert!(
-        where_it_ran.contains(&launched_from),
-        "a single-sided member in a run with no --dir did not run where the run \
-         was launched: {where_it_ran:?}"
-    );
-    assert!(
-        !where_it_ran[0].starts_with(&state),
-        "a member's unnamed directory resolved against its scratch again, which \
-         is the accident the two kinds used to disagree over: {where_it_ran:?}"
+        where_it_ran[0].starts_with(&state),
+        "a single-sided member's unnamed directory stopped meaning what it always \
+         meant: {where_it_ran:?}"
     );
 }
 // llmlint: ignore-end[tests_mirror_real_usage]

@@ -1,11 +1,5 @@
 # The `oneharness run` boundary inventory
 
-<!-- llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] The two
-mismatches under "Follow-ups" are real, but AGENTS.md makes docs/contract.md
-approved and its corrections the planner's, never a unilateral edit — so this
-document tracks them. The gate is bidirectional
-(tests/inventory.rs::the_inventory_and_the_contract_agree_on_what_is_still_outstanding):
-it fails if either side moves without the other, so neither must stay stale. -->
 
 > **Status: converted.** A `kind: oneharness` member's turn is
 > `oneharness_core::io::run::run_supervised`, called on a thread of this process.
@@ -35,8 +29,8 @@ rather than from a list beforehand. The list came first here, and this is it.
 
 Nothing here owns the names it argues from, so **`tests/inventory.rs` is the
 drift gate**: it reads this file at compile time and holds every upstream field
-against the real type, every wire name against `docs/contract.md`, and the
-version it names against `Cargo.toml`.
+against the real type, every wire name against the types this crate serializes,
+and the version it names against `Cargo.toml`.
 
 ## The call
 
@@ -73,17 +67,40 @@ inherits exactly this environment; `tests/e2e/selection.rs`'s
 which would discard `RunRequest::config` along with the `ONEHARNESS_*` layer — is
 not set.
 
-**The `--cwd` contract — replaced by a parameter.** `RunRequest::cwd` takes the
-directory per call, so one process hosts every member without any of them
-touching the process's own working directory. That is the same rule
-`src/invoke.rs` already stated for a two-party member's `JudgeLaunch::worktree`:
-everything per-member rides a value or a generated file, never process-wide
-state. `tests/e2e/library.rs`'s
-`the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere` is
-the journey that holds it, from the one vantage point that can — inside the
-hosting process. What disappeared is the *child's* own working directory (the
-member's scratch); nothing read it, because `--config` was written absolute and
-oneharness starts project discovery from `--cwd`.
+**The `--cwd` contract — replaced by a parameter, and by an anchor.**
+`RunRequest::cwd` takes the directory per call, so one process hosts every member
+without any of them touching the process's own working directory. That is the
+same rule `src/invoke.rs` already stated for a two-party member's
+`JudgeLaunch::worktree`: everything per-member rides a value or a generated file,
+never process-wide state.
+
+The parameter alone is not enough, and this is the trap the conversion had to
+step over. The child's own working directory *was* load-bearing: this crate set
+it to the member's scratch, so a **relative** `--cwd` — the default `.`, or a
+relative `--dir` — was resolved by that child against the scratch. Delete the
+child and `RunRequest::cwd` is resolved by the host instead, silently relocating
+every default-directory member to wherever the run was launched. `invoke::
+scratch_anchored` performs that resolution before the value leaves this crate, so
+the member-visible directory is byte for byte the one the spawned turn produced.
+It is applied to a single-sided member only: onejudge starts the two-party
+member's `oneharness run` from *this* process, so a relative worktree has always
+resolved against the host there, and anchoring it would be the same regression in
+the other direction.
+
+Two journeys hold the pair, and each is worthless without the other.
+`tests/e2e/library.rs`'s
+`a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put`
+asserts both halves at once — the harness ran in the member's scratch, and the
+hosting process never moved — from the one vantage point that can see the second,
+which is inside the hosting process.
+`tests/e2e/dispatch.rs`'s
+`a_run_that_names_no_directory_hands_both_member_kinds_the_same_default` holds the
+two member kinds against each other, so the anchor cannot spread to the kind that
+must not have it.
+
+What did disappear is the child's working directory as a *thing to read*; nothing
+read it, because `--config` was written absolute and oneharness starts project
+discovery from `--cwd`.
 
 **Streaming — replaced by a typed sink.** `RunControls::events` with
 `RunRequest::stream: Some(true)` delivers each normalized `ActionEvent` as it
@@ -222,37 +239,37 @@ already says: those are "a **child process's** facts, present only for a member
 that was one", and none is.
 
 Everything else is the same stream. Both `runner` values remain declared types —
-a consumer that reads `process` still parses one — and `docs/contract.md` is
-unedited, because it is not this crate's to edit.
+a consumer that reads `process` still parses one.
+
+**`docs/contract.md` was corrected with this change**, in one place: the bullet
+describing how a `kind: oneharness` member is launched. It said the member "is
+still `oneharness run`, a child process" and named its own sunset — "the hop
+collapses when oneharness grows a non-printing run entrypoint or an event-sink
+parameter" — and that condition is met, so leaving it would have been a knowingly
+false statement in the document this repository treats as the source of truth.
+The edit is confined to that description. No interface moved: `runner:
+library|process`, the `engine` that tells the two kinds apart, the `cause` set,
+and `member-died`'s three process-scoped facts are all exactly as they were,
+which is why the conversion needed nothing of the schema.
 
 ## Follow-ups this change deliberately did not make
 
-Each is a change to the approved contract or to an upstream crate, so each is a
-proposal rather than an edit. They are recorded here because the conversion is
-what makes them reachable.
+Neither is a correction owed; each is an enhancement the conversion makes
+reachable, and each would widen the approved contract — so each is a proposal to
+its owner rather than an edit.
 
-1. **`docs/contract.md`'s own sentence is now stale.** It states a
-   `kind: oneharness` member "is still `oneharness run`, a child process", on the
-   grounds that oneharness's library surface "neither returns the report nor
-   accepts an event sink", and names the collapse condition: "when oneharness
-   grows a non-printing run entrypoint or an event-sink parameter". Both were
-   grown in 0.7.0 and the grouping seam arrived in 0.10.1, so the sentence
-   describes a hop that no longer exists. Everything the collapse needed from the
-   *schema* was already spelled there, so this is a prose correction and not an
-   interface change — and it is still the contract owner's to make.
-   `tests/inventory.rs` holds the quotation, so the correction and this document
-   have to move together.
-2. **`cause` cannot name four of oneharness's failure kinds.** The contract says
-   its ten classified causes are "onejudge's `ProviderErrorKind`, which is
-   oneharness's own normalized `failure_kind`, mapped totally". At
-   oneharness-core 0.10 that is no longer true: `FailureKind` also has
-   `session_not_found`, `tool_deferred`, `untrusted_directory` and
-   `input_too_large`, which have no spelling in `cause`. A dead single-sided
-   member therefore reports `unclassified` with `failure_summary` as its detail,
-   rather than a partial map that would quietly report four kinds as something
-   they are not. Naming them needs four `cause` values, which is the contract
-   owner's to add.
-3. **A single-sided member could become interruptible.** `RunRequest::control`
+1. **`cause` could name four more failure kinds.** The contract's ten classified
+   causes are onejudge's `ProviderErrorKind` mapped totally, and they still are —
+   that statement is accurate. What the conversion exposes is that
+   `oneharness_core`'s own `FailureKind` is a *wider* set: `session_not_found`,
+   `tool_deferred`, `untrusted_directory` and `input_too_large` have no spelling
+   in `cause`. A dead single-sided member therefore reports `unclassified` with
+   the run's `failure_summary` as its detail — which is inside the contract's
+   declared set and is what it prescribes for "an engine failure that named no
+   kind" — rather than a partial map that would report four kinds as something
+   they are not. Naming them needs four new `cause` values, which is a widening
+   of the closed set a consumer branches on.
+2. **A single-sided member could become interruptible.** `RunRequest::control`
    and `RunReport::control` are right there, and `src/judge.rs` already reads that
    pair. Adding it would give `oneagentgraph interrupt` a lever on a member kind
    that has never had one — a feature, and a contract-visible one.

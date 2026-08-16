@@ -717,6 +717,105 @@ fn the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere()
     );
 }
 
+/// A member's **relative** directory resolves where it always has — inside that
+/// member's own scratch — and the process hosting every member still never moves.
+///
+/// Both halves in one journey, because each is worthless without the other. A
+/// run given no `--dir` carries `.`, and `.` only means something once somebody
+/// resolves it. While a single-sided member's turn was `oneharness run`, the
+/// resolver was that child, whose working directory this crate set to the
+/// member's scratch — so the harness ran in the scratch. In-process there is no
+/// such child: `RunRequest::cwd` is resolved by *this* process, and the obvious
+/// conversion silently relocates every default-directory member to wherever the
+/// run was launched from. `invoke::scratch_anchored` is what stops that, and this
+/// is the regression test for it: it fails on the unanchored conversion by
+/// reporting the launch directory where the scratch belongs.
+///
+/// The second half is why the fix cannot be a `set_current_dir` into the scratch,
+/// which would resolve `.` correctly and move every sibling member while doing
+/// it. Asserted from inside the hosting process — the only vantage point that
+/// can see it — and against the harness's *own* report of where it started,
+/// which is the far end of the value this crate decided.
+#[test]
+fn a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put() {
+    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let workspace = Workspace::new();
+    let where_it_ran = workspace.at("reporter.cwd");
+
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness().as_str())],
+    ));
+    // No `dir`, which is the whole point: the request carries the same `.` the
+    // CLI defaults to when an operator names no directory.
+    let request = Request {
+        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
+        task: Some(format!(
+            "fake:complete-now report in. fake:record-cwd={}",
+            where_it_ran.display()
+        )),
+        dir: std::path::PathBuf::from("."),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter: None,
+        state_dir: workspace.state(),
+        oneharness_bin: oneharness_bin(),
+    };
+
+    let before = std::env::current_dir().expect("the hosting process has a working directory");
+    let running = run::start(&request, &BTreeMap::new()).expect("the graph starts");
+    assert_eq!(running.wait().expect("the graph settles"), 0);
+
+    // The shared process never moved, so no member was relocated by a sibling.
+    assert_eq!(
+        std::env::current_dir().expect("the hosting process still has a working directory"),
+        before,
+        "the run moved the working directory of the process that hosts every member"
+    );
+
+    // And the member's harness ran inside that member's own scratch, which is
+    // where a relative directory has always resolved to.
+    let scratch = workspace
+        .state()
+        .join(run_id(&workspace.state()))
+        .join("members")
+        .join("reporter");
+    let ran = recorded(&where_it_ran);
+    assert_eq!(ran.len(), 1, "{ran:?}");
+    assert_eq!(
+        ran[0],
+        canonical(&scratch),
+        "a member with no directory of its own stopped running in its scratch; \
+         it ran in {:?} while this process sits in {:?}",
+        ran[0],
+        before
+    );
+    assert_ne!(
+        ran[0],
+        canonical(&before),
+        "the member ran where the run was launched, which is the unanchored \
+         conversion relocating every default-directory member"
+    );
+}
+
+/// The one run this state directory holds.
+fn run_id(state: &std::path::Path) -> String {
+    let mut ids: Vec<String> = std::fs::read_dir(state)
+        .expect("a state directory")
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().is_dir())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    ids.sort();
+    assert_eq!(ids.len(), 1, "expected exactly one run: {ids:?}");
+    ids.remove(0)
+}
+
 /// Every directory a harness recorded through `fake:record-cwd`, canonical so a
 /// host whose temporary directory is a symlink (macOS: `/var` → `/private/var`)
 /// compares equal to what the graph named.

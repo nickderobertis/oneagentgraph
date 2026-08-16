@@ -275,7 +275,10 @@ pub fn build(
                 kind: crate::member::Kind::Oneharness,
                 launch: Launch::Harness(Box::new(HarnessLaunch {
                     config: path,
-                    worktree: member_dir(member.dir.as_deref(), context),
+                    worktree: scratch_anchored(
+                        member_dir(member.dir.as_deref(), context),
+                        context.scratch,
+                    ),
                     prompt: member_task(member.task.as_deref(), context)?,
                     reporting: reporting(&config, &member.oneharness_config.0)?,
                 })),
@@ -1155,6 +1158,9 @@ fn task(context: &Context<'_>) -> Result<String, Error> {
 /// A member that named none gets `context.dir` **exactly as the run was given
 /// it**, relative or not, because that is what this crate has always passed to
 /// `oneharness run --cwd` and a member with no `dir` behaves as it did before.
+/// A single-sided member anchors that value before it reaches oneharness — see
+/// [`scratch_anchored`], which is what keeps "as the run was given it" meaning the same
+/// directory now that no child resolves it.
 ///
 /// A member's own `dir` is resolved rather than passed through, and the
 /// difference is not tidiness. The value goes to `--cwd` on a child spawned with
@@ -1172,6 +1178,41 @@ fn member_dir(named: Option<&Path>, context: &Context<'_>) -> PathBuf {
     };
     let joined = context.dir.join(named);
     std::path::absolute(&joined).unwrap_or(joined)
+}
+
+/// Resolve a single-sided member's directory the way the child that used to run
+/// its turn resolved it: relative to the member's **scratch**.
+///
+/// This exists because the turn stopped being a process, and the resolution has
+/// to survive that. `oneharness run --cwd <dir>` was resolved by the child, whose
+/// working directory this crate set to the member's scratch — so a relative value
+/// (the default `.`, or a relative `--dir`) meant "inside the scratch". A library
+/// call has no child to resolve it, and `RunRequest::cwd` is resolved by *this*
+/// process instead, which would silently move every such member to wherever the
+/// run was launched. Anchoring here is what makes the conversion invisible.
+///
+/// Only relative values are touched, so the ordinary case — an absolute `--dir`,
+/// or a member's own `dir`, which [`member_dir`] has already made absolute — is
+/// returned unchanged. A leading `.` is dropped rather than joined, so the value
+/// an operator reads on `member-started` names the directory rather than spelling
+/// it `…/members/reporter/.`.
+///
+/// It is deliberately **not** applied to a two-party member. onejudge starts that
+/// member's `oneharness run` from this process, so a relative worktree has always
+/// resolved against this process there, and anchoring it would be the same
+/// regression in the other direction. `tests/e2e/dispatch.rs`'s
+/// `a_run_that_names_no_directory_hands_both_member_kinds_the_same_default` holds
+/// both halves against each other.
+fn scratch_anchored(dir: PathBuf, scratch: &Path) -> PathBuf {
+    if dir.is_absolute() {
+        return dir;
+    }
+    let mut anchored = scratch.to_path_buf();
+    anchored.extend(
+        dir.components()
+            .filter(|part| !matches!(part, std::path::Component::CurDir)),
+    );
+    anchored
 }
 
 /// Write one generated file, creating the directory that holds it.

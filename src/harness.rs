@@ -394,14 +394,13 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
         return died(
             emitter,
             Rule::ProviderFailure,
-            // Four of oneharness's eight `FailureKind`s have no `cause` in
-            // `docs/contract.md`, so the honest answer inside that closed
-            // vocabulary is `unclassified`; the summary below names the harness.
-            //
-            // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] adding
-            // those four causes is the contract owner's, not this crate's. The
-            // gap is a tracked follow-up in `docs/oneharness-library.md`, gated
-            // both ways by `tests/inventory.rs`.
+            // Four of oneharness's eight `FailureKind`s — `session_not_found`,
+            // `tool_deferred`, `untrusted_directory`, `input_too_large` — have no
+            // `cause` in `docs/contract.md`'s closed set, so `unclassified` is the
+            // honest answer inside it and the summary below names the harness. A
+            // partial map would report those four as something they are not.
+            // Widening `cause` is a contract proposal, recorded in
+            // `docs/oneharness-library.md`.
             Cause::Unclassified,
             &outcome.failure_summary.unwrap_or_else(|| {
                 format!("the turn exited {} without a report", outcome.exit_code)

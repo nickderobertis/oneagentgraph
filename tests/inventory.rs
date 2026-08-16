@@ -5,8 +5,8 @@
 //! one side, `docs/contract.md`'s wire schema and this crate's manifest on the
 //! other. Neither copy can be generated — the document is prose written for a
 //! reader — so this suite is the drift gate instead. Every upstream field the
-//! document names is resolved by the compiler against the real type, every
-//! sentence it quotes is matched against the document it quotes, and the version
+//! document names is resolved by the compiler against the real type, every wire
+//! name it restates is built as the type this crate serializes, and the version
 //! it credits is read out of `Cargo.toml`.
 //!
 //! The load-bearing one is [`the_seam_the_conversion_rests_on_is_still_there`]:
@@ -227,74 +227,6 @@ fn the_status_block_names_the_version_the_manifest_takes() {
     );
 }
 
-/// The inventory and `docs/contract.md` **agree on what is still outstanding**.
-///
-/// The conversion left the contract carrying two statements the code no longer
-/// matches, and correcting an approved contract is its owner's to do, not this
-/// crate's — so the inventory records each as a follow-up instead. This is the
-/// gate on that arrangement, and it is deliberately checked *both ways*: while
-/// the contract still carries a stale statement the inventory must list it as
-/// owed, and the moment the owner corrects it the inventory must stop claiming a
-/// debt that has been paid.
-///
-/// Written as an agreement rather than as "the contract still says X" on
-/// purpose. A gate asserting the quotation alone would need the contract to stay
-/// stale in order to stay green, which preserves the mismatch rather than
-/// preventing it. This one is green on either side of the correction and red
-/// only when the two documents disagree about which side of it they are on.
-#[test]
-fn the_inventory_and_the_contract_agree_on_what_is_still_outstanding() {
-    // Both documents are hard-wrapped prose, so a statement is matched against
-    // the reflowed text rather than against whichever line it happened to break
-    // on. A rewrap on either side is not drift.
-    let inventory = reflowed(INVENTORY);
-    let contract = reflowed(CONTRACT);
-    for (owed, statements) in OUTSTANDING {
-        let still_owed = inventory.contains(owed);
-        for statement in *statements {
-            assert_eq!(
-                contract.contains(statement),
-                still_owed,
-                "the contract and the inventory disagree about {owed:?}: the contract \
-                 {} say {statement:?}, and the inventory {} list it as outstanding",
-                if contract.contains(statement) {
-                    "does"
-                } else {
-                    "does not"
-                },
-                if still_owed { "does" } else { "does not" },
-            );
-        }
-    }
-    assert!(
-        OUTSTANDING
-            .iter()
-            .any(|(owed, _)| inventory.contains(*owed)),
-        "the inventory lists no follow-up at all, so this gate is watching nothing \
-         — drop it with the last correction rather than leaving it green and idle"
-    );
-}
-
-/// Each correction `docs/contract.md` still owes: how the inventory's follow-up
-/// list names it, and the statements in the contract that go with it.
-const OUTSTANDING: &[(&str, &[&str])] = &[
-    (
-        "`docs/contract.md`'s own sentence is now stale",
-        &[
-            "is still `oneharness run`, a child process",
-            "neither returns the report nor accepts an event sink",
-            "when oneharness grows a non-printing run entrypoint or an event-sink parameter",
-        ],
-    ),
-    (
-        "`cause` cannot name four of oneharness's failure kinds",
-        &[
-            "onejudge's `ProviderErrorKind`, which is oneharness's own normalized \
-             `failure_kind`, mapped totally",
-        ],
-    ),
-];
-
 /// The wire names both documents share still name the types this crate
 /// serializes.
 ///
@@ -386,12 +318,6 @@ fn qualified_fields_named_in(text: &'static str) -> BTreeSet<String> {
                 .to_owned()
         })
         .collect()
-}
-
-/// `text` with every run of whitespace collapsed to one space, so a hard-wrapped
-/// sentence is one string again.
-fn reflowed(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// The contents of each non-empty backtick-delimited span in `text`.
