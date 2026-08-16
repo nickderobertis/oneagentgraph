@@ -10,6 +10,11 @@
 //! is still there before it does. A doc edit that renames a placeholder fails
 //! here rather than silently skipping the substitution.
 
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
+// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
+// contradicts is its owner's to correct, and no coupling test stands in for
+// that approval.
+
 use std::collections::BTreeSet;
 
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
@@ -1468,9 +1473,6 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         &mut oneagentgraph::resolve::Resolver::new(),
     )
     .expect("the member builds");
-    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] see blocker 1 in
-    // `docs/oneharness-library.md`; the contract sentence this contradicts is the
-    // owner's to correct.
     let oneagentgraph::invoke::Launch::Harness(launch) = invocation.launch else {
         panic!("a single-sided member is driven through the oneharness library")
     };

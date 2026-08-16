@@ -255,58 +255,57 @@ process-scoped facts are all exactly as they were.
 
 Neither is resolvable from inside this crate.
 
-**1. `docs/contract.md` states something the code contradicts, and correcting it
-needs the contract owner.** The launch bullet says a `kind: oneharness` member
-"is still `oneharness run`, a child process", resting that on oneharness's
-library surface "neither returns the report nor accepts an event sink", and names
-its own sunset: "the hop collapses when oneharness grows a non-printing run
-entrypoint or an event-sink parameter". The evidence that the sentence is now
-false is the code beside it — `src/harness.rs` calls
-`oneharness_core::io::run::run_supervised`, which returns `RunOutcome` and takes
-`RunControls::events` — and `tests/e2e/dispatch.rs`'s
-`a_single_sided_members_turn_spawns_no_oneharness_process`, which settles a member
-with `ONEAGENTGRAPH_ONEHARNESS_BIN` pointing at a binary that does not exist.
-A correction was written and then **reverted**, because AGENTS.md says the
-approved contract "is not edited to match the code" and that changing it "is a
-proposal to the planner who owns that contract, never a unilateral edit". What
-unblocks it is that planner approving the one-bullet prose change; it is a
-description of which process runs a member, not an interface change, and the
-sunset condition the bullet itself names has been met.
+**1. `docs/contract.md` says a `kind: oneharness` member "is still `oneharness
+run`, a child process", and the code no longer does.** The evidence is
+`src/harness.rs`, which calls `oneharness_core::io::run::run_supervised` — a call
+that returns `RunOutcome` and takes `RunControls::events`, the two capabilities
+the same bullet names as its own sunset — and
+`tests/e2e/dispatch.rs`'s `a_single_sided_members_turn_spawns_no_oneharness_process`,
+which settles a member with `ONEAGENTGRAPH_ONEHARNESS_BIN` pointing at a binary
+that does not exist. A correction was written here and reverted, because that
+document is approved and its changes are its owner's. What clears this is that
+owner approving one bullet of prose; nothing in the code changes with it.
 
 **2. The panic-containment criterion has no real-interface journey, because
-nothing user-reachable panics.** The requirement is a member turn driven through
-the compiled binary whose library path panics, proving that member dies while the
-graph survives. The `RunRequest` this crate builds is a closed template — only the
-config's content, the directory, the prompt text and one boolean vary with graph
-input — and every layer between that input and the engine is total: `bound_detail`
-counts `chars`, `summarize` matches every `Value` shape, `Emitter` holds a
-poison-tolerant lock, and `oneharness_core` documents request problems as
-`OneharnessError` and harness behaviour as a report, never a panic. So no graph,
-task or config reaches the arm. Driving one would need a fault-injection seam in
-the production path, and AGENTS.md allows exactly one fake — "the paid harness
-process, at oneharness's own `ONEHARNESS_BIN_<ID>` binary override. Everything
-else in a journey is real" — which is an invariant rather than something to widen
-for a test. What unblocks it is either that invariant being widened by its owner,
-or an upstream test hook on `oneharness_core` that makes a run panic on demand.
-Until then the containment is covered at the supervision loop only, by
-`harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`,
-which drives the real loop against a real panicking thread — and that is a unit
-test, not the journey the bar asks for.
+nothing user-reachable panics.** The bar wants a member turn driven through the
+compiled binary whose library path panics. The `RunRequest` this crate builds is
+a closed template — only the config's content, the directory, the prompt text and
+one boolean vary with graph input — and every layer between that input and the
+engine is total: `bound_detail` counts `chars`, `summarize` matches every `Value`
+shape, `Emitter` holds a poison-tolerant lock, and `oneharness_core` documents
+request problems as `OneharnessError` and harness behaviour as a report, never a
+panic. So no graph, task or config reaches the arm, and driving one would need a
+fault-injection seam in the production path — which is a change to this
+repository's single-fake testing invariant, not a test to write under it. What
+clears this is that invariant's owner widening it, or an upstream hook that makes
+a run panic on demand. Until then the containment is covered at the supervision
+loop by `harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`,
+which drives the real loop against a real panicking thread — a unit test, and not
+the journey the bar asks for.
 
 **3. `selection::a_chain_that_refuses_every_candidate_reports_each_one_and_fails`
 fails on Windows only, in the dependency's classification.** With every candidate
 refusing on `auth`, the report names two fallen-through candidates on Linux and
-macOS and **one** on Windows, so the second is never published. The conversion is
-what exposes it: this member's chain used to be classified by the *installed*
-`oneharness` CLI (`just`'s `oneharness-version`, 0.6.15) and is now classified by
-the linked `oneharness-core` 0.10.1, and the two disagree there. It is not a
-grouping fault — `liveness::a_cancelled_run_reaps_a_single_sided_members_harness`
-passes on Windows in the same run, which is the job object holding and reaping a
-harness this process never spawned. Fallback classification is upstream's by
-`docs/contract.md`'s own rule that this crate "owns NO harness/model/fallback
-logic", so the test is left asserting the behaviour that is correct rather than
-relaxed to match one platform. Unblocking needs a Windows host to diagnose on and,
-most likely, an upstream fix.
+macOS and **one** on Windows, so the second is never published — the chain stops
+at it instead of stepping past. The conversion is what exposes it: this member's
+chain used to be classified by the *installed* `oneharness` CLI (`just`'s
+`oneharness-version`, 0.6.15) and is now classified by the linked
+`oneharness-core` 0.10.1, and the two disagree there.
+
+It is **not** a grouping or teardown fault. In the same Windows run every one of
+those journeys passes, including
+`liveness::a_cancelled_run_reaps_a_single_sided_members_harness` — a job object
+holding, and a `cancel --kill` from another process reaping, a harness this
+process never spawned. That run is 376 of 377 green with this as the only failure.
+
+The lead for whoever has a Windows host: `FAKE_HARNESS_REFUSAL=auth` writes its
+refusal **to stderr alone** (`src/bin/fake_harness.rs`), so `auth` is only
+classified if oneharness captures that child's stderr. A candidate whose stderr
+is missed is a plain non-zero exit, which is not a startup failure and therefore
+stops the chain — exactly the observed shape. That points at pipe capture for the
+*second* spawn of a run rather than at anything this crate decides. Fallback
+classification is upstream's, not this crate's, so the test is left asserting the
+correct behaviour rather than relaxed to match one platform.
 
 ## Follow-ups this change deliberately did not make
 
@@ -314,17 +313,13 @@ Neither is a correction owed; each is an enhancement the conversion makes
 reachable, and each would widen the approved contract — so each is a proposal to
 its owner rather than an edit.
 
-1. **`cause` could name four more failure kinds.** The contract's ten classified
-   causes are onejudge's `ProviderErrorKind` mapped totally, and they still are —
-   that statement is accurate. What the conversion exposes is that
-   `oneharness_core`'s own `FailureKind` is a *wider* set: `session_not_found`,
-   `tool_deferred`, `untrusted_directory` and `input_too_large` have no spelling
-   in `cause`. A dead single-sided member therefore reports `unclassified` with
-   the run's `failure_summary` as its detail — which is inside the contract's
-   declared set and is what it prescribes for "an engine failure that named no
-   kind" — rather than a partial map that would report four kinds as something
-   they are not. Naming them needs four new `cause` values, which is a widening
-   of the closed set a consumer branches on.
+1. **`cause` could name four more failure kinds.** `oneharness_core`'s
+   `FailureKind` is a wider set than the closed `cause` vocabulary:
+   `session_not_found`, `tool_deferred`, `untrusted_directory` and
+   `input_too_large` have no spelling there. A dead single-sided member therefore
+   reports `unclassified` with the run's `failure_summary` as its detail, rather
+   than a partial map that would report four kinds as something they are not.
+   Naming them widens a closed set consumers branch on, so it is a proposal.
 2. **A single-sided member could become interruptible.** `RunRequest::control`
    and `RunReport::control` are right there, and `src/judge.rs` already reads that
    pair. Adding it would give `oneagentgraph interrupt` a lever on a member kind

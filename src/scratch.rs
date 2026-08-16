@@ -342,19 +342,12 @@ impl Group {
         Ok(name)
     }
 
-    /// [`Group::adopt`] for a caller that did not spawn the child and must not
-    /// start it: the process joins this group and is left exactly as it was
-    /// found.
+    /// [`Group::adopt`] without the resume: the process joins this group and is
+    /// left exactly as it was found.
     ///
-    /// This is the half a spawn *hook* wants, and on Windows the distinction is
-    /// load-bearing rather than tidy. `oneharness_core`'s `ProcessSupervisor`
-    /// calls its `spawned` hook while the child is still `CREATE_SUSPENDED` and
-    /// resumes it itself once the hook returns — precisely so a job assignment
-    /// cannot miss a descendant. A hook that resumed here would let the child run
-    /// and possibly exit before oneharness enumerated its primary thread, and
-    /// upstream reads a thread it cannot find as a spawn failure and tears the
-    /// tree down. So the group takes the process and leaves the starting to
-    /// whoever owns it.
+    /// What a spawn *hook* wants. A caller that did not start the child does not
+    /// own the moment it runs, and on Windows resuming here races the spawner's
+    /// own thread enumeration.
     ///
     /// # Errors
     ///

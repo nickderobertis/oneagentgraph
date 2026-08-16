@@ -717,25 +717,9 @@ fn the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere()
     );
 }
 
-/// A member's **relative** directory resolves where it always has — inside that
-/// member's own scratch — and the process hosting every member still never moves.
-///
-/// Both halves in one journey, because each is worthless without the other. A
-/// run given no `--dir` carries `.`, and `.` only means something once somebody
-/// resolves it. While a single-sided member's turn was `oneharness run`, the
-/// resolver was that child, whose working directory this crate set to the
-/// member's scratch — so the harness ran in the scratch. In-process there is no
-/// such child: `RunRequest::cwd` is resolved by *this* process, and the obvious
-/// conversion silently relocates every default-directory member to wherever the
-/// run was launched from. `invoke::scratch_anchored` is what stops that, and this
-/// is the regression test for it: it fails on the unanchored conversion by
-/// reporting the launch directory where the scratch belongs.
-///
-/// The second half is why the fix cannot be a `set_current_dir` into the scratch,
-/// which would resolve `.` correctly and move every sibling member while doing
-/// it. Asserted from inside the hosting process — the only vantage point that
-/// can see it — and against the harness's *own* report of where it started,
-/// which is the far end of the value this crate decided.
+/// Both halves in one journey because each is worthless without the other: the
+/// host staying put is why the scratch resolution cannot be a `set_current_dir`,
+/// and it is only observable from inside the hosting process.
 #[test]
 fn a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put() {
     let _serial = LIBRARY_RUN.lock().expect("library journey lock");
@@ -751,8 +735,8 @@ fn a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put()
         ),
         &[(FAKE_HARNESS_KEY, fake_harness().as_str())],
     ));
-    // No `dir`, which is the whole point: the request carries the same `.` the
-    // CLI defaults to when an operator names no directory.
+    // `dir: "."`, which is the whole point: the same default the CLI applies when
+    // an operator names no directory, and the value whose resolution moved.
     let request = Request {
         graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
         task: Some(format!(

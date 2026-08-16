@@ -9,17 +9,17 @@
 //! name it restates is built as the type this crate serializes, and the version
 //! it credits is read out of `Cargo.toml`.
 //!
-//! What this suite deliberately does **not** do is gate the launch-boundary
-//! sentence `docs/contract.md` and the implementation now disagree about. That
-//! disagreement is a blocker recorded in the inventory, and a token-presence
-//! check across the two documents would stay green through it — which would read
-//! as reconciliation while reconciling nothing.
-//!
 //! The load-bearing one is [`the_seam_the_conversion_rests_on_is_still_there`]:
 //! the grouping hooks are the entire reason this conversion was safe to make, and
 //! a build that quietly lost them would leave the activity watchdog looking at an
 //! empty tree and a killed run's paid harnesses billing. It is written so that
 //! disappearing upstream is a failure here rather than a silent regression there.
+
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
+// open as blocker 1 in `docs/oneharness-library.md`: the launch-boundary sentence
+// the implementation contradicts is its owner's to correct. A gate here could
+// only stay green while the mismatch exists or demand the contract stay stale,
+// so there is deliberately none.
 
 use std::collections::BTreeSet;
 use std::process::{Child, Command};

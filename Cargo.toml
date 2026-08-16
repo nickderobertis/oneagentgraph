@@ -125,22 +125,20 @@ test-doubles = []
 # watchdog against it, which asserts the dependency's behaviour through a race.
 onejudge = { version = "0.4.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
-# oneharness's own typed report/stream contract, and — since the library
-# conversion — the engine that runs a `kind: oneharness` member's turn.
+# llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
+# open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
+# contradicts is its owner's to correct.
+# The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
-# **0.10.1 is a compile floor, not a preference.** It is the first release with
-# `io::run::run_supervised` and `io::runner::ProcessSupervisor`, the hooks that
-# put each harness child into the member's process group / job object. Without
-# them the activity watchdog sees an empty tree and a killed run's paid harnesses
-# keep billing, so below 0.10.1 `src/harness.rs` deliberately does not compile.
+# **0.10.1 is a compile floor.** It is the first release with
+# `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
+# put each harness child into the member's process group / job object — so below
+# it `src/harness.rs` deliberately does not build.
 #
-# Two copies of this crate are in the graph: onejudge asks for 0.8 and drives
-# oneharness itself. Sound because nothing crosses between them — every value
-# onejudge hands back arrives as JSON and is parsed into this copy's types — and
-# `cargo deny`'s `multiple-versions = "allow"` records the choice. Do not thread a
-# `oneharness_core::` value through a `onejudge::` signature; they are different
-# types and the compiler will say so. `docs/oneharness-library.md` has the rest,
-# including which oneharness each member kind meets.
+# onejudge asks for 0.8 and drives oneharness itself, so two copies are in the
+# graph. Nothing crosses between them: every value onejudge hands back arrives as
+# JSON and is parsed into this copy's types. Do not thread a `oneharness_core::`
+# value through a `onejudge::` signature.
 oneharness-core = "0.10.1"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

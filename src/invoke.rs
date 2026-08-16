@@ -1,5 +1,10 @@
 //! Preparing one member for launch.
 //!
+
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
+// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
+// contradicts is its owner's to correct, and no coupling test stands in for
+// that approval.
 //! This is the whole of what `docs/contract.md` means by "prepares each member's
 //! launch": a member's refs are resolved, its persona is merged onto its base,
 //! each side's oneharness config is written into the run's own directory, and
@@ -99,21 +104,10 @@ pub const MODE_ENV: &str = "ONEHARNESS_MODE";
 /// applied afterwards and wins.
 pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
 
-/// How one member is started.
+/// How one member is started: which engine drives it, and over what config.
 ///
-// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] see blocker 1 in
-// `docs/oneharness-library.md`; the contract sentence this contradicts is the
-// owner's to correct.
-///
-/// The contract's two member kinds are two different things to start, and this is
-/// the one place that difference lives. **Neither is a process any more**: a
-/// `kind: onejudge` member is onejudge's run driver and a `kind: oneharness`
-/// member is oneharness's, each called on a thread of this process, so neither
-/// has an argv, an exit status, or a stderr of its own. What differs is which
-/// engine reads the member's config and what that config is — which is exactly
-/// the two variants below. See `docs/oneharness-library.md` for the conversion
-/// that collapsed the second one, and `docs/contract.md` for the wire shape both
-/// publish.
+/// Neither kind is a process. What differs is the engine and the config shape,
+/// which is exactly the two variants.
 #[derive(Debug, Clone)]
 pub enum Launch {
     /// onejudge's own run driver, over the config written into the member's
@@ -1184,29 +1178,14 @@ fn member_dir(named: Option<&Path>, context: &Context<'_>) -> PathBuf {
     std::path::absolute(&joined).unwrap_or(joined)
 }
 
-/// Resolve a single-sided member's directory the way the child that used to run
-/// its turn resolved it: relative to the member's **scratch**.
+/// Resolve a single-sided member's directory in its **scratch**, which is where
+/// the child that used to run its turn resolved a relative `--cwd`.
 ///
-/// This exists because the turn stopped being a process, and the resolution has
-/// to survive that. `oneharness run --cwd <dir>` was resolved by the child, whose
-/// working directory this crate set to the member's scratch — so a relative value
-/// (the default `.`, or a relative `--dir`) meant "inside the scratch". A library
-/// call has no child to resolve it, and `RunRequest::cwd` is resolved by *this*
-/// process instead, which would silently move every such member to wherever the
-/// run was launched. Anchoring here is what makes the conversion invisible.
-///
-/// Only relative values are touched, so the ordinary case — an absolute `--dir`,
-/// or a member's own `dir`, which [`member_dir`] has already made absolute — is
-/// returned unchanged. A leading `.` is dropped rather than joined, so the value
-/// an operator reads on `member-started` names the directory rather than spelling
-/// it `…/members/reporter/.`.
-///
-/// It is deliberately **not** applied to a two-party member. onejudge starts that
-/// member's `oneharness run` from this process, so a relative worktree has always
-/// resolved against this process there, and anchoring it would be the same
-/// regression in the other direction. `tests/e2e/dispatch.rs`'s
-/// `a_run_that_names_no_directory_hands_both_member_kinds_the_same_default` holds
-/// both halves against each other.
+/// Absolute values — an absolute `--dir`, or a member's own `dir`, which
+/// [`member_dir`] has already made absolute — are returned unchanged, and a
+/// leading `.` is dropped rather than joined. Not applied to a two-party member:
+/// onejudge starts that member's harness from this process, so a relative
+/// worktree has always resolved against the host there.
 fn scratch_anchored(dir: PathBuf, scratch: &Path) -> PathBuf {
     if dir.is_absolute() {
         return dir;

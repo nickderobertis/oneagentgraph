@@ -1014,22 +1014,11 @@ fn a_cancelled_run_reaps_a_member_that_published_nothing() {
     );
 }
 
-/// A cancelled run reaps a **single-sided** member's harness, which is a process
-/// this crate never spawned.
+/// A cancelled run reaps a **single-sided** member's harness — a process this
+/// crate never spawned, and the one every other cancel journey here misses.
 ///
-/// The pair with the journey above, and the one the library conversion made
-/// necessary. Every other cancel journey here drives the default two-party
-/// graph, whose harnesses onejudge starts and `judge::MemberSpawn` groups. A
-/// single-sided member's harness is started by `oneharness_core` **inside this
-/// process**, so the only thing that can put it in the member's group is
-/// `harness::HarnessSpawn` — the `ProcessSupervisor` hooks the engine calls
-/// between building the `Command` and having the `Child`.
-///
-/// This is the regression the whole conversion was gated on. Without those
-/// hooks the harness carries no stamp, `scratch::stamped_for` reports an empty
-/// tree, and `cancel --kill` from another process reports a cancelled member
-/// whose paid harness is still running — so the `until` below never settles and
-/// this journey hangs rather than passing quietly.
+/// Without the grouping hooks the harness carries no stamp, so this hangs rather
+/// than passing quietly.
 #[test]
 fn a_cancelled_run_reaps_a_single_sided_members_harness() {
     let workspace = Workspace::new();

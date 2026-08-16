@@ -7,6 +7,11 @@
 //! says which and why)", so a journey that only checked the code would leave the
 //! part a supervisor reads unproven.
 
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
+// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
+// contradicts is its owner's to correct, and no coupling test stands in for
+// that approval.
+
 // llmlint: ignore-file[e2e_not_mocked] see tests/e2e/support.rs: the paid harness
 // process is the single sanctioned double, replaced at oneharness's own
 // `ONEHARNESS_BIN_<ID>` seam, with real onejudge and real oneharness in between.
@@ -540,13 +545,8 @@ fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
         ),
     ]);
     single_run.expect_code(0);
-    // The value this crate decided for *this* kind, and it is a resolved one.
-    // Both kinds are `runner: library`, but only this one carries a directory
-    // nobody downstream will resolve again: onejudge resolves the two-party
-    // member's `.` against this process, while `RunRequest::cwd` is the end of
-    // the line — so the anchoring happens here and the stream says where the
-    // harness will actually run. That is the field the spawned turn's `cwd`
-    // carried, which was the member's scratch too.
+    // A resolved directory, unlike the two-party member's `.` above: nothing
+    // downstream resolves `RunRequest::cwd`, so the anchoring happens here.
     let published = single_run.of_kind("member-started")[0]["payload"]["worktree"]
         .as_str()
         .expect("a single-sided member names its worktree")
@@ -569,15 +569,8 @@ fn a_run_that_names_no_directory_hands_both_member_kinds_the_same_default() {
         published.starts_with(&state),
         "the published worktree is not the member's scratch: {published:?}"
     );
-    // And resolved as it always was, against the member's own scratch. The two
-    // kinds genuinely differ here and the difference is preserved rather than
-    // tidied away: `.` is resolved by whoever is handed it, and for a
-    // single-sided member that was the child spawned into the scratch. The turn
-    // is a library call now, so `invoke::scratch_anchored` does that resolution
-    // before the value leaves this crate — see
-    // `tests/e2e/library.rs`'s
-    // `a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put`,
-    // which is the regression test for exactly this.
+    // And the harness really ran there. The two kinds differ, and the difference
+    // is preserved rather than tidied away.
     let where_it_ran = recorded(&single_sided);
     assert_eq!(where_it_ran.len(), 1, "{where_it_ran:?}");
     assert!(

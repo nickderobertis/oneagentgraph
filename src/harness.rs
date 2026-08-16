@@ -5,11 +5,13 @@
 //! of its own. [`crate::judge`] is this module for the other member kind and has
 //! the same shape; both reach the shared settle and death in [`crate::member`].
 //!
-//! What this module hands the engine is constrained by guarantees the deleted
-//! subprocess used to provide — grouping, teardown, cwd resolution, panic
-//! containment — each with its own seam here and its reasoning in
-//! `docs/oneharness-library.md`, which also records the blockers this conversion
-//! left open.
+//! `docs/oneharness-library.md` owns why each seam below is shaped as it is.
+
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
+// open as blocker 1 in `docs/oneharness-library.md`: the contract sentence this
+// contradicts is its owner's to correct, and no coupling test stands in for
+// that approval.
+
 use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -58,25 +60,13 @@ pub(crate) const ONEHARNESS_ENGINE: &str = "oneharness";
 ///
 /// Returns only when the member has settled or been condemned: the engine runs
 /// on its own thread, and this call is the supervision around it.
-//
-// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] accurate, and open
-// as blocker 1 in `docs/oneharness-library.md`: correcting the contract sentence
-// this contradicts is the owner's, an edit was reverted on that rule, and no
-// coupling test stands in for the approval.
 #[must_use]
 pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
-    // Opened before the engine is driven for the reason [`crate::judge`] opens
-    // one before its plan: it is what the spawns go *into*, and they are not this
-    // module's spawns to make. A member that could not be grouped is refused
-    // rather than started, because a paid harness no cancel can reach is worse
-    // than a member that never ran.
+    // Opened before the engine runs, because it is what the spawns go into.
     //
-    // llmlint: ignore-block[changed_behavior_has_e2e] this arm has no journey for
-    // the reason its two twins do not: opening a group takes no input, and the
-    // only ways it fails are the kernel refusing a job object or a scratch this
-    // run created moments ago having become unwritable. Both are host failures
-    // rather than requests. The reachable half — that the harness lands in the
-    // group and a cancel reaps it through one — is tests/e2e/liveness.rs.
+    // llmlint: ignore-block[changed_behavior_has_e2e] no input reaches this arm:
+    // opening a group fails only on a kernel refusal or an unwritable scratch.
+    // The reachable half is tests/e2e/liveness.rs.
     let group = match crate::scratch::Group::open(scratch) {
         Ok(group) => Arc::new(group),
         Err(err) => {
@@ -115,7 +105,7 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 activity,
                 started,
                 cancel: cancel.clone(),
-                opened: false,
+                turn: Turn::Unopened,
             };
             let outcome = run_supervised(
                 &request,
@@ -309,22 +299,15 @@ struct Events {
     /// documented short-circuit — a condemned member stops at its next event
     /// rather than only when the terminate path reaches it.
     cancel: CancelToken,
-    /// Whether this member's one turn has been opened. Not a counter: an
-    /// `oneharness run` is a single turn, so the only two states are before the
-    /// first event and after it — see [`Events::event`].
-    opened: bool,
+    turn: Turn,
 }
 
 impl EventSink for Events {
     fn event(&mut self, _harness_id: &str, event: &ActionEvent) -> SinkStep {
         self.activity
             .store(elapsed_millis(self.started), Ordering::SeqCst);
-        // One turn, always: `oneharness run` is a single turn, and its stream
-        // envelope carries no turn index — the NDJSON reader this replaces
-        // defaulted every event to turn 1 for exactly that reason. So the first
-        // event a member publishes opens its turn and nothing renumbers it.
-        if !self.opened {
-            self.opened = true;
+        if self.turn == Turn::Unopened {
+            self.turn = Turn::Open;
             emit_turn_started(&self.emitter, THE_ONLY_TURN);
         }
         ingest(event, &self.emitter);
@@ -334,6 +317,14 @@ impl EventSink for Events {
             SinkStep::Continue
         }
     }
+}
+
+/// Whether this member's one turn has been opened. `oneharness run` is a single
+/// turn, so these are the only two states there are.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Turn {
+    Unopened,
+    Open,
 }
 
 /// The turn index every event of a single-sided member's run is attributed to.
@@ -626,7 +617,7 @@ mod tests {
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             cancel: CancelToken::new(),
-            opened: false,
+            turn: Turn::Unopened,
         };
         for _ in 0..3 {
             assert!(matches!(
@@ -678,7 +669,7 @@ mod tests {
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             cancel: cancel.clone(),
-            opened: false,
+            turn: Turn::Unopened,
         };
         assert!(matches!(
             sink.event("claude-code", &call(Some("bash"))),
