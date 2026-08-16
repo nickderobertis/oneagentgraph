@@ -327,12 +327,41 @@ impl Group {
     /// both platforms — [`stamped_for`] and [`reap`] take exactly this string,
     /// so a record of it is a record something else can act on.
     ///
+    /// For a caller that spawned the child itself, and so owns the moment it
+    /// starts running. A caller that only *observes* somebody else's spawn wants
+    /// [`Group::join`]; the two differ by exactly the resume, and getting that
+    /// wrong is a Windows-only race — see there.
+    ///
     /// # Errors
     ///
     /// Whatever the platform reports when a live process cannot be put in the
     /// group. The caller kills the child rather than running it ungrouped.
     pub(crate) fn adopt(&self, child: &Child) -> std::io::Result<String> {
-        self.inner.adopt(child)?;
+        let name = self.join(child)?;
+        self.inner.start(child)?;
+        Ok(name)
+    }
+
+    /// [`Group::adopt`] for a caller that did not spawn the child and must not
+    /// start it: the process joins this group and is left exactly as it was
+    /// found.
+    ///
+    /// This is the half a spawn *hook* wants, and on Windows the distinction is
+    /// load-bearing rather than tidy. `oneharness_core`'s `ProcessSupervisor`
+    /// calls its `spawned` hook while the child is still `CREATE_SUSPENDED` and
+    /// resumes it itself once the hook returns — precisely so a job assignment
+    /// cannot miss a descendant. A hook that resumed here would let the child run
+    /// and possibly exit before oneharness enumerated its primary thread, and
+    /// upstream reads a thread it cannot find as a spawn failure and tears the
+    /// tree down. So the group takes the process and leaves the starting to
+    /// whoever owns it.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the platform reports when a live process cannot be put in the
+    /// group. The caller refuses the member rather than running it ungrouped.
+    pub(crate) fn join(&self, child: &Child) -> std::io::Result<String> {
+        self.inner.join(child)?;
         Ok(self.scratch.display().to_string())
     }
 
@@ -798,7 +827,13 @@ mod platform {
 
         /// Nothing to do to a live process either — it was in the group the
         /// moment it `exec`ed, and it cannot be moved out of one.
-        pub fn adopt(&self, _child: &std::process::Child) -> std::io::Result<()> {
+        pub fn join(&self, _child: &std::process::Child) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing to start: a POSIX child is running from its `exec`, so the
+        /// suspend/resume window Windows needs does not exist here.
+        pub fn start(&self, _child: &std::process::Child) -> std::io::Result<()> {
             Ok(())
         }
 
@@ -1176,7 +1211,12 @@ mod platform {
             Ok(())
         }
 
-        /// Put the suspended child in the job and let it run.
+        /// Put the suspended child in the job, leaving it suspended.
+        ///
+        /// A job assignment **nests**, which is what lets this be safe for a
+        /// child somebody else spawned: a harness `oneharness_core` has already
+        /// put in a job of its own joins this one as well, and either side's
+        /// teardown ends it.
         //
         // llmlint: ignore-block[changed_behavior_has_e2e] there is no journey
         // for the failure arms because there is no input that reaches them: a
@@ -1190,7 +1230,7 @@ mod platform {
         // one: a child that started but could not be put in the job is killed
         // rather than returned, because returning it would leave a paid harness
         // running that no cancel could ever find.
-        pub fn adopt(&self, child: &Child) -> std::io::Result<()> {
+        pub fn join(&self, child: &Child) -> std::io::Result<()> {
             // SAFETY: the child handle is live for the borrow, and the job is
             // one this group owns; failure is reported through the return value.
             let assigned = unsafe {
@@ -1199,6 +1239,11 @@ mod platform {
             if assigned == 0 {
                 return Err(std::io::Error::last_os_error());
             }
+            Ok(())
+        }
+
+        /// Let a child this group's own [`Group::spawn`] started run.
+        pub fn start(&self, child: &Child) -> std::io::Result<()> {
             resume(child.id())
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -1482,8 +1527,13 @@ mod platform {
             Ok(())
         }
 
-        /// Nothing to adopt either, for the same reason.
-        pub fn adopt(&self, _child: &std::process::Child) -> std::io::Result<()> {
+        /// Nothing to join either, for the same reason.
+        pub fn join(&self, _child: &std::process::Child) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing was suspended, so nothing has to be started.
+        pub fn start(&self, _child: &std::process::Child) -> std::io::Result<()> {
             Ok(())
         }
 

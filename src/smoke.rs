@@ -55,6 +55,7 @@
 // the classification, is the closed `Reason` set above.
 
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -224,9 +225,22 @@ fn after_attempts(error: Error) -> Error {
     }
 }
 
+/// A turn command which cannot consume the caller's input.
+///
+/// Kept beside the one launch that still makes one: a smoke turn proves *this
+/// host's* `oneharness` on `PATH` reaches an identity, so unlike a member's turn
+/// it has to stay the binary rather than the linked library — the reason is at
+/// [`run`]. Nulling stdin here means the probe can never block on a prompt it was
+/// never going to answer.
+fn command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.stdin(Stdio::null());
+    command
+}
+
 /// Spend one turn in `dir`, once.
 fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
-    let output = crate::harness_process::command(oneharness_bin)
+    let output = command(oneharness_bin)
         .args(["run", "--cwd"])
         .arg(dir)
         .args(["--compact", "--prompt", PROMPT])

@@ -1,37 +1,28 @@
-//! The blocked-conversion inventory is driven by the surfaces it quotes.
+//! The conversion inventory is driven by the surfaces it describes.
 //!
-//! `docs/oneharness-library.md` says the `oneharness run` hop is blocked, and
+//! `docs/oneharness-library.md` says the `oneharness run` hop is converted, and
 //! rests that claim on names it does not own: `oneharness-core`'s public API on
 //! one side, `docs/contract.md`'s wire schema and this crate's manifest on the
 //! other. Neither copy can be generated — the document is prose written for a
 //! reader — so this suite is the drift gate instead. Every upstream field the
 //! document names is resolved by the compiler against the real type, every
 //! sentence it quotes is matched against the document it quotes, and the version
-//! it blames is read out of `Cargo.toml`.
+//! it credits is read out of `Cargo.toml`.
 //!
-//! The load-bearing one is
-//! [`the_status_block_names_the_version_the_manifest_takes`], and it did not use
-//! to be. The signal was
-//! [`run_controls_keeps_the_four_fields_upstream_committed_to`], on the
-//! reasoning that an exhaustive [`RunControls`] destructure stops compiling the
-//! day upstream adds the spawn seam. Upstream then added the seam as a second
-//! entry point — `io::run::run_supervised`, taking an
-//! `io::runner::ProcessSupervisor` — and did it that way *because* embedders
-//! destructure that struct exhaustively, so a field would be a breaking change.
-//! [`RunControls`] is therefore committed to its four fields and that test can
-//! never fire; it is now a pin on the commitment.
-//!
-//! What marks the unblock instead is the manifest: the conversion needs a
-//! *published* engine carrying the seam, so it starts with a version bump, and
-//! the version test fails until the document's status block is rewritten to
-//! match.
+//! The load-bearing one is [`the_seam_the_conversion_rests_on_is_still_there`]:
+//! the grouping hooks are the entire reason this conversion was safe to make, and
+//! a build that quietly lost them would leave the activity watchdog looking at an
+//! empty tree and a killed run's paid harnesses billing. It is written so that
+//! disappearing upstream is a failure here rather than a silent regression there.
 
 use std::collections::BTreeSet;
+use std::process::{Child, Command};
 
 use oneagentgraph::event::{Cause, Disposition, MemberDied, Runner};
 use oneharness_core::domain::report::RunReport;
 use oneharness_core::io::cancel::CancelToken;
 use oneharness_core::io::run::{RunControls, RunOutcome, RunRequest};
+use oneharness_core::io::runner::ProcessSupervisor;
 
 /// The inventory itself, read at compile time rather than copied beside this.
 const INVENTORY: &str = include_str!("../docs/oneharness-library.md");
@@ -40,29 +31,90 @@ const CONTRACT: &str = include_str!("../docs/contract.md");
 /// The manifest, which owns the `oneharness-core` version the inventory names.
 const MANIFEST: &str = include_str!("../Cargo.toml");
 
-/// `RunControls` has exactly four fields, and upstream has committed to keeping
-/// it that way. The exhaustive destructure below is what holds that.
+/// Both halves of the grouping seam, recorded here as an implementation of the
+/// upstream trait.
 ///
-/// It was written to hold the opposite — the blocker is that this struct offers
-/// no seam between building a harness process and having one, and a
-/// `spawning`/`spawned` pair added here would have broken the compile and
-/// announced the unblock. The unblock did not arrive that way. Upstream put the
-/// seam on its own entry point *because* embedders spell this struct out
-/// exhaustively, this test among them, so a field would break them all. The
-/// destructure therefore records a promise instead of waiting on one, which is
-/// why it is named for the promise; the test that fires on the unblock is
-/// [`the_status_block_names_the_version_the_manifest_takes`]. Keep it
-/// exhaustive — a broken promise is worth failing on.
+/// `src/harness.rs`'s own implementation is the real one; this exists so the
+/// *shape* of the seam is asserted by a test rather than only by a module that
+/// happens to compile. A hook renamed, dropped, or given a different signature
+/// upstream fails here with the reason attached.
+struct BothHooks {
+    /// Set by `spawning`, so the assertion below is about a hook that ran rather
+    /// than one that merely exists.
+    prepared: std::sync::atomic::AtomicBool,
+}
+
+impl ProcessSupervisor for BothHooks {
+    fn spawning(&self, command: &mut Command) {
+        // The last look before the fork, and it is the `Command` actually
+        // spawned — which is what lets `scratch::Group::prepare` put the POSIX
+        // ownership stamp and the Windows `CREATE_SUSPENDED` flag on the harness
+        // itself.
+        command.env("ONEAGENTGRAPH_INVENTORY_PROBE", "1");
+        self.prepared
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn spawned(&self, child: &Child) {
+        // A shared reference, and on Windows a still-suspended process: read the
+        // id and return. `scratch::Group::join` is what this does for real, and
+        // it deliberately does *not* resume — see the inventory.
+        let _ = child.id();
+    }
+}
+
+/// The seam the conversion rests on: a supervisor with both hooks, handed to a
+/// run through the entry point that takes one.
+///
+/// Every name resolved by the compiler. `run_supervised` taken as a function
+/// value rather than called, so the signature is checked without spawning a paid
+/// harness — the suite proves the *behaviour* end to end in
+/// `tests/e2e/liveness.rs`, against a real grouped tree.
 #[test]
-fn run_controls_keeps_the_four_fields_upstream_committed_to() {
+fn the_seam_the_conversion_rests_on_is_still_there() {
+    let hooks = BothHooks {
+        prepared: std::sync::atomic::AtomicBool::new(false),
+    };
+    let mut command = Command::new("does-not-run");
+    hooks.spawning(&mut command);
+    assert!(
+        hooks.prepared.load(std::sync::atomic::Ordering::SeqCst),
+        "the pre-fork hook did not run"
+    );
+
+    // The entry point, by signature: request, controls, and the caller's claim.
+    let entry: fn(
+        &RunRequest,
+        RunControls<'_>,
+        Option<&dyn ProcessSupervisor>,
+    ) -> Result<RunOutcome, oneharness_core::errors::OneharnessError> =
+        oneharness_core::io::run::run_supervised;
+    let supervised: Option<&dyn ProcessSupervisor> = Some(&hooks);
+    assert!(supervised.is_some(), "the supervisor is the caller's to pass");
+    // Named so an unused binding is not what keeps the signature honest.
+    let _ = entry;
+
+    assert!(
+        INVENTORY.contains("run_supervised") && INVENTORY.contains("ProcessSupervisor"),
+        "the inventory stopped naming the seam it rests on"
+    );
+}
+
+/// `RunControls` is still exactly the four side channels `src/harness.rs` builds
+/// a literal for.
+///
+/// Exhaustive on purpose — no `..` — because that literal is exhaustive too: a
+/// field added upstream breaks this compile *and* that one, and the two have to
+/// be reconciled together. Upstream states this is why the supervisor took its
+/// own entry point rather than a field here.
+#[test]
+fn the_controls_the_conversion_builds_are_still_these_four() {
     let controls = RunControls {
         events: None,
         cancel: CancelToken::new(),
         signal_cancel: false,
         version: None,
     };
-    // Exhaustive on purpose — no `..` — so this is the drift gate and not a
-    // sample of the fields that happened to be interesting.
     let RunControls {
         events,
         cancel,
@@ -71,17 +123,11 @@ fn run_controls_keeps_the_four_fields_upstream_committed_to() {
     } = controls;
     assert!(events.is_none(), "the sink is the caller's to supply");
     assert!(!cancel.is_cancelled(), "a fresh token is uncancelled");
-    assert!(!signal_cancel, "an embedder handles its own signals");
-    assert!(version.is_none(), "the engine names itself by default");
-
-    let real: BTreeSet<&str> = ["events", "cancel", "signal_cancel", "version"]
-        .into_iter()
-        .collect();
-    assert_eq!(
-        listed_in_the_status_block(),
-        real,
-        "the status block names a different `RunControls` than the linked one"
+    assert!(
+        !signal_cancel,
+        "an embedder handles its own signals — this process is many members"
     );
+    assert!(version.is_none(), "the engine names itself by default");
 }
 
 /// The name of an upstream field, produced from the very tokens the compiler
@@ -100,7 +146,7 @@ macro_rules! field {
 }
 
 /// Every `RunRequest`/`RunControls`/`RunOutcome`/`RunReport` field the inventory
-/// names as the replacement for something the spawn provides today.
+/// names as the replacement for something the spawn provided.
 ///
 /// The document argues from these by name; a field renamed or dropped upstream
 /// turns an argument into a dangling reference. Each entry below is resolved by
@@ -114,7 +160,6 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
         field!(RunRequest, events),
         field!(RunRequest, stream),
         field!(RunRequest, prompt),
-        field!(RunRequest, env),
         field!(RunRequest, control),
         field!(RunRequest, no_config),
         field!(RunRequest, bin),
@@ -149,12 +194,12 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
     );
 }
 
-/// The status block attributes the blocker to a *version* of `oneharness-core`,
-/// and the manifest is what decides which one that is.
+/// The status block credits a *version* of `oneharness-core` with the seam, and
+/// the manifest is what decides which one is linked.
 ///
 /// A bump that leaves this document naming the version it was written against
 /// would read as a claim about the linked engine that nobody checked — which is
-/// exactly how a fixed blocker goes unnoticed.
+/// exactly how a fixed blocker went unnoticed for two dispatches.
 #[test]
 fn the_status_block_names_the_version_the_manifest_takes() {
     let (_, rest) = MANIFEST
@@ -163,87 +208,26 @@ fn the_status_block_names_the_version_the_manifest_takes() {
     let (linked, _) = rest.split_once('"').expect("the requirement is quoted");
 
     let (_, rest) = INVENTORY
-        .split_once("`oneharness-core` ")
-        .expect("the status block still names the dependency");
+        .split_once("`oneharness-core` **")
+        .expect("the status block still credits the dependency by version");
     let (named, _) = rest
-        .split_once("'s public API")
-        .expect("the status block still attributes the blocker to its public API");
+        .split_once("**")
+        .expect("the version the status block names is emphasized");
     assert_eq!(
         named, linked,
-        "the inventory blames `oneharness-core` {named} for a blocker in the {linked} the manifest takes"
-    );
-}
-
-/// The document has to keep naming the seam upstream actually built, because the
-/// conversion reaches for it by name and the shape it reaches for is not the one
-/// originally proposed here.
-///
-/// The stale story — a field on `RunControls` — is the one a reader would infer
-/// from the blocker section alone, and it is now the wrong thing to write against:
-/// upstream ruled that shape out. Nothing else in this suite would notice the
-/// proposal reverting to it, since no name below resolves against the linked
-/// 0.10.0 engine.
-///
-/// So this is a string check, and it is deliberately a check on *names and a
-/// citation* rather than on a restated signature. An unreleased upstream API
-/// cannot have a drift gate here — there is no symbol to resolve and no artifact
-/// to diff — so the document carries the decision the conversion has to make
-/// (which entry point, what to pass it) and points at the upstream change for the
-/// declaration itself. The link is the half that keeps this from becoming a
-/// second source, which is why it is asserted alongside the names.
-#[test]
-fn the_proposal_names_the_seam_upstream_settled_on() {
-    let inventory = reflowed(INVENTORY);
-
-    // The authority for the signature, so the prose stays a signpost. When this
-    // releases, these names get resolved against the real crate by
-    // `every_upstream_field_the_inventory_names_is_still_there` instead.
-    assert!(
-        inventory.contains("https://github.com/nickderobertis/oneharness/pull/1260"),
-        "the proposal describes an unreleased upstream API without linking the change that declares it"
-    );
-
-    for name in [
-        // The entry point the conversion calls instead of `run`.
-        "run_supervised",
-        // The trait it takes, which carries the pair this crate already implements
-        // for onejudge as `judge::MemberSpawn`.
-        "ProcessSupervisor",
-        "spawning",
-        "spawned",
-        // Why it is an entry point and not a field — the reason that turned the
-        // `RunControls` destructure from a tripwire into a pin.
-        "exhaustively constructible",
-    ] {
-        assert!(
-            inventory.contains(name),
-            "the proposal stopped naming `{name}`, so it no longer describes the seam upstream built"
-        );
-    }
-
-    // The seam is real but unreleased, and the document says so. That claim and
-    // the manifest's version are checked against each other by
-    // `the_status_block_names_the_version_the_manifest_takes`; what is asserted
-    // here is only that the document has not quietly started claiming the
-    // conversion is adoptable while the blocker section still stands.
-    assert!(
-        inventory.contains("Status: blocked, and not started"),
-        "the status block is what tells a reader the code is unchanged"
-    );
-    assert!(
-        inventory.contains("PR #1260"),
-        "the document names the upstream change a reader has to check for a release"
+        "the inventory credits `oneharness-core` {named} with a seam the {linked} the manifest \
+         takes is what provides"
     );
 }
 
 /// The wire names the inventory restates belong to `docs/contract.md`, and its
 /// quotations of that document have to still be quotations.
 ///
-/// The inventory's last two sections argue from the contract — that a
-/// platform-conditional conversion would make `runner` and the process facts
-/// depend on the host, and that the contract's own sentence about this hop is
-/// stale. Both arguments dissolve if the contract stops saying what is quoted
-/// here, so the copies are checked against it rather than trusted.
+/// Two of the three quoted sentences are the *stale* ones the inventory reports
+/// as a correction the contract owner still owes. That is the direction this
+/// gate is meant to run in: when the owner makes that correction, this fails, and
+/// the inventory's follow-up list has to be updated in the same change rather
+/// than left claiming a debt that has been paid.
 #[test]
 fn the_contract_still_says_what_the_inventory_quotes_it_saying() {
     // Both documents are hard-wrapped prose, so a quotation is matched against
@@ -255,6 +239,8 @@ fn the_contract_still_says_what_the_inventory_quotes_it_saying() {
         "is still `oneharness run`, a child process",
         "neither returns the report nor accepts an event sink",
         "when oneharness grows a non-printing run entrypoint or an event-sink parameter",
+        "onejudge's `ProviderErrorKind`, which is oneharness's own normalized `failure_kind`, \
+         mapped totally",
     ] {
         assert!(
             inventory.contains(quotation),
@@ -266,9 +252,10 @@ fn the_contract_still_says_what_the_inventory_quotes_it_saying() {
         );
     }
 
-    // `runner: library`'s three fields, and the three the contract scopes to a
-    // member that was a process. Building each is what ties the name in the
-    // document to the type this crate serializes.
+    // `runner: library`'s three fields — what a single-sided member now
+    // publishes — and the three the contract scopes to a member that *was* a
+    // process, which no member is. Both are still declared types: a consumer
+    // reading an older stream still parses one.
     let library = Runner::Library {
         engine: "oneharness".to_owned(),
         config: "oneharness.toml".to_owned(),
@@ -305,20 +292,6 @@ fn the_contract_still_says_what_the_inventory_quotes_it_saying() {
             "the inventory attributes `{name}` to a contract that has no such name"
         );
     }
-}
-
-/// The `RunControls` field names the status block says are all there is.
-///
-/// Read out of the sentence itself — from `exposes only` up to the next thing it
-/// names — so rewording the claim without rewording the list fails above.
-fn listed_in_the_status_block() -> BTreeSet<&'static str> {
-    let (_, rest) = INVENTORY
-        .split_once("exposes only")
-        .expect("the status block still says what `RunControls` exposes");
-    let (sentence, _) = rest
-        .split_once("io::process::Process")
-        .expect("the status block still goes on to the private spawn type");
-    backticked(sentence).collect()
 }
 
 /// The `field` column of the argument table, as bare `RunRequest` field names.

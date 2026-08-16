@@ -1468,16 +1468,11 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         &mut oneagentgraph::resolve::Resolver::new(),
     )
     .expect("the member builds");
-    let oneagentgraph::invoke::Launch::Process { args, .. } = invocation.launch else {
-        panic!("a single-sided member is a child process")
+    let oneagentgraph::invoke::Launch::Harness(launch) = invocation.launch else {
+        panic!("a single-sided member is driven through the oneharness library")
     };
-    let prompt = args
-        .iter()
-        .position(|arg| arg == "--prompt")
-        .and_then(|at| args.get(at + 1))
-        .expect("the member is given a prompt");
     assert_eq!(
-        prompt,
+        launch.prompt,
         "ship the release\n\nand report it, using {task} to say so"
     );
 }

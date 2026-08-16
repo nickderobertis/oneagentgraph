@@ -1,70 +1,43 @@
 # The `oneharness run` boundary inventory
 
-> **Status: blocked, and not started. This document describes a conversion that
-> has not happened.** A `kind: oneharness` member's turn is `oneharness run`, a
-> child process, exactly as it has always been; nothing here has been applied to
-> the code. Every "replaced by …" below is the *future* tense — the seam that
-> would take over if the conversion ran — not a report of what
-> `src/harness_process.rs` does now. For current behaviour read that module and
-> `docs/contract.md`.
+> **Status: converted.** A `kind: oneharness` member's turn is
+> `oneharness_core::io::run::run_supervised`, called on a thread of this process.
+> No `oneharness` process is spawned for the turn itself — the harness the turn
+> selects is still a child process, and it is oneharness that starts it. Every
+> "replaced by …" below is now past tense: it names the seam that took over and
+> where it lives. `src/harness.rs` is the module; `src/judge.rs` is its twin for
+> the other member kind, and the two are deliberately the same shape.
 >
-> **The blocker** is Windows process grouping, and its cause is
-> `oneharness-core` 0.10.0's public API: [`RunControls`](#what-is-still-holding-the-hop-open-grouping-on-windows-only)
-> exposes only `events`, `cancel`, `signal_cancel`, and `version`, and
-> `io::process::Process` — which holds the two moments a caller would need — is
-> `pub(crate)` inside a private `io::process` module. So an embedder has no
-> pre-spawn or post-spawn hook at which to put each harness child into the
-> member's named job object.
->
-> **What unblocks it** is a `spawning(&mut Command)` / `spawned(&Child)` pair, or
-> any equivalent seam that hands the caller the harness `Command` before the fork
-> and the `Child` after it. That is upstream's to add, and it now **is** added —
-> as the "any equivalent seam" arm rather than the `RunControls` arm. It is
-> unpublished: oneharness PR #1260 is open, so the newest release crates.io serves
-> is still the 0.10.0 named above, which does not carry it.
-> [The proposal](#the-proposal-which-is-upstreams-rather-than-this-crates-to-build)
-> below records the shape upstream settled on. Converting before that release
-> exists silently breaks the activity watchdog and leaves a killed run's paid
-> harnesses billing.
+> **What unblocked it** is `oneharness-core` **0.10.1**: a
+> [`ProcessSupervisor`](#grouping-the-seam-this-whole-document-was-written-to-get)
+> trait with a `spawning(&mut Command)` / `spawned(&Child)` pair, and
+> `io::run::run_supervised` as the entry point that takes one. That is the seam
+> this document proposed, added upstream as proposed — a second entry point
+> rather than a field on `RunControls`, so the exhaustive literals embedders had
+> already written kept compiling. It is a **compile floor**, not a preference:
+> below 0.10.1 neither name exists and `src/harness.rs` does not build, which is
+> what stops a future edit from quietly falling back to unsupervised `run`.
 
-Why `src/harness_process.rs` is still a subprocess hop, what its process boundary
-provides, and the seam that would replace each of those things — written down
-*before* the conversion, because this conversion's two predecessors each dropped
-an OS-level guarantee nobody had named (onejudge→oneharness dropped no-output
-teardown; oneagentgraph→onejudge dropped process grouping), and both were found
-from a red platform check afterwards rather than from a list beforehand.
+Why `src/harness.rs` calls a library where `src/member.rs` used to spawn a
+process, what that process boundary provided, and the seam that replaced each of
+those things — written down *before* the conversion, because this conversion's
+two predecessors each dropped an OS-level guarantee nobody had named
+(onejudge→oneharness dropped no-output teardown; oneagentgraph→onejudge dropped
+process grouping), and both were found from a red platform check afterwards
+rather than from a list beforehand. The list came first here, and this is it.
 
-The short version: `oneharness_core::io::run::run` is not the obstacle, and only
-**one** guarantee is genuinely missing — process grouping, on Windows only. It is
-upstream's to add and this document is the proposal.
+Nothing here owns the names it argues from, so **`tests/inventory.rs` is the
+drift gate**: it reads this file at compile time and holds every upstream field
+against the real type, every wire name against `docs/contract.md`, and the
+version it names against `Cargo.toml`.
 
-Nothing here owns the names it argues from, so **`tests/inventory.rs` is the drift
-gate**: it reads this file at compile time and holds every upstream field against
-the real type and every wire name against `docs/contract.md`.
+## The call
 
-**Which test in it is load-bearing has changed, and the reason is worth keeping.**
-This document used to rest that job on an *exhaustive* destructure of
-`RunControls` — add the seam upstream, the suite stops compiling, and the compile
-break is the notice. That signal can no longer fire. Upstream settled on an
-entry point instead of a field, and did so *because* embedders destructure and
-construct that struct exhaustively: a field there would break every literal
-already written, making a purely additive capability a major bump. So
-`RunControls` is now committed to staying the four fields it has, the destructure
-will pass forever, and it is a pin on that commitment rather than a tripwire.
-
-The signal is **`the_status_block_names_the_version_the_manifest_takes`** instead:
-the status block above blames a version, that test reads the version out of
-`Cargo.toml`, and the two have to agree. Bumping `oneharness-core` to the release
-carrying the seam therefore fails the suite until this document is rewritten —
-which is the same notice, taken from the one event that actually marks the
-unblock. The conversion needs a *published* engine, not a merged upstream commit,
-and the manifest is where that arrives.
-
-## The call is there
-
-`run` returns the report, takes an event sink, and takes a cancel token — the
-three things `docs/contract.md` names as collapsing this hop — and every argument
-`src/invoke.rs` builds for a single-sided member maps onto a `RunRequest` field:
+`run_supervised` returns the report, takes an event sink, takes a cancel token,
+and takes this crate's claim on each harness child — the four things that make
+the hop collapsible. Every argument `src/invoke.rs` used to build for a
+single-sided member maps onto a `RunRequest` field, and
+`crate::invoke::HarnessLaunch` is the value it builds instead of an argv:
 
 | argument | field |
 |---|---|
@@ -72,84 +45,96 @@ three things `docs/contract.md` names as collapsing this hop — and every argum
 | `--cwd <d>` | `cwd` |
 | `--events` | `events` |
 | `--stream` | `stream: Some(true)`, and only for a member whose own resolved config leaves its run streaming |
-| `--compact` | none, by design: it is how the CLI *prints* a report — which is exactly why it takes the streaming flag's place for a member whose config asks for a schema, and why a library call would need neither, the report being the return value |
+| `--compact` | none, by design: it is how the CLI *prints* a report onto a pipe a reader took a line at a time — which is exactly why it took the streaming flag's place for a member whose config asks for a schema, and why the library call needs neither, the report being the return value |
 | `--prompt <text>` | `prompt` |
 
 `tests/inventory.rs` parses that column and names each field in a `RunRequest`
 literal, so a rename upstream fails there rather than here.
 
-## What the process boundary provides, and what would replace it
+## What the process boundary provided, and what replaced it
 
-**A per-member environment — replaced, and already in place.** `src/member.rs`
-spawns with `env_remove(invoke::PROCESS_WIDE_HARNESS_ENV)`, so an ambient
-`ONEHARNESS_HARNESSES` cannot beat the config the graph named. A library run reads
-*this* process's environment instead — and that environment has already been made
-the same one: `src/run.rs`'s `export` removes that variable here, once, before the
-first member thread starts, and re-adds it when the graph's own `env:` block asks
-for it, which is byte for byte what the `Command` does. It has to, because a
-two-party member is already in-process and inherits exactly this environment;
-`tests/e2e/selection.rs`'s `each_side_runs_the_config_it_was_given` is the journey
-that holds it. So a `RunRequest` needs no environment layer of its own, and
-`RunRequest::no_config` — which would discard `RunRequest::config` along with the
-`ONEHARNESS_*` layer — is not needed either.
+**A per-member environment — replaced by the process's own.** `src/member.rs`
+used to spawn with `env_remove(invoke::PROCESS_WIDE_HARNESS_ENV).envs(graph_env)`,
+so an ambient `ONEHARNESS_HARNESSES` could not beat the config the graph named. A
+library run reads *this* process's environment instead — and that environment is
+byte for byte the same one: `src/run.rs`'s `export` removes that variable here,
+once, before the first member thread starts, and adds the graph's own `env:`
+block over it. It has to, because a two-party member was already in-process and
+inherits exactly this environment; `tests/e2e/selection.rs`'s
+`each_side_runs_the_config_it_was_given` is the journey that holds it. So the
+`RunRequest` needs no environment layer of its own, and `RunRequest::no_config` —
+which would discard `RunRequest::config` along with the `ONEHARNESS_*` layer — is
+not set.
 
 **The `--cwd` contract — replaced by a parameter.** `RunRequest::cwd` takes the
-directory per call, so one process hosts every member without any of them touching
-the process's own working directory. That is the same rule `src/invoke.rs` already
-states for a two-party member's `JudgeLaunch::worktree`: everything per-member
-rides a value or a generated file, never process-wide state.
-`tests/e2e/library.rs`'s `the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere`
-is the journey that holds it, from the one vantage point that can — inside the
-hosting process. What does disappear is the *child's* own working directory (today
-the member's scratch); nothing reads it, because `--config` is written absolute and
+directory per call, so one process hosts every member without any of them
+touching the process's own working directory. That is the same rule
+`src/invoke.rs` already stated for a two-party member's `JudgeLaunch::worktree`:
+everything per-member rides a value or a generated file, never process-wide
+state. `tests/e2e/library.rs`'s
+`the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere` is
+the journey that holds it, from the one vantage point that can — inside the
+hosting process. What disappeared is the *child's* own working directory (the
+member's scratch); nothing read it, because `--config` was written absolute and
 oneharness starts project discovery from `--cwd`.
 
 **Streaming — replaced by a typed sink.** `RunControls::events` with
 `RunRequest::stream: Some(true)` delivers each normalized `ActionEvent` as it
-occurs, which is what the `--stream` NDJSON lines carry today. The reader in
-`src/member.rs` that parses those lines back apart goes away exactly as the
-onejudge conversion's did, and `SinkStep::Stop` is that path's
-`ControlFlow::Break`.
+occurs, which is what the `--stream` NDJSON lines carried. The reader in
+`src/member.rs` that parsed those lines back apart is gone, exactly as the
+onejudge conversion's was, and `SinkStep::Stop` is that path's
+`ControlFlow::Break` — answered as soon as the run is cancelled, so a condemned
+member stops at its next event rather than only when the terminate path reaches
+it.
+
+One detail the typed sink makes visible: oneharness's stream envelope carries no
+turn index, so the NDJSON reader defaulted every event to turn 1. `oneharness run`
+*is* one turn. `src/harness.rs` therefore opens turn 1 on the first event and
+never renumbers — the same stream, from the shape rather than from a default.
 
 Whether a given member streams at all is not this crate's to decide, and the
-conversion has to keep it that way: `src/invoke.rs`'s `streams` reads the
-member's own resolved config, because a config asking for a schema cannot stream
-in oneharness and one asking for both is refused before launch. So the value the
-conversion carries is that decision rather than a constant, and what replaces
-the buffered path is smaller than what replaces the streaming one — a member that
-does not stream is on `--compact` today only so that its report reaches
-`src/member.rs` down a pipe read a line at a time, and a library call has the
-report as `run`'s return value with no printing in between.
+conversion kept it that way: `src/invoke.rs`'s `reporting` reads the member's own
+resolved config, because a config asking for a schema cannot stream in oneharness
+and one asking for both is refused before launch. So `HarnessLaunch::stream`
+carries that decision rather than a constant, and it reaches `RunRequest::stream`
+as `Some` in both directions — never `None`, which would hand the question back to
+the config layer that has already answered it.
 
-**Control binding — gained, not held.** A single-sided member's argv carries no
-`--control` at all, so it records no `control::Turn` and `oneagentgraph interrupt`
-has no lever on one. `RunRequest::control` and `RunReport::control` are the same
-pair `src/judge.rs` reads for a two-party member, so the conversion adds the lever
-rather than having to preserve it.
+**Control binding — available, and deliberately not taken.** A single-sided
+member's argv carried no `--control`, so it recorded no `control::Turn` and
+`oneagentgraph interrupt` had no lever on one. `RunRequest::control` and
+`RunReport::control` are the same pair `src/judge.rs` reads for a two-party
+member, so the library path *could* grow the lever. It does not, in this change:
+the bar here is that a converted member behaves identically, and giving one kind
+of member a new lever is a contract-visible feature rather than a conversion.
+Named here because the seam is now free — see the follow-ups.
 
-**Accounting — replaced by the return value.** The exit status feeds
-`member::Kind::settled` and the stderr tail feeds `member-died`'s `detail`; both
-come from `RunOutcome` (`exit_code`, `failure_summary`) and `OneharnessError`
-instead. The fallback chain stops being re-parsed out of a terminal `result` line
-and is read off `RunReport::fallback` as the type it already is.
+**Accounting — replaced by the return value.** The exit status fed
+`member::Kind::settled` and the stderr tail fed `member-died`'s `detail`; both
+come from `RunOutcome` (`exit_code`, `failure_summary`) and from the
+`OneharnessError` a refused *request* returns. The fallback chain is no longer
+re-parsed out of a terminal `result` line: it is read off `RunReport::fallback` as
+the type it already is, and each candidate's reason is published through
+oneharness's own `as_str()`, so a respelling upstream fails a test here rather
+than reaching a consumer.
 
-**Isolation of failure — replaced by the thread seam.** A crashed child cannot take
-the graph down; an in-process panic can. `src/judge.rs` already answers this and
-its answer is the one to reuse: the engine runs on `std::thread::spawn` and answers
-over an `mpsc::channel`, so a panic drops the sender and
-`RecvTimeoutError::Disconnected` becomes *that member's* `provider-failure` death.
-Nothing here builds with `panic = "abort"`, and the shared state a reader holds is
-taken through `src/member.rs`'s poison-tolerant `held`.
+**Isolation of failure — replaced by the thread seam.** A crashed child could not
+take the graph down; an in-process panic can. `src/judge.rs` already answered this
+and its answer is reused: the engine runs on `std::thread::spawn` and answers over
+an `mpsc::channel`, so a panic drops the sender and `RecvTimeoutError::Disconnected`
+becomes *that member's* `provider-failure` death.
+`harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`
+drives the real supervision loop against a real panicking thread. Nothing here
+builds with `panic = "abort"`.
 
-**Test seams — replaced by the same seam.** The suite substitutes a paid harness at
-oneharness's own `ONEHARNESS_BIN_<ID>`, set through the graph's `env:` block —
+**Test seams — replaced by the same seam.** The suite substitutes a paid harness
+at oneharness's own `ONEHARNESS_BIN_<ID>`, set through the graph's `env:` block —
 which `export` has already put on this process, so the override is read from one
-environment either way (`RunRequest::bin` is the explicit form if it is ever
-wanted). What the spawn *also* gives the suite is `member-started`'s
-`program`/`args`/`cwd` as the record of what was decided; those become
-`runner: library`'s `config`/`worktree`, which is why the `RunRequest` has to be a
-value this crate builds and can assert on rather than one assembled inline at the
-call.
+environment either way (`RunRequest::bin` is the explicit form, unused). What the
+spawn *also* gave the suite was `member-started`'s `program`/`args`/`cwd` as the
+record of what was decided; those are now `runner: library`'s `config`/`worktree`,
+which is why `HarnessLaunch` is a value this crate builds and can assert on rather
+than a `RunRequest` assembled inline at the call.
 
 **Teardown of the harness's descendants — replaced by the cancel token.**
 `RunControls::cancel` terminates each harness tree through
@@ -158,124 +143,128 @@ upstream for the *first* of the two prior regressions. It covers every leg of th
 CI matrix, because oneharness owns the harness's own tree on each: a POSIX harness
 is its own process-group leader and is signalled as a group, and a Windows one is
 spawned `CREATE_SUSPENDED` into oneharness's own `KILL_ON_JOB_CLOSE` job and ended
-with `TerminateJobObject`. A graph process that dies outright is covered on Windows
-by that same flag, since the job handle is this process's.
+with `TerminateJobObject`. A graph process that dies outright is covered on
+Windows by that same flag on *this crate's* job, since the handle is this
+process's.
 
-## What is still holding the hop open: grouping, on Windows only
+This is why `src/harness.rs`'s watchdog is shorter than `src/judge.rs`'s: there
+is one lever rather than an ask-then-reap escalation. It cancels, reaps whatever
+the stamp still finds, and gives the engine a bounded grace before giving up on
+the thread rather than on the run.
+
+## Grouping: the seam this whole document was written to get
 
 Teardown is not grouping. `scratch::Group` is how a **second** process — and this
-crate's own watchdog — finds a member's tree, and the two platforms prove
-membership by opposite means:
+crate's own activity watchdog — finds a member's tree, and the two platforms
+prove membership by opposite means. `crate::harness::HarnessSpawn` is the
+`ProcessSupervisor` that holds both, and it is the same two moments, against the
+same `scratch::Group`, that `crate::judge::MemberSpawn` hands onejudge. One seam,
+two engines.
 
-- **POSIX — replaced.** The group *is* the `scratch::SCRATCH_ENV` stamp, fixed at
-  `exec` and shed by nothing, and `RunRequest::env` puts it on every harness
-  process oneharness starts (`io::run` folds `--env` into each job's environment,
-  last write wins). Membership is unchanged, reparented descendants included.
-- **Windows — no seam.** The group is a *named* job object, and joining it is
-  `AssignProcessToJobObject` on a `CREATE_SUSPENDED` child — it needs the `Child`,
-  which an in-process call never yields. `oneharness_core::io::run` spawns the
-  harness itself, into a job of its **own**, and the linked `RunControls` exposes no
-  hook between the two moments (`io::process::Process::spawn`, which holds them, is
-  `pub(crate)`). So the harness would sit outside this member's named job, and
-  `scratch::stamped_for` — the only Windows evidence there is — would report an
-  empty tree.
+- **POSIX.** The group *is* the `scratch::SCRATCH_ENV` stamp, fixed at `exec` and
+  shed by nothing. `spawning` puts it on the harness's own `Command`, which is
+  the last look before the fork, so membership needs nothing of the child itself
+  and reparented descendants are in the group by construction. Nothing here
+  re-parents a process group — upstream is explicit that a `pre_exec` `setpgid`
+  in the hook would *transfer* teardown ownership — so oneharness keeps owning
+  the teardown of the tree it spawned and this crate's reap reaches the same
+  processes through the stamp. `spawned` is a no-op.
+- **Windows.** The group is a *named* job object, and joining it is
+  `AssignProcessToJobObject` on the `Child`. `spawned` runs while the harness is
+  still `CREATE_SUSPENDED` — oneharness resumes it once the hook returns — so the
+  assignment cannot miss a descendant. A job assignment **nests**, so the harness
+  sits in oneharness's job *and* this member's, and either side's teardown ends
+  it. `spawning` sets `CREATE_SUSPENDED` too, because on Windows `creation_flags`
+  *replaces* rather than adds and dropping it would reopen the race it exists to
+  close.
 
-Two guarantees drop with it, and neither is theoretical:
+**The resume is oneharness's, and that is why `Group::adopt` was split.**
+`Group::adopt` assigns *and* resumes, which is right for a caller that spawned
+the child itself — `Group::spawn`, and `crate::judge`'s hook, where onejudge
+knows nothing of suspension. The supervisor hook must not resume: upstream
+enumerates the child's primary thread after the hook returns and reads a thread
+it cannot find as a spawn failure, tearing the tree down. A hook that resumed
+first would let the harness run, possibly exit, and lose that thread. So
+`Group::join` is adoption without the start, and `src/harness.rs` uses it.
+
+**Neither hook can refuse a spawn** — upstream's methods return nothing, because
+the run owns the child's lifetime. So a grouping failure cancels the run and is
+kept for the death it becomes. That is the same direction the other two call sites
+choose (a harness this process cannot reach is not left running), reached by the
+only lever a hook has; oneharness still owns the tree it spawned, so the
+cancellation is what ends the ungrouped harness.
+
+What this buys, stated as the two guarantees that would otherwise have dropped:
 
 1. `scratch::work` is what the activity watchdog observes, and it is the CPU
    charged to the stamped tree. An empty tree is an idle tree, so a member blocked
    on a harness that is working would be condemned by the rule written to stop
    exactly that — `member::Stall`.
 2. `scratch::reap`, which is `oneagentgraph cancel --kill` reaching a run from
-   another process, would find nothing to end and report a cancelled member that is
-   still billing.
+   another process, would find nothing to end and report a cancelled member that
+   is still billing.
 
-## The proposal, which is upstream's rather than this crate's to build
+## What the conversion changed on the wire, and what it did not
 
-A spawn hook mirroring `onejudge::SpawnHook` — `spawning(&mut Command)` before the
-fork and `spawned(&Child)` after it. That is precisely `scratch::Group`'s own
-`prepare` and `adopt`, split for this exact reason; it is the seam onejudge grew
-for the *second* of the two prior regressions; and `judge::MemberSpawn` is a
-working implementation of the same two methods. Rebuilding it here is not an
-option the composition rule leaves open.
+`member-started` for a single-sided member is `runner: library` with
+`engine: oneharness`, its `config`, and its `worktree` — the same three fields a
+two-party member has always published, distinguished by the `engine` the contract
+put there for exactly this. `member-died` no longer carries `exit_code`,
+`disposition` or `stderr_tail` for any member, which is what `docs/contract.md`
+already says: those are "a **child process's** facts, present only for a member
+that was one", and none is.
 
-**Upstream has built it, in that shape, and it is waiting on a release.** The two
-methods are the ones asked for, on a `ProcessSupervisor` trait in
-`oneharness_core::io::runner`; what differs from the ask is where a caller hands
-it over — not a fifth field on `RunControls` but a second entry point beside
-`run`, named `run_supervised`, which takes an optional supervisor and is `run`
-exactly when given none.
+Everything else is the same stream. Both `runner` values remain declared types —
+a consumer that reads `process` still parses one — and `docs/contract.md` is
+unedited, because it is not this crate's to edit.
 
-**That sentence is a signpost, not a copy of the signature, and deliberately so.**
-The authority is
-[oneharness PR #1260](https://github.com/nickderobertis/oneharness/pull/1260),
-and until it releases there is nothing here that could check a restatement of it:
-the linked 0.10.0 engine has no such symbol, so a spelled-out signature in this
-file would be a second source no compiler and no gate could reconcile — the exact
-drift this document exists to avoid. Read the signature there. What is written
-down here is only what the conversion has to *decide*, which survives a
-signature tweak: which entry point to call, and what to pass it. When the release
-lands, `tests/inventory.rs` resolves these names against the real crate the same
-way it already resolves every `RunRequest` field, and this paragraph goes away.
+## Follow-ups this change deliberately did not make
 
-Upstream's stated reason for the entry point is the one recorded above —
-`RunControls` is exhaustively constructible by its embedders, so a field there
-would be a breaking change — and oneharness keeps owning teardown of every tree
-it spawns, with only the part a `spawning` hook re-parents moving to the caller.
-That is the division
-this crate wants: `scratch::Group::prepare` on `spawning` and `adopt` on
-`spawned`, leaving `RunControls::cancel` as the teardown seam the section above
-already assigns it.
+Each is a change to the approved contract or to an upstream crate, so each is a
+proposal rather than an edit. They are recorded here because the conversion is
+what makes them reachable.
 
-So when the conversion runs, the call is `run_supervised` with a supervisor
-wrapping the member's `scratch::Group`, and the POSIX/Windows split in the section
-above collapses: the stamp still rides `RunRequest::env`, and the Windows job
-object gets the `Child` it needs from `spawned`.
-
-**It is not adoptable yet.** PR #1260 is open with two red checks, so crates.io
-still serves 0.10.0 and the manifest still takes it. A git pin is not the
-workaround — `cargo deny`'s `unknown-git = "deny"` refuses one, by the rule in
-`AGENTS.md` that every cross-repo dependency is a published version. The
-conversion waits for the release.
-
-**The same gap is already filed upstream, by the other dependent, and it holds two
-hops rather than one.** onejudge drives a turn in process through `io::run::run` by
-default and keeps a spawning seam beside it for one stated reason — `RunControls`
-cannot offer a spawned harness to the caller — written up with a proposal against
-oneharness in *its* `docs/oneharness-library.md`. Installing a `SpawnHook` is what
-*selects* that seam, and `src/judge.rs` installs one on every two-party member, for
-this crate's grouping. So both `oneharness run` processes in this stack are held
-open by the one missing hook: `src/harness_process.rs`'s, and the one per side per
-turn that a `kind: onejudge` member is pushed back onto. That is what the addition
-buys, and it is why the ask belongs upstream rather than in either dependent.
-
-**Why the conversion is not done for POSIX alone in the meantime.** The two member
-kinds are distinguishable on the wire: `member-started` carries
-`runner: library|process`, and `member-died` carries `exit_code`, `disposition`,
-and `stderr_tail` only for a member that was a process. A platform-conditional
-conversion makes both of those depend on the host the run happened to land on, so a
-consumer branching on `runner` would need to know the platform to read the stream.
-The stream is the contract; a contract that differs by platform is worse than a
-hop.
+1. **`docs/contract.md`'s own sentence is now stale.** It states a
+   `kind: oneharness` member "is still `oneharness run`, a child process", on the
+   grounds that oneharness's library surface "neither returns the report nor
+   accepts an event sink", and names the collapse condition: "when oneharness
+   grows a non-printing run entrypoint or an event-sink parameter". Both were
+   grown in 0.7.0 and the grouping seam arrived in 0.10.1, so the sentence
+   describes a hop that no longer exists. Everything the collapse needed from the
+   *schema* was already spelled there, so this is a prose correction and not an
+   interface change — and it is still the contract owner's to make.
+   `tests/inventory.rs` holds the quotation, so the correction and this document
+   have to move together.
+2. **`cause` cannot name four of oneharness's failure kinds.** The contract says
+   its ten classified causes are "onejudge's `ProviderErrorKind`, which is
+   oneharness's own normalized `failure_kind`, mapped totally". At
+   oneharness-core 0.10 that is no longer true: `FailureKind` also has
+   `session_not_found`, `tool_deferred`, `untrusted_directory` and
+   `input_too_large`, which have no spelling in `cause`. A dead single-sided
+   member therefore reports `unclassified` with `failure_summary` as its detail,
+   rather than a partial map that would quietly report four kinds as something
+   they are not. Naming them needs four `cause` values, which is the contract
+   owner's to add.
+3. **A single-sided member could become interruptible.** `RunRequest::control`
+   and `RunReport::control` are right there, and `src/judge.rs` already reads that
+   pair. Adding it would give `oneagentgraph interrupt` a lever on a member kind
+   that has never had one — a feature, and a contract-visible one.
 
 ## Two things that are not this hop
 
-**`src/smoke.rs`'s `oneharness run`** proves that *this host's* launch path reaches
-an identity, so it has to take the path the members take — the binary on `PATH`, at
-whatever version is installed there. It collapses when the members do, and not
-before; the reason is written at that site.
+**`src/smoke.rs`'s `oneharness run`** proves that *this host's* launch path
+reaches an identity, so it has to take the path an operator's install takes — the
+binary on `PATH`, at whatever version is there. Collapsing it into the linked
+library would prove the library works, which is not the question it asks. The
+reason is written at that site.
 
-**`docs/contract.md`'s own sentence.** It states this member "is still
-`oneharness run`, a child process", on the grounds that oneharness's library
-surface "neither returns the report nor accepts an event sink", and names the
-collapse condition: "when oneharness grows a non-printing run entrypoint or an
-event-sink parameter". Both were grown in 0.7.0, so that sentence is stale and its
-condition is met — the reason the hop remains is the one above instead. Everything
-the collapse needs from the *schema* is already spelled there — `runner: library`
-with an `engine`, a `config`, and a `worktree`, and the three process facts scoped
-to "a member that was one" — so this is a prose correction and not an interface
-change. It is still the contract owner's to make.
+**`src/control.rs`'s `oneharness interrupt`** is the other remaining hop, and
+`src/control.rs` documents its own collapse condition: there is no
+`io::control::interrupt` equivalent on the public surface. That one is unchanged
+by this conversion.
 
-Every sentence quoted in this section, and every wire name the section above
-restates, is checked against `docs/contract.md` itself by `tests/inventory.rs` — a
-quotation that stops being one fails there.
+Both are why `just`'s `oneharness-version` pin still exists and is still separate
+from `Cargo.toml`'s. What changed is which question each answers: the linked
+version now selects the chain, classifies each refusal and writes the report for
+a `kind: oneharness` member, while the installed CLI governs `interrupt`, `smoke`,
+and the `oneharness run` onejudge starts per side per turn.

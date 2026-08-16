@@ -968,7 +968,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "libc",
- "oneharness-core 0.10.0",
+ "oneharness-core 0.10.1",
  "onejudge",
  "predicates",
  "rcgen",
@@ -1007,9 +1007,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d63585d587ddbd2419274c67928d5718cae2da0a1dbfa159c9040e4581dfe3c8"
+checksum = "703b2cae0e922191ae5baea8bafde9d738a09e1e8f40847b9bae1880231a955f"
 dependencies = [
  "fs2",
  "jsonschema",
