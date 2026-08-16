@@ -17,6 +17,11 @@
 //! {"type":"result","subtype":"success","result":"…","usage":{…}}
 //! ```
 //!
+//! …unless the run asked for another one. oneharness picks the format per run
+//! and parses this process's stdout under it, so the format on the argv is read
+//! rather than assumed — see [`Shape`], which is what a structured-output run
+//! (`--output-format json`, one document) needs.
+//!
 //! The turn is steered by sentinels in the prompt (which arrives on the argv,
 //! after `-p`, because that is how oneharness spawns claude-code) and by
 //! `FAKE_HARNESS_*` variables, so one binary covers every journey.
@@ -31,6 +36,7 @@
 //! | sentinel / variable | what this turn does |
 //! | --- | --- |
 //! | `fake:complete-now` | the agent finishes on its first turn |
+//! | `fake:answer-file=<path>` | answer with that file's contents — a validated JSON document, for a structured-output run |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
@@ -340,8 +346,19 @@ fn main() -> std::process::ExitCode {
         None => {}
     }
 
+    // Read once, before either kind of turn: the format oneharness selected is
+    // what it will parse this process's stdout under, so a value this double
+    // cannot answer in is refused here rather than answered in the wrong shape.
+    let Some(shape) = Shape::asked_for(&argv) else {
+        eprintln!(
+            "fake-harness: --output-format must be json or stream-json, got {:?}",
+            flag(&argv, "--output-format").unwrap_or_default()
+        );
+        return exit(2);
+    };
+
     if controlled(&argv) {
-        return control_stream(&system, &argv);
+        return control_stream(&system, &argv, shape);
     }
 
     if steers(&prompt, "hang") {
@@ -358,7 +375,9 @@ fn main() -> std::process::ExitCode {
             return exit(1);
         }
     }
-    turn(&prompt, None);
+    if turn(&prompt, None, shape) == Answered::No {
+        return exit(2);
+    }
     exit(0)
 }
 
@@ -404,8 +423,13 @@ fn controlled(argv: &[String]) -> bool {
 /// operator's redirection as the *next* user frame the moment it sees this turn's
 /// terminal `result`. Nothing here is a shortcut around that: the turn really
 /// stops where it was, and the replacement really is a second turn.
-fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
+fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::ExitCode {
     let interrupted = Arc::new(AtomicBool::new(false));
+    // A turn runs on a thread, so it cannot return this process's exit code —
+    // it records that it could not be taken here instead, and the exit below is
+    // the one place that decides. Every turn of the stream shares the flag: a
+    // process that answered one request and refused another did not succeed.
+    let refused = Arc::new(AtomicBool::new(false));
     let mut running: Option<std::thread::JoinHandle<()>> = None;
     let argv = Arc::new(argv.to_vec());
     for line in std::io::stdin().lock().lines().map_while(Result::ok) {
@@ -428,6 +452,7 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
                 };
                 let prompt = format!("{system}\n{text}");
                 let flag = Arc::clone(&interrupted);
+                let failed = Arc::clone(&refused);
                 let argv = Arc::clone(&argv);
                 // On a thread of its own so this loop keeps reading: the frame
                 // that aborts the turn arrives *while* it runs, which is the
@@ -435,7 +460,9 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
                 running = std::thread::Builder::new()
                     .spawn(move || {
                         recordings(&prompt, &argv);
-                        turn(&prompt, Some(&flag));
+                        if turn(&prompt, Some(&flag), shape) == Answered::No {
+                            failed.store(true, Ordering::SeqCst);
+                        }
                     })
                     .ok();
             }
@@ -465,7 +492,62 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
     if let Some(handle) = running {
         let _ = handle.join();
     }
+    // Joined first, so a turn that refused on its way out is counted: exiting 0
+    // having published no result reaches oneharness as a harness that ran and
+    // said nothing, which is a journey failing far from the sentinel that caused
+    // it.
+    if refused.load(Ordering::SeqCst) {
+        return exit(2);
+    }
     exit(0)
+}
+
+/// The output shape oneharness asked this turn for, on its own `--output-format`.
+///
+/// Not a detail a journey may ignore: oneharness selects the format per run and
+/// then *parses this process's stdout under it*. A structured-output run asks
+/// claude-code for `json` — one document, because that is where the answer it
+/// validates lives — and a double that answered the stream-json transcript
+/// anyway produced stdout oneharness could extract no answer from at all, which
+/// reads as a harness that ran and said nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shape {
+    /// `--output-format stream-json`.
+    Stream,
+    /// `--output-format json`.
+    Single,
+}
+
+impl Shape {
+    /// The shape this launch was asked for, or `None` for a format this double
+    /// cannot answer in.
+    ///
+    /// A closed set, read the way [`Refusal`] is read: a format this process
+    /// answered *anyway* would be stdout oneharness parses under a different one,
+    /// which is a journey failing somewhere far from the flag that caused it.
+    /// `text` is in that set deliberately — nothing here asks for it, and the day
+    /// something does, this says so instead of quietly streaming JSON at it.
+    ///
+    /// A launch with no `--output-format` at all keeps the streamed shape this
+    /// double has always answered with: that is a harness whose default format
+    /// oneharness accepted, not a value it could not read.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `None` arm is a guard
+    // rail on this double rather than behaviour of the product: no graph, task,
+    // or flag a user of `oneagentgraph` can write reaches it — only oneharness
+    // asking for a format nothing here answers in, which is a journey's own
+    // mistake. Driving it would mean committing a deliberately misconfigured
+    // journey, whose whole assertion is that this refusal exists. The formats
+    // that *are* answered are exercised by every journey in the suite: the
+    // streamed one throughout, and `json` by the structured-output journey in
+    // tests/e2e/dispatch.rs.
+    fn asked_for(argv: &[String]) -> Option<Self> {
+        match flag(argv, "--output-format").as_deref() {
+            None | Some("stream-json") => Some(Shape::Stream),
+            Some("json") => Some(Shape::Single),
+            _ => None,
+        }
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// One turn: hold if the prompt asked it to, then answer.
@@ -474,7 +556,7 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
 /// *stoppable*: the hold ends the moment it is set, the turn reports a terminal
 /// result having done none of its work, and the flag is cleared so the redirected
 /// turn that follows is not aborted by the same request.
-fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
+fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answered {
     let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
     // Written before any wait, so a journey can wait for a turn that is really
     // in flight rather than for a process that has merely started.
@@ -505,7 +587,9 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
-    emit(&json!({"type": "system", "subtype": "init", "session_id": session}));
+    if shape == Shape::Stream {
+        emit(&json!({"type": "system", "subtype": "init", "session_id": session}));
+    }
     if stopped() {
         if let Some(flag) = interrupted {
             flag.store(false, Ordering::SeqCst);
@@ -515,25 +599,58 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>) {
             "num_turns": 1, "result": "", "session_id": session,
             "usage": {"input_tokens": 1, "output_tokens": 0}, "total_cost_usd": 0.0,
         }));
-        return;
+        return Answered::Yes;
     }
     // Past the wait and past the abort, so this line is the proof that *this*
     // turn did its work — a turn an interrupt stopped never reaches it.
     if interrupted.is_some() {
         record(prompt, "did-work", prompt);
     }
-    emit(&json!({
-        "type": "assistant", "session_id": session,
-        "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
-            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
-    }));
+    // A tool transcript is a stream-json line and has nowhere to go in a single
+    // `json` document, which is exactly why oneharness upgrades the format for a
+    // run that asked for events.
+    if shape == Shape::Stream {
+        emit(&json!({
+            "type": "assistant", "session_id": session,
+            "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
+        }));
+    }
+    // Resolved before the terminal line rather than inside it: a turn this
+    // process cannot answer publishes no `result` at all, which is what a
+    // harness that failed looks like — never a `result` carrying whatever an
+    // unreadable file left behind.
+    let answer = match answer(prompt) {
+        Ok(answer) => answer,
+        Err(reason) => {
+            eprintln!("fake-harness: {reason}");
+            return Answered::No;
+        }
+    };
     emit(&json!({
         "type": "result", "subtype": "success", "is_error": false, "duration_ms": 5,
-        "num_turns": 1, "result": answer(prompt), "session_id": session,
+        "num_turns": 1, "result": answer, "session_id": session,
         "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 4,
                   "cache_creation_input_tokens": 1},
         "total_cost_usd": 0.002,
     }));
+    Answered::Yes
+}
+
+/// Whether a turn was one this double could take.
+///
+/// [`Answered::No`] is a journey's own mistake — an answer file that is not
+/// there — and it is returned rather than swallowed so the single-sided path can
+/// exit on it: a double that exited 0 having published nothing reaches oneharness
+/// as a harness that ran and said nothing, which is a journey failing several
+/// layers away from the sentinel that caused it. A **controlled** turn runs on a
+/// thread of its own and so cannot return that code directly; it records the
+/// refusal for the stream loop, which exits on it once the turn in flight has
+/// been joined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answered {
+    Yes,
+    No,
 }
 
 /// How often a hanging turn proves it is still alive.
@@ -666,40 +783,67 @@ fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
 ///
 /// onejudge renders a distinct framing per operation, so the prompt itself says
 /// which side this invocation is — there is no flag that does.
-fn answer(prompt: &str) -> String {
+///
+/// `Err` is a turn this process cannot take: a journey named an answer file and
+/// this cannot read it, which is a journey asserting against a turn it never
+/// configured. The caller refuses loudly rather than answering something else.
+fn answer(prompt: &str) -> Result<String, String> {
     if prompt.contains("completion supervisor") {
         // The two shapes are not symmetrical, and onejudge enforces that: a
         // completed response carries a `reason` and *no* `message`, because
         // there is no next turn for a message to be. A continuing one carries
         // both.
         if steers(prompt, "should-fail") {
-            return json!({
+            return Ok(json!({
                 "completion": false,
                 "message": "verify it before you call it done",
                 "reason": "fake supervisor requires another turn",
             })
-            .to_string();
+            .to_string());
         }
-        return json!({"completion": true, "reason": "fake supervisor verified completion"})
-            .to_string();
+        return Ok(
+            json!({"completion": true, "reason": "fake supervisor verified completion"})
+                .to_string(),
+        );
     }
     if prompt.contains("role-playing the USER") {
-        return "verify it before you call it done".into();
+        return Ok("verify it before you call it done".into());
     }
     if prompt.contains("Criterion:") {
-        return json!({
+        return Ok(json!({
             "value": !steers(prompt, "should-fail"),
             "reason": "fake judge verdict",
         })
-        .to_string();
+        .to_string());
     }
     if prompt.contains("Assessment request:") {
-        return "None".into();
+        return Ok("None".into());
     }
+    // Beside `complete-now` rather than above the judge-shaped branches, and for
+    // the same reason they are ordered that way: a judge side's prompt embeds the
+    // transcript, so a sentinel the operator's task carried arrives there a
+    // second time, and an answer-file that fired on it would hand the judge a
+    // document in the agent's shape.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `Err` arm is the same
+    // guard rail as [`Shape::asked_for`]'s: a journey names the answer file, so
+    // one that cannot be read is that journey's own mistake and not anything a
+    // user of `oneagentgraph` can cause. The `Ok` arm is what the structured
+    // journeys in tests/e2e/dispatch.rs drive, in both directions — an answer
+    // that satisfies its schema and one that does not.
+    if let Some(path) = sentinel_path(prompt, "answer-file") {
+        return match std::fs::read_to_string(&path) {
+            Ok(document) => Ok(document.trim().to_string()),
+            Err(err) => Err(format!(
+                "cannot read the answer file {}: {err}",
+                path.display()
+            )),
+        };
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     if steers(prompt, "complete-now") {
-        "done".into()
+        Ok("done".into())
     } else {
-        "working on it".into()
+        Ok("working on it".into())
     }
 }
 

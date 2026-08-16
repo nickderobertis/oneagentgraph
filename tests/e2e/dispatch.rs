@@ -14,8 +14,8 @@
 use std::collections::BTreeMap;
 
 use crate::support::{
-    fake_harness, fake_provider, graph_with, labels, single_sided_graph, two_party_graph,
-    Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
+    fake_harness, fake_provider, graph_with, labels, oneharness_bin, single_sided_graph,
+    two_party_graph, Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// The whole happy path: a two-party member completes, and the stream carries
@@ -2589,5 +2589,482 @@ fn a_single_sided_member_runs_one_agent_with_no_judge() {
         !run.of_kind("turn-activity").is_empty(),
         "{:?}",
         run.kinds()
+    );
+}
+
+/// The argv one member was started with, read off the stream it published.
+fn started_args(run: &crate::support::Run, member: &str) -> Vec<String> {
+    let started = run
+        .of_kind("member-started")
+        .into_iter()
+        .find(|event| {
+            labels(event)
+                .get("member")
+                .is_some_and(|name| name.as_str() == member)
+        })
+        .unwrap_or_else(|| panic!("{member} never started:\n{}", run.stdout));
+    started["payload"]["args"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{member} named no argv: {started}"))
+        .iter()
+        .map(|arg| arg.as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
+/// The report one member stored, read from the path its settle named.
+fn stored_report(run: &crate::support::Run, member: &str) -> serde_json::Value {
+    let settled = run
+        .of_kind("member-settled")
+        .into_iter()
+        .find(|event| {
+            labels(event)
+                .get("member")
+                .is_some_and(|name| name.as_str() == member)
+        })
+        .unwrap_or_else(|| panic!("{member} never settled:\n{}", run.stdout));
+    let path = settled["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{member}'s settle named no stored report: {settled}"));
+    assert_eq!(
+        settled["payload"]["completed"],
+        serde_json::json!(true),
+        "{member} did not settle successfully: {settled}"
+    );
+    let raw = std::fs::read_to_string(path).expect("the stored report");
+    serde_json::from_str(&raw).expect("the stored report is JSON")
+}
+
+/// A member whose own oneharness config asks for structured output gets it: the
+/// run does not stream, the answer is validated against the schema that config
+/// names, and the settle stores the document carrying it.
+///
+/// Two overrides this crate used to make are what the journey is really about,
+/// and both are load-bearing here:
+///
+/// * The forced `--stream`. A flag beats config in oneharness and is mutually
+///   exclusive with a schema there, so a member declaring `schema_file` was a
+///   usage error rather than a structured-output run. The `reporter` beside the
+///   drafter is the other half of that: a config declaring neither still streams,
+///   argv for argv, which is what every graph already written depends on.
+/// * The relative path. The drafter's config lives **outside** the directory the
+///   member works in and names its schema relative to itself, which is where the
+///   operator wrote it. oneharness resolves a config-declared `schema_file`
+///   against `--cwd`, so without anchoring it looks for the schema under the work
+///   directory, finds nothing, and the member dies before a turn.
+#[test]
+fn a_single_sided_member_answers_with_the_structured_document_its_config_asks_for() {
+    let workspace = Workspace::new();
+    // Beside the config that names it, one directory away from where the member
+    // works — the arrangement an operator keeps their graph's configs in.
+    workspace.write(
+        "configs/oneharness.structured.toml",
+        &format!(
+            "{CHAIN}schema_file = \"./answer.schema.json\"\nhistory = true\nhistory_dir = \"./history\"\n"
+        ),
+    );
+    workspace.write(
+        "configs/answer.schema.json",
+        concat!(
+            "{\"type\": \"object\", \"required\": [\"title\", \"body\"],",
+            " \"properties\": {\"title\": {\"type\": \"string\"},",
+            " \"body\": {\"type\": \"string\"}},",
+            " \"additionalProperties\": false}\n"
+        ),
+    );
+    let answer = workspace.write(
+        "answer.json",
+        "{\"title\": \"take the config as written\", \"body\": \"one change request\"}",
+    );
+
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  drafter:\n    kind: oneharness\n",
+            "    oneharness_config: ./configs/oneharness.structured.toml\n",
+            "  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    task: \"fake:complete-now: say what changed\"\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.drafter.task".to_string(),
+                format!("draft the body. fake:answer-file={}", answer.display()),
+            ),
+        ],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    // The member the operator asked for a validated answer from is not streamed,
+    // because there is no such run one layer down.
+    let drafting = started_args(&run, "drafter");
+    assert!(
+        !drafting.contains(&"--stream".to_string()),
+        "the member's own config was overridden by a flag again: {drafting:?}"
+    );
+    assert!(drafting.contains(&"--compact".to_string()), "{drafting:?}");
+
+    // And the answer came back validated, in the report the settle stored.
+    let report = stored_report(&run, "drafter");
+    let result = &report["results"][0];
+    assert_eq!(result["schema_valid"], serde_json::json!(true), "{result}");
+    assert_eq!(
+        result["structured"],
+        serde_json::json!({"title": "take the config as written", "body": "one change request"}),
+        "the stored report carries no structured answer: {result}"
+    );
+
+    // Every path in that config was anchored, not just the one the schema run
+    // needed: the history this member was told to keep landed beside the config
+    // that asked for it, which is the only directory its author named.
+    assert!(
+        workspace.at("configs/history").is_dir(),
+        "a relative `history_dir` was resolved against a directory nobody named"
+    );
+    assert!(
+        !workspace.dir().join("history").exists(),
+        "the history landed in the directory the member works in"
+    );
+
+    // The member beside it declares neither a schema nor `stream`, and runs
+    // exactly as it did before: the streamed argv, and the tool events only a
+    // streamed member publishes.
+    let reporting = started_args(&run, "reporter");
+    assert!(
+        reporting.contains(&"--stream".to_string()),
+        "a member whose config says nothing stopped streaming: {reporting:?}"
+    );
+    assert!(
+        !reporting.contains(&"--compact".to_string()),
+        "{reporting:?}"
+    );
+    let activity: Vec<String> = run
+        .of_kind("turn-activity")
+        .iter()
+        .filter_map(|event| labels(event).get("member").cloned())
+        .collect();
+    assert_eq!(
+        activity
+            .iter()
+            .filter(|member| member.as_str() == "reporter")
+            .count(),
+        1,
+        "the streaming member published no tool event: {activity:?}"
+    );
+    assert!(
+        !activity.iter().any(|member| member.as_str() == "drafter"),
+        "a member that does not stream published a streamed event: {activity:?}"
+    );
+}
+
+/// A member whose config says `stream = false` is honoured rather than
+/// overridden: it publishes one report at the end and settles on it.
+///
+/// The buffered report is not merely "the same run without events". `oneharness
+/// run` pretty-prints it, and this crate reads a member's stdout a line at a
+/// time — so a member that stopped streaming and lost its report would settle as
+/// a provider failure, which is exactly what this asserts it does not do.
+#[test]
+fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", &format!("{CHAIN}stream = false\n"));
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_task("fake:complete-now: one report at the end");
+    run.expect_code(0);
+
+    let args = started_args(&run, "reporter");
+    assert!(
+        !args.contains(&"--stream".to_string()),
+        "`stream = false` was overridden on the argv: {args:?}"
+    );
+    assert!(
+        run.of_kind("turn-activity").is_empty(),
+        "a member that does not stream published streamed events: {:?}",
+        run.kinds()
+    );
+    let report = stored_report(&run, "reporter");
+    assert_eq!(
+        report["results"][0]["text"],
+        serde_json::json!("done"),
+        "the buffered report never reached the settle: {report}"
+    );
+
+    // And saying it beside a schema is the same run, not a contradiction: the
+    // pair a config may legally declare — the operator asking for the buffered
+    // report the schema already implies — runs and answers validated JSON.
+    workspace.write(
+        "answer.schema.json",
+        concat!(
+            "{\"type\": \"object\", \"required\": [\"title\"],",
+            " \"properties\": {\"title\": {\"type\": \"string\"}},",
+            " \"additionalProperties\": false}\n"
+        ),
+    );
+    let answer = workspace.write("answer.json", "{\"title\": \"said out loud\"}");
+    workspace.write(
+        "oneharness.toml",
+        &format!("{CHAIN}stream = false\nschema_file = \"./answer.schema.json\"\n"),
+    );
+    let both = workspace.run_task(&format!("draft it. fake:answer-file={}", answer.display()));
+    both.expect_code(0);
+    assert!(
+        !started_args(&both, "reporter").contains(&"--stream".to_string()),
+        "{:?}",
+        started_args(&both, "reporter")
+    );
+    assert_eq!(
+        stored_report(&both, "reporter")["results"][0]["structured"],
+        serde_json::json!({"title": "said out loud"}),
+    );
+}
+
+/// A relative `env_file` in a member's config is anchored the same way, and the
+/// refusal proves where it pointed: oneharness reads that file to assemble the
+/// identity's environment, so the path it names is the path it looked in.
+///
+/// Deliberately the *missing* file. oneharness resolves a variant's environment
+/// before it spawns anything, so this journey reaches the resolution and stops.
+///
+/// The candidate still has to be **installed** to get that far — a chain whose
+/// only candidate has no binary fails as `not-installed` having resolved
+/// nothing, which is what this asserted against on a host that happened to have
+/// the paid CLI and nowhere else. A variant is not reachable by the
+/// `ONEHARNESS_BIN_<ID>` override every other journey uses (that keys on a
+/// harness id, and there is no spelling of it that carries a variant), so this
+/// one names its provider where a variant can: oneharness's own deterministic
+/// responder, `mock-harness`, which ships inside the `oneharness` this suite
+/// already drives and is selected by the variable its own `run --mock-harness`
+/// sets. Nothing paid is reachable from this config, on any machine, and no
+/// journey turns on a harness being installed.
+#[test]
+fn a_relative_env_file_in_a_members_config_is_read_beside_that_config() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "configs/oneharness.identity.toml",
+        &format!(
+            concat!(
+                "run_mode = \"fallback\"\nharnesses = [\"claude-code:alternate\"]\n",
+                "\n[harness.claude-code.variant.alternate]\n",
+                "bin = {bin}\nenv_file = \"./identity.env\"\n",
+                "\n[harness.claude-code.variant.alternate.env]\n",
+                "ONEHARNESS_INTERNAL_MOCK_HARNESS = \"1\"\n",
+            ),
+            // Quoted as TOML quotes it, so a Windows path's backslashes are not
+            // read as escapes by the file this writes.
+            bin = toml_edit::Value::from(oneharness_bin()),
+        ),
+    );
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: oneharness\n",
+            "    oneharness_config: ./configs/oneharness.identity.toml\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "fake:complete-now: never gets an identity",
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{died:?}");
+    let detail = died[0]["payload"]["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains(
+            &workspace
+                .at("configs")
+                .join("identity.env")
+                .display()
+                .to_string()
+        ),
+        "the identity file was looked for somewhere its author never named: {detail}"
+    );
+    assert!(
+        !detail.contains(&workspace.dir().display().to_string()),
+        "the identity file was resolved against the directory the member works in: {detail}"
+    );
+}
+
+/// An answer that does not satisfy the schema is a member that **failed**, not
+/// one that quietly answered something else.
+///
+/// The other half of the structured-output journey above, and the half a
+/// consumer depends on: `onepipeline` reads the stored report for a validated
+/// document, so a run that could not produce one has to say so. oneharness
+/// re-prompts and then reports the harness as failed, which reaches the stream
+/// as a death with the exit code the run really made — never a `member-settled`
+/// carrying an unvalidated answer.
+#[test]
+fn a_structured_answer_that_fails_its_schema_fails_the_member() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "configs/oneharness.structured.toml",
+        &format!("{CHAIN}schema_file = \"./answer.schema.json\"\nschema_max_retries = 0\n"),
+    );
+    workspace.write(
+        "configs/answer.schema.json",
+        concat!(
+            "{\"type\": \"object\", \"required\": [\"title\"],",
+            " \"properties\": {\"title\": {\"type\": \"string\"}},",
+            " \"additionalProperties\": false}\n"
+        ),
+    );
+    // Valid JSON, and not the document that was asked for.
+    let answer = workspace.write("answer.json", "{\"title\": 5, \"extra\": true}");
+
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  drafter:\n    kind: oneharness\n",
+            "    oneharness_config: ./configs/oneharness.structured.toml\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!("draft the body. fake:answer-file={}", answer.display()),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(1);
+
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "a member that never produced a validated answer settled anyway: {:?}",
+        run.kinds()
+    );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{died:?}");
+    assert_eq!(labels(&died[0])["member"], "drafter");
+    assert_eq!(
+        died[0]["payload"]["rule"],
+        serde_json::json!("provider-failure")
+    );
+}
+
+/// A two-party member's sides are the same operator's configs, anchored the same
+/// way: the agent side's own `history_dir` is written beside the config that
+/// named it.
+///
+/// Asserted for the *other* member kind because the anchoring is one rule for
+/// both — each side's config is resolved and stamped into the member's scratch
+/// by the same call — and a rule proven on only one of them is one that can
+/// silently stop holding for the other.
+#[test]
+fn a_two_party_members_side_config_keeps_its_paths_where_they_were_written() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "configs/oneharness.agent.toml",
+        &format!("{CHAIN}history = true\nhistory_dir = \"./history\"\n"),
+    );
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./configs/oneharness.agent.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    let run = workspace.run_task("fake:complete-now: write the thing");
+    run.expect_code(0);
+
+    assert!(
+        workspace.at("configs/history").is_dir(),
+        "the agent side's relative `history_dir` was resolved against a directory \
+         nobody named: {:?}",
+        std::fs::read_dir(workspace.path())
+            .expect("the workspace")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A path that already means one thing is carried through untouched: an absolute
+/// one, and an empty value oneharness reads as unset.
+///
+/// The other side of anchoring, and the half that would break silently. An
+/// absolute `schema_file` joined onto the config's directory would name a file
+/// nobody wrote, and an empty `history_dir` joined onto it would turn a key that
+/// said nothing into one naming that directory — so this asserts the run
+/// answered on the schema its author named *and* that the history landed in
+/// oneharness's own default store rather than beside the config.
+#[test]
+fn a_config_whose_paths_are_already_unambiguous_is_carried_through_as_written() {
+    let workspace = Workspace::new();
+    let schema = workspace.write(
+        "schemas/answer.schema.json",
+        concat!(
+            "{\"type\": \"object\", \"required\": [\"title\"],",
+            " \"properties\": {\"title\": {\"type\": \"string\"}},",
+            " \"additionalProperties\": false}\n"
+        ),
+    );
+    workspace.write(
+        "configs/oneharness.absolute.toml",
+        &format!(
+            "{CHAIN}schema_file = {}\nhistory = true\nhistory_dir = \"\"\n",
+            // Quoted as TOML quotes it, so a Windows path's backslashes are not
+            // read as escapes by the file this writes.
+            toml_edit::Value::from(schema.display().to_string())
+        ),
+    );
+    let answer = workspace.write("answer.json", "{\"title\": \"already unambiguous\"}");
+
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  drafter:\n    kind: oneharness\n",
+            "    oneharness_config: ./configs/oneharness.absolute.toml\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!("draft it. fake:answer-file={}", answer.display()),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+    run.expect_code(0);
+
+    // The absolute schema was read where it was written, so the answer validated.
+    let report = stored_report(&run, "drafter");
+    assert_eq!(
+        report["results"][0]["structured"],
+        serde_json::json!({"title": "already unambiguous"}),
+        "{report}"
+    );
+    // And the empty history directory stayed unset, so oneharness resolved its
+    // own default store for it: nothing was written beside the config, which is
+    // the one place anchoring an empty value could have put it. Where that
+    // default *is* is oneharness's own question and differs per platform, so it
+    // is deliberately not asserted here.
+    assert!(
+        !workspace.at("configs/history").exists(),
+        "an empty `history_dir` was turned into the config's own directory"
     );
 }

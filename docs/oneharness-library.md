@@ -52,9 +52,9 @@ three things `docs/contract.md` names as collapsing this hop — and every argum
 | `--config <p>` | `config` |
 | `--cwd <d>` | `cwd` |
 | `--events` | `events` |
-| `--stream` | `stream: Some(true)` |
+| `--stream` | `stream: Some(true)`, and only for a member whose own resolved config leaves its run streaming |
+| `--compact` | none, by design: it is how the CLI *prints* a report — which is exactly why it takes the streaming flag's place for a member whose config asks for a schema, and why a library call would need neither, the report being the return value |
 | `--prompt <text>` | `prompt` |
-| `--compact` | none, by design: it is how the CLI *prints* a report |
 
 `tests/inventory.rs` parses that column and names each field in a `RunRequest`
 literal, so a rename upstream fails there rather than here.
@@ -91,6 +91,16 @@ occurs, which is what the `--stream` NDJSON lines carry today. The reader in
 `src/member.rs` that parses those lines back apart goes away exactly as the
 onejudge conversion's did, and `SinkStep::Stop` is that path's
 `ControlFlow::Break`.
+
+Whether a given member streams at all is not this crate's to decide, and the
+conversion has to keep it that way: `src/invoke.rs`'s `streams` reads the
+member's own resolved config, because a config asking for a schema cannot stream
+in oneharness and one asking for both is refused before launch. So the value the
+conversion carries is that decision rather than a constant, and what replaces
+the buffered path is smaller than what replaces the streaming one — a member that
+does not stream is on `--compact` today only so that its report reaches
+`src/member.rs` down a pipe read a line at a time, and a library call has the
+report as `run`'s return value with no printing in between.
 
 **Control binding — gained, not held.** A single-sided member's argv carries no
 `--control` at all, so it records no `control::Turn` and `oneagentgraph interrupt`

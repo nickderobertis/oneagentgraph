@@ -14,7 +14,10 @@
 //!
 //! `docs/oneharness-library.md` is the rest: every other guarantee this spawn
 //! provides with the seam that replaces it, the upstream proposal that one gap is,
-//! and why the conversion is not done for POSIX alone in the meantime.
+//! and why the conversion is not done for POSIX alone in the meantime. Its
+//! argument table is where the argv this module launches is held against a
+//! `RunRequest` field by field — including the one flag the two callers here
+//! decide rather than always pass, which is whether the turn streams.
 
 use std::process::{Command, Stdio};
 

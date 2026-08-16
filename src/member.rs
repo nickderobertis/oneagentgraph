@@ -1,12 +1,12 @@
 //! Running one member, and turning what it publishes into envelopes.
 //!
-//! A **single-sided** member is one child process, `oneharness run --stream`, and
-//! this module is the whole of running it. A **two-party** member is onejudge's
-//! own run driver called in this process; [`crate::judge`] runs that one, and
-//! shares the settle, the death, and the two watchdogs below so both kinds reach
-//! the stream as the same events.
+//! A **single-sided** member is one child process, `oneharness run`, and this
+//! module is the whole of running it. A **two-party** member is onejudge's own
+//! run driver called in this process; [`crate::judge`] runs that one, and shares
+//! the settle, the death, and the two watchdogs below so both kinds reach the
+//! stream as the same events.
 //!
-//! A child member speaks two NDJSON envelopes on stdout (onejudge's
+//! A streaming child member speaks two NDJSON envelopes on stdout (onejudge's
 //! `docs/streaming.md`):
 //!
 //! ```text
@@ -17,6 +17,12 @@
 //! Each `event` line becomes a [`EventKind::TurnActivity`]; the first of a turn
 //! is preceded by a [`EventKind::TurnStarted`]; the terminal `result` line
 //! becomes a [`EventKind::TurnCompleted`] and a [`EventKind::MemberSettled`].
+//!
+//! Whether a member streams at all is **its own oneharness config's** decision —
+//! see [`crate::invoke`], which is where the argv is built. A member that does
+//! not (one asking for a schema-validated answer, or one that simply said
+//! `stream = false`) publishes no envelopes and one report, on one line: the same
+//! document, reaching the same settle, with no `turn-activity` before it.
 //!
 //! Two watchdogs run alongside, both ported from ai-orchestrator with their
 //! defaults and their environment overrides intact:
@@ -759,9 +765,59 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
                 *held(report) = Some(document.clone());
             }
         }
+        // A member whose own config turned streaming off publishes no envelopes
+        // at all: `oneharness run --compact` writes its whole report as one
+        // line, and that document is the same one a streamed `result` carries.
+        //
+        // Recognized by the report envelope's own two identifying fields rather
+        // than by position, so a line arriving before it cannot be mistaken for
+        // the report. This is a trust boundary — another process's stdout — and
+        // the same bar the `result` arm above applies: what is accepted must be
+        // the document everything downstream reads as one, not merely something
+        // shaped a bit like it.
+        // llmlint: ignore-block[changed_behavior_has_e2e] the arm this guard does
+        // *not* take has no journey because no input a user can give reaches it:
+        // a non-streaming member's stdout is `oneharness run --compact`, which
+        // prints its report or prints nothing at all. The nothing-at-all case is
+        // the one an operator can cause — a config oneharness refuses — and it is
+        // driven end to end by the schema and `env_file` journeys in
+        // tests/e2e/dispatch.rs, each asserting the provider-failure death this
+        // guard leads to. A line that is valid JSON and not a report would be an
+        // `oneharness` printing something no release prints.
+        _ if is_report(&value) => {
+            *held(report) = Some(value.clone());
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         _ => {}
     }
 }
+
+/// Whether one line of a member's stdout is oneharness's own run report.
+///
+/// The two fields every report carries and nothing else this crate reads does:
+/// the `schema_version` that says which report contract it is written to, and
+/// the `results` array everything downstream — the settle, the fallback chain,
+/// the structured answer — is read out of.
+///
+/// Checked by name rather than by deserializing into `oneharness_core`'s
+/// `Report`, because a member runs whichever `oneharness` an operator installed:
+/// a report from a build whose schema this one cannot parse is still that
+/// member's report, and refusing it would report a member that answered as one
+/// that died. That is the same trust level the streamed `result` arm has always
+/// applied, and every reader of the document downstream is a tolerant `get` —
+/// the report is *evidence*, stored and forwarded, never a value this crate
+/// branches on structurally.
+// llmlint: ignore-block[boundary_inputs_validated] the deliberate stopping point
+// the doc above states: a full typed parse of a neighbouring tool's report would
+// refuse a member's own answer whenever its `oneharness` is a release this
+// build's types do not know, which turns a member that settled into a member
+// that died. Revisit if this crate ever branches on a report field rather than
+// storing and forwarding it.
+fn is_report(value: &Value) -> bool {
+    value.get("schema_version").is_some_and(Value::is_string)
+        && value.get("results").is_some_and(Value::is_array)
+}
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// What a member's shared state holds, whether or not a reader thread died
 /// holding it.

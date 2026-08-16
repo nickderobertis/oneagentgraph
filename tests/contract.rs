@@ -106,8 +106,13 @@ fn fenced_block(language: &str) -> String {
 
 /// Every `` `backticked` `` token in the contract.
 fn backticked() -> Vec<String> {
+    backticked_in(CONTRACT)
+}
+
+/// The same, over one passage of it.
+fn backticked_in(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut rest = CONTRACT;
+    let mut rest = text;
     while let Some(open) = rest.find('`') {
         rest = &rest[open + 1..];
         let Some(close) = rest.find('`') else { break };
@@ -1631,5 +1636,46 @@ fn the_detach_answer_carries_the_three_keys_the_contract_names() {
     assert_eq!(
         serde_json::from_value::<Started>(rendered).expect("round-trips"),
         started
+    );
+}
+
+/// Where the contract names the path-valued keys a member's oneharness config
+/// has anchored to its own directory.
+const ANCHORED_PATHS_SENTENCE: &str = "The path-valued keys this applies to:";
+
+/// The contract's list of anchored path keys and the crate's are one list.
+///
+/// The set is a contract in both directions: a key the document names and this
+/// build does not anchor is a promise nothing keeps, and one this build anchors
+/// without the document is a config value silently rewritten under its author.
+/// Neither can be caught by the fenced-block tests above — the list is prose,
+/// because it is a rule about a *neighbouring* tool's schema rather than a shape
+/// of this crate's own — so it is checked here instead.
+#[test]
+fn the_documented_path_keys_are_the_ones_a_members_config_has_anchored() {
+    let (_, rest) = CONTRACT
+        .split_once(ANCHORED_PATHS_SENTENCE)
+        .unwrap_or_else(|| panic!("docs/contract.md no longer says {ANCHORED_PATHS_SENTENCE:?}"));
+    // The sentence alone: everything after it names what is *not* anchored.
+    let sentence = rest.split_once(". ").map_or(rest, |(head, _)| head);
+    let documented: BTreeSet<String> = backticked_in(sentence)
+        .into_iter()
+        // A key inside a table is named as its author writes it —
+        // `[harness.<id>.variant.<name>] env_file` — and the key is the last word
+        // of that.
+        .filter_map(|token| token.split_whitespace().last().map(str::to_string))
+        .collect();
+    let anchored: BTreeSet<String> = oneagentgraph::invoke::ANCHORED_PATHS
+        .iter()
+        .copied()
+        .chain(std::iter::once(
+            oneagentgraph::invoke::ANCHORED_VARIANT_PATH,
+        ))
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        documented, anchored,
+        "the contract and this build disagree about which paths in a member's \
+         oneharness config are anchored to that config's own directory"
     );
 }
