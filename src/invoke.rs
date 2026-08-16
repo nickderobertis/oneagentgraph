@@ -449,7 +449,10 @@ fn streams(config: &str, origin: &str) -> Result<bool, Error> {
         .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
     let schema = match document.get("schema_file") {
         None => false,
-        Some(named) if named.is_str() => true,
+        // A value that names a file. An empty one names none — oneharness reads
+        // it as the working directory and dies on it, so it is refused here with
+        // the rest, rather than quietly deciding this member's run for it.
+        Some(named) if named.as_str().is_some_and(|path| !path.is_empty()) => true,
         Some(_) => {
             return Err(Error::InvalidConfig(format!(
                 "{origin}: `schema_file` must be the path of a JSON Schema file"
@@ -1597,6 +1600,10 @@ mod tests {
             ),
             (
                 "harnesses = [\"codex\"]\nschema_file = 3\n",
+                "`schema_file` must be the path",
+            ),
+            (
+                "harnesses = [\"codex\"]\nschema_file = \"\"\n",
                 "`schema_file` must be the path",
             ),
             (
