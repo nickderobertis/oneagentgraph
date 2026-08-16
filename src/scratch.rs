@@ -327,27 +327,43 @@ impl Group {
     /// both platforms — [`stamped_for`] and [`reap`] take exactly this string,
     /// so a record of it is a record something else can act on.
     ///
-    /// For a caller that spawned the child itself, and so owns the moment it
-    /// starts running. A caller that only *observes* somebody else's spawn wants
-    /// [`Group::join`]; the two differ by exactly the resume, and getting that
-    /// wrong is a Windows-only race — see there.
+    /// For a caller that spawned the child itself — [`Group::spawn`], and
+    /// [`crate::judge`]'s hook, where onejudge starts a bare `oneharness run`
+    /// this crate is the first to contain. It owns the moment that child starts
+    /// running, and it is handing over a process nobody else has claimed.
+    ///
+    /// A caller that only *observes* somebody else's spawn wants [`Group::join`],
+    /// and the two differ by more than the resume — see there.
     ///
     /// # Errors
     ///
     /// Whatever the platform reports when a live process cannot be put in the
     /// group. The caller kills the child rather than running it ungrouped.
     pub(crate) fn adopt(&self, child: &Child) -> std::io::Result<String> {
-        let name = self.join(child)?;
+        self.inner.attach(child)?;
         self.inner.start(child)?;
-        Ok(name)
+        Ok(self.scratch.display().to_string())
     }
 
-    /// [`Group::adopt`] without the resume: the process joins this group and is
-    /// left exactly as it was found.
+    /// [`Group::adopt`] for a child **another supervisor has already contained**,
+    /// and without the resume: the process joins this group and is left exactly
+    /// as it was found.
     ///
-    /// What a spawn *hook* wants. A caller that did not start the child does not
-    /// own the moment it runs, and on Windows resuming here races the spawner's
-    /// own thread enumeration.
+    /// What a spawn *hook* wants, and every harness a `kind: oneharness` member
+    /// runs arrives through one: oneharness spawns it into containment of its
+    /// own and hands this crate the still-suspended child. Two things follow from
+    /// that, and both are Windows-only.
+    ///
+    /// A caller that did not start the child does not own the moment it runs, so
+    /// resuming here would race the spawner's own thread enumeration — which is
+    /// the resume this does not do.
+    ///
+    /// And a child that is already in a job cannot simply be added to a second
+    /// one: the assignment *nests*, so the group's own job would become a child
+    /// of the spawner's, and a job has exactly one parent. The platform therefore
+    /// gives each such child a job of its own, recorded for this scratch
+    /// alongside the group's. Nothing about the group's name changes — every job
+    /// a second process may open is still derived from this directory.
     ///
     /// # Errors
     ///
@@ -820,6 +836,13 @@ mod platform {
 
         /// Nothing to do to a live process either — it was in the group the
         /// moment it `exec`ed, and it cannot be moved out of one.
+        pub fn attach(&self, _child: &std::process::Child) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// The same nothing, and for a stronger reason: a stamp is not a claim
+        /// anybody else's containment competes with, so a child another
+        /// supervisor already owns carries this group's membership too.
         pub fn join(&self, _child: &std::process::Child) -> std::io::Result<()> {
             Ok(())
         }
@@ -1141,13 +1164,21 @@ mod platform {
     /// lock itself — so acquiring one is evidence a sweeper may act on.
     pub const LOCK_PROVES_OWNERSHIP: bool = true;
 
-    /// One member's process tree, as the job object holding it.
+    /// One member's process tree, as the job objects holding it.
     #[derive(Debug)]
     pub struct Group {
-        /// The job every process in the tree belongs to. Closing it terminates
-        /// whatever is left, because the job is `KILL_ON_JOB_CLOSE`.
+        /// The job every process this crate is the first to contain belongs to.
+        /// Closing it terminates whatever is left, because the job is
+        /// `KILL_ON_JOB_CLOSE`.
         job: Job,
-        /// Where the job's name is recorded, removed with the group so a name
+        /// The directory this group is named after, which every name below is
+        /// derived from.
+        scratch: PathBuf,
+        /// One job apiece for the children that arrived **already inside another
+        /// supervisor's** — see [`Group::join`]. Held open for the reason `job`
+        /// is: the last handle going away is what ends the tree.
+        adopted: std::sync::Mutex<Vec<Job>>,
+        /// Where the job names are recorded, removed with the group so a name
         /// that no longer resolves is not left behind for a sweeper to open.
         record: PathBuf,
     }
@@ -1155,41 +1186,22 @@ mod platform {
     impl Group {
         /// Create the job `scratch` names and record it there.
         pub fn open(scratch: &Path) -> Result<Self, Error> {
-            let name = wide(&job_name(scratch));
-            // SAFETY: `name` is a live, null-terminated wide string for the
-            // duration of the call; failure is reported with a null handle.
-            let job = unsafe { CreateJobObjectW(std::ptr::null(), name.as_ptr()) };
-            let job = Job::own(job).ok_or_else(|| {
+            let job = create(&job_name(scratch)).map_err(|err| {
                 Error::InvalidConfig(format!(
-                    "cannot create the job object for {}: {}",
+                    "cannot create the job object for {}: {err}",
                     scratch.display(),
-                    std::io::Error::last_os_error()
                 ))
             })?;
-            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            // SAFETY: `limits` is a live, fully initialised structure of exactly
-            // the size passed alongside it, and the class named is the one it is.
-            let set = unsafe {
-                SetInformationJobObject(
-                    job.as_raw(),
-                    JobObjectExtendedLimitInformation,
-                    std::ptr::from_ref(&limits).cast(),
-                    u32::try_from(std::mem::size_of_val(&limits)).unwrap_or(u32::MAX),
-                )
-            };
-            if set == 0 {
-                return Err(Error::InvalidConfig(format!(
-                    "cannot bind the job object for {} to its launcher: {}",
-                    scratch.display(),
-                    std::io::Error::last_os_error()
-                )));
-            }
             let record = scratch.join(OWNER_JOB_FILE);
             std::fs::write(&record, job_name(scratch)).map_err(|err| {
                 Error::InvalidConfig(format!("cannot write {}: {err}", record.display()))
             })?;
-            Ok(Self { job, record })
+            Ok(Self {
+                job,
+                scratch: scratch.to_path_buf(),
+                adopted: std::sync::Mutex::new(Vec::new()),
+                record,
+            })
         }
 
         /// Ask for the child suspended, so it cannot run before it is in the
@@ -1204,34 +1216,62 @@ mod platform {
             Ok(())
         }
 
-        /// Put the suspended child in the job, leaving it suspended.
-        ///
-        /// A job assignment **nests**, which is what lets this be safe for a
-        /// child somebody else spawned: a harness `oneharness_core` has already
-        /// put in a job of its own joins this one as well, and either side's
-        /// teardown ends it.
+        /// Put a child **nobody else has contained** in this group's own job,
+        /// leaving it suspended.
         //
         // llmlint: ignore-block[changed_behavior_has_e2e] there is no journey
         // for the failure arms because there is no input that reaches them: a
-        // job this process created a moment ago refusing its own child, or a
-        // suspended process with no resumable thread, are kernel failures rather
-        // than anything a caller can ask for, and no seam this crate sanctions
-        // fakes Win32. The reachable half — that a member which *is* grouped is
-        // torn down whole, by a cancel, a watchdog, or its launcher dying — is
-        // covered in tests/e2e/liveness.rs. What these arms decide is the
-        // direction of an unreachable failure, and the callers make it the safe
-        // one: a child that started but could not be put in the job is killed
-        // rather than returned, because returning it would leave a paid harness
-        // running that no cancel could ever find.
+        // job this process created a moment ago refusing its own child, a job
+        // object the kernel will not create, or a suspended process with no
+        // resumable thread, are kernel failures rather than anything a caller can
+        // ask for, and no seam this crate sanctions fakes Win32. The reachable
+        // half — that a member which *is* grouped is torn down whole, by a
+        // cancel, a watchdog, or its launcher dying — is covered in
+        // tests/e2e/liveness.rs. What these arms decide is the direction of an
+        // unreachable failure, and the callers make it the safe one: a child that
+        // started but could not be put in a job is killed rather than returned,
+        // because returning it would leave a paid harness running that no cancel
+        // could ever find.
+        pub fn attach(&self, child: &Child) -> std::io::Result<()> {
+            assign(self.job.as_raw(), child)
+        }
+
+        /// Put a child **another supervisor has already contained** in a job of
+        /// its own, recorded for this scratch, leaving it suspended.
+        ///
+        /// A job of its own rather than this group's, and that is a Win32 rule
+        /// rather than a preference. Assigning a process that already belongs to
+        /// a job **nests**: the job it is assigned to becomes a *child* of the one
+        /// it was in, and a job has exactly one parent. So this group's own job
+        /// can take one already-contained child and no more — a second assignment
+        /// asks it for a second parent, and the kernel refuses. That is not a
+        /// corner: oneharness creates a fresh job per spawn, so a member whose
+        /// fallback chain steps to a second candidate is exactly the second
+        /// assignment, and the refusal there cancelled the run and lost the step
+        /// past.
+        ///
+        /// Each of these jobs is `KILL_ON_JOB_CLOSE` like the group's, so the
+        /// nesting works the way the containment wants in both directions: the
+        /// harness sits in oneharness's job *and* in one of this member's, and
+        /// either side's teardown ends it.
+        ///
+        /// The name is derived from **this directory** and numbered, never
+        /// minted, so a second process still computes every name it may open
+        /// rather than reading one out of a file — see [`groups_under`].
         pub fn join(&self, child: &Child) -> std::io::Result<()> {
-            // SAFETY: the child handle is live for the borrow, and the job is
-            // one this group owns; failure is reported through the return value.
-            let assigned = unsafe {
-                AssignProcessToJobObject(self.job.as_raw(), child.as_raw_handle() as HANDLE)
-            };
-            if assigned == 0 {
-                return Err(std::io::Error::last_os_error());
-            }
+            let mut adopted = self
+                .adopted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let name = sibling_name(&self.scratch, adopted.len());
+            let job = create(&name)?;
+            assign(job.as_raw(), child)?;
+            // Recorded before the handle is kept, so the failure direction stays
+            // the safe one: a job this frame still owns is closed on the way out,
+            // and `KILL_ON_JOB_CLOSE` ends the child that no reap could have
+            // found.
+            record(&self.record, &name)?;
+            adopted.push(job);
             Ok(())
         }
 
@@ -1241,16 +1281,72 @@ mod platform {
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
 
-        /// End this group's whole tree.
+        /// End this group's whole tree — its own job, and every one it adopted a
+        /// separately-contained child into.
         pub fn terminate(&self, _scratch: &Path) -> usize {
-            let pids = pids_in(self.job.as_raw());
-            // SAFETY: the job is one this group owns; failure is reported
-            // through the return value.
-            if unsafe { TerminateJobObject(self.job.as_raw(), 1) } == 0 {
-                return 0;
-            }
-            pids.len()
+            let adopted = self
+                .adopted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::iter::once(&self.job)
+                .chain(adopted.iter())
+                .map(|job| end(job.as_raw()))
+                .sum()
         }
+    }
+
+    /// Create a `KILL_ON_JOB_CLOSE` job object under `name`.
+    fn create(name: &str) -> std::io::Result<Job> {
+        let wide = wide(name);
+        // SAFETY: `wide` is a live, null-terminated wide string for the duration
+        // of the call; failure is reported with a null handle.
+        let job = unsafe { CreateJobObjectW(std::ptr::null(), wide.as_ptr()) };
+        let job = Job::own(job).ok_or_else(std::io::Error::last_os_error)?;
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // SAFETY: `limits` is a live, fully initialised structure of exactly the
+        // size passed alongside it, and the class named is the one it is.
+        let set = unsafe {
+            SetInformationJobObject(
+                job.as_raw(),
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                u32::try_from(std::mem::size_of_val(&limits)).unwrap_or(u32::MAX),
+            )
+        };
+        if set == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(job)
+    }
+
+    /// Put one live process in one job.
+    fn assign(job: HANDLE, child: &Child) -> std::io::Result<()> {
+        // SAFETY: the child handle is live for the borrow, and the job is one
+        // this group owns; failure is reported through the return value.
+        let assigned = unsafe { AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) };
+        if assigned == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Add one more job name to a group's record, on a line of its own.
+    fn record(path: &Path, name: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new().append(true).open(path)?;
+        write!(file, "\n{name}")
+    }
+
+    /// End one job, and say how many processes it held.
+    fn end(job: HANDLE) -> usize {
+        let pids = pids_in(job);
+        // SAFETY: the job is one this group owns; failure is reported through
+        // the return value.
+        if unsafe { TerminateJobObject(job, 1) } == 0 {
+            return 0;
+        }
+        pids.len()
     }
 
     impl Drop for Group {
@@ -1275,6 +1371,34 @@ mod platform {
         format!("Local\\{}{digest:x}", super::SCRATCH_PREFIX)
     }
 
+    /// What separates a scratch directory's own job name from the index of one
+    /// of its siblings.
+    ///
+    /// A character no digest produces and no object namespace reads as anything
+    /// — unlike `\`, which would make each sibling a *directory* below the name
+    /// rather than a name of its own.
+    const SIBLING_MARK: char = '#';
+
+    /// The name of the `index`th job recorded for a scratch directory beyond its
+    /// own — the ones [`Group::join`] mints for children another supervisor had
+    /// already contained.
+    ///
+    /// Derived from the directory exactly as [`job_name`] is, so the rule a
+    /// reader applies stays "a name this directory computes" rather than "a name
+    /// somebody wrote down".
+    fn sibling_name(scratch: &Path, index: usize) -> String {
+        format!("{}{SIBLING_MARK}{index}", job_name(scratch))
+    }
+
+    /// The most job names one record is read as carrying.
+    ///
+    /// Not a limit anybody meets: a member records one name per harness that
+    /// arrived already contained, which is one per candidate of its fallback
+    /// chain. What the bound is for is the *read* — `owner.job` is a file in a
+    /// scratch directory, so a reader that took its length on trust would open a
+    /// handle per line somebody else appended.
+    const MAX_RECORDED_GROUPS: usize = 1024;
+
     /// One string as the null-terminated wide buffer the Win32 API takes.
     fn wide(text: &str) -> Vec<u16> {
         std::ffi::OsStr::new(text)
@@ -1292,24 +1416,21 @@ mod platform {
     /// A record naming a job nothing holds open any more simply does not open,
     /// which is the same answer as an empty group: that tree is gone.
     ///
-    /// The name a group is opened under is **derived from the directory**, never
-    /// taken from the file. `owner.job` is a file in a scratch directory — a
-    /// trust boundary like any other, and one whose content would otherwise
+    /// Every name a group is opened under is **derived from the directory**,
+    /// never taken from the file. `owner.job` is a file in a scratch directory —
+    /// a trust boundary like any other, and one whose content would otherwise
     /// decide what `TerminateJobObject` is aimed at, so a record somebody else
     /// wrote would point a `cancel` at any job object this user can open. What
-    /// the file is for is saying *that* a group was recorded here and letting an
-    /// operator read which one; what it may not do is choose. A record that does
-    /// not match the name this directory computes is not this crate's, and is
-    /// skipped rather than opened.
+    /// the file is for is saying *how many* groups were recorded here and letting
+    /// an operator read which; what it may not do is choose. A line that is
+    /// neither the name this directory computes nor one of that name's numbered
+    /// siblings is not this crate's, and is skipped rather than opened.
     fn groups_under(root: &Path, access: u32) -> Vec<Job> {
         let mut found = Vec::new();
         let mut walking = vec![(root.to_path_buf(), 0usize)];
         while let Some((dir, depth)) = walking.pop() {
-            let expected = job_name(&dir);
-            if std::fs::read_to_string(dir.join(OWNER_JOB_FILE))
-                .is_ok_and(|recorded| recorded.trim() == expected)
-            {
-                let name = wide(&expected);
+            for name in recorded_names(&dir) {
+                let name = wide(&name);
                 // SAFETY: `name` is a live, null-terminated wide string for the
                 // duration of the call; failure is reported with a null handle.
                 let job = unsafe { OpenJobObjectW(access, 0, name.as_ptr()) };
@@ -1328,6 +1449,42 @@ mod platform {
             }
         }
         found
+    }
+
+    /// Every job name `dir`'s record carries that `dir` itself derives — its own
+    /// name, or one of that name's numbered siblings — each at most once.
+    ///
+    /// The whole of the trust boundary [`groups_under`] describes, in one place
+    /// so there is one rule rather than one per reader.
+    fn recorded_names(dir: &Path) -> Vec<String> {
+        let Ok(recorded) = std::fs::read_to_string(dir.join(OWNER_JOB_FILE)) else {
+            return Vec::new();
+        };
+        let base = job_name(dir);
+        let mut names: Vec<String> = recorded
+            .lines()
+            .take(MAX_RECORDED_GROUPS)
+            .map(str::trim)
+            .filter(|line| derived_from(line, &base))
+            .map(str::to_owned)
+            .collect();
+        // A name recorded twice would open twice, and a teardown counting per
+        // job would report the same tree's processes as ended more than once.
+        names.sort();
+        names.dedup();
+        names
+    }
+
+    /// Whether `line` is a name the directory behind `base` computes: `base`
+    /// itself, or `base` followed by the mark and a decimal index.
+    fn derived_from(line: &str, base: &str) -> bool {
+        let Some(rest) = line.strip_prefix(base) else {
+            return false;
+        };
+        rest.is_empty()
+            || rest.strip_prefix(SIBLING_MARK).is_some_and(|index| {
+                !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
+            })
     }
 
     /// Every process id one job holds.
@@ -1438,6 +1595,58 @@ mod platform {
         }
     }
 
+    #[cfg(test)]
+    mod tests {
+        use super::{derived_from, job_name, recorded_names, sibling_name, Group, OWNER_JOB_FILE};
+
+        /// The names a group writes down are the ones the directory it sits in
+        /// derives, so a reader that trusts nothing in the file still opens them.
+        #[test]
+        fn a_group_records_names_its_own_directory_derives() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let group = Group::open(dir.path()).expect("a group");
+            // What `join` appends, without a live child to assign: the point
+            // under test is the rule a reader applies to the record.
+            super::record(
+                &dir.path().join(OWNER_JOB_FILE),
+                &sibling_name(dir.path(), 0),
+            )
+            .expect("a recorded sibling");
+
+            assert_eq!(
+                recorded_names(dir.path()),
+                vec![job_name(dir.path()), sibling_name(dir.path(), 0)],
+                "a group's own record did not read back as its own names"
+            );
+            drop(group);
+        }
+
+        /// A record naming a job this directory does not derive is skipped, not
+        /// opened: the file says *that* a group is here, never *which*.
+        #[test]
+        fn a_name_this_directory_does_not_derive_is_skipped() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let base = job_name(dir.path());
+            std::fs::write(
+                dir.path().join(OWNER_JOB_FILE),
+                format!("Local\\somebody-elses-job\n{base}\n{base}#notanindex\n{base}#1"),
+            )
+            .expect("a record");
+
+            assert_eq!(
+                recorded_names(dir.path()),
+                vec![base.clone(), format!("{base}#1")],
+                "a record chose a name the directory does not compute"
+            );
+            // And the rule itself, on the three ways a line can miss.
+            assert!(derived_from(&base, &base));
+            assert!(derived_from(&format!("{base}#12"), &base));
+            assert!(!derived_from(&format!("{base}#"), &base));
+            assert!(!derived_from(&format!("{base}-1"), &base));
+            assert!(!derived_from("Local\\other", &base));
+        }
+    }
+
     /// One job object handle, closed when it goes out of scope.
     ///
     /// Closing is not bookkeeping here: the job is `KILL_ON_JOB_CLOSE`, so the
@@ -1517,6 +1726,11 @@ mod platform {
 
         /// Nothing to configure: there is no group to put the child in.
         pub fn prepare(&self, _command: &mut std::process::Command) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        /// Nothing to attach either, for the same reason.
+        pub fn attach(&self, _child: &std::process::Child) -> std::io::Result<()> {
             Ok(())
         }
 

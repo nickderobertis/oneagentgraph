@@ -143,12 +143,16 @@ than reaching a consumer.
 
 **Isolation of failure — replaced by the thread seam.** A crashed child could not
 take the graph down; an in-process panic can. `src/judge.rs` already answered this
-and its answer is reused: the engine runs on `std::thread::spawn` and answers over
-an `mpsc::channel`, so a panic drops the sender and `RecvTimeoutError::Disconnected`
+and its answer is reused: the engine runs on a thread and answers over an
+`mpsc::channel`, so a panic drops the sender and `RecvTimeoutError::Disconnected`
 becomes *that member's* `provider-failure` death.
 `harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`
 drives the real supervision loop against a real panicking thread. Nothing here
-builds with `panic = "abort"`.
+builds with `panic = "abort"`. The thread is started through
+`std::thread::Builder`, not `std::thread::spawn`, because the plain spawn answers
+a host that will not give this run one more thread by panicking — which would be
+one member's resource limit taking the graph down. That is the half `src/judge.rs`
+did *not* already have, and it has it now: see the blocker below.
 
 **Test seams — replaced by the same seam.** The suite substitutes a paid harness
 at oneharness's own `ONEHARNESS_BIN_<ID>`, set through the graph's `env:` block —
@@ -196,10 +200,33 @@ two engines.
   `AssignProcessToJobObject` on the `Child`. `spawned` runs while the harness is
   still `CREATE_SUSPENDED` — oneharness resumes it once the hook returns — so the
   assignment cannot miss a descendant. A job assignment **nests**, so the harness
-  sits in oneharness's job *and* this member's, and either side's teardown ends
-  it. `spawning` sets `CREATE_SUSPENDED` too, because on Windows `creation_flags`
-  *replaces* rather than adds and dropping it would reopen the race it exists to
-  close.
+  sits in oneharness's job *and* one of this member's, and either side's teardown
+  ends it. `spawning` sets `CREATE_SUSPENDED` too, because on Windows
+  `creation_flags` *replaces* rather than adds and dropping it would reopen the
+  race it exists to close.
+
+**"One of this member's", not "this member's", and that is the rule the
+conversion had to learn.** Nesting is not free composition: assigning a process
+that is already in a job makes the job it is assigned to a **child** of the one
+it was in, and a job has exactly one parent. oneharness creates a fresh job per
+spawn, so a member's own job can take the first harness — becoming a child of
+that spawn's job — and the *second* assignment asks it for a second parent, which
+the kernel refuses. `scratch::Group::join` therefore mints one job per
+already-contained child, named from the member's scratch and numbered, and
+records each in the same `owner.job` the base name is in; `groups_under` opens
+every name the directory derives. `Group::adopt` is unchanged and still uses the
+member's own job, because the children it takes — `Group::spawn`'s, and the bare
+`oneharness run` onejudge starts for each side — are in no job when this crate
+first sees them, and their harnesses join by parentage rather than by assignment.
+
+This is the regression the conversion introduced and the CI matrix caught: with
+the shared job, a member whose fallback chain reached a second candidate had that
+candidate's grouping refused, which cancels the run — so the candidate came back
+`Status::Cancelled`, which oneharness (rightly) does not step past, and the chain
+stopped one candidate early with only the first published as `fallback-advanced`.
+`selection::a_chain_that_refuses_every_candidate_reports_each_one_and_fails` is
+what fails on that, and it is a two-candidate chain because the whole point of
+A17 is that a chain names every identity that refused.
 
 **The resume is oneharness's, and that is why `Group::adopt` was split.**
 `Group::adopt` assigns *and* resumes, which is right for a caller that spawned
@@ -253,9 +280,9 @@ sunset — and `tests/e2e/dispatch.rs`'s
 `a_single_sided_members_turn_spawns_no_oneharness_process`, which settles a member
 with `ONEAGENTGRAPH_ONEHARNESS_BIN` pointing at a binary that does not exist.
 
-## Blockers
+## The one blocker left
 
-**1. The panic-containment criterion has no real-interface journey, because
+**The panic-containment criterion has no real-interface journey, because
 nothing user-reachable panics.** The bar wants a member turn driven through the
 compiled binary whose library path panics. The `RunRequest` this crate builds is
 a closed template — only the config's content, the directory, the prompt text and
@@ -268,33 +295,18 @@ fault-injection seam in the production path — which is a change to this
 repository's single-fake testing invariant, not a test to write under it. What
 clears this is that invariant's owner widening it, or an upstream hook that makes
 a run panic on demand. Until then the containment is covered at the supervision
-loop by `harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`,
-which drives the real loop against a real panicking thread — a unit test, and not
-the journey the bar asks for.
+loop by `harness::tests::a_panicking_engine_kills_its_own_member_and_not_the_process`
+and its twin in `crate::judge` — each drives its module's real loop against a real
+panicking thread, which is a unit test and not the journey the bar asks for.
 
-**3. `selection::a_chain_that_refuses_every_candidate_reports_each_one_and_fails`
-fails on Windows only, in the dependency's classification.** With every candidate
-refusing on `auth`, the report names two fallen-through candidates on Linux and
-macOS and **one** on Windows, so the second is never published — the chain stops
-at it instead of stepping past. The conversion is what exposes it: this member's
-chain used to be classified by the *installed* `oneharness` CLI (`just`'s
-`oneharness-version`, 0.6.15) and is now classified by the linked
-`oneharness-core` 0.10.1, and the two disagree there.
-
-It is **not** a grouping or teardown fault. In the same Windows run every one of
-those journeys passes, including
-`liveness::a_cancelled_run_reaps_a_single_sided_members_harness` — a job object
-holding, and a `cancel --kill` from another process reaping, a harness this
-process never spawned. That run is 376 of 377 green with this as the only failure.
-
-The lead for whoever has a Windows host: `FAKE_HARNESS_REFUSAL=auth` writes its
-refusal **to stderr alone** (`src/bin/fake_harness.rs`), so `auth` is only
-classified if oneharness captures that child's stderr. A candidate whose stderr
-is missed is a plain non-zero exit, which is not a startup failure and therefore
-stops the chain — exactly the observed shape. That points at pipe capture for the
-*second* spawn of a run rather than at anything this crate decides. Fallback
-classification is upstream's, not this crate's, so the test is left asserting the
-correct behaviour rather than relaxed to match one platform.
+What *is* settled is that both member kinds are contained the same way. Before the
+conversion a harness panic was a dead child process and a onejudge panic was a
+dead member, so only one path needed the seam; now neither kind has a process to
+crash instead. `src/judge.rs` therefore spawns through `std::thread::Builder` as
+`src/harness.rs` does — a host that will not give this run one more thread refuses
+that *member* rather than panicking the graph — and its supervision loop is split
+out of `run` for the same reason `harness::supervise` is: so the containment can
+be driven rather than asserted.
 
 ## Follow-ups this change deliberately did not make
 
