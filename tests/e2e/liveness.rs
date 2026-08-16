@@ -1014,6 +1014,74 @@ fn a_cancelled_run_reaps_a_member_that_published_nothing() {
     );
 }
 
+/// A cancelled run reaps a **single-sided** member's harness, which is a process
+/// this crate never spawned.
+///
+/// The pair with the journey above, and the one the library conversion made
+/// necessary. Every other cancel journey here drives the default two-party
+/// graph, whose harnesses onejudge starts and `judge::MemberSpawn` groups. A
+/// single-sided member's harness is started by `oneharness_core` **inside this
+/// process**, so the only thing that can put it in the member's group is
+/// `harness::HarnessSpawn` — the `ProcessSupervisor` hooks the engine calls
+/// between building the `Command` and having the `Child`.
+///
+/// This is the regression the whole conversion was gated on. Without those
+/// hooks the harness carries no stamp, `scratch::stamped_for` reports an empty
+/// tree, and `cancel --kill` from another process reports a cancelled member
+/// whose paid harness is still running — so the `until` below never settles and
+/// this journey hangs rather than passing quietly.
+#[test]
+fn a_cancelled_run_reaps_a_single_sided_members_harness() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph());
+    let state = workspace.state();
+
+    let mut member = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:hang and publish nothing at all",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    until("the member's harness to be stamped for its group", || {
+        member_scratch(&state).is_some_and(|scratch| {
+            !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+        })
+    });
+    let scratch = member_scratch(&state).expect("a member scratch");
+    // The stamped process is the *harness*, not this crate's child: there is no
+    // `oneharness` process in this member's turn to have carried it.
+    assert!(
+        !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty(),
+        "the harness oneharness spawned in this process carries no group stamp"
+    );
+
+    let run_id = run_id(&state);
+    let cancelled = workspace.run(&["cancel", &run_id, "--kill"]);
+    cancelled.expect_code(0);
+    assert!(
+        cancelled.stdout.contains("signalled") && !cancelled.stdout.contains("0 process(es)"),
+        "a cancel of a single-sided member signalled nothing, so its harness is \
+         still billing: {}",
+        cancelled.stdout
+    );
+
+    until("the stamped harness to be gone", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+
+    let status = member.wait().expect("the run exits");
+    assert!(
+        status.code().is_some(),
+        "the cancelled run never exited: its harness still holds its streams"
+    );
+}
+
 /// A descendant that refuses `SIGTERM` is stopped anyway: the reap asks once,
 /// waits out its grace period, and kills whatever is still there.
 ///
