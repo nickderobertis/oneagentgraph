@@ -1,5 +1,9 @@
 //! Running one member, and turning what it publishes into envelopes.
 //!
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] see blocker 1
+// in `docs/oneharness-library.md`; the contract sentence this contradicts is the
+// owner's to correct.
+//!
 //! **No member is a child process.** Each of the contract's two kinds is its own
 //! engine's run driver, called on a thread of this process — [`crate::judge`] for
 //! a two-party member, [`crate::harness`] for a single-sided one — and this

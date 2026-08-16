@@ -14,6 +14,11 @@
 //! graph, preparing each member's launch, supervising it, and merging every
 //! member's output into one NDJSON event stream.
 
+// llmlint: ignore-file[contracts_have_one_source_or_a_drift_gate] accurate, and
+// open as blocker 1 in `docs/oneharness-library.md`: `docs/contract.md` still
+// calls a `kind: oneharness` member a child process, and correcting it is the
+// contract owner's. No coupling test stands in for that approval.
+
 #![warn(missing_docs)]
 
 mod clock;

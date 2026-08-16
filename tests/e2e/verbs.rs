@@ -1808,11 +1808,12 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
 /// A typo is refused *while the run is in flight*, which is when these verbs are
 /// actually used.
 ///
-/// The run record fills its outcomes in as members settle, so for the whole of a
-/// live run there are none — and a check that read only those accepted any name
-/// at all, answering an operator's typo with exit 0 and a signal file nothing
-/// would ever read. The graph's own member list is written before anything
-/// launches for exactly this.
+/// The run record fills its outcomes in as members settle, so a run whose members
+/// are all still working has none — and a check that read only those accepted any
+/// name at all, answering an operator's typo with exit 0 and a signal file
+/// nothing would ever read. The graph's own member list is written before
+/// anything launches for exactly this, which is why the refusal below holds in a
+/// state the outcomes map cannot answer for.
 #[test]
 fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
     let workspace = Workspace::new();
@@ -1827,16 +1828,28 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
         &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
     let state = workspace.state();
+    // The member is *held* rather than left to race the assertions below. It has
+    // to still be unsettled when the record is read, and "it will not have
+    // finished yet" stopped being true when a member's turn stopped being a
+    // spawned process: in-process it can settle before this thread reads the
+    // file. The barrier makes the state this journey needs deterministic on every
+    // platform instead of a function of how long a launch takes.
+    let release = workspace.at("release");
+    let task = format!(
+        "fake:complete-now: in flight fake:hold={}",
+        release.display()
+    );
     let handle = {
         let dir = workspace.path().to_path_buf();
         let state = state.clone();
+        let task = task.clone();
         std::thread::spawn(move || {
             std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
                 .args([
                     "run",
                     "./graph.yaml",
                     "--task",
-                    "fake:complete-now: in flight",
+                    &task,
                     "--dir",
                     &dir.join("work").display().to_string(),
                 ])
@@ -1889,6 +1902,7 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
         "a refused signal still left its file behind"
     );
 
+    std::fs::write(&release, "go").expect("release the held member");
     workspace.run(&["cancel", &id]).expect_code(0);
     handle.join().expect("the run thread");
 }

@@ -1468,6 +1468,9 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         &mut oneagentgraph::resolve::Resolver::new(),
     )
     .expect("the member builds");
+    // llmlint: ignore[contracts_have_one_source_or_a_drift_gate] see blocker 1 in
+    // `docs/oneharness-library.md`; the contract sentence this contradicts is the
+    // owner's to correct.
     let oneagentgraph::invoke::Launch::Harness(launch) = invocation.launch else {
         panic!("a single-sided member is driven through the oneharness library")
     };

@@ -101,6 +101,10 @@ pub const PROCESS_WIDE_HARNESS_ENV: &str = "ONEHARNESS_HARNESSES";
 
 /// How one member is started.
 ///
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] see blocker 1 in
+// `docs/oneharness-library.md`; the contract sentence this contradicts is the
+// owner's to correct.
+///
 /// The contract's two member kinds are two different things to start, and this is
 /// the one place that difference lives. **Neither is a process any more**: a
 /// `kind: onejudge` member is onejudge's run driver and a `kind: oneharness`
