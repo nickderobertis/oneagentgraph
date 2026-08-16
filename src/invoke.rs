@@ -427,36 +427,59 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
 /// schema are mutually exclusive one layer down, and picking the schema is
 /// picking the setting the operator actually wrote.
 ///
-/// A `stream` this cannot read as a boolean is left to oneharness, which parses
-/// that file for real and refuses it by name; guessing here would be this crate
-/// deciding a question it just handed back.
+/// Both keys are *read* here, so both are checked here: a `stream` that is not a
+/// boolean, or a `schema_file` that is not a string, is refused by name before
+/// anything is launched rather than silently taken for the value it is not.
+/// oneharness would refuse the same file — this only decides where an operator
+/// reads the reason, and one sentence naming the file and the key beats a member
+/// that died on a config error two processes down.
 ///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when the config is not TOML.
+/// [`Error::InvalidConfig`] when the config is not TOML, or when either key
+/// holds a value this cannot read.
 fn streams(config: &str, origin: &str) -> Result<bool, Error> {
     let document: DocumentMut = config
         .parse()
         .map_err(|err| Error::InvalidConfig(format!("{origin} is not valid TOML: {err}")))?;
-    Ok(document
-        .get("stream")
-        .and_then(Item::as_bool)
-        .unwrap_or_else(|| document.get("schema_file").is_none()))
+    let schema = match document.get("schema_file") {
+        None => None,
+        Some(named) if named.is_str() => Some(named),
+        Some(_) => {
+            return Err(Error::InvalidConfig(format!(
+                "{origin}: `schema_file` must be the path of a JSON Schema file"
+            )))
+        }
+    };
+    match document.get("stream") {
+        // The operator's own answer, either way.
+        Some(declared) => declared.as_bool().ok_or_else(|| {
+            Error::InvalidConfig(format!(
+                "{origin}: `stream` must be true or false — it is whether this member's run \
+                 streams its events"
+            ))
+        }),
+        // A config that says nothing streams, as every graph already written
+        // does; one asking for a validated answer cannot, so it does not.
+        None => Ok(schema.is_none()),
+    }
 }
 
 /// The keys of an oneharness config whose value is a **path**, and which
 /// oneharness resolves against the directory the harnesses run in rather than
 /// against the file that named them.
 ///
-/// `docs/contract.md` names this set. It is deliberately not "every string that
+/// `docs/contract.md` names this set, and `tests/contract.rs` checks the two
+/// against each other, so a key added here without the document — or the other
+/// way round — fails rather than drifts. It is deliberately not "every string that
 /// could be a path": `[harness.<id>] bin` is a program looked up on `PATH` and a
 /// `[[hooks]] command` is a command line, so anchoring either would turn a name
 /// that resolves into a path that does not exist.
-const ANCHORED_PATHS: [&str; 2] = ["schema_file", "history_dir"];
+pub const ANCHORED_PATHS: [&str; 2] = ["schema_file", "history_dir"];
 
 /// The same, one level down: `[harness.<id>.variant.<name>] env_file`, the file
 /// an identity's environment is read out of.
-const ANCHORED_VARIANT_PATH: &str = "env_file";
+pub const ANCHORED_VARIANT_PATH: &str = "env_file";
 
 /// Anchor every relative path in one side's config to the directory that config
 /// was written in.
@@ -1519,9 +1542,6 @@ mod tests {
             (format!("{chain}stream = false\n"), false),
             // A schema run cannot stream, so declaring one is declaring that.
             (format!("{chain}schema_file = \"./answer.json\"\n"), false),
-            // A `stream` this cannot read is left to oneharness, which parses
-            // the file for real; the default stands in the meantime.
-            (format!("{chain}stream = \"yes\"\n"), true),
         ] {
             std::fs::write(dir.path().join("oneharness.toml"), &config).expect("chain");
             let args = process_args(&member, &context(dir.path(), &scratch));
@@ -1544,25 +1564,43 @@ mod tests {
         }
     }
 
-    /// A single-sided member whose config is not TOML is refused before anything
-    /// is launched, naming the file — the same refusal the other side's stamp
-    /// makes, now that this side's argv depends on reading the file too.
+    /// A single-sided member whose config this cannot read is refused before
+    /// anything is launched, naming the file and what is wrong with it.
+    ///
+    /// Both keys the argv is built from are checked, because both are read: a
+    /// member that streams or does not is decided here, and deciding it off a
+    /// value that is not the type it claims to be is deciding it off nothing.
     #[test]
-    fn a_single_sided_member_whose_config_is_not_toml_is_refused_by_name() {
+    fn a_single_sided_member_whose_config_cannot_be_read_is_refused_by_name() {
         let dir = workspace();
-        std::fs::write(dir.path().join("oneharness.toml"), "not = toml = here\n").expect("chain");
         let scratch = dir.path().join("scratch");
         let member: Member =
             serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
                 .expect("a member");
-        let err = build(
-            &member,
-            &context(dir.path(), &scratch),
-            &mut Resolver::new(),
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("not valid TOML"), "{err}");
-        assert!(err.to_string().contains("./oneharness.toml"), "{err}");
+        for (config, expected) in [
+            ("not = toml = here\n", "not valid TOML"),
+            (
+                "harnesses = [\"codex\"]\nstream = \"yes\"\n",
+                "`stream` must be true or false",
+            ),
+            (
+                "harnesses = [\"codex\"]\nschema_file = 3\n",
+                "`schema_file` must be the path",
+            ),
+        ] {
+            std::fs::write(dir.path().join("oneharness.toml"), config).expect("chain");
+            let err = build(
+                &member,
+                &context(dir.path(), &scratch),
+                &mut Resolver::new(),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains(expected), "{config:?}: {err}");
+            assert!(
+                err.to_string().contains("./oneharness.toml"),
+                "{config:?}: {err}"
+            );
+        }
     }
 
     /// A scratch path carrying backslashes round-trips through the stamp with

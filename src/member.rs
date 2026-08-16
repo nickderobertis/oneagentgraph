@@ -768,14 +768,33 @@ fn ingest(line: &str, emitter: &Emitter, turn: &mut u64, report: &Arc<Mutex<Opti
         // A member whose own config turned streaming off publishes no envelopes
         // at all: `oneharness run --compact` writes its whole report as one
         // line, and that document is the same one a streamed `result` carries.
-        // Recognized by its own shape — a `results` array is what a report has
-        // and nothing else on this stream does — rather than by position, so a
-        // line arriving before it cannot be mistaken for the report.
-        _ if value.get("results").is_some_and(Value::is_array) => {
+        //
+        // Recognized by the report envelope's own two identifying fields rather
+        // than by position, so a line arriving before it cannot be mistaken for
+        // the report. This is a trust boundary — another process's stdout — and
+        // the same bar the `result` arm above applies: what is accepted must be
+        // the document everything downstream reads as one, not merely something
+        // shaped a bit like it.
+        _ if is_report(&value) => {
             *held(report) = Some(value.clone());
         }
         _ => {}
     }
+}
+
+/// Whether one line of a member's stdout is oneharness's own run report.
+///
+/// The two fields every report carries and nothing else this crate reads does:
+/// the `schema_version` that says which report contract it is written to, and
+/// the `results` array everything downstream — the settle, the fallback chain,
+/// the structured answer — is read out of. Checked by name rather than by
+/// deserializing into `oneharness_core`'s `Report`, because a member runs
+/// whichever `oneharness` an operator installed: a report from a build whose
+/// schema this one cannot parse is still that member's report, and refusing it
+/// would report a member that answered as one that died.
+fn is_report(value: &Value) -> bool {
+    value.get("schema_version").is_some_and(Value::is_string)
+        && value.get("results").is_some_and(Value::is_array)
 }
 
 /// What a member's shared state holds, whether or not a reader thread died

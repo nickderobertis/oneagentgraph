@@ -346,8 +346,19 @@ fn main() -> std::process::ExitCode {
         None => {}
     }
 
+    // Read once, before either kind of turn: the format oneharness selected is
+    // what it will parse this process's stdout under, so a value this double
+    // cannot answer in is refused here rather than answered in the wrong shape.
+    let Some(shape) = Shape::asked_for(&argv) else {
+        eprintln!(
+            "fake-harness: --output-format must be json or stream-json, got {:?}",
+            flag(&argv, "--output-format").unwrap_or_default()
+        );
+        return exit(2);
+    };
+
     if controlled(&argv) {
-        return control_stream(&system, &argv);
+        return control_stream(&system, &argv, shape);
     }
 
     if steers(&prompt, "hang") {
@@ -364,7 +375,9 @@ fn main() -> std::process::ExitCode {
             return exit(1);
         }
     }
-    turn(&prompt, None, Shape::asked_for(&argv));
+    if turn(&prompt, None, shape) == Answered::No {
+        return exit(2);
+    }
     exit(0)
 }
 
@@ -410,7 +423,7 @@ fn controlled(argv: &[String]) -> bool {
 /// operator's redirection as the *next* user frame the moment it sees this turn's
 /// terminal `result`. Nothing here is a shortcut around that: the turn really
 /// stops where it was, and the replacement really is a second turn.
-fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
+fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::ExitCode {
     let interrupted = Arc::new(AtomicBool::new(false));
     let mut running: Option<std::thread::JoinHandle<()>> = None;
     let argv = Arc::new(argv.to_vec());
@@ -441,7 +454,9 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
                 running = std::thread::Builder::new()
                     .spawn(move || {
                         recordings(&prompt, &argv);
-                        turn(&prompt, Some(&flag), Shape::asked_for(&argv));
+                        // The exit is the loop's below: this turn runs on a
+                        // thread, and stderr already carries the reason.
+                        let _ = turn(&prompt, Some(&flag), shape);
                     })
                     .ok();
             }
@@ -474,12 +489,6 @@ fn control_stream(system: &str, argv: &[String]) -> std::process::ExitCode {
     exit(0)
 }
 
-/// One turn: hold if the prompt asked it to, then answer.
-///
-/// `interrupted` is the control channel's flag, and it is what makes a held turn
-/// *stoppable*: the hold ends the moment it is set, the turn reports a terminal
-/// result having done none of its work, and the flag is cleared so the redirected
-/// turn that follows is not aborted by the same request.
 /// The output shape oneharness asked this turn for, on its own `--output-format`.
 ///
 /// Not a detail a journey may ignore: oneharness selects the format per run and
@@ -499,17 +508,34 @@ enum Shape {
 }
 
 impl Shape {
-    /// The shape this launch was asked for, defaulting to the streamed one every
-    /// journey but a structured-output run gets.
-    fn asked_for(argv: &[String]) -> Self {
+    /// The shape this launch was asked for, or `None` for a format this double
+    /// cannot answer in.
+    ///
+    /// A closed set, read the way [`Refusal`] is read: a format this process
+    /// answered *anyway* would be stdout oneharness parses under a different one,
+    /// which is a journey failing somewhere far from the flag that caused it.
+    /// `text` is in that set deliberately — nothing here asks for it, and the day
+    /// something does, this says so instead of quietly streaming JSON at it.
+    ///
+    /// A launch with no `--output-format` at all keeps the streamed shape this
+    /// double has always answered with: that is a harness whose default format
+    /// oneharness accepted, not a value it could not read.
+    fn asked_for(argv: &[String]) -> Option<Self> {
         match flag(argv, "--output-format").as_deref() {
-            Some("json") => Shape::Single,
-            _ => Shape::Stream,
+            None | Some("stream-json") => Some(Shape::Stream),
+            Some("json") => Some(Shape::Single),
+            _ => None,
         }
     }
 }
 
-fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) {
+/// One turn: hold if the prompt asked it to, then answer.
+///
+/// `interrupted` is the control channel's flag, and it is what makes a held turn
+/// *stoppable*: the hold ends the moment it is set, the turn reports a terminal
+/// result having done none of its work, and the flag is cleared so the redirected
+/// turn that follows is not aborted by the same request.
+fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answered {
     let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
     // Written before any wait, so a journey can wait for a turn that is really
     // in flight rather than for a process that has merely started.
@@ -552,7 +578,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) {
             "num_turns": 1, "result": "", "session_id": session,
             "usage": {"input_tokens": 1, "output_tokens": 0}, "total_cost_usd": 0.0,
         }));
-        return;
+        return Answered::Yes;
     }
     // Past the wait and past the abort, so this line is the proof that *this*
     // turn did its work — a turn an interrupt stopped never reaches it.
@@ -569,13 +595,38 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) {
                 {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
         }));
     }
+    // Decided before anything is emitted: a turn this process cannot answer must
+    // not first publish half of one.
+    let answer = match answer(prompt) {
+        Ok(answer) => answer,
+        Err(reason) => {
+            eprintln!("fake-harness: {reason}");
+            return Answered::No;
+        }
+    };
     emit(&json!({
         "type": "result", "subtype": "success", "is_error": false, "duration_ms": 5,
-        "num_turns": 1, "result": answer(prompt), "session_id": session,
+        "num_turns": 1, "result": answer, "session_id": session,
         "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 4,
                   "cache_creation_input_tokens": 1},
         "total_cost_usd": 0.002,
     }));
+    Answered::Yes
+}
+
+/// Whether a turn was one this double could take.
+///
+/// [`Answered::No`] is a journey's own mistake — an answer file that is not
+/// there — and it reaches the caller so the process exits on it. A double that
+/// exited 0 having published nothing would be classified by oneharness as a
+/// harness that ran and said nothing, which is a journey failing several layers
+/// away from the sentinel that caused it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answered {
+    /// The turn published its terminal result.
+    Yes,
+    /// It could not, and stderr says why.
+    No,
 }
 
 /// How often a hanging turn proves it is still alive.
@@ -708,35 +759,41 @@ fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
 ///
 /// onejudge renders a distinct framing per operation, so the prompt itself says
 /// which side this invocation is — there is no flag that does.
-fn answer(prompt: &str) -> String {
+///
+/// `Err` is a turn this process cannot take: a journey named an answer file and
+/// this cannot read it, which is a journey asserting against a turn it never
+/// configured. The caller refuses loudly rather than answering something else.
+fn answer(prompt: &str) -> Result<String, String> {
     if prompt.contains("completion supervisor") {
         // The two shapes are not symmetrical, and onejudge enforces that: a
         // completed response carries a `reason` and *no* `message`, because
         // there is no next turn for a message to be. A continuing one carries
         // both.
         if steers(prompt, "should-fail") {
-            return json!({
+            return Ok(json!({
                 "completion": false,
                 "message": "verify it before you call it done",
                 "reason": "fake supervisor requires another turn",
             })
-            .to_string();
+            .to_string());
         }
-        return json!({"completion": true, "reason": "fake supervisor verified completion"})
-            .to_string();
+        return Ok(
+            json!({"completion": true, "reason": "fake supervisor verified completion"})
+                .to_string(),
+        );
     }
     if prompt.contains("role-playing the USER") {
-        return "verify it before you call it done".into();
+        return Ok("verify it before you call it done".into());
     }
     if prompt.contains("Criterion:") {
-        return json!({
+        return Ok(json!({
             "value": !steers(prompt, "should-fail"),
             "reason": "fake judge verdict",
         })
-        .to_string();
+        .to_string());
     }
     if prompt.contains("Assessment request:") {
-        return "None".into();
+        return Ok("None".into());
     }
     // Beside `complete-now` rather than above the judge-shaped branches, and for
     // the same reason they are ordered that way: a judge side's prompt embeds the
@@ -745,23 +802,17 @@ fn answer(prompt: &str) -> String {
     // document in the agent's shape.
     if let Some(path) = sentinel_path(prompt, "answer-file") {
         return match std::fs::read_to_string(&path) {
-            Ok(document) => document.trim().to_string(),
-            Err(err) => {
-                // Not a panic and not an invented answer: this reaches oneharness
-                // as a turn that answered nothing, which is what a journey
-                // asserting on a validated answer must see fail.
-                eprintln!(
-                    "fake-harness: cannot read the answer file {}: {err}",
-                    path.display()
-                );
-                String::new()
-            }
+            Ok(document) => Ok(document.trim().to_string()),
+            Err(err) => Err(format!(
+                "cannot read the answer file {}: {err}",
+                path.display()
+            )),
         };
     }
     if steers(prompt, "complete-now") {
-        "done".into()
+        Ok("done".into())
     } else {
-        "working on it".into()
+        Ok("working on it".into())
     }
 }
 
