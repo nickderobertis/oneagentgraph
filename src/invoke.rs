@@ -49,11 +49,12 @@
 //! here, while the directory it was written in is still known.
 
 use std::collections::BTreeSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 
+use crate::anchor::{anchored, anchored_path};
 use crate::config::{AgentSide, ConfigRef, JudgeSide, Member, OnejudgeMember, TaskText};
 use crate::error::Error;
 use crate::persona::{self, Persona};
@@ -392,81 +393,6 @@ fn anchor_skill(config: &mut serde_json::Map<String, Value>, base_dir: Option<&P
         return;
     };
     config.insert("skill".into(), Value::String(anchored));
-}
-
-/// One relative path, anchored to the directory the config naming it was written
-/// in — the same string on every platform.
-///
-/// `None` when there is nothing to anchor: an empty value, or a path that names
-/// its own root and so already says where it starts from.
-///
-/// The splice is textual because `Path::join` and [`std::path::absolute`] answer
-/// for the host: on Windows they spell the separator differently and re-root a
-/// path that carries no drive — `Path::is_relative` calls `/graphs/api`
-/// *relative* there — under this process's own drive, naming a file its author
-/// never wrote. Only a base with no root of its own is made absolute, against
-/// the directory this process runs in, because that is the one it was written
-/// against.
-///
-/// Purely lexical, as both callers' documentation promises: nothing is read.
-fn anchored(base_dir: &Path, written: &str) -> Option<String> {
-    let path = Path::new(written);
-    if written.is_empty() || names_its_own_root(path) {
-        return None;
-    }
-    let base = if names_its_own_root(base_dir) {
-        base_dir.to_path_buf()
-    } else {
-        // An empty base is a config named by a bare filename — `Path::parent`
-        // answers `""` for one — so the directory it was written in is the
-        // directory this process runs in. Named as `.` because that is the same
-        // directory and [`std::path::absolute`] refuses an empty path.
-        let base = if base_dir.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            base_dir
-        };
-        std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf())
-    };
-    let base = base.display().to_string();
-    let separator = separator_of(&base).to_string();
-    // A `.` says "the directory this config is in", which is what the base
-    // already names; every other component is carried exactly as written.
-    let relative: Vec<String> = path
-        .components()
-        .filter(|component| !matches!(component, Component::CurDir))
-        .map(|component| component.as_os_str().to_string_lossy().into_owned())
-        .collect();
-    let relative = relative.join(&separator);
-    Some(if base.ends_with(['/', '\\']) {
-        format!("{base}{relative}")
-    } else {
-        format!("{base}{separator}{relative}")
-    })
-}
-
-/// Whether a path carries a root of its own, and so says where it starts from
-/// rather than leaving that to whatever directory it is read in.
-///
-/// Asked this way rather than through `Path::is_absolute`, which is the question
-/// *Windows* asks: a rooted path with no drive on it is not absolute there, and
-/// re-rooting one under this process's drive is exactly the bug above. Every
-/// Windows form an operator writes carries a root — `C:\…`, `\\server\share\…`,
-/// a verbatim `\\?\…` — so nothing else needs asking.
-fn names_its_own_root(path: &Path) -> bool {
-    path.has_root()
-}
-
-/// The separator to splice with: the one the base directory is already spelled
-/// with, so an anchored path reads as a path of the platform it was written on.
-///
-/// Windows resolves `/` and `\` alike, so this decides what an operator — and a
-/// refusal naming the path back to them — reads, never whether the file opens.
-fn separator_of(base: &str) -> char {
-    base.chars()
-        .rev()
-        .find(|character| matches!(character, '/' | '\\'))
-        .unwrap_or('/')
 }
 
 /// How a single-sided member's turn reports what it did.
@@ -954,10 +880,7 @@ fn catalog_root(context: &Context<'_>) -> Result<Option<PathBuf>, Error> {
     let Some(root) = context.personas else {
         return Ok(None);
     };
-    let root = match context.graph_dir {
-        Some(graph_dir) if root.is_relative() => graph_dir.join(root),
-        _ => root.to_path_buf(),
-    };
+    let root = anchored_path(context.graph_dir, root);
     if let Err(err) = std::fs::read_dir(&root) {
         return Err(Error::InvalidConfig(format!(
             "this graph's persona catalog ({}) is not a directory this run can read ({err}), so \
@@ -1514,6 +1437,36 @@ mod tests {
             .persona
             .as_deref(),
             Some("reviewer")
+        );
+    }
+
+    /// A catalog an operator wrote relative to their graph is resolved against
+    /// that graph's directory, and one that names its own root is searched where
+    /// they wrote it.
+    ///
+    /// The graph directory is a real temporary one because only a base carrying a
+    /// drive prefix is one a `join` could re-root `/graphs/api` under. The refusal
+    /// is what names the resolved path back, since a catalog at the filesystem
+    /// root is one no run can read.
+    #[test]
+    fn a_catalog_that_names_its_own_root_is_not_re_rooted_under_this_run() {
+        let dir = workspace();
+        std::fs::create_dir_all(dir.path().join("personas")).expect("catalog");
+        let scratch = dir.path().join("scratch");
+
+        let mut relative = context(dir.path(), &scratch);
+        relative.personas = Some(Path::new("personas"));
+        assert_eq!(
+            catalog_root(&relative).expect("a readable catalog"),
+            Some(dir.path().join("personas"))
+        );
+
+        let mut rooted = context(dir.path(), &scratch);
+        rooted.personas = Some(Path::new("/graphs/api"));
+        let err = catalog_root(&rooted).unwrap_err();
+        assert!(
+            err.to_string().contains("catalog (/graphs/api) is not"),
+            "{err}"
         );
     }
 
