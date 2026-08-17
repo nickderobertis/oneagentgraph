@@ -151,14 +151,14 @@ fn read(reference: &ConfigRef, base_dir: Option<&Path>) -> Result<Resolved, Erro
     })
 }
 
-/// Where a path-shaped ref points, once a relative one is joined to its base.
+/// Where a path-shaped ref points, once a relative one is anchored to its base.
+///
+/// Anchored through this crate's own `anchor` module rather than by a `join`,
+/// which the module explains gets a rooted-but-driveless ref wrong. This is the
+/// widest of its callers: every path-shaped ref in a graph resolves here.
 #[must_use]
 pub fn local_path(reference: &ConfigRef, base_dir: Option<&Path>) -> PathBuf {
-    let named = PathBuf::from(&reference.0);
-    match base_dir {
-        Some(base) if named.is_relative() => base.join(named),
-        _ => named,
-    }
+    crate::anchor::anchored_path(base_dir, Path::new(&reference.0))
 }
 
 /// The HTTP client every remote ref is fetched through.
@@ -394,6 +394,29 @@ mod tests {
             Some(Path::new("/graphs/a")),
         );
         assert_eq!(absolute, PathBuf::from("/etc/x.toml"));
+    }
+
+    /// A ref that names its own root is read from where its author wrote it,
+    /// whatever base it was named under — and a relative one beside it still
+    /// anchors to that base.
+    ///
+    /// The base is a real temporary directory rather than a typed-out `/graphs/a`,
+    /// because only a base carrying a drive prefix is one a `join` could re-root
+    /// `/graphs/api/oneharness.toml` under, and Windows is where bases have those.
+    #[test]
+    fn a_ref_that_names_its_own_root_is_not_re_rooted_under_its_base() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert_eq!(
+            local_path(
+                &ConfigRef("/graphs/api/oneharness.toml".into()),
+                Some(dir.path())
+            ),
+            PathBuf::from("/graphs/api/oneharness.toml")
+        );
+        assert_eq!(
+            local_path(&ConfigRef("./oneharness.toml".into()), Some(dir.path())),
+            dir.path().join("oneharness.toml")
+        );
     }
 
     /// `http` is refused before a byte is read.

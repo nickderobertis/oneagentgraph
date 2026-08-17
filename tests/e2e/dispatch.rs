@@ -1907,6 +1907,59 @@ fn a_catalog_is_resolved_against_the_graph_document_and_an_absolute_one_as_writt
     }
 }
 
+/// A path that names its own root but carries **no drive** — `/graphs/api` — is
+/// read from where its author wrote it, at each of the three surfaces a graph
+/// names one on: a path-shaped config ref, a persona catalog, and a base config's
+/// `skill:`.
+///
+/// The refusal is the whole observation: a directory at the filesystem root is not
+/// one a journey can create, and a path re-rooted the way `Path::join` re-roots
+/// this one on Windows arrives back with a drive on the front.
+#[test]
+fn a_path_that_names_its_own_root_is_read_from_there_and_not_from_under_this_run() {
+    let workspace = Workspace::new();
+
+    // Every path-shaped ref in a graph resolves through one function, so a ref is
+    // the widest of the three.
+    workspace.graph(
+        &two_party_graph(&fake_harness(), NO_ENV).replace("./base.yaml", "/graphs/api/base.yaml"),
+    );
+    let refused = workspace.run_task("fake:complete-now: never gets a base config");
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("cannot read /graphs/api/base.yaml"),
+        "{}",
+        refused.stderr
+    );
+
+    // A persona catalog, which is a directory rather than a file and so is
+    // refused by being unreadable rather than unfound.
+    workspace.graph(&catalogued_graph("/graphs/api", "lead"));
+    let refused = workspace.run_task("fake:complete-now: never finds a catalog");
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("catalog (/graphs/api)"),
+        "{}",
+        refused.stderr
+    );
+
+    // A base config's own `skill:`, which is anchored twice — once into the
+    // effective config this crate writes, and again when onejudge's plan is
+    // resolved out of that copy. The refusal is onejudge's, on the stream, so
+    // this is the member dying rather than the graph refusing to start.
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV));
+    workspace.write("base.yaml", &format!("{BASE}skill: /graphs/api\n"));
+    let died = workspace.run_task("fake:complete-now: never loads a skill");
+    died.expect_code(1);
+    let events = died.of_kind("member-died");
+    assert_eq!(events.len(), 1, "{events:?}");
+    let detail = events[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(detail.contains("skill `/graphs/api`"), "{detail}");
+}
+
 /// A local persona and a shipped one of the same name is refused before the
 /// graph starts, rather than resolved to the shipped one behind the operator's
 /// back — and naming the file by path is the way to say which was meant.

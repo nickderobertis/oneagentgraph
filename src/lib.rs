@@ -16,6 +16,7 @@
 
 #![warn(missing_docs)]
 
+mod anchor;
 mod clock;
 
 pub mod cli;

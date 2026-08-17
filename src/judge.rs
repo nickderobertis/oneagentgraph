@@ -309,12 +309,13 @@ impl onejudge::SpawnHook for MemberSpawn {
 ///
 /// Every step here is the one `onejudge run` itself takes, in the same order:
 /// the file is parsed, a config-file `skill:` is rebased against the config's own
-/// directory, the `ONEJUDGE_*` environment is applied, and the run's task beats
-/// it. What this adds is the last line, and it is what replaces changing
-/// directory: a conversation with no skill directory of its own is anchored to
-/// this member's worktree by *name*, and onejudge puts that name on the agent
-/// side's `oneharness run --cwd` — so the member works in the directory the graph
-/// was given without any member touching the process's own working directory.
+/// directory — through [`crate::anchor`] — the `ONEJUDGE_*` environment is
+/// applied, and the run's task beats it. What this adds is the last line, and it
+/// is what replaces changing directory: a conversation with no skill directory of
+/// its own is anchored to this member's worktree by *name*, and onejudge puts that
+/// name on the agent side's `oneharness run --cwd` — so the member works in the
+/// directory the graph was given without any member touching the process's own
+/// working directory.
 ///
 /// What it no longer has to carry is the agent side's config: that rides
 /// [`MemberSpawn`] to the same side's `--config`, which is what let this become
@@ -323,18 +324,8 @@ fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
     let text = std::fs::read_to_string(&launch.config)
         .map_err(|err| format!("cannot read {}: {err}", launch.config.display()))?;
     let mut config = Config::from_yaml(&text).map_err(|err| err.to_string())?;
-    if let Some(base) = launch
-        .config
-        .parent()
-        .filter(|base| !base.as_os_str().is_empty())
-    {
-        if let Some(named) = config.skill.take() {
-            config.skill = Some(if named.is_relative() {
-                base.join(named)
-            } else {
-                named
-            });
-        }
+    if let Some(named) = config.skill.take() {
+        config.skill = Some(crate::anchor::anchored_path(launch.config.parent(), &named));
     }
     config
         .apply(Overrides::from_env(|key| std::env::var(key).ok()).map_err(|err| err.to_string())?);
@@ -696,14 +687,9 @@ mod tests {
         launch.worktree = dir.path().to_path_buf();
 
         let plan = plan(&launch).expect("a plan");
-        // Compared as a *path*, not as a string. A config names its skill the way
-        // its author writes one — `skills/greeter` — and rebasing that is a join,
-        // so on Windows the result carries both separators
-        // (`C:\…\skills/greeter`). That is a real directory there and onejudge
-        // opens it without complaint; only the spelling differs from a
-        // `join("skills").join("greeter")`. Canonicalizing both is what asserts
-        // the thing that matters — the plan names *this* directory — and it
-        // fails if the plan names one that does not exist at all.
+        // Compared as a *path*, not as a string: the claim is that the plan names
+        // *this* directory, and canonicalizing both says so while still failing
+        // if the plan names one that does not exist at all.
         assert_eq!(
             std::fs::canonicalize(&plan.conversation.skill.dir)
                 .expect("the plan named a directory that is not there"),
@@ -715,6 +701,21 @@ mod tests {
             plan.conversation.skill.instructions,
             "preamble\n\nGreet warmly."
         );
+    }
+
+    /// A `skill:` that names its own root is loaded from there, whatever directory
+    /// the effective config naming it sits in.
+    ///
+    /// That directory is a real temporary one because only a base carrying a drive
+    /// prefix is one a `join` could re-root `/graphs/api` under. onejudge's refusal
+    /// is what names the path back, since a skill directory at the filesystem root
+    /// is one no run can read; the relative half of the rule is
+    /// [`a_config_that_names_a_skill_directory_keeps_it`].
+    #[test]
+    fn a_skill_that_names_its_own_root_is_not_re_rooted_under_the_config() {
+        let (_dir, launch) = workspace(&format!("{EFFECTIVE}skill: /graphs/api\n"));
+        let err = plan(&launch).unwrap_err();
+        assert!(err.contains("skill `/graphs/api`"), "{err}");
     }
 
     /// A config this build cannot resolve is a member that never started, named
