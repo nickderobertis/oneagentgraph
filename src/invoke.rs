@@ -429,30 +429,15 @@ impl Reporting {
 /// config's** decision rather than this crate's.
 ///
 /// A flag beats config in oneharness, so the `--stream` this argv used to carry
-/// unconditionally was not a default — it was an override, and one an operator
-/// had no way to win against. Two settings oneharness has shipped for releases
-/// were unreachable behind it: `stream = false`, which asks for the buffered
-/// report; and `schema_file`, which asks for a validated JSON answer and which
-/// oneharness refuses to *stream*, so declaring it turned the member into a
-/// usage error rather than a structured-output run.
+/// unconditionally was an override an operator had no way to win against: it put
+/// `stream = false` and `schema_file` — a validated answer, which oneharness
+/// refuses to *stream* — out of reach. A config declaring neither streams, as
+/// every graph already written does.
 ///
-/// So the config answers, and the default is what every graph already written
-/// does: a config that declares neither streams, exactly as before. A config
-/// declaring a schema does not, because there is no such run — the flag and the
-/// schema are mutually exclusive one layer down, and picking the schema is
-/// picking the setting the operator actually wrote.
-///
-/// Both keys are *read* here, so both are checked here: a `stream` that is not a
-/// boolean, or a `schema_file` that is not a string, is refused by name before
-/// anything is launched rather than silently taken for the value it is not.
-/// oneharness would refuse the same file — this only decides where an operator
-/// reads the reason, and one sentence naming the file and the key beats a member
-/// that died on a config error two processes down.
-///
-/// A config asking for **both** — `stream = true` beside a `schema_file` — is
-/// refused here rather than assembled into an argv oneharness would reject: the
-/// two are mutually exclusive there, so honouring one of them would be this
-/// crate picking which of the operator's settings to drop.
+/// Both keys are *read* here, so both are checked here, the pairing that
+/// contradicts itself included: a member that died on a config error two
+/// processes down is a worse answer than one sentence naming the file and the
+/// key.
 ///
 /// # Errors
 ///
@@ -481,8 +466,6 @@ fn reporting(config: &str, origin: &str) -> Result<Reporting, Error> {
         }
     };
     match document.get("stream") {
-        // The operator's own answer — except for the one pairing that is not an
-        // answer at all, which is refused by naming both keys.
         Some(declared) => match declared.as_bool() {
             Some(true) if schema => Err(Error::InvalidConfig(format!(
                 "{origin}: `stream = true` and `schema_file` cannot both hold — oneharness \
@@ -496,8 +479,6 @@ fn reporting(config: &str, origin: &str) -> Result<Reporting, Error> {
                  streams its events"
             ))),
         },
-        // A config that says nothing streams, as every graph already written
-        // does; one asking for a validated answer cannot, so it does not.
         None if schema => Ok(Reporting::Buffered),
         None => Ok(Reporting::Streamed),
     }
@@ -522,27 +503,17 @@ pub const ANCHORED_VARIANT_PATH: &str = "env_file";
 /// Anchor every relative path in one side's config to the directory that config
 /// was written in.
 ///
-/// The same rule [`anchor_skill`] applies to a onejudge base, and for the same
-/// reason: the file oneharness reads is the stamped copy in the member's
-/// scratch, not the operator's own file. oneharness resolves a config-declared
-/// path against the directory the harnesses run in — `oneharness run --cwd`,
-/// which for a member is the directory that member works in — so a relative path
-/// written beside the config points at neither the file's own directory nor
-/// anywhere the operator can predict. Anchored here, it keeps meaning what it
-/// meant where it was written, which is the rule every other ref in a graph
-/// already follows.
-///
-/// A config fetched over https has no directory for a relative path to mean
-/// anything against, so its paths are left exactly as written and oneharness
-/// answers for them by name. Purely lexical, like [`anchor_skill`]: nothing is
-/// read, so a file that is not there is still oneharness's refusal to make.
+/// The traversal; [`anchored`] does the splicing, for the reason it gives. The
+/// file oneharness actually reads is the stamped copy in the member's scratch,
+/// and it resolves a config-declared path against `oneharness run --cwd` — for a
+/// member, the directory that member works in — so a path left as written points
+/// at neither.
 ///
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when one of those keys holds something that is not a
-/// path at all. Every key this reads is checked where it is read: a value that
-/// cannot be anchored would otherwise be carried into the member's scratch
-/// unexamined and die two processes down.
+/// path at all: a value carried into the scratch unexamined dies two processes
+/// down instead.
 fn anchor_paths(document: &mut DocumentMut, base_dir: &Path, origin: &str) -> Result<(), Error> {
     for key in ANCHORED_PATHS {
         anchor(document.as_table_mut(), key, base_dir, origin, key)?;
