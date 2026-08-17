@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.19](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.18...v0.2.19) - 2026-08-17
+
+### Fixed
+
+- anchor every written path through one helper, not three joins ([#52](https://github.com/nickderobertis/oneagentgraph/pull/52))
+
 ## [0.2.18](https://github.com/nickderobertis/oneagentgraph/compare/v0.2.17...v0.2.18) - 2026-08-16
 
 ### Added
