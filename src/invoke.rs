@@ -240,9 +240,9 @@ pub struct Context<'a> {
 ///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when a ref cannot be read, a persona is invalid, the
-/// merged config is incomplete, the model pairing rule is broken, or a generated
-/// file cannot be written.
+/// [`Error::InvalidConfig`] when a ref cannot be read, a persona is invalid, a
+/// base cannot be merged with one, the model pairing rule is broken, or a
+/// generated file cannot be written.
 pub fn build(
     member: &Member,
     context: &Context<'_>,
@@ -294,15 +294,11 @@ fn onejudge(
         .resolve(&member.base_config, context.graph_dir)?
         .clone();
     let (persona, label) = load_persona(member.persona.as_ref(), context, resolver)?;
+    // What the merged config must hold is onejudge's to say, and it is said one
+    // layer down: `judge::run` builds onejudge's own plan from this document, so
+    // a field onejudge needs and nobody supplied is refused there, by the crate
+    // that knows. Nothing is checked for a second time here.
     let mut effective = persona::merge(&base.content, &member.base_config.0, &persona)?;
-    let missing = persona::missing_from_merged(&effective);
-    if !missing.is_empty() {
-        return Err(Error::InvalidConfig(format!(
-            "the config {} merges to is incomplete: missing {}",
-            member.base_config.0,
-            missing.join(", ")
-        )));
-    }
 
     let side = Side {
         model: member.agent.model.as_deref(),
@@ -861,13 +857,6 @@ fn load_persona(
     };
     let (document, origin) = persona_document(reference, context, resolver)?;
     let persona = Persona::parse(&document, &origin)?;
-    let errors = persona.validate();
-    if !errors.is_empty() {
-        return Err(Error::InvalidConfig(format!(
-            "{origin}: {}",
-            errors.join("; ")
-        )));
-    }
     let label = persona.label().map(str::to_string).or_else(|| {
         Path::new(&reference.0)
             .file_stem()
@@ -1284,7 +1273,7 @@ mod tests {
             dir.path().join("base.yaml"),
             concat!(
                 "provider:\n  kind: oneharness\n",
-                "agent:\n  instructions: preamble\n",
+                "system_prompt: preamble\n",
                 "user:\n  persona: lead\n  done_when: done\n  max_turns: 4\n",
             ),
         )
@@ -1389,7 +1378,7 @@ mod tests {
         let dir = workspace();
         std::fs::write(
             dir.path().join("lead.yaml"),
-            "agent:\n  instructions: role\nuser:\n  persona: supervisor\n",
+            "system_prompt: role\nuser:\n  persona: supervisor\n",
         )
         .expect("persona");
         let scratch = dir.path().join("scratch");
@@ -1446,7 +1435,7 @@ mod tests {
         std::fs::create_dir_all(catalog.join("crozier")).expect("catalog");
         std::fs::write(
             catalog.join("crozier/crozier-corpus.yaml"),
-            "agent:\n  instructions: corpus role\nuser:\n  persona: corpus supervisor\n",
+            "system_prompt: corpus role\nuser:\n  persona: corpus supervisor\n",
         )
         .expect("a catalog persona");
         let scratch = dir.path().join("scratch");
@@ -1489,7 +1478,7 @@ mod tests {
         // Until the catalog holds one too, and then neither wins silently.
         std::fs::write(
             catalog.join("reviewer.yaml"),
-            "agent:\n  instructions: our reviewer\nuser:\n  persona: ours\n",
+            "system_prompt: our reviewer\nuser:\n  persona: ours\n",
         )
         .expect("a colliding persona");
         let err = build(&member("reviewer"), &catalogued, &mut Resolver::new()).unwrap_err();
@@ -1525,7 +1514,7 @@ mod tests {
         std::fs::create_dir_all(dir.path().join("personas")).expect("catalog");
         std::fs::write(
             dir.path().join("personas/reviewer.yaml"),
-            "agent:\n  instructions: our reviewer\nuser:\n  persona: ours\n",
+            "system_prompt: our reviewer\nuser:\n  persona: ours\n",
         )
         .expect("a persona no graph named");
         let scratch = dir.path().join("scratch");

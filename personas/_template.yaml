@@ -1,29 +1,36 @@
 # Persona template. `oneagentgraph persona new <name>` copies this to <name>.yaml.
 #
-# A persona is a DELTA over the onejudge base config a member names as its
-# `base_config` — put only what makes this role different here. Everything else
-# (provider wiring, session, the shared agent preamble, the default turn cap) is
+# A persona is a **onejudge config fragment**, written in onejudge's own field
+# names and layered over the onejudge base config a member names as its
+# `base_config`. Put only what makes this role different here; everything else
+# (provider wiring, session, the shared preamble, the default turn cap) is
 # inherited from that base when the member launches.
 #
-# Contract (enforced by `oneagentgraph persona validate`):
-#   REQUIRED  agent.instructions   the role, appended after the base preamble
-#   REQUIRED  user.persona         how the supervisor reviews this kind of work
-#   optional  agent.name           the role label stamped on this member's events
-#   optional  user.done_when       a second completion bar, enforced ALONGSIDE the
-#                                  base's rather than instead of it
-#   optional  user.done_when_replaces_base
-#                                  true when this role's bar must stand in for the
-#                                  base's; needs a user.done_when to stand in with
-#   optional  user.max_turns       role-specific turn cap (else base default)
-#   optional  evals                extra transcript checks for this role
-# No other top-level keys — the task comes from `--task`, shared settings from
-# the base.
+# onejudge decides what a config may say and what it must say — which is
+# nothing: a persona carrying only a `system_prompt` is complete. `docs/persona-format.md`
+# documents the whole format, including the two keys below that are
+# oneagentgraph's own and never reach onejudge.
+#
+#   onejudge  system_prompt   the role, appended after the base's preamble
+#   onejudge  user.persona    how the supervisor reviews this kind of work
+#   onejudge  user.done_when  a second completion bar, enforced ALONGSIDE the base's
+#   onejudge  user.max_turns  role-specific turn cap (else the base's)
+#   onejudge  evals           extra transcript checks for this role
+#   onejudge  assessment      a free-text judgement of the finished transcript
+#   ours      name            the role label stamped on this member's events
+#   ours      user.done_when_replaces_base
+#                             true when this role's bar must stand in for the
+#                             base's; needs a user.done_when to stand in with
+#
+# The member owns `provider`, `session`, `task`, and `skill`, so a persona naming
+# one is refused rather than overwritten. The `agent:` block oneagentgraph used to
+# define is refused too, with no compatibility path — write `agent.instructions`
+# as `system_prompt` and `agent.name` as `name`.
 
-agent:
-  name: role-name
-  instructions: |
-    What this worker specializes in and how it should approach its task. Be
-    specific about the role; the shared quality bar belongs in the base config.
+name: role-name
+system_prompt: |
+  What this worker specializes in and how it should approach its task. Be
+  specific about the role; the shared quality bar belongs in the base config.
 
 user:
   persona: |

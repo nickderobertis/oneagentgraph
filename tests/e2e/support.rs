@@ -314,7 +314,7 @@ pub const MIXED_CHAIN: &str =
 /// The onejudge base every member merges its persona onto.
 pub const BASE: &str = concat!(
     "provider:\n  kind: oneharness\n",
-    "agent:\n  instructions: |\n    Standing bar: verify before you claim done.\n",
+    "system_prompt: |\n  Standing bar: verify before you claim done.\n",
     "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
 );
 
