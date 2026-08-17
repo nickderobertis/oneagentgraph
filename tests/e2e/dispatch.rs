@@ -1750,11 +1750,19 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
             "./roles/replaces-nothing.yaml",
             "names nothing to replace the base's bar with",
         ),
+        // And the flag that says so is this crate's own key, so a value that is
+        // not a boolean is refused by its own name rather than by a serde trace
+        // from a schema that has never heard of it.
+        ("./roles/flag.yaml", "must be true or false"),
     ];
     workspace.write("roles/typo.yaml", "system_promt: typo\n");
     workspace.write(
         "roles/replaces-nothing.yaml",
         "system_prompt: r\nuser:\n  persona: p\n  done_when_replaces_base: true\n",
+    );
+    workspace.write(
+        "roles/flag.yaml",
+        "system_prompt: r\nuser:\n  persona: p\n  done_when_replaces_base: yes please\n",
     );
     for (reference, expected) in cases {
         workspace.graph(
@@ -2324,6 +2332,49 @@ fn a_role_only_persona_runs_a_member_whose_judge_is_a_command() {
     );
 }
 
+/// A persona file with nothing in it layers nothing, and still runs the member on
+/// its base alone.
+///
+/// The emptiest document an author can point a member at is not a refusal: what a
+/// config must carry is onejudge's to say, and onejudge asks for none of it. So
+/// the journey asserts the base reached the agent *unaltered* — the preamble it
+/// wrote and the review bar it centralized — because a persona that layers nothing
+/// and a persona that quietly blanks something are indistinguishable from an exit
+/// code.
+#[test]
+fn an_empty_persona_layers_nothing_and_still_runs_the_member() {
+    let workspace = Workspace::new();
+    workspace.write("roles/blank.yaml", "");
+    workspace.graph(
+        &two_party_graph(&fake_harness(), NO_ENV)
+            .replace("persona: engineer", "persona: ./roles/blank.yaml"),
+    );
+
+    let record = workspace.at("prompts.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: the base alone fake:record-prompt={}",
+        record.display()
+    ));
+    run.expect_code(0);
+    assert!(
+        std::fs::read_to_string(&record)
+            .expect("prompts")
+            .contains("Standing bar: verify before you claim done."),
+        "the base's own preamble never reached the agent"
+    );
+    let effective = workspace.member_file("worker", "onejudge.yaml");
+    assert!(
+        effective.contains("the task is complete"),
+        "the base's own review bar was not what the member ran under: {effective}"
+    );
+    // A document that names no `name` is labelled by the file it was read from,
+    // so the events still say which role ran.
+    assert_eq!(
+        labels(&run.of_kind("member-started")[0])["persona"],
+        "blank"
+    );
+}
+
 /// A base config the merge will not compose with is refused before a paid turn,
 /// with what was found.
 #[test]
@@ -2344,6 +2395,27 @@ fn a_base_config_the_merge_cannot_accept_refuses_the_run() {
             .contains("`user.done_when` must be a string, got a list"),
         "{}",
         wrong_shape.stderr
+    );
+
+    // The shared preamble is the other value the composition rests on, and is
+    // read the same way: a `system_prompt:` of another shape is refused with what
+    // was found rather than read as a base that set none, which would dispatch
+    // under the persona's role and no standing bar at all.
+    workspace.write(
+        "base.yaml",
+        &BASE.replace(
+            "system_prompt: |\n  Standing bar: verify before you claim done.\n",
+            "system_prompt: [a, b]\n",
+        ),
+    );
+    let no_preamble = workspace.run_task("fake:complete-now: a preamble of the wrong shape");
+    no_preamble.expect_code(2);
+    assert!(
+        no_preamble
+            .stderr
+            .contains("`system_prompt` must be a string, got a list"),
+        "{}",
+        no_preamble.stderr
     );
 
     // A base is external input exactly as a persona is, and onejudge's own schema
