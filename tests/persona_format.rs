@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 
-use oneagentgraph::persona::{merge, Persona, SHIPPED_PERSONAS};
+use oneagentgraph::persona::{merge, Persona, MEMBER_OWNED, SHIPPED_PERSONAS};
 use serde_json::Value;
 
 /// The published format, read rather than restated.
@@ -68,6 +68,21 @@ fn yaml_blocks() -> Vec<String> {
         "docs/persona-format.md has an unclosed fenced block"
     );
     blocks
+}
+
+/// Every row of the document's table whose header row starts with `header`, as
+/// written — the header and its `| --- |` separator dropped.
+fn table_rows(header: &str) -> Vec<String> {
+    let mut lines = FORMAT.lines().skip_while(|line| !line.starts_with(header));
+    assert!(
+        lines.next().is_some(),
+        "docs/persona-format.md has no table headed {header:?}"
+    );
+    assert!(lines.next().is_some(), "{header:?} has no separator row");
+    lines
+        .take_while(|line| line.starts_with('|'))
+        .map(str::to_string)
+        .collect()
 }
 
 /// A value with every mapping's keys sorted, so a comparison is about what the
@@ -167,6 +182,27 @@ fn the_documented_refusal_is_what_the_crate_does() {
     let merged = merge(BASE, "base.yaml", &carried).expect("it merges");
     assert_eq!(merged["user"]["done_when"], Value::from("bar"));
     assert_eq!(merged["user"]["max_turns"], Value::from(3));
+}
+
+/// The fields the document says are refused are exactly the fields the crate
+/// refuses, in the same order and with the same reason.
+///
+/// `MEMBER_OWNED` is the list a persona is actually checked against, and this
+/// document is where an author reads it — two places one fact has to agree in, so
+/// the document's table is reconciled against the constant rather than written
+/// beside it. A field added to the crate and not to the table, or a reason
+/// reworded in one and not the other, fails here.
+#[test]
+fn the_document_names_exactly_the_fields_the_crate_refuses() {
+    let expected: Vec<String> = MEMBER_OWNED
+        .iter()
+        .map(|(field, owner)| format!("| `{field}` | {owner} |"))
+        .collect();
+    assert_eq!(
+        table_rows("| refused field |"),
+        expected,
+        "docs/persona-format.md and MEMBER_OWNED disagree about what a persona may not carry"
+    );
 }
 
 /// Every role this crate ships merges to exactly the config it merged to before

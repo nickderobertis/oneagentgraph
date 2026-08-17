@@ -51,7 +51,13 @@ pub const SHIPPED_PERSONAS: &[(&str, &str)] = &[
 /// without a word — the silent drop this crate refuses everywhere else. They are
 /// named here rather than left to onejudge because onejudge, reading a whole
 /// config, is right to accept all four.
-const MEMBER_OWNED: &[(&str, &str)] = &[
+///
+/// Public because the list is a published fact an author reads elsewhere:
+/// `docs/persona-format.md` names the refused fields, and `tests/persona_format.rs`
+/// reconciles that document against this slice, so the document cannot keep a copy
+/// this list has moved on from. The e2e journeys drive one refusal per entry from
+/// here too, so a key added without a journey fails the suite.
+pub const MEMBER_OWNED: &[(&str, &str)] = &[
     (
         "provider",
         "the member's own `agent:` and `judge:` in the graph decide its provider",
@@ -82,10 +88,70 @@ const MEMBER_OWNED: &[(&str, &str)] = &[
 pub struct Persona {
     /// This crate's own `name`: the label stamped on this member's events.
     name: Option<PersonaName>,
-    /// This crate's own `user.done_when_replaces_base` — see [`merge`].
-    done_when_replaces_base: bool,
-    /// Everything onejudge's, exactly as written, ready to layer onto a base.
+    /// The bar this persona brings and how it stands beside the base's — see
+    /// [`RoleBar`] and [`merge`].
+    bar: RoleBar,
+    /// Everything else onejudge's, exactly as written, ready to layer onto a
+    /// base.
     fragment: Map<String, Value>,
+}
+
+/// The completion bar a persona brings, and how it stands beside the base's.
+///
+/// One value rather than a bar and a `done_when_replaces_base` flag beside it,
+/// because replacing the base's bar means nothing without a bar to replace it
+/// *with*: two fields can spell that pair, and it is the operator's shared review
+/// bar dropped for nothing. [`RoleBar::compose`] is the only way to build one and
+/// refuses it there, so no reader downstream is handed the combination to check
+/// again.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+enum RoleBar {
+    /// The persona brings none, so the base's own bar stands as written.
+    #[default]
+    FromBaseAlone,
+    /// The persona's own bar, enforced beside the base's.
+    BesideBase(String),
+    /// The persona's own bar, standing in for the base's.
+    InsteadOfBase(String),
+}
+
+impl RoleBar {
+    /// The bar a persona's `user.done_when` brought, read with this crate's own
+    /// `user.done_when_replaces_base` beside it.
+    ///
+    /// # Errors
+    ///
+    /// When the flag is set and there is no bar to stand in with: that is the
+    /// shared review bar removed and nothing put in its place, which is the
+    /// silent drop spelled out loud.
+    fn compose(replaces_base: bool, bar: &str) -> Result<Self, String> {
+        match (replaces_base, bar.trim()) {
+            (true, "") => Err(
+                "user.done_when_replaces_base names nothing to replace the base's bar with: give \
+                 this persona its own user.done_when, or drop the key"
+                    .to_string(),
+            ),
+            (true, bar) => Ok(Self::InsteadOfBase(bar.to_string())),
+            (false, "") => Ok(Self::FromBaseAlone),
+            (false, bar) => Ok(Self::BesideBase(bar.to_string())),
+        }
+    }
+
+    /// This bar over a base's own, as the single `user.done_when` a supervisor is
+    /// handed — or nothing at all when the persona brought no bar, which leaves
+    /// the base's exactly as it wrote it.
+    fn over(&self, base_bar: &str) -> Option<String> {
+        let (kept, own) = match self {
+            Self::FromBaseAlone => return None,
+            Self::BesideBase(bar) => (base_bar.trim(), bar.as_str()),
+            Self::InsteadOfBase(bar) => ("", bar.as_str()),
+        };
+        let bars: Vec<&str> = [kept, own]
+            .into_iter()
+            .filter(|bar| !bar.is_empty())
+            .collect();
+        Some(one_bar_from(&bars))
+    }
 }
 
 /// A persona's name: one lowercase segment, or several separated by `/` for a
@@ -170,7 +236,7 @@ impl Persona {
             Some(Value::String(name)) => Some(name.parse()?),
             Some(other) => return Err(format!("`name` must be a string, got {}", kind_of(&other))),
         };
-        let done_when_replaces_base = take_replaces_base(&mut fragment)?;
+        let replaces_base = take_replaces_base(&mut fragment)?;
         // What is left is onejudge's, and onejudge's own schema is what says
         // whether each key is a field at all and what it has to hold. Validated
         // by construction rather than by a copy of the rules kept here, so this
@@ -178,20 +244,13 @@ impl Persona {
         serde_json::from_value::<onejudge::cli::Config>(Value::Object(fragment.clone())).map_err(
             |err| format!("a persona is a onejudge config fragment, and this one is not: {err}"),
         )?;
-        // The one pair this crate's own flat key allows and must not honour:
-        // `done_when_replaces_base` with nothing to replace the base's bar with
-        // is the shared review bar removed and nothing put in its place, which is
-        // the silent drop spelled out loud.
-        if done_when_replaces_base && role_bar(&fragment).trim().is_empty() {
-            return Err(
-                "user.done_when_replaces_base names nothing to replace the base's bar with: give \
-                 this persona its own user.done_when, or drop the key"
-                    .to_string(),
-            );
-        }
+        // Read once onejudge's schema has proved the bar is a string, and taken
+        // out of the fragment with the flag it pairs with: from here the bar lives
+        // in `bar` alone, so the composition cannot read a copy left behind.
+        let bar = RoleBar::compose(replaces_base, &take_role_bar(&mut fragment))?;
         Ok(Self {
             name,
-            done_when_replaces_base,
+            bar,
             fragment,
         })
     }
@@ -257,14 +316,22 @@ fn take_replaces_base(fragment: &mut Map<String, Value>) -> Result<bool, String>
     }
 }
 
-/// The completion bar a fragment brings, as the string onejudge's schema has
+/// Take the bar a fragment brings out of it, as the string onejudge's schema has
 /// already proved it to be.
-fn role_bar(fragment: &Map<String, Value>) -> &str {
-    fragment
-        .get("user")
-        .and_then(|user| user.get("done_when"))
-        .and_then(Value::as_str)
-        .unwrap_or_default()
+///
+/// Taken rather than read, so [`RoleBar`] is the only thing holding it: a copy
+/// left in the fragment would be a second source the merge could layer over the
+/// base instead of the composed bar.
+fn take_role_bar(fragment: &mut Map<String, Value>) -> String {
+    let Some(user) = fragment.get_mut("user").and_then(Value::as_object_mut) else {
+        return String::new();
+    };
+    match user.remove("done_when") {
+        Some(Value::String(bar)) => bar,
+        // Absent, or `null` — by here onejudge's own schema has refused every
+        // other shape a `done_when` could have been written in.
+        _ => String::new(),
+    }
 }
 
 /// Whether `name` is a usable persona name: one lowercase segment, or several
@@ -325,8 +392,8 @@ pub fn shipped(name: &str) -> Option<&'static str> {
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when the base is not a YAML mapping, carries the
-/// refused `agent:` block, or spells `system_prompt`, `user`, or
-/// `user.done_when` as something other than what the composition reads.
+/// refused `agent:` block, spells `system_prompt`, `user`, or `user.done_when` as
+/// something other than what the composition reads, or is not a onejudge config.
 pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, Error> {
     let mut config: Value = serde_norway::from_str(base)
         .map_err(|err| Error::InvalidConfig(format!("{base_origin}: {err}")))?;
@@ -347,17 +414,11 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
     }
     map.remove("task");
 
+    let preamble = base_preamble(map, base_origin)?;
+    let base_bar = base_review_bar(map, base_origin)?;
+    validate_base(map, base_origin)?;
+
     // The preamble and the role, in that order, both kept.
-    let preamble = match map.get("system_prompt") {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::String(text)) => text.clone(),
-        Some(other) => {
-            return Err(Error::InvalidConfig(format!(
-                "{base_origin}: `system_prompt` must be a string, got {}",
-                kind_of(other)
-            )))
-        }
-    };
     let role = persona
         .fragment
         .get("system_prompt")
@@ -373,39 +434,7 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
         map.insert("system_prompt".into(), Value::String(combined.join("\n\n")));
     }
 
-    // The base's own bar, read as the string it has to be. A base is external
-    // input and this is the value the whole composition rests on, so a
-    // `done_when:` of some other shape is refused with what was found rather
-    // than read as no bar at all — which is the shared review bar going missing
-    // silently, the very thing composing them is here to stop. Checked whether
-    // or not this persona layers anything onto it, because a base nobody can
-    // compose with is broken wherever it is read.
-    let base_bar = match map.get("user") {
-        None | Some(Value::Null) => String::new(),
-        Some(Value::Object(user)) => match user.get("done_when") {
-            None | Some(Value::Null) => String::new(),
-            Some(Value::String(text)) => text.clone(),
-            Some(other) => {
-                return Err(Error::InvalidConfig(format!(
-                    "{base_origin}: `user.done_when` must be a string, got {}",
-                    kind_of(other)
-                )))
-            }
-        },
-        Some(other) => {
-            return Err(Error::InvalidConfig(format!(
-                "{base_origin}: `user` must be a mapping, got {}",
-                kind_of(other)
-            )))
-        }
-    };
-
-    let role_user = persona
-        .fragment
-        .get("user")
-        .and_then(Value::as_object)
-        .cloned();
-    if role_user.is_some() || persona.done_when_replaces_base {
+    if let Some(role_user) = persona.fragment.get("user").and_then(Value::as_object) {
         let user = map
             .entry("user")
             .or_insert_with(|| Value::Object(Map::new()));
@@ -413,23 +442,11 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
             *user = Value::Object(Map::new());
         }
         let user = user.as_object_mut().expect("the shape checked above");
-        for (key, value) in role_user.unwrap_or_default() {
-            if key == "done_when" {
-                continue;
-            }
-            user.insert(key, value);
+        for (key, value) in role_user {
+            user.insert(key.clone(), value.clone());
         }
-        let role_bar = role_bar(&persona.fragment);
-        let kept = match persona.done_when_replaces_base {
-            true => "",
-            false => base_bar.trim(),
-        };
-        let bars: Vec<&str> = [kept, role_bar.trim()]
-            .into_iter()
-            .filter(|bar| !bar.is_empty())
-            .collect();
-        if !role_bar.trim().is_empty() {
-            user.insert("done_when".into(), Value::String(one_bar_from(&bars)));
+        if let Some(bar) = persona.bar.over(&base_bar) {
+            user.insert("done_when".into(), Value::String(bar));
         }
     }
 
@@ -440,6 +457,62 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
         map.insert(key.clone(), value.clone());
     }
     Ok(config)
+}
+
+/// The shared preamble a base config brings, as the string it has to be.
+fn base_preamble(map: &Map<String, Value>, base_origin: &str) -> Result<String, Error> {
+    match map.get("system_prompt") {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(other) => Err(Error::InvalidConfig(format!(
+            "{base_origin}: `system_prompt` must be a string, got {}",
+            kind_of(other)
+        ))),
+    }
+}
+
+/// The base's own review bar, read as the string it has to be.
+///
+/// A base is external input and this is the value the whole composition rests on,
+/// so a `done_when:` of some other shape is refused with what was found rather
+/// than read as no bar at all — which is the shared review bar going missing
+/// silently, the very thing composing them is here to stop. Read whether or not
+/// this persona layers anything onto it, because a base nobody can compose with
+/// is broken wherever it is read.
+fn base_review_bar(map: &Map<String, Value>, base_origin: &str) -> Result<String, Error> {
+    match map.get("user") {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::Object(user)) => match user.get("done_when") {
+            None | Some(Value::Null) => Ok(String::new()),
+            Some(Value::String(text)) => Ok(text.clone()),
+            Some(other) => Err(Error::InvalidConfig(format!(
+                "{base_origin}: `user.done_when` must be a string, got {}",
+                kind_of(other)
+            ))),
+        },
+        Some(other) => Err(Error::InvalidConfig(format!(
+            "{base_origin}: `user` must be a mapping, got {}",
+            kind_of(other)
+        ))),
+    }
+}
+
+/// Check a base config against onejudge's own schema, before anything is layered
+/// over it.
+///
+/// A base is external input exactly as a persona is, and the same schema decides
+/// both: without this, a key onejudge does not have — or one holding what onejudge
+/// would refuse — is layered over, written into the effective config, and first
+/// noticed by the member dying a paid turn later. The two fields the composition
+/// itself reads are checked before this, so each still names what was found rather
+/// than answering with a serde trace.
+fn validate_base(map: &Map<String, Value>, base_origin: &str) -> Result<(), Error> {
+    serde_json::from_value::<onejudge::cli::Config>(Value::Object(map.clone())).map_err(|err| {
+        Error::InvalidConfig(format!(
+            "{base_origin}: a base config is a onejudge config, and this one is not: {err}"
+        ))
+    })?;
+    Ok(())
 }
 
 /// One completion bar out of every bar the merge kept.
@@ -755,6 +828,25 @@ mod tests {
         );
         // An empty document is a base with nothing in it, not a failure.
         assert!(merge("", "empty.yaml", &persona).is_ok());
+    }
+
+    /// A base is external input exactly as a persona is, and onejudge's own schema
+    /// decides both: a key onejudge does not have is refused at the merge rather
+    /// than layered over and written into the effective config, where the first
+    /// thing to notice it is the member dying a paid turn later.
+    #[test]
+    fn a_base_that_is_not_a_onejudge_config_is_refused() {
+        let persona = Persona::parse("system_prompt: r\nuser:\n  persona: p\n", "p").unwrap();
+        for base in [
+            "system_promt: typo\n",
+            "user:\n  done_wen: typo\n",
+            "user:\n  max_turns: many\n",
+            "evals:\n  - kind: boolean\n",
+        ] {
+            let err = merge(base, "base.yaml", &persona).unwrap_err().to_string();
+            assert!(err.contains("base.yaml"), "{base}: {err}");
+            assert!(err.contains("is a onejudge config"), "{base}: {err}");
+        }
     }
 
     /// A `user` of any wrong shape is refused with the shape that was found, so

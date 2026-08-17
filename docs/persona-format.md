@@ -45,11 +45,20 @@ consumed by the merge — neither ever reaches onejudge:
 | `name` | the `persona` label on every event this member publishes. Absent, the label is the persona ref's own file name. |
 | `user.done_when_replaces_base` | `true` when this role's bar must stand in for the base's instead of adding to it. Needs a `user.done_when` to stand in with, or the file is refused. |
 
-Four onejudge fields are **refused** in a persona, because the member's own launch
-decides each and would overwrite it: `provider` (the graph's `agent:` / `judge:`),
-`session` (the run's), `task` (the member's `task:` or the run's `--task`), and
-`skill` (resolved against the directory of the config naming it, so it belongs in
-the base config). Anything else onejudge accepts, a persona may carry.
+Some onejudge fields are **refused** in a persona, because the member's own launch
+decides each and would overwrite it. Anything else onejudge accepts, a persona may
+carry.
+
+| refused field | what owns it instead, in the words the refusal uses |
+| --- | --- |
+| `provider` | the member's own `agent:` and `judge:` in the graph decide its provider |
+| `session` | the run names the session, and every member of it shares one |
+| `task` | the task comes from the member's own `task:`, or from the run's `--task` |
+| `skill` | a relative skill path is resolved against the directory of the config naming it, which for a member is its base config — so name it there |
+
+That table is `oneagentgraph::persona::MEMBER_OWNED`, which is what the crate
+refuses from; `tests/persona_format.rs` fails when the two stop agreeing, so a
+field added to one cannot go unnamed in the other.
 
 ## How it merges
 

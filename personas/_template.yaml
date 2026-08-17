@@ -1,31 +1,8 @@
 # Persona template. `oneagentgraph persona new <name>` copies this to <name>.yaml.
 #
-# A persona is a **onejudge config fragment**, written in onejudge's own field
-# names and layered over the onejudge base config a member names as its
-# `base_config`. Put only what makes this role different here; everything else
-# (provider wiring, session, the shared preamble, the default turn cap) is
-# inherited from that base when the member launches.
-#
-# onejudge decides what a config may say and what it must say — which is
-# nothing: a persona carrying only a `system_prompt` is complete. `docs/persona-format.md`
-# documents the whole format, including the two keys below that are
-# oneagentgraph's own and never reach onejudge.
-#
-#   onejudge  system_prompt   the role, appended after the base's preamble
-#   onejudge  user.persona    how the supervisor reviews this kind of work
-#   onejudge  user.done_when  a second completion bar, enforced ALONGSIDE the base's
-#   onejudge  user.max_turns  role-specific turn cap (else the base's)
-#   onejudge  evals           extra transcript checks for this role
-#   onejudge  assessment      a free-text judgement of the finished transcript
-#   ours      name            the role label stamped on this member's events
-#   ours      user.done_when_replaces_base
-#                             true when this role's bar must stand in for the
-#                             base's; needs a user.done_when to stand in with
-#
-# The member owns `provider`, `session`, `task`, and `skill`, so a persona naming
-# one is refused rather than overwritten. The `agent:` block oneagentgraph used to
-# define is refused too, with no compatibility path — write `agent.instructions`
-# as `system_prompt` and `agent.name` as `name`.
+# Fill in what makes this role different and delete the rest: everything a
+# persona may say, which keys are refused, and how each one merges over the
+# member's `base_config` is in `docs/persona-format.md`.
 
 name: role-name
 system_prompt: |

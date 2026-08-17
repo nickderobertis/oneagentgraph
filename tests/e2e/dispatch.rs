@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 
+use oneagentgraph::persona::MEMBER_OWNED;
+
 use crate::support::{
     fake_harness, fake_provider, graph_with, labels, oneharness_bin, single_sided_graph,
     two_party_graph, Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
@@ -1742,9 +1744,6 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
         // A key onejudge does not have, refused by onejudge's own schema: this
         // crate keeps no second copy of it to be stricter than.
         ("./roles/typo.yaml", "unknown field `system_promt`"),
-        // A key the member's own launch decides, refused where it is written
-        // rather than overwritten on the way to onejudge.
-        ("./roles/provider.yaml", "decide its provider"),
         // Replacing the operator's shared review bar with nothing at all is the
         // silent drop said out loud, and is refused as the mistake it is.
         (
@@ -1753,7 +1752,6 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
         ),
     ];
     workspace.write("roles/typo.yaml", "system_promt: typo\n");
-    workspace.write("roles/provider.yaml", "provider:\n  kind: command\n");
     workspace.write(
         "roles/replaces-nothing.yaml",
         "system_prompt: r\nuser:\n  persona: p\n  done_when_replaces_base: true\n",
@@ -1766,6 +1764,46 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
         let run = workspace.run_task("fake:complete-now: never gets here");
         run.expect_code(2);
         assert!(run.stderr.contains(expected), "{reference}: {}", run.stderr);
+    }
+}
+
+/// **Every** key the member's own launch decides is refused where its author
+/// wrote it: the run stops before a paid turn, naming the key and what owns it
+/// instead.
+///
+/// Driven from `MEMBER_OWNED` rather than a list typed out here, so a key this
+/// crate starts refusing cannot arrive without a journey covering it. What the
+/// document gives the key is beside the point — the key alone earns the refusal,
+/// before onejudge's own schema ever reads the fragment — so one shape of document
+/// covers all of them.
+#[test]
+fn a_persona_naming_a_key_the_member_owns_refuses_the_run() {
+    let workspace = Workspace::new();
+    for (key, owner) in MEMBER_OWNED {
+        let file = format!("roles/{key}.yaml");
+        workspace.write(
+            &file,
+            &format!("system_prompt: r\nuser:\n  persona: p\n{key}: mine\n"),
+        );
+        workspace.graph(
+            &two_party_graph(&fake_harness(), NO_ENV)
+                .replace("persona: engineer", &format!("persona: ./{file}")),
+        );
+        let run = workspace.run_task("fake:complete-now: never gets here");
+        run.expect_code(2);
+        // The file to repair, the key that is wrong, and what decides it instead.
+        assert!(run.stderr.contains(&file), "{key}: {}", run.stderr);
+        assert!(
+            run.stderr
+                .contains(&format!("`{key}` is not a persona key")),
+            "{key}: {}",
+            run.stderr
+        );
+        assert!(run.stderr.contains(owner), "{key}: {}", run.stderr);
+        assert!(
+            run.stdout.is_empty(),
+            "{key}: a refusal must not read as an event stream"
+        );
     }
 }
 
@@ -2286,9 +2324,10 @@ fn a_role_only_persona_runs_a_member_whose_judge_is_a_command() {
     );
 }
 
-/// A base config the merge cannot read is refused, with what was found.
+/// A base config the merge will not compose with is refused before a paid turn,
+/// with what was found.
 #[test]
-fn a_base_config_of_the_wrong_shape_refuses_the_run() {
+fn a_base_config_the_merge_cannot_accept_refuses_the_run() {
     let workspace = Workspace::new();
     // A bar of the wrong shape is refused with what was found, rather than read
     // as a base that set none — which would run the dispatch under whatever the
@@ -2305,6 +2344,25 @@ fn a_base_config_of_the_wrong_shape_refuses_the_run() {
             .contains("`user.done_when` must be a string, got a list"),
         "{}",
         wrong_shape.stderr
+    );
+
+    // A base is external input exactly as a persona is, and onejudge's own schema
+    // decides both: a key it does not have is refused here rather than layered
+    // over, written into the effective config, and first noticed by the member
+    // dying a paid turn later.
+    workspace.write("base.yaml", &format!("{BASE}system_promt: typo\n"));
+    let not_a_config = workspace.run_task("fake:complete-now: a key onejudge does not have");
+    not_a_config.expect_code(2);
+    for named in ["base.yaml", "unknown field `system_promt`"] {
+        assert!(
+            not_a_config.stderr.contains(named),
+            "{named}: {}",
+            not_a_config.stderr
+        );
+    }
+    assert!(
+        not_a_config.stdout.is_empty(),
+        "a refusal must not read as an event stream"
     );
 }
 
