@@ -1627,9 +1627,19 @@ mod tests {
             member.emit(*kind, Map::new());
         }
 
+        // Named here rather than taken from `carries_session`, which is the
+        // thing under test: a build that widened it would otherwise agree with
+        // itself. The same four are held against `docs/contract.md` by
+        // `tests/contract.rs`.
+        let a_turn = [
+            EventKind::TurnStarted,
+            EventKind::TurnActivity,
+            EventKind::TurnCompleted,
+            EventKind::TurnInterrupted,
+        ];
         for envelope in lines(&recorder) {
             let session = envelope.labels.extra.get(SESSION_LABEL);
-            if envelope.kind.carries_session() {
+            if a_turn.contains(&envelope.kind) {
                 assert_eq!(
                     session,
                     Some(&Value::from("node-scope-1.worker")),
