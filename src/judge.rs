@@ -55,7 +55,7 @@
 //!    condemned, which is the failure the watchdog exists to prevent.
 
 use std::ops::ControlFlow;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -88,18 +88,6 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(5);
 /// was reaped starts a new harness process, and one that is not reaped in turn is
 /// a paid turn the member was already condemned for.
 const TEARDOWN_POLL: Duration = Duration::from_millis(100);
-
-/// The extension oneharness gives a history session file.
-///
-/// A telemetry `history_file` is **external input** — this crate neither chose
-/// the path nor wrote the file — and the three values published from it are only
-/// resolvable for a path in oneharness's own layout: its reader lists a project
-/// directory's `*.jsonl` and matches a stem against it, so a path ending
-/// otherwise decomposes perfectly well into three fields that open nothing.
-/// Stated here rather than imported because upstream keeps it private; a real
-/// run holds the two together, in `tests/e2e/session.rs`, by asserting the file
-/// oneharness actually wrote carries it.
-const SESSION_EXTENSION: &str = "jsonl";
 
 /// Run one two-party member to its end, publishing every envelope it produces.
 #[must_use]
@@ -545,7 +533,7 @@ fn publish_attribution(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry
 /// `<history_dir>/<history_project>/<history_session>.jsonl`, and a consumer
 /// resolves it through that library rather than by splitting a string this crate
 /// chose the shape of. A path outside that layout is refused by
-/// [`history_location`], so it publishes nothing.
+/// [`location::Location::of`], so it publishes nothing.
 //
 // llmlint: ignore-block[changed_behavior_has_e2e] two arms below have no journey
 // because no input a user can give reaches them, and the one seam this suite
@@ -560,7 +548,7 @@ fn session_pointer(
     attribution: &onejudge::HarnessAttribution,
 ) -> Option<(OneharnessSession, Artifact)> {
     let file = Path::new(attribution.history_file.as_deref()?);
-    let location = history_location(file)?;
+    let location = location::Location::of(file)?;
     let ran = attribution
         .candidates
         .iter()
@@ -572,9 +560,9 @@ fn session_pointer(
         identity: ran.harness_id.clone(),
         session_id: ran.session_id.clone(),
         history_id: history_id.clone(),
-        history_dir: location.dir,
-        history_project: location.project,
-        history_session: location.session,
+        history_dir: location.dir().to_string(),
+        history_project: location.project().to_string(),
+        history_session: location.session().to_string(),
     };
     let artifact = Artifact {
         id: history_id,
@@ -587,70 +575,106 @@ fn session_pointer(
     Some((session, artifact))
 }
 
-/// The three values a consumer resolves a session file with, taken from the one
-/// path onejudge's telemetry names it by.
+/// Where one session file sits in oneharness's history store.
 ///
-/// This is the **trust boundary** on that path, and the check is stricter than
-/// "does it parse" because of what happens to these three fields afterwards:
-/// they are published for someone else to join back together, and
-/// `onepipeline-ui`'s read API joins them and opens the result on its own host.
-/// A component that climbs (`..`) is therefore *refused rather than normalised* —
-/// a normalised path is a path this crate invented, and one that climbed is an
-/// arbitrary file read at the far end rather than a transcript. Only oneharness's
-/// own layout is taken: an absolute path to a session file, named and carrying
-/// oneharness's own extension, in a project directory, in a store that is itself
-/// named by at least one component. A path that is relative, or `.`-prefixed and
-/// so relative, is refused with them; a `.` further along names the same file
-/// either way and the parser folds it out before this sees it. The
-/// store must be named because an *empty* `history_dir` is worse than a wrong
-/// one — the consumer's resolver reads an empty one as unset and answers with the
-/// host's own default store, sending a reader to a stranger's transcripts rather
-/// than to none.
-fn history_location(file: &Path) -> Option<Location> {
-    if file.extension() != Some(std::ffi::OsStr::new(SESSION_EXTENSION)) {
-        return None;
+/// A module of its own so [`Location`](location::Location)'s fields are
+/// unreachable **inside** this file as well as outside it:
+/// [`Location::of`](location::Location::of) is the trust boundary on a telemetry
+/// path, and a boundary that can be walked around by writing the struct literal
+/// a few lines further down is a comment rather than a check.
+mod location {
+    use std::path::{Component, Path};
+
+    /// The extension oneharness gives a history session file.
+    ///
+    /// The three values published from a `history_file` are only resolvable for
+    /// a path in oneharness's own layout: its reader lists a project directory's
+    /// `*.jsonl` and matches a stem against it, so a path ending otherwise
+    /// decomposes perfectly well into three fields that open nothing. Stated
+    /// here rather than imported because upstream keeps it private; a real run
+    /// holds the two together, in `tests/e2e/session.rs`, by asserting the file
+    /// oneharness actually wrote carries it.
+    const SESSION_EXTENSION: &str = "jsonl";
+
+    /// The three values a consumer resolves a session file with — the store, the
+    /// project inside it, and the file's own name — valid by construction.
+    pub(super) struct Location {
+        dir: String,
+        project: String,
+        session: String,
     }
-    let mut named: Vec<&str> = Vec::new();
-    let mut rooted = false;
-    for component in file.components() {
-        match component {
-            // A root, or a Windows prefix before one, and only ahead of every
-            // name — never a `..` or a `.` anywhere, at any depth.
-            Component::Prefix(_) | Component::RootDir if named.is_empty() => rooted = true,
-            Component::Normal(part) => named.push(part.to_str()?),
-            _ => return None,
+
+    impl Location {
+        /// One telemetry `history_file`, checked and taken apart; [`None`] for a
+        /// path that is not inside oneharness's own store.
+        ///
+        /// This is the **trust boundary** on that path, and the check is stricter
+        /// than "does it decompose" because of what the three values become:
+        /// they are published for someone else to join back together, and
+        /// `onepipeline-ui`'s read API joins them and opens the result on its own
+        /// host. A component that climbs (`..`) is therefore *refused rather than
+        /// normalised* — a normalised path is a path this crate invented, and one
+        /// that climbed is an arbitrary file read at the far end rather than a
+        /// transcript. Only oneharness's own layout is taken: an absolute path to
+        /// a named session file carrying [`SESSION_EXTENSION`], in a project
+        /// directory, in a store named by at least one component of its own. A
+        /// relative path — including a `.`-prefixed one — is refused with them; a
+        /// `.` further along names the same file either way and the parser folds
+        /// it out before this sees it. The store must be named because an *empty*
+        /// `history_dir` is worse than a wrong one: the consumer's resolver reads
+        /// an empty one as unset and answers with the host's own default store,
+        /// sending a reader to a stranger's transcripts rather than to none.
+        pub(super) fn of(file: &Path) -> Option<Self> {
+            if file.extension() != Some(std::ffi::OsStr::new(SESSION_EXTENSION)) {
+                return None;
+            }
+            let mut named: Vec<&str> = Vec::new();
+            let mut rooted = false;
+            for component in file.components() {
+                match component {
+                    // A root, or a Windows prefix before one, and only ahead of
+                    // every name — never a `..` or a `.` anywhere, at any depth.
+                    Component::Prefix(_) | Component::RootDir if named.is_empty() => rooted = true,
+                    Component::Normal(part) => named.push(part.to_str()?),
+                    _ => return None,
+                }
+            }
+            let [store @ .., project, _session] = named.as_slice() else {
+                return None;
+            };
+            if !rooted || store.is_empty() {
+                return None;
+            }
+            Some(Self {
+                // The store and the project as they were written rather than
+                // rejoined from the components above, so a path that resolved
+                // for oneharness resolves the same way for the reader.
+                dir: file.parent()?.parent()?.to_str()?.to_string(),
+                project: (*project).to_string(),
+                // The name without oneharness's extension, which its own reader
+                // adds back: the two are checked against each other by a real
+                // run, in `tests/e2e/session.rs`.
+                session: file.file_stem()?.to_str()?.to_string(),
+            })
+        }
+
+        /// The store the record was written into, absolute and named.
+        pub(super) fn dir(&self) -> &str {
+            &self.dir
+        }
+
+        /// The project directory inside that store.
+        pub(super) fn project(&self) -> &str {
+            &self.project
+        }
+
+        /// The session file's own name, without its extension.
+        pub(super) fn session(&self) -> &str {
+            &self.session
         }
     }
-    let [store @ .., project, _session] = named.as_slice() else {
-        return None;
-    };
-    if !rooted || store.is_empty() {
-        return None;
-    }
-    Some(Location {
-        // The store and the project as they were written rather than rejoined
-        // from the components above, so a path that resolved for oneharness
-        // resolves the same way for the reader.
-        dir: file.parent()?.parent()?.to_str()?.to_string(),
-        project: (*project).to_string(),
-        // The name without oneharness's extension, which its own reader adds
-        // back: the two are checked against each other by a real run, in
-        // `tests/e2e/session.rs`.
-        session: file.file_stem()?.to_str()?.to_string(),
-    })
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
-
-/// Where one session file sits in oneharness's history store: the three values
-/// [`OneharnessSession`] publishes and a consumer resolves it with.
-struct Location {
-    /// The store, absolute.
-    dir: String,
-    /// The project directory inside it.
-    project: String,
-    /// The session file's own name, without its extension.
-    session: String,
-}
 
 /// One payload struct as the map the wire carries.
 fn as_payload<T: serde::Serialize>(payload: &T) -> Map<String, Value> {
