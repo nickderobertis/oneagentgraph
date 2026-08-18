@@ -21,6 +21,7 @@ mod origin;
 mod remote;
 mod scheduler;
 mod selection;
+mod session;
 mod support;
 mod verbs;
 

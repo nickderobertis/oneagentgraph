@@ -18,8 +18,8 @@
 // candidates and neither may be a real subscription.
 
 use crate::support::{
-    fake_harness, graph_with, two_party_graph, Workspace, CHAIN, FAKE_HARNESS_KEY, FALLBACK_CHAIN,
-    MIXED_CHAIN, NO_ENV,
+    fake_harness, graph_with, make_executable, two_party_graph, Workspace, CHAIN, FAKE_HARNESS_KEY,
+    FALLBACK_CHAIN, MIXED_CHAIN, NO_ENV,
 };
 
 // llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
@@ -317,18 +317,6 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
     );
     assert_eq!(advanced[0]["payload"]["reason"], serde_json::json!("quota"));
     assert!(!run.of_kind("member-settled").is_empty());
-}
-
-/// Mark a generated helper script executable, so oneharness can spawn it.
-#[cfg(unix)]
-fn make_executable(path: &std::path::Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).expect("chmod");
-    }
-    #[cfg(not(unix))]
-    let _ = path;
 }
 
 /// A **two-party** member reports the candidates each side stepped past, with

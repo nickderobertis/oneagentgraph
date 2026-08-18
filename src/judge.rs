@@ -55,7 +55,7 @@
 //!    condemned, which is the failure the watchdog exists to prevent.
 
 use std::ops::ControlFlow;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
@@ -65,7 +65,8 @@ use onejudge::StreamEvent;
 use serde_json::{Map, Value};
 
 use crate::event::{
-    bound_detail, bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, Role,
+    bound_detail, bound_text, Artifact, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
+    OneharnessSession, Role, ONEHARNESS_SESSION_ARTIFACT,
 };
 use crate::invoke::JudgeLaunch;
 use crate::member::{
@@ -87,6 +88,18 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(5);
 /// was reaped starts a new harness process, and one that is not reaped in turn is
 /// a paid turn the member was already condemned for.
 const TEARDOWN_POLL: Duration = Duration::from_millis(100);
+
+/// The extension oneharness gives a history session file.
+///
+/// A telemetry `history_file` is **external input** — this crate neither chose
+/// the path nor wrote the file — and the three values published from it are only
+/// resolvable for a path in oneharness's own layout: its reader lists a project
+/// directory's `*.jsonl` and matches a stem against it, so a path ending
+/// otherwise decomposes perfectly well into three fields that open nothing.
+/// Stated here rather than imported because upstream keeps it private; a real
+/// run holds the two together, in `tests/e2e/session.rs`, by asserting the file
+/// oneharness actually wrote carries it.
+const SESSION_EXTENSION: &str = "jsonl";
 
 /// Run one two-party member to its end, publishing every envelope it produces.
 #[must_use]
@@ -378,7 +391,7 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             // subscription to restore is exactly what an operator needs, and a
             // chain records every candidate it stepped past whether or not a
             // later one ran.
-            advance(emitter, summary.report.telemetry.as_ref());
+            publish_attribution(emitter, summary.report.telemetry.as_ref());
             record_control(&summary.report, scratch);
             let completed = onejudge::cli::exit_code(&summary) == 0;
             let document = serde_json::to_value(&summary.report).unwrap_or(Value::Null);
@@ -388,7 +401,7 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             // The one place harness attribution for a *failed* run is reachable
             // at all: a run that produced no report used to reach a supervisor
             // with nothing said about which identity refused.
-            advance(emitter, failure.telemetry.as_ref());
+            publish_attribution(emitter, failure.telemetry.as_ref());
             // The stop files are the supervisor's authoritative cancellation
             // request. Do not infer it from the provider process's exit shape:
             // POSIX reports a signal while Windows job termination reports an
@@ -478,15 +491,23 @@ fn provider_cause(failure: &RunFailure) -> Cause {
     }
 }
 
-/// Publish every candidate this member's chains stepped past.
+/// Publish what this member's telemetry attributes: every candidate its chains
+/// stepped past, and the oneharness conversation each invocation wrote down.
 ///
 /// A two-party member has one chain per side per turn, and onejudge's telemetry
-/// keeps them apart — which is why `role` and `turn` are on the payload. Nothing
-/// like this was reachable while this hop was a subprocess: onejudge's report
-/// carries no `fallback` block, so a two-party member published no
+/// keeps them apart — which is why `role` and `turn` are on both payloads.
+/// Nothing like this was reachable while this hop was a subprocess: onejudge's
+/// report carries no `fallback` block, so a two-party member published no
 /// `fallback-advanced` at all and an operator had to read the identity out of a
 /// harness's own history.
-fn advance(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry>) {
+///
+/// `attribution` is also the only place a *failed* run says either thing, which
+/// is why both ride it. The sibling `telemetry.sessions` is not a substitute for
+/// the session pointer: a `SessionLink` exists only where the harness exposed a
+/// native continuation id, and the agent side of a claude-code dispatch exposes
+/// none — so a member's own turns would be exactly the ones missing from it,
+/// while `attribution` carries a history id for every one of them.
+fn publish_attribution(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry>) {
     let Some(telemetry) = telemetry else {
         return;
     };
@@ -500,12 +521,140 @@ fn advance(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry>) {
             };
             emitter.emit(EventKind::FallbackAdvanced, as_payload(&advanced));
         }
+        if let Some((session, artifact)) = session_pointer(attribution) {
+            emitter.emit_with(
+                EventKind::OneharnessSession,
+                as_payload(&session),
+                vec![artifact],
+            );
+        }
     }
 }
 
+/// Where one invocation's conversation was written down, and how much of it
+/// there is.
+///
+/// [`None`] for an invocation that names no history record: history was off for
+/// that side, or no candidate ran at all, and a pointer at a file nobody wrote is
+/// worse than the silence an operator can act on. The id comes from the candidate
+/// that **ran** — the others' records are attempts, and the artifact id names the
+/// record a consumer opens.
+///
+/// The path is decomposed rather than published whole because the reader takes
+/// its three parts: oneharness stores a session at
+/// `<history_dir>/<history_project>/<history_session>.jsonl`, and a consumer
+/// resolves it through that library rather than by splitting a string this crate
+/// chose the shape of. A path outside that layout is refused by
+/// [`history_location`], so it publishes nothing.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] two arms below have no journey
+// because no input a user can give reaches them, and the one seam this suite
+// sanctions does not either: the `history_file` is oneharness's own, written by
+// oneharness at a path oneharness chose, and the doubled *harness binary* has no
+// say in either. So a path outside that layout, and a file that cannot be read
+// where one was named, are upstream faults rather than requests — driven here
+// against constructed telemetry, which is the only place they exist. What a run
+// really produces is `tests/e2e/session.rs`, which resolves the file through
+// oneharness's own reader and so fails if this layout stops being the one.
+fn session_pointer(
+    attribution: &onejudge::HarnessAttribution,
+) -> Option<(OneharnessSession, Artifact)> {
+    let file = Path::new(attribution.history_file.as_deref()?);
+    let location = history_location(file)?;
+    let ran = attribution
+        .candidates
+        .iter()
+        .find(|candidate| candidate.ran)?;
+    let history_id = ran.history_id.clone()?;
+    let session = OneharnessSession {
+        role: Role::from(attribution.role),
+        turn: u64::from(attribution.turn_index),
+        identity: ran.harness_id.clone(),
+        session_id: ran.session_id.clone(),
+        history_id: history_id.clone(),
+        history_dir: location.dir,
+        history_project: location.project,
+        history_session: location.session,
+    };
+    let artifact = Artifact {
+        id: history_id,
+        kind: ONEHARNESS_SESSION_ARTIFACT.to_string(),
+        // The bytes stay in oneharness's store — nothing is copied here — so an
+        // unreadable file is a count of zero beside a pointer that still names
+        // it, rather than a pointer withheld.
+        bytes: std::fs::metadata(file).map_or(0, |file| file.len()),
+    };
+    Some((session, artifact))
+}
+
+/// The three values a consumer resolves a session file with, taken from the one
+/// path onejudge's telemetry names it by.
+///
+/// This is the **trust boundary** on that path, and the check is stricter than
+/// "does it parse" because of what happens to these three fields afterwards:
+/// they are published for someone else to join back together, and
+/// `onepipeline-ui`'s read API joins them and opens the result on its own host.
+/// A component that climbs (`..`) is therefore *refused rather than normalised* —
+/// a normalised path is a path this crate invented, and one that climbed is an
+/// arbitrary file read at the far end rather than a transcript. Only oneharness's
+/// own layout is taken: an absolute path to a session file, named and carrying
+/// oneharness's own extension, in a project directory, in a store that is itself
+/// named by at least one component. A path that is relative, or `.`-prefixed and
+/// so relative, is refused with them; a `.` further along names the same file
+/// either way and the parser folds it out before this sees it. The
+/// store must be named because an *empty* `history_dir` is worse than a wrong
+/// one — the consumer's resolver reads an empty one as unset and answers with the
+/// host's own default store, sending a reader to a stranger's transcripts rather
+/// than to none.
+fn history_location(file: &Path) -> Option<Location> {
+    if file.extension() != Some(std::ffi::OsStr::new(SESSION_EXTENSION)) {
+        return None;
+    }
+    let mut named: Vec<&str> = Vec::new();
+    let mut rooted = false;
+    for component in file.components() {
+        match component {
+            // A root, or a Windows prefix before one, and only ahead of every
+            // name — never a `..` or a `.` anywhere, at any depth.
+            Component::Prefix(_) | Component::RootDir if named.is_empty() => rooted = true,
+            Component::Normal(part) => named.push(part.to_str()?),
+            _ => return None,
+        }
+    }
+    let [store @ .., project, _session] = named.as_slice() else {
+        return None;
+    };
+    if !rooted || store.is_empty() {
+        return None;
+    }
+    Some(Location {
+        // The store and the project as they were written rather than rejoined
+        // from the components above, so a path that resolved for oneharness
+        // resolves the same way for the reader.
+        dir: file.parent()?.parent()?.to_str()?.to_string(),
+        project: (*project).to_string(),
+        // The name without oneharness's extension, which its own reader adds
+        // back: the two are checked against each other by a real run, in
+        // `tests/e2e/session.rs`.
+        session: file.file_stem()?.to_str()?.to_string(),
+    })
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// Where one session file sits in oneharness's history store: the three values
+/// [`OneharnessSession`] publishes and a consumer resolves it with.
+struct Location {
+    /// The store, absolute.
+    dir: String,
+    /// The project directory inside it.
+    project: String,
+    /// The session file's own name, without its extension.
+    session: String,
+}
+
 /// One payload struct as the map the wire carries.
-fn as_payload(advanced: &FallbackAdvanced) -> Map<String, Value> {
-    match serde_json::to_value(advanced) {
+fn as_payload<T: serde::Serialize>(payload: &T) -> Map<String, Value> {
+    match serde_json::to_value(payload) {
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
     }
@@ -536,7 +685,7 @@ fn condemn(
                     Ok(summary) => summary.report.telemetry.clone(),
                     Err(failure) => failure.telemetry.clone(),
                 };
-                advance(emitter, telemetry.as_ref());
+                publish_attribution(emitter, telemetry.as_ref());
                 return died(
                     emitter,
                     rule,
@@ -865,7 +1014,7 @@ mod tests {
         .expect("telemetry");
 
         let (emitter, recorder) = recorded();
-        advance(&emitter, Some(&telemetry));
+        publish_attribution(&emitter, Some(&telemetry));
         let events = recorder.events();
         assert_eq!(events.len(), 1, "{events:?}");
         assert_eq!(events[0].kind, EventKind::FallbackAdvanced);
@@ -876,8 +1025,174 @@ mod tests {
 
         // A run with no telemetry publishes nothing rather than an invented chain.
         let (quiet, unwritten) = recorded();
-        advance(&quiet, None);
+        publish_attribution(&quiet, None);
         assert!(unwritten.events().is_empty());
+    }
+
+    /// One attribution's session file, decomposed into the three values a
+    /// consumer resolves it with, beside the artifact that names the record.
+    ///
+    /// The file here does not exist, which is the *unreadable* case: the pointer
+    /// is still published, carrying a count of zero, because where the record is
+    /// is what an operator needs and how big it is is not. That the same three
+    /// values open a file oneharness really wrote is `tests/e2e/session.rs`.
+    #[test]
+    fn an_invocation_that_wrote_a_record_publishes_where_to_read_it() {
+        let telemetry: onejudge::Telemetry = serde_json::from_value(json!({
+            "wall_ms": 10, "orchestration_ms": 1,
+            "agent": {}, "judge": {}, "sessions": [],
+            "attribution": [
+                {"role": "judge", "turn_index": 2, "ran": "claude-code:alternate",
+                 "fell_through": [],
+                 "candidates": [
+                     {"harness": "codex", "harness_id": "codex", "status": "skipped",
+                      "available": false, "ran": false, "history_id": "the-attempt"},
+                     {"harness": "claude-code", "harness_id": "claude-code:alternate",
+                      "status": "ok", "available": true, "ran": true,
+                      "session_id": "54e7ad34", "history_id": "01a00d0f"},
+                 ],
+                 "history_file": "/state/oneharness/history/a-project/worker-skill-1.jsonl"},
+            ],
+        }))
+        .expect("telemetry");
+
+        let (emitter, recorder) = recorded();
+        publish_attribution(&emitter, Some(&telemetry));
+        let events = recorder.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::OneharnessSession);
+        assert_eq!(
+            events[0].payload,
+            json!({
+                "role": "judge",
+                "turn": 2,
+                "identity": "claude-code:alternate",
+                "session_id": "54e7ad34",
+                "history_id": "01a00d0f",
+                "history_dir": "/state/oneharness/history",
+                "history_project": "a-project",
+                "history_session": "worker-skill-1",
+            })
+            .as_object()
+            .cloned()
+            .expect("an object"),
+            "the pointer is built from the candidate that ran, not from an attempt"
+        );
+        assert_eq!(
+            events[0].artifacts,
+            vec![crate::event::Artifact {
+                id: "01a00d0f".to_string(),
+                kind: ONEHARNESS_SESSION_ARTIFACT.to_string(),
+                bytes: 0,
+            }]
+        );
+        // The label a consumer renders a transcript from is not on this event:
+        // it names where a conversation is, and is not a turn of one.
+        assert_eq!(
+            events[0].labels.extra.get(crate::event::SESSION_LABEL),
+            None
+        );
+    }
+
+    /// One attribution as telemetry, for the arms that turn on a single field.
+    fn one_attribution(attribution: Value) -> onejudge::Telemetry {
+        serde_json::from_value(json!({
+            "wall_ms": 1, "orchestration_ms": 0,
+            "agent": {}, "judge": {}, "sessions": [],
+            "attribution": [attribution],
+        }))
+        .expect("telemetry")
+    }
+
+    /// The candidate that ran and wrote a record, which the arms below keep
+    /// fixed so the field under test is the only thing that changed.
+    fn a_candidate_that_ran() -> Value {
+        json!({"harness": "claude-code", "harness_id": "claude-code", "status": "ok",
+               "available": true, "ran": true, "history_id": "01a00d0f"})
+    }
+
+    /// An invocation with no record to point at publishes nothing.
+    ///
+    /// Three ways there is none, all ordinary rather than exceptional: history
+    /// was off for that side, no candidate ran at all, and the candidate that ran
+    /// wrote no record.
+    #[test]
+    fn an_invocation_with_no_record_publishes_no_pointer() {
+        for telemetry in [
+            // History off: the invocation named no file.
+            one_attribution(
+                json!({"role": "agent", "turn_index": 1, "ran": "claude-code",
+                                   "fell_through": [], "candidates": [a_candidate_that_ran()]}),
+            ),
+            // Nothing ran: every candidate refused, records of their own or not.
+            one_attribution(json!({"role": "agent", "turn_index": 1, "fell_through": [],
+                                   "candidates": [{"harness": "codex", "harness_id": "codex",
+                                                   "status": "skipped", "available": false,
+                                                   "ran": false, "history_id": "the-attempt"}],
+                                   "history_file": "/state/h/p/s.jsonl"})),
+            // It ran, but wrote nothing to point at.
+            one_attribution(json!({"role": "agent", "turn_index": 1, "ran": "codex",
+                                   "fell_through": [],
+                                   "candidates": [{"harness": "codex", "harness_id": "codex",
+                                                   "status": "ok", "available": true,
+                                                   "ran": true}],
+                                   "history_file": "/state/h/p/s.jsonl"})),
+        ] {
+            let (emitter, recorder) = recorded();
+            publish_attribution(&emitter, Some(&telemetry));
+            assert!(
+                recorder.events().is_empty(),
+                "a pointer at nothing was published: {:?}",
+                recorder.events()
+            );
+        }
+    }
+
+    /// A `history_file` that is not a path inside oneharness's own store
+    /// publishes nothing — refused rather than tidied into three fields.
+    ///
+    /// This is the trust boundary, and what makes it one is what the three
+    /// fields become: a consumer joins them back together and opens the result on
+    /// its own host, so a component that climbs out of the store is an arbitrary
+    /// file read there rather than a transcript. Every path here decomposes
+    /// perfectly well into a store, a project and a session — which is exactly
+    /// why decomposing cannot be the check.
+    #[test]
+    fn a_history_file_that_could_escape_the_store_publishes_nothing() {
+        for history_file in [
+            // Climbing out of the store, from the middle and from the front.
+            "/state/h/p/../../../../etc/shadow.jsonl",
+            "/state/h/../../p/s.jsonl",
+            "../../../../etc/p/s.jsonl",
+            // Relative, so three fields anchored to whatever working directory
+            // the consumer happens to have rather than to a store.
+            "./p/s.jsonl",
+            "p/s.jsonl",
+            // Absolute, but with nothing named above the project — which
+            // publishes a `history_dir` that is empty or a bare root, and the
+            // consumer's resolver reads an empty one as unset and answers with
+            // the host's own default store, sending a reader to a stranger's
+            // transcripts rather than to none.
+            "/p/s.jsonl",
+            "/s.jsonl",
+            // Not a session file at all: three fields that open nothing, however
+            // neatly the path splits into them.
+            "/state/h/p/s.txt",
+            "/state/h/p/s",
+            "/state/h/p/.jsonl",
+        ] {
+            let telemetry = one_attribution(json!({
+                "role": "agent", "turn_index": 1, "ran": "claude-code", "fell_through": [],
+                "candidates": [a_candidate_that_ran()], "history_file": history_file,
+            }));
+            let (emitter, recorder) = recorded();
+            publish_attribution(&emitter, Some(&telemetry));
+            assert!(
+                recorder.events().is_empty(),
+                "{history_file:?} was published for a consumer to resolve: {:?}",
+                recorder.events()
+            );
+        }
     }
 
     /// A failure onejudge classified reaches the wire as that class; one it could
