@@ -222,44 +222,129 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
 /// events are all an operator gets: this member never settled and never reported
 /// a failure of its own — it was stopped — so the records of the turns it did
 /// take are the only account of what it was doing when it stopped.
+///
+/// **Which side had the conversation, and which one stalls.** The agent side
+/// runs `--control`, and the double answers a controlled turn rather than
+/// hanging on it — `fake:hang` is read off the argv, and a controlled turn's
+/// prompt arrives on stdin. So the agent takes its turn and its oneharness
+/// invocation reports, which is the conversation this journey reads back; the
+/// judge side is spawned with the task on its argv, hangs on it, and is what the
+/// watchdog finds. That asymmetry is the journey: one side accounted for, one
+/// side stopped mid-turn.
+///
+/// **The rule is the activity watchdog, and that is load-bearing rather than a
+/// preference.** Both rules condemn through the same arm, so either would drive
+/// the publication — but the heartbeat rule's window is *fixed*: the supervisor
+/// re-dates it every loop, so a deadline under the 500ms refresh cadence fires
+/// on the first tick and one over it never fires at all. Half a second, measured
+/// from the member's birth, is all a two-party member gets to start three real
+/// CLIs and have a turn — and `tests/e2e/liveness.rs`'s `single_sided_graph`
+/// records that chain missing that window by *seconds* on a CI runner, which is
+/// why both condemnation journeys there are single-sided. This one cannot be:
+/// only a two-party member publishes a pointer. Lost that race, the member is
+/// condemned having had no conversation at all, and the assertion below is
+/// vacuously red — which is exactly how it failed on `windows-latest`, with a
+/// stream carrying no `turn-started` to lose.
+///
+/// The activity rule has no such window. Its clock is quiet time since the
+/// member's own last event, and it condemns only a tree that two probes agree is
+/// idle — so a slow start clears it on the CPU the start itself is charged, and
+/// the rule cannot fire until the conversation it is meant to account for has
+/// both happened and gone quiet. `tests/e2e/liveness.rs` condemns a two-party
+/// member under this same shape, on every platform.
+///
+/// **The retry is how the precondition is reached, and it is
+/// `tests/e2e/liveness.rs`'s own answer to this** — see
+/// `a_condemned_member_leaves_no_descendant_running`, which reaches a live
+/// descendant the same way. A run where the member never spoke is a run that
+/// never reached the state under test, so it is run again rather than passed;
+/// the budget is what stops that from being patience without end, and it fails
+/// saying the member never had a conversation rather than going green on one
+/// that had none. Nothing about the account itself is retried: a member that
+/// spoke and then published no pointer is the failure, and it is asserted once.
 #[test]
 fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
-    let workspace = Workspace::new();
-    // The heartbeat deadline, tightened until the rule fires on a member whose
-    // turn never answers; the stall bound is left wide so the rule that fires is
-    // this one. The same shape `tests/e2e/liveness.rs` drives it under.
-    let held = bounds("0.05", "600");
-    let run = workspace.run_with(
-        &[
-            "run",
-            "./graph.yaml",
-            "--task",
-            "fake:hang after saying something worth reading back",
-            "--dir",
-            &workspace.dir().display().to_string(),
-        ],
-        &as_env(&held),
-    );
-    run.expect_code(1);
-    assert_eq!(run.of_kind("member-died").len(), 1, "{:?}", run.kinds());
-
-    let published = sessions(&run);
-    assert!(
-        !published.is_empty(),
-        "a condemned member accounted for nothing it had done: {:?}",
-        run.kinds()
-    );
-    for event in &published {
-        let path = resolve(&event["payload"]);
-        assert!(
-            read_record(&path, &event["artifacts"][0]["id"])["prompt"]
-                .as_str()
-                .is_some_and(|it| !it.is_empty()),
-            "the record a condemned member pointed at carries no conversation"
+    let give_up_at = std::time::Instant::now() + REACH_BUDGET;
+    for attempt in 1.. {
+        let workspace = Workspace::new();
+        // The stall bound, shortened to the one `tests/e2e/liveness.rs` condemns
+        // a two-party member under; the heartbeat is left wide so the rule that
+        // fires is this one.
+        let held = bounds("60", "2");
+        let run = workspace.run_with(
+            &[
+                "run",
+                "./graph.yaml",
+                "--task",
+                "fake:hang after saying something worth reading back",
+                "--dir",
+                &workspace.dir().display().to_string(),
+            ],
+            &as_env(&held),
         );
+        run.expect_code(1);
+        let died = run.of_kind("member-died");
+        assert_eq!(died.len(), 1, "{:?}", run.kinds());
+        assert_eq!(
+            died[0]["payload"]["rule"], "activity",
+            "another rule reached this member first, so the window this journey \
+             needs is no longer the one it runs under: {}",
+            died[0]["payload"]
+        );
+
+        // The conversation this journey is the account of, established before it
+        // is asked for: a member stopped before it ever spoke has nothing to
+        // account for, and a run that cannot tell that apart from one that lost
+        // the account reports the wrong failure.
+        if run.of_kind("turn-activity").is_empty() {
+            assert!(
+                std::time::Instant::now() < give_up_at,
+                "the member was condemned before it had a conversation at all, \
+                 across {attempt} runs — this journey asserts on the account of \
+                 a turn that happened, and never saw one: {:?}",
+                run.kinds()
+            );
+            continue;
+        }
+
+        let published = sessions(&run);
+        assert!(
+            !published.is_empty(),
+            "a condemned member accounted for nothing it had done: {:?}",
+            run.kinds()
+        );
+        // The side that ran, named by role: a condemned member's in-flight
+        // invocation is killed where it stands, and only POSIX's ask-then-compel
+        // teardown leaves it a moment to report at all — so what an operator is
+        // owed on every platform is the turn that *finished*, and this is that
+        // claim rather than "some pointer arrived".
+        assert!(
+            published
+                .iter()
+                .any(|event| event["payload"]["role"] == "agent"),
+            "the side that took a turn published nothing: {published:?}"
+        );
+        for event in &published {
+            let path = resolve(&event["payload"]);
+            assert!(
+                read_record(&path, &event["artifacts"][0]["id"])["prompt"]
+                    .as_str()
+                    .is_some_and(|it| !it.is_empty()),
+                "the record a condemned member pointed at carries no conversation"
+            );
+        }
+        assert_session_labels(&run);
+        return;
     }
-    assert_session_labels(&run);
 }
+
+/// How long the journey above may spend *reaching* a member that spoke before it
+/// stalled, before it gives up and says it never saw one.
+///
+/// A budget rather than a count, for the reason `tests/e2e/liveness.rs` gives its
+/// twin: what should be shared between hosts is the patience, not the number of
+/// attempts, and an attempt here costs a whole stall bound.
+const REACH_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Exactly the four kinds that name a turn carry a `session` label, and every
 /// other kind the run put on its stream carries none.
