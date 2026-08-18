@@ -27,7 +27,9 @@
 
 use std::path::PathBuf;
 
-use crate::support::{assert_session_labels, graph_with, until, Workspace};
+#[cfg(unix)]
+use crate::support::assert_session_labels;
+use crate::support::{graph_with, until, Workspace};
 
 /// One run whose member is parked on a controllable turn, and the run id an
 /// operator addresses it by.

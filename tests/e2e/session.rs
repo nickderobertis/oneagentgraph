@@ -18,9 +18,11 @@ use std::path::{Path, PathBuf};
 use oneharness_core::io::history;
 use serde_json::Value;
 
+#[cfg(unix)]
+use crate::support::make_executable;
 use crate::support::{
-    as_env, assert_session_labels, bounds, fake_harness, graph_with, make_executable,
-    two_party_graph, Run, Workspace, FAKE_HARNESS_KEY,
+    as_env, assert_session_labels, bounds, fake_harness, graph_with, two_party_graph, Run,
+    Workspace, FAKE_HARNESS_KEY,
 };
 
 /// The task these journeys run: one turn, completed, so a member reaches its

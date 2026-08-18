@@ -17,9 +17,11 @@
 // double under a second `ONEHARNESS_BIN_*` key, because a fall-through needs two
 // candidates and neither may be a real subscription.
 
+#[cfg(unix)]
+use crate::support::make_executable;
 use crate::support::{
-    fake_harness, graph_with, make_executable, two_party_graph, Workspace, CHAIN, FAKE_HARNESS_KEY,
-    FALLBACK_CHAIN, MIXED_CHAIN, NO_ENV,
+    fake_harness, graph_with, two_party_graph, Workspace, CHAIN, FAKE_HARNESS_KEY, FALLBACK_CHAIN,
+    MIXED_CHAIN, NO_ENV,
 };
 
 // llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
