@@ -534,7 +534,6 @@ fn publish_attribution(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry
 /// resolves it through that library rather than by splitting a string this crate
 /// chose the shape of. A path outside that layout is refused by
 /// [`location::Location::of`], so it publishes nothing.
-//
 // llmlint: ignore-block[changed_behavior_has_e2e] two arms below have no journey
 // because no input a user can give reaches them, and the one seam this suite
 // sanctions does not either: the `history_file` is oneharness's own, written by
@@ -625,7 +624,23 @@ mod location {
         /// an empty one as unset and answers with the host's own default store,
         /// sending a reader to a stranger's transcripts rather than to none.
         pub(super) fn of(file: &Path) -> Option<Self> {
-            if file.extension() != Some(std::ffi::OsStr::new(SESSION_EXTENSION)) {
+            // The name without oneharness's extension, which its own reader adds
+            // back: the two are checked against each other by a real run, in
+            // `tests/e2e/session.rs`. Stripped off the name here rather than read
+            // from `Path::file_stem`, because that pair disagrees about a bare
+            // `.jsonl` — `extension` calls it extensionless while `file_stem`
+            // hands the whole name back — and neither answer is the one a
+            // consumer needs.
+            let session = file
+                .file_name()?
+                .to_str()?
+                .strip_suffix(SESSION_EXTENSION)
+                .and_then(|named| named.strip_suffix('.'))?;
+            // An empty name is refused with the paths below rather than
+            // published: the consumer joins these three values back into a file
+            // name, and an empty session names the extension itself — a dot-file
+            // in the project directory rather than the transcript asked for.
+            if session.is_empty() {
                 return None;
             }
             let mut named: Vec<&str> = Vec::new();
@@ -651,10 +666,7 @@ mod location {
                 // for oneharness resolves the same way for the reader.
                 dir: file.parent()?.parent()?.to_str()?.to_string(),
                 project: (*project).to_string(),
-                // The name without oneharness's extension, which its own reader
-                // adds back: the two are checked against each other by a real
-                // run, in `tests/e2e/session.rs`.
-                session: file.file_stem()?.to_str()?.to_string(),
+                session: session.to_string(),
             })
         }
 
@@ -676,7 +688,6 @@ mod location {
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
-/// One payload struct as the map the wire carries.
 fn as_payload<T: serde::Serialize>(payload: &T) -> Map<String, Value> {
     match serde_json::to_value(payload) {
         Ok(Value::Object(map)) => map,
@@ -1203,7 +1214,6 @@ mod tests {
             // neatly the path splits into them.
             "/state/h/p/s.txt",
             "/state/h/p/s",
-            "/state/h/p/.jsonl",
         ] {
             let telemetry = one_attribution(json!({
                 "role": "agent", "turn_index": 1, "ran": "claude-code", "fell_through": [],
@@ -1214,6 +1224,32 @@ mod tests {
             assert!(
                 recorder.events().is_empty(),
                 "{history_file:?} was published for a consumer to resolve: {:?}",
+                recorder.events()
+            );
+        }
+    }
+
+    /// A `history_file` that names no session — the extension and nothing else —
+    /// publishes nothing rather than a pointer whose session name is empty.
+    ///
+    /// Its own arm because it is the one malformed path that decomposes into a
+    /// store and a project a consumer can reach: `onepipeline-ui`'s read API
+    /// joins the three values back into a file name, and an empty session names
+    /// the project directory's `.jsonl` dot-file rather than a transcript. The
+    /// second path is the same name a directory down, so what is refused is the
+    /// empty name itself and not a path too short to take apart.
+    #[test]
+    fn a_history_file_naming_no_session_publishes_nothing() {
+        for history_file in ["/state/h/p/.jsonl", "/state/oneharness/history/p/.jsonl"] {
+            let telemetry = one_attribution(json!({
+                "role": "agent", "turn_index": 1, "ran": "claude-code", "fell_through": [],
+                "candidates": [a_candidate_that_ran()], "history_file": history_file,
+            }));
+            let (emitter, recorder) = recorded();
+            publish_attribution(&emitter, Some(&telemetry));
+            assert!(
+                recorder.events().is_empty(),
+                "{history_file:?} was published with an empty session name: {:?}",
                 recorder.events()
             );
         }

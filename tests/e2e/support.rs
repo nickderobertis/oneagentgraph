@@ -544,7 +544,6 @@ pub fn labels(event: &Value) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-/// The kinds an envelope may carry a `session` label on, per `docs/contract.md`.
 pub const SESSION_LABELLED_KINDS: [&str; 4] = [
     "turn-started",
     "turn-activity",

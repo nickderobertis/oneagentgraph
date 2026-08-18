@@ -29,7 +29,6 @@ use crate::support::{
 /// settle and both sides of the conversation write a history record.
 const TASK: &str = "fake:complete-now: say something worth reading back";
 
-/// Every `oneharness-session` on a run's stream.
 fn sessions(run: &Run) -> Vec<Value> {
     run.of_kind("oneharness-session")
 }

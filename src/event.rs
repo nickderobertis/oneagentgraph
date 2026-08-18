@@ -242,7 +242,6 @@ pub fn session_label(stream: &str, member: &str) -> Option<String> {
     (!session.is_empty()).then(|| session.to_string())
 }
 
-/// One id under the consumer's alphabet, character for character.
 fn accepted(id: &str) -> String {
     id.chars()
         .map(|character| {
