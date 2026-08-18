@@ -1399,6 +1399,21 @@ fn persona_new_scaffolds_and_refuses_a_name_that_escapes_its_catalog() {
         "{}",
         created.stdout
     );
+    // What it says to do next is the whole point of scaffolding a file: the two
+    // fields to fill in, named in the spelling that ships, and the verb that
+    // checks the result.
+    for named in [
+        "crozier/corpus.yaml",
+        "system_prompt",
+        "user.persona",
+        "persona validate",
+    ] {
+        assert!(
+            created.stdout.contains(named),
+            "{named}: {}",
+            created.stdout
+        );
+    }
 
     // The scaffold is a real document: it validates as written.
     workspace
@@ -1422,6 +1437,12 @@ fn persona_new_scaffolds_and_refuses_a_name_that_escapes_its_catalog() {
 /// `persona validate` walks a catalog recursively, names the failing file, and
 /// skips the `_`-prefixed template a catalog scaffolds from.
 ///
+/// The failing file is one written in the spelling this crate used to define,
+/// because that is the migration interface: `persona validate` is where an
+/// operator points at a catalog of them, and the answer has to be enough to
+/// repair each file with. A role carrying nothing but its `system_prompt` sits
+/// beside it, passing — onejudge requires nothing more, and neither does this.
+///
 /// Ported from `test_recursive_validation_cli_reports_qualified_persona_name`.
 #[test]
 fn persona_validate_walks_a_catalog_and_names_the_failing_file() {
@@ -1432,9 +1453,13 @@ fn persona_validate_walks_a_catalog_and_names_the_failing_file() {
     );
     workspace.write(
         "catalog/good.yaml",
-        "agent:\n  instructions: role\nuser:\n  persona: lead\n",
+        "system_prompt: role\nuser:\n  persona: lead\n",
     );
-    workspace.write("catalog/nested/bad.yaml", "agent:\n  instructions: role\n");
+    workspace.write("catalog/role-only.yaml", "system_prompt: just the role\n");
+    workspace.write(
+        "catalog/nested/bad.yaml",
+        "agent:\n  name: bad\n  instructions: role\nuser:\n  persona: lead\n",
+    );
     let run = workspace.run(&["persona", "validate", "catalog"]);
     run.expect_code(2);
     // Joined rather than written with a `/`, because the qualified name is what
@@ -1445,11 +1470,17 @@ fn persona_validate_walks_a_catalog_and_names_the_failing_file() {
         "{}",
         run.stderr
     );
-    assert!(
-        run.stderr.contains("user.persona is required"),
-        "{}",
-        run.stderr
-    );
+    // The file, the key it refused, and the field to write instead — everything
+    // the rewrite needs, without reading a release note.
+    for named in [
+        "`agent.instructions`",
+        "`system_prompt`",
+        "`agent.name`",
+        "top-level `name`",
+        "no deprecation period",
+    ] {
+        assert!(run.stderr.contains(named), "{named}: {}", run.stderr);
+    }
     // The template is scaffolding, not a persona, so it is never judged.
     assert!(!run.stderr.contains("_template.yaml"), "{}", run.stderr);
 

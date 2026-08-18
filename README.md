@@ -57,6 +57,13 @@ members:
 `run` streams one envelope per line. Exit `0` means every member settled, `1`
 that one failed or died, `2` that the config is invalid.
 
+A member may name a **persona** — the role delta it layers over its base config,
+by built-in name (`persona: engineer`), by a name in the graph's own catalog, or
+by path. A persona is a onejudge config fragment: it is written in onejudge's own
+field names, and onejudge's schema decides what it may say. [The persona
+format](docs/persona-format.md) documents it, including the `agent:` block
+earlier versions defined, which is now refused with no compatibility path.
+
 When a member's turn goes the wrong way, `oneagentgraph interrupt RUN MEMBER
 --input "do this instead"` redirects it in place instead of discarding it the way
 `cancel` does. Exit `3` means there was no controllable turn in flight, and says

@@ -15,10 +15,12 @@
 // double, classifies its refusal, and falls through. Nothing between them is
 // stubbed, and no journey may widen this to a second seam.
 
-// Journeys are modules, and each reaches for a different part of this support
-// surface; an unused-here helper is used two files over, so `dead_code` would
-// fire on the shared vocabulary rather than on anything unused.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "journeys are modules, and each reaches for a different part of this support surface; \
+              an unused-here helper is used two files over, so `dead_code` would fire on the \
+              shared vocabulary rather than on anything unused"
+)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -314,7 +316,7 @@ pub const MIXED_CHAIN: &str =
 /// The onejudge base every member merges its persona onto.
 pub const BASE: &str = concat!(
     "provider:\n  kind: oneharness\n",
-    "agent:\n  instructions: |\n    Standing bar: verify before you claim done.\n",
+    "system_prompt: |\n  Standing bar: verify before you claim done.\n",
     "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
 );
 

@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 
+use oneagentgraph::persona::MEMBER_OWNED;
+
 use crate::support::{
     fake_harness, fake_provider, graph_with, labels, oneharness_bin, single_sided_graph,
     two_party_graph, Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
@@ -1467,7 +1469,7 @@ fn the_base_preamble_and_the_persona_role_both_reach_the_agent() {
     workspace.write(
         "roles/lead.yaml",
         concat!(
-            "agent:\n  name: lead\n  instructions: |\n    Role marker: you lead.\n",
+            "name: lead\nsystem_prompt: |\n  Role marker: you lead.\n",
             "user:\n  persona: |\n    Supervisor marker: push hard.\n",
         ),
     );
@@ -1516,7 +1518,7 @@ fn a_personas_own_bar_is_enforced_beside_the_bases_rather_than_instead_of_it() {
             "roles/lead.yaml",
             &format!(
                 concat!(
-                    "agent:\n  name: lead\n  instructions: |\n    Role marker: you lead.\n",
+                    "name: lead\nsystem_prompt: |\n  Role marker: you lead.\n",
                     "user:\n  persona: |\n    Supervisor marker: push hard.\n",
                     "  done_when: \"Role bar: every finding cites the code it names\"\n{}",
                 ),
@@ -1686,7 +1688,7 @@ fn a_command_judge_supervises_through_the_split_provider() {
         "base.yaml",
         concat!(
             "provider:\n  kind: oneharness\n",
-            "agent:\n  instructions: |\n    Standing bar: verify before you claim done.\n",
+            "system_prompt: |\n  Standing bar: verify before you claim done.\n",
             "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
             "evals:\n",
             "  - criterion: \"the change is well-scoped\"\n    kind: numeric\n    scale: [1, 5]\n",
@@ -1729,33 +1731,38 @@ fn a_member_with_no_task_refuses_before_it_launches() {
     );
 }
 
-/// A persona that does not satisfy the delta contract refuses the run, naming
-/// what is wrong — before a paid turn is spent on it.
+/// A persona a member cannot run under refuses the run, naming what is wrong —
+/// before a paid turn is spent on it.
 ///
 /// Ported from `test_dispatch_unknown_persona_raises` and
 /// `test_dispatch_rejects_unsafe_persona_names`.
 #[test]
 fn an_unusable_persona_refuses_the_run_before_anything_starts() {
     let workspace = Workspace::new();
-    workspace.write(
-        "roles/empty.yaml",
-        "agent:\n  instructions: '  '\nuser:\n  persona: ''\n",
-    );
     let cases = [
-        ("./roles/empty.yaml", "agent.instructions is required"),
         ("./roles/nowhere.yaml", "cannot read"),
-        ("./roles/typo.yaml", "unknown field"),
+        // A key onejudge does not have, refused by onejudge's own schema: this
+        // crate keeps no second copy of it to be stricter than.
+        ("./roles/typo.yaml", "unknown field `system_promt`"),
         // Replacing the operator's shared review bar with nothing at all is the
         // silent drop said out loud, and is refused as the mistake it is.
         (
             "./roles/replaces-nothing.yaml",
             "names nothing to replace the base's bar with",
         ),
+        // And the flag that says so is this crate's own key, so a value that is
+        // not a boolean is refused by its own name rather than by a serde trace
+        // from a schema that has never heard of it.
+        ("./roles/flag.yaml", "must be true or false"),
     ];
-    workspace.write("roles/typo.yaml", "agent:\n  instrucions: typo\n");
+    workspace.write("roles/typo.yaml", "system_promt: typo\n");
     workspace.write(
         "roles/replaces-nothing.yaml",
-        "agent:\n  instructions: r\nuser:\n  persona: p\n  done_when_replaces_base: true\n",
+        "system_prompt: r\nuser:\n  persona: p\n  done_when_replaces_base: true\n",
+    );
+    workspace.write(
+        "roles/flag.yaml",
+        "system_prompt: r\nuser:\n  persona: p\n  done_when_replaces_base: yes please\n",
     );
     for (reference, expected) in cases {
         workspace.graph(
@@ -1766,6 +1773,109 @@ fn an_unusable_persona_refuses_the_run_before_anything_starts() {
         run.expect_code(2);
         assert!(run.stderr.contains(expected), "{reference}: {}", run.stderr);
     }
+}
+
+/// **Every** key the member's own launch decides is refused where its author
+/// wrote it: the run stops before a paid turn, naming the key and what owns it
+/// instead.
+///
+/// Driven from `MEMBER_OWNED` rather than a list typed out here, so a key this
+/// crate starts refusing cannot arrive without a journey covering it. What the
+/// document gives the key is beside the point — the key alone earns the refusal,
+/// before onejudge's own schema ever reads the fragment — so one shape of document
+/// covers all of them.
+#[test]
+fn a_persona_naming_a_key_the_member_owns_refuses_the_run() {
+    let workspace = Workspace::new();
+    for (key, owner) in MEMBER_OWNED {
+        let file = format!("roles/{key}.yaml");
+        workspace.write(
+            &file,
+            &format!("system_prompt: r\nuser:\n  persona: p\n{key}: mine\n"),
+        );
+        workspace.graph(
+            &two_party_graph(&fake_harness(), NO_ENV)
+                .replace("persona: engineer", &format!("persona: ./{file}")),
+        );
+        let run = workspace.run_task("fake:complete-now: never gets here");
+        run.expect_code(2);
+        // The file to repair, the key that is wrong, and what decides it instead.
+        assert!(run.stderr.contains(&file), "{key}: {}", run.stderr);
+        assert!(
+            run.stderr
+                .contains(&format!("`{key}` is not a persona key")),
+            "{key}: {}",
+            run.stderr
+        );
+        assert!(run.stderr.contains(owner), "{key}: {}", run.stderr);
+        assert!(
+            run.stdout.is_empty(),
+            "{key}: a refusal must not read as an event stream"
+        );
+    }
+}
+
+/// The spelling this crate used to define does not load when a graph runs
+/// either, and the refusal is the whole migration: it names the file, the key it
+/// refused, and the onejudge field to write instead.
+///
+/// A member is where a persona is *used*, so this is the path an operator hits
+/// first — and there is nothing behind it. No alias, no flag, no environment
+/// variable: the run refuses, and produces no member at all.
+#[test]
+fn the_previous_persona_spelling_refuses_the_run_and_says_how_to_repair_it() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "roles/lead.yaml",
+        concat!(
+            "agent:\n  name: lead\n  instructions: |\n    Role marker: you lead.\n",
+            "user:\n  persona: |\n    Supervisor marker: push hard.\n",
+        ),
+    );
+    workspace.graph(
+        &two_party_graph(&fake_harness(), NO_ENV)
+            .replace("persona: engineer", "persona: ./roles/lead.yaml"),
+    );
+
+    let refused = workspace.run_task("fake:complete-now: never gets here");
+    refused.expect_code(2);
+    for named in [
+        "roles/lead.yaml",
+        "`agent.instructions`",
+        "`system_prompt`",
+        "`agent.name`",
+        "top-level `name`",
+        "no deprecation period",
+    ] {
+        assert!(
+            refused.stderr.contains(named),
+            "{named}: {}",
+            refused.stderr
+        );
+    }
+    assert!(
+        refused.stdout.is_empty(),
+        "a refusal must not read as an event stream: no member was produced"
+    );
+
+    // A base config is a onejudge config for the same reason, so the preamble
+    // this crate used to read out of an `agent:` block there is refused too,
+    // rather than translated a second time on the other side of the merge.
+    workspace.write(
+        "roles/lead.yaml",
+        "system_prompt: |\n  Role marker: you lead.\n",
+    );
+    workspace.write(
+        "base.yaml",
+        &BASE.replace(
+            "system_prompt: |\n  Standing bar",
+            "agent:\n  instructions: |\n    Standing bar",
+        ),
+    );
+    let base = workspace.run_task("fake:complete-now: never gets here");
+    base.expect_code(2);
+    assert!(base.stderr.contains("base.yaml"), "{}", base.stderr);
+    assert!(base.stderr.contains("`system_prompt`"), "{}", base.stderr);
 }
 
 /// A graph whose member resolves its `persona` name against a catalog at
@@ -1807,7 +1917,7 @@ fn a_graph_local_persona_catalog_is_dispatchable_by_name() {
     workspace.write(
         "personas/crozier/crozier-corpus.yaml",
         concat!(
-            "agent:\n  instructions: |\n    Catalog marker: mind the corpus.\n",
+            "system_prompt: |\n  Catalog marker: mind the corpus.\n",
             "user:\n  persona: |\n    Catalog supervisor: check the citations.\n",
         ),
     );
@@ -1864,7 +1974,7 @@ fn a_catalog_is_resolved_against_the_graph_document_and_an_absolute_one_as_writt
     let persona = |marker: &str| {
         format!(
             concat!(
-                "agent:\n  instructions: |\n    {} role.\n",
+                "system_prompt: |\n  {} role.\n",
                 "user:\n  persona: |\n    {} supervisor.\n",
             ),
             marker, marker
@@ -1969,7 +2079,7 @@ fn a_persona_name_in_both_catalogs_refuses_the_run() {
     workspace.write(
         "personas/reviewer.yaml",
         concat!(
-            "agent:\n  instructions: |\n    Local marker: our own reviewer.\n",
+            "system_prompt: |\n  Local marker: our own reviewer.\n",
             "user:\n  persona: |\n    Local supervisor: our own bar.\n",
         ),
     );
@@ -2015,7 +2125,7 @@ fn a_catalog_lookup_that_cannot_be_honoured_refuses_the_run() {
     let workspace = Workspace::new();
     workspace.write(
         "personas/ours.yaml",
-        "agent:\n  instructions: ours\nuser:\n  persona: ours\n",
+        "system_prompt: ours\nuser:\n  persona: ours\n",
     );
     std::fs::create_dir_all(workspace.at("personas/adirectory.yaml")).expect("not a persona");
     for (graph, expected) in [
@@ -2106,7 +2216,7 @@ fn a_single_sided_member_takes_its_persona_from_the_catalog_too() {
     };
     workspace.write(
         "personas/crozier/crozier-corpus.yaml",
-        "agent:\n  instructions: corpus role\nuser:\n  persona: corpus supervisor\n",
+        "system_prompt: corpus role\nuser:\n  persona: corpus supervisor\n",
     );
     workspace.graph(&single_sided("crozier/crozier-corpus"));
 
@@ -2119,7 +2229,7 @@ fn a_single_sided_member_takes_its_persona_from_the_catalog_too() {
 
     workspace.write(
         "personas/reviewer.yaml",
-        "agent:\n  instructions: ours\nuser:\n  persona: ours\n",
+        "system_prompt: ours\nuser:\n  persona: ours\n",
     );
     workspace.graph(&single_sided("reviewer"));
     let refused = workspace.run_task("fake:complete-now: never gets here");
@@ -2155,16 +2265,178 @@ fn a_catalog_entry_that_cannot_be_described_is_reported_rather_than_missed() {
     assert!(refused.stderr.contains("lead.yaml"), "{}", refused.stderr);
 }
 
-/// A graph whose base config merges to something incomplete refuses, naming the
-/// field the base never supplied.
+/// A persona carrying nothing but the role runs a member whose judge is a
+/// `command` provider — the case that has no simulated user at all.
+///
+/// This is what a persona being a onejudge config fragment buys: onejudge is
+/// content with a config that names no `user`, so this crate is too. An external
+/// judge decides completion, so a simulated-user bar here would be a review bar
+/// nothing reads — and the journey asserts none was invented on the member's
+/// behalf, by reading the effective config the dispatch was actually handed.
 #[test]
-fn an_incomplete_base_config_refuses_the_run() {
+fn a_role_only_persona_runs_a_member_whose_judge_is_a_command() {
     let workspace = Workspace::new();
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 2\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: ./roles/observer.yaml\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      command: [the provider below]\n",
+            "    mode: bypass\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            ("members.worker.judge.command.0", fake_provider()),
+        ],
+    ));
+    // A base with no supervisor of its own, and a persona that is one field.
     workspace.write("base.yaml", "provider:\n  kind: oneharness\n");
-    let run = workspace.run_task("fake:complete-now: incomplete base");
-    run.expect_code(2);
-    assert!(run.stderr.contains("user.done_when"), "{}", run.stderr);
+    workspace.write(
+        "roles/observer.yaml",
+        "system_prompt: |\n  Observer marker: judge the surface, do not restate it.\n",
+    );
 
+    let record = workspace.at("prompts.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: role only fake:record-prompt={}",
+        record.display()
+    ));
+    run.expect_code(0);
+    assert_eq!(
+        run.of_kind("member-settled")[0]["payload"]["completed"],
+        serde_json::json!(true)
+    );
+    assert!(
+        std::fs::read_to_string(&record)
+            .expect("prompts")
+            .contains("Observer marker: judge the surface, do not restate it."),
+        "the role never reached the agent"
+    );
+
+    // And no supervisor was invented for it: to onejudge an empty `user:` is a
+    // simulated user with an empty persona, not the absent one the base asked
+    // for. The two are told apart from outside, in what the member settled on — a
+    // supervised run ends because a supervisor said it had, and settles carrying
+    // that supervisor's own reason, while a single-turn run has nobody to carry a
+    // reason from.
+    assert_eq!(
+        run.of_kind("member-settled")[0]["payload"]["completion_reason"],
+        serde_json::Value::Null,
+        "a simulated user was invented and ended the run: {}",
+        run.stdout
+    );
+}
+
+/// A member's own `max_turns` lands on a base that wrote `user:` with nothing
+/// under it, which is the base asking for no simulated user at all.
+///
+/// That base is valid onejudge, and a role-only persona brings no `user` to
+/// normalize it, so the cap is the first thing that has to write into a block
+/// nobody made. It makes one — the alternative was a panic on a configuration a
+/// member could have run, reached through the CLI with no error a caller could
+/// act on.
+#[test]
+fn a_member_cap_lands_on_a_base_whose_user_block_is_empty() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 2\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: ./roles/observer.yaml\n",
+            "    max_turns: 2\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    // `user:` with nothing under it, which onejudge reads as no supervisor.
+    workspace.write("base.yaml", "provider:\n  kind: oneharness\nuser:\n");
+    workspace.write(
+        "roles/observer.yaml",
+        "system_prompt: |\n  Observer marker: judge the surface, do not restate it.\n",
+    );
+
+    let record = workspace.at("prompts.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: the capped member fake:record-prompt={}",
+        record.display()
+    ));
+    run.expect_code(0);
+    assert_eq!(
+        run.of_kind("member-settled")[0]["payload"]["completed"],
+        serde_json::json!(true),
+        "{}",
+        run.stdout
+    );
+    // The cap made the supervisor the empty block had none of, and the run went
+    // through it: a member that settled on a supervisor's own reason is a member
+    // whose `user:` block exists and holds the cap that made it.
+    assert_eq!(
+        run.of_kind("member-settled")[0]["payload"]["completion_reason"],
+        serde_json::json!("fake supervisor verified completion"),
+        "{}",
+        run.stdout
+    );
+    // And filling the block in cost nothing the persona brought.
+    assert!(
+        std::fs::read_to_string(&record)
+            .expect("prompts")
+            .contains("Observer marker: judge the surface, do not restate it."),
+        "the role never reached the agent"
+    );
+}
+
+/// A persona file with nothing in it layers nothing, and still runs the member on
+/// its base alone.
+///
+/// The emptiest document an author can point a member at is not a refusal: what a
+/// config must carry is onejudge's to say, and onejudge asks for none of it. So
+/// the journey asserts what each side was *handed* — the preamble the base wrote,
+/// and the review bar it centralized — because a persona that layers nothing and a
+/// persona that quietly blanks something are indistinguishable from an exit code.
+#[test]
+fn an_empty_persona_layers_nothing_and_still_runs_the_member() {
+    let workspace = Workspace::new();
+    workspace.write("roles/blank.yaml", "");
+    workspace.graph(
+        &two_party_graph(&fake_harness(), NO_ENV)
+            .replace("persona: engineer", "persona: ./roles/blank.yaml"),
+    );
+
+    let record = workspace.at("prompts.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: the base alone fake:record-prompt={}",
+        record.display()
+    ));
+    run.expect_code(0);
+    // Both sides record what they were prompted with, so the base's own preamble
+    // and its own bar are read where they land rather than from the config.
+    let delivered = std::fs::read_to_string(&record).expect("prompts");
+    assert!(
+        delivered.contains("Standing bar: verify before you claim done."),
+        "the base's own preamble never reached the agent: {delivered}"
+    );
+    assert!(
+        delivered.contains("the task is complete"),
+        "the base's own review bar never reached the supervisor: {delivered}"
+    );
+    // A document that names no `name` is labelled by the file it was read from,
+    // so the events still say which role ran.
+    assert_eq!(
+        labels(&run.of_kind("member-started")[0])["persona"],
+        "blank"
+    );
+}
+
+/// A base config the merge will not compose with is refused before a paid turn,
+/// with what was found.
+#[test]
+fn a_base_config_the_merge_cannot_accept_refuses_the_run() {
+    let workspace = Workspace::new();
     // A bar of the wrong shape is refused with what was found, rather than read
     // as a base that set none — which would run the dispatch under whatever the
     // persona brought and no shared review bar at all.
@@ -2180,6 +2452,46 @@ fn an_incomplete_base_config_refuses_the_run() {
             .contains("`user.done_when` must be a string, got a list"),
         "{}",
         wrong_shape.stderr
+    );
+
+    // The shared preamble is the other value the composition rests on, and is
+    // read the same way: a `system_prompt:` of another shape is refused with what
+    // was found rather than read as a base that set none, which would dispatch
+    // under the persona's role and no standing bar at all.
+    workspace.write(
+        "base.yaml",
+        &BASE.replace(
+            "system_prompt: |\n  Standing bar: verify before you claim done.\n",
+            "system_prompt: [a, b]\n",
+        ),
+    );
+    let no_preamble = workspace.run_task("fake:complete-now: a preamble of the wrong shape");
+    no_preamble.expect_code(2);
+    assert!(
+        no_preamble
+            .stderr
+            .contains("`system_prompt` must be a string, got a list"),
+        "{}",
+        no_preamble.stderr
+    );
+
+    // A base is external input exactly as a persona is, and onejudge's own schema
+    // decides both: a key it does not have is refused here rather than layered
+    // over, written into the effective config, and first noticed by the member
+    // dying a paid turn later.
+    workspace.write("base.yaml", &format!("{BASE}system_promt: typo\n"));
+    let not_a_config = workspace.run_task("fake:complete-now: a key onejudge does not have");
+    not_a_config.expect_code(2);
+    for named in ["base.yaml", "unknown field `system_promt`"] {
+        assert!(
+            not_a_config.stderr.contains(named),
+            "{named}: {}",
+            not_a_config.stderr
+        );
+    }
+    assert!(
+        not_a_config.stdout.is_empty(),
+        "a refusal must not read as an event stream"
     );
 }
 

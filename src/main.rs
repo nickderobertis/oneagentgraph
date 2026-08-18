@@ -283,10 +283,9 @@ const VALIDATE_TASK: &str = "validate: no task is run";
 ///
 /// Everything `run` does short of launching: the graph parses, its schema holds,
 /// its `deps` can be satisfied, and **every member's invocation is built** — so a
-/// persona that does not satisfy the delta contract, a base that merges to an
-/// incomplete config, and a model paired with a chain of two harness families are
-/// all found here rather than after a paid turn has been spent on the members
-/// that did start.
+/// persona the crate cannot read, a base the merge cannot compose with, and a
+/// model paired with a chain of two harness families are all found here rather
+/// than after a paid turn has been spent on the members that did start.
 fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     let graph = preflight(&args.graph, &[], env, Some(VALIDATE_TASK))?;
     println!("{}: {} member(s) OK", graph.name, graph.members.len());
@@ -715,7 +714,7 @@ fn persona(args: &PersonaArgs) -> Result<i32, Error> {
                 Error::InvalidConfig(format!("cannot write {}: {err}", path.display()))
             })?;
             println!(
-                "Created {} — fill in agent.instructions and user.persona, then run \
+                "Created {} — fill in system_prompt and user.persona, then run \
                  `oneagentgraph persona validate {}`.",
                 path.display(),
                 path.display()
@@ -729,18 +728,13 @@ fn persona(args: &PersonaArgs) -> Result<i32, Error> {
                     Error::InvalidConfig(format!("cannot read {}: {err}", file.display()))
                 })?;
                 let name = file.display().to_string();
-                match Persona::parse(&document, &name) {
-                    Ok(persona) => {
-                        let errors = persona.validate();
-                        for error in &errors {
-                            eprintln!("{name}: {error}");
-                        }
-                        failures += usize::from(!errors.is_empty());
-                    }
-                    Err(err) => {
-                        eprintln!("{err}");
-                        failures += 1;
-                    }
+                // Reading the document *is* validating it: a persona is a
+                // onejudge config fragment, and every rule it has to satisfy —
+                // onejudge's own, and this crate's two keys — is checked on the
+                // way in. There is no second pass to run here.
+                if let Err(err) = Persona::parse(&document, &name) {
+                    eprintln!("{err}");
+                    failures += 1;
                 }
             }
             if failures > 0 {

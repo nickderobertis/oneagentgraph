@@ -40,6 +40,9 @@ include = [
   "/README.md",
   "/LICENSE",
   "/docs/contract.md",
+  # Read the same way, by `tests/persona_format.rs`: the published persona
+  # format drives the types it documents.
+  "/docs/persona-format.md",
 ]
 
 [[bin]]

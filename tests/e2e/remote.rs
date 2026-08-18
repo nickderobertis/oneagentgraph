@@ -24,7 +24,7 @@ use crate::support::{fake_harness, two_party_graph, Workspace, NO_ENV};
 /// The onejudge base one of these journeys serves instead of writing to disk.
 const SERVED_BASE: &str = concat!(
     "provider:\n  kind: oneharness\n",
-    "agent:\n  instructions: |\n    Standing bar: verify before you claim done.\n",
+    "system_prompt: |\n  Standing bar: verify before you claim done.\n",
     "    Served marker: this base arrived over https.\n",
     "user:\n  done_when: \"the task is complete\"\n  max_turns: 4\n",
 );

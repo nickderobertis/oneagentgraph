@@ -18,7 +18,7 @@ Rules that hold as this grows:
 | --- | --- |
 | `config` | the graph YAML schema, and what `validate` can check without launching |
 | `resolve` | a `ConfigRef` → bytes, content-addressed for the run record |
-| `persona` | the persona delta schema, the merge onto a onejudge base, the shipped catalog |
+| `persona` | reading a persona as a onejudge config fragment (`docs/persona-format.md`), the merge onto a onejudge base, the shipped catalog |
 | `invoke` | one member's launch, its generated configs, and the model pairing rule |
 | `member` | a single-sided member's child process: its stream, its watchdogs, its death |
 | `judge` | a two-party member, driven through onejudge's library in this process |
