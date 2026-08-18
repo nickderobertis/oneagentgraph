@@ -2317,16 +2317,76 @@ fn a_role_only_persona_runs_a_member_whose_judge_is_a_command() {
 
     // And no supervisor was invented for it: to onejudge an empty `user:` is a
     // simulated user with an empty persona, not the absent one the base asked
-    // for. The document the dispatch ran on is read for this one property because
-    // it is the only place an *absence* shows — a supervisor that was never
-    // created prompts nobody and publishes no turn, so there is no stream for it
-    // to be missing from.
-    let effective = workspace.member_file("worker", "onejudge.yaml");
-    let config: serde_json::Value =
-        serde_norway::from_str(&effective).expect("the effective config is YAML");
+    // for. The two are told apart from outside, in what the member settled on — a
+    // supervised run ends because a supervisor said it had, and settles carrying
+    // that supervisor's own reason, while a single-turn run has nobody to carry a
+    // reason from.
+    assert_eq!(
+        run.of_kind("member-settled")[0]["payload"]["completion_reason"],
+        serde_json::Value::Null,
+        "a simulated user was invented and ended the run: {}",
+        run.stdout
+    );
+}
+
+/// A member's own `max_turns` lands on a base that wrote `user:` with nothing
+/// under it, which is the base asking for no simulated user at all.
+///
+/// That base is valid onejudge, and a role-only persona brings no `user` to
+/// normalize it, so the cap is the first thing that has to write into a block
+/// nobody made. It makes one — the alternative was a panic on a configuration a
+/// member could have run, reached through the CLI with no error a caller could
+/// act on.
+#[test]
+fn a_member_cap_lands_on_a_base_whose_user_block_is_empty() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 2\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: ./roles/observer.yaml\n",
+            "    max_turns: 2\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    // `user:` with nothing under it, which onejudge reads as no supervisor.
+    workspace.write("base.yaml", "provider:\n  kind: oneharness\nuser:\n");
+    workspace.write(
+        "roles/observer.yaml",
+        "system_prompt: |\n  Observer marker: judge the surface, do not restate it.\n",
+    );
+
+    let record = workspace.at("prompts.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: the capped member fake:record-prompt={}",
+        record.display()
+    ));
+    run.expect_code(0);
+    assert_eq!(
+        run.of_kind("member-settled")[0]["payload"]["completed"],
+        serde_json::json!(true),
+        "{}",
+        run.stdout
+    );
+    // The cap made the supervisor the empty block had none of, and the run went
+    // through it: a member that settled on a supervisor's own reason is a member
+    // whose `user:` block exists and holds the cap that made it.
+    assert_eq!(
+        run.of_kind("member-settled")[0]["payload"]["completion_reason"],
+        serde_json::json!("fake supervisor verified completion"),
+        "{}",
+        run.stdout
+    );
+    // And filling the block in cost nothing the persona brought.
     assert!(
-        config.get("user").is_none(),
-        "a simulated user was invented: {effective}"
+        std::fs::read_to_string(&record)
+            .expect("prompts")
+            .contains("Observer marker: judge the surface, do not restate it."),
+        "the role never reached the agent"
     );
 }
 

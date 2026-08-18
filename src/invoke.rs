@@ -328,11 +328,18 @@ fn onejudge(
     map.insert("provider".into(), provider);
     map.insert("session".into(), Value::String(context.session.to_string()));
     if let Some(cap) = member.max_turns {
-        map.entry("user")
-            .or_insert_with(|| Value::Object(serde_json::Map::new()))
-            .as_object_mut()
-            .expect("user is a mapping after the merge")
-            .insert("max_turns".into(), Value::Number(cap.into()));
+        // The block the cap is written into, made rather than found. A base may
+        // write `user:` with nothing under it — to onejudge that is a run with no
+        // simulated user at all, and a perfectly good config — and a persona that
+        // brings no `user` of its own leaves it exactly as the base wrote it. So
+        // what is there is not always a mapping, and assuming one turned a
+        // configuration a member could have run into a panic.
+        let mut user = match map.get("user") {
+            Some(Value::Object(user)) => user.clone(),
+            _ => serde_json::Map::new(),
+        };
+        user.insert("max_turns".into(), Value::Number(cap.into()));
+        map.insert("user".into(), Value::Object(user));
     }
 
     let config_path = context.scratch.join(ONEJUDGE_CONFIG_FILE);
