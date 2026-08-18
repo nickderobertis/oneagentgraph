@@ -225,7 +225,7 @@ impl EventKind {
 // are already inside this alphabet by the time they arrive, by `RunId::mint` and
 // by `MemberName::parse`. Driven in this module against the values a future
 // producer could hand it; the half that *is* reachable is
-// `tests/e2e/session.rs::a_conversation_stays_within_the_bound_however_long_the_run_is_named`.
+// `tests/e2e/session.rs::two_members_of_an_over_long_run_are_still_two_conversations`.
 #[must_use]
 pub fn session_label(stream: &str, member: &str) -> Option<String> {
     let stream = accepted(stream);
