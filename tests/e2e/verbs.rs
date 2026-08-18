@@ -1399,6 +1399,21 @@ fn persona_new_scaffolds_and_refuses_a_name_that_escapes_its_catalog() {
         "{}",
         created.stdout
     );
+    // What it says to do next is the whole point of scaffolding a file: the two
+    // fields to fill in, named in the spelling that ships, and the verb that
+    // checks the result.
+    for named in [
+        "crozier/corpus.yaml",
+        "system_prompt",
+        "user.persona",
+        "persona validate",
+    ] {
+        assert!(
+            created.stdout.contains(named),
+            "{named}: {}",
+            created.stdout
+        );
+    }
 
     // The scaffold is a real document: it validates as written.
     workspace

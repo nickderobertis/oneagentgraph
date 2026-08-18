@@ -2317,18 +2317,16 @@ fn a_role_only_persona_runs_a_member_whose_judge_is_a_command() {
 
     // And no supervisor was invented for it: to onejudge an empty `user:` is a
     // simulated user with an empty persona, not the absent one the base asked
-    // for.
+    // for. The document the dispatch ran on is read for this one property because
+    // it is the only place an *absence* shows — a supervisor that was never
+    // created prompts nobody and publishes no turn, so there is no stream for it
+    // to be missing from.
     let effective = workspace.member_file("worker", "onejudge.yaml");
     let config: serde_json::Value =
         serde_norway::from_str(&effective).expect("the effective config is YAML");
     assert!(
         config.get("user").is_none(),
         "a simulated user was invented: {effective}"
-    );
-    assert_eq!(
-        config["system_prompt"].as_str(),
-        Some("Observer marker: judge the surface, do not restate it."),
-        "{effective}"
     );
 }
 
@@ -2337,10 +2335,9 @@ fn a_role_only_persona_runs_a_member_whose_judge_is_a_command() {
 ///
 /// The emptiest document an author can point a member at is not a refusal: what a
 /// config must carry is onejudge's to say, and onejudge asks for none of it. So
-/// the journey asserts the base reached the agent *unaltered* — the preamble it
-/// wrote and the review bar it centralized — because a persona that layers nothing
-/// and a persona that quietly blanks something are indistinguishable from an exit
-/// code.
+/// the journey asserts what each side was *handed* — the preamble the base wrote,
+/// and the review bar it centralized — because a persona that layers nothing and a
+/// persona that quietly blanks something are indistinguishable from an exit code.
 #[test]
 fn an_empty_persona_layers_nothing_and_still_runs_the_member() {
     let workspace = Workspace::new();
@@ -2356,16 +2353,16 @@ fn an_empty_persona_layers_nothing_and_still_runs_the_member() {
         record.display()
     ));
     run.expect_code(0);
+    // Both sides record what they were prompted with, so the base's own preamble
+    // and its own bar are read where they land rather than from the config.
+    let delivered = std::fs::read_to_string(&record).expect("prompts");
     assert!(
-        std::fs::read_to_string(&record)
-            .expect("prompts")
-            .contains("Standing bar: verify before you claim done."),
-        "the base's own preamble never reached the agent"
+        delivered.contains("Standing bar: verify before you claim done."),
+        "the base's own preamble never reached the agent: {delivered}"
     );
-    let effective = workspace.member_file("worker", "onejudge.yaml");
     assert!(
-        effective.contains("the task is complete"),
-        "the base's own review bar was not what the member ran under: {effective}"
+        delivered.contains("the task is complete"),
+        "the base's own review bar never reached the supervisor: {delivered}"
     );
     // A document that names no `name` is labelled by the file it was read from,
     // so the events still say which role ran.

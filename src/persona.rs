@@ -418,7 +418,6 @@ pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, 
     let base_bar = base_review_bar(map, base_origin)?;
     validate_base(map, base_origin)?;
 
-    // The preamble and the role, in that order, both kept.
     let role = persona
         .fragment
         .get("system_prompt")
