@@ -11,7 +11,9 @@
 
 use oneagentgraph::config::FIRST_EVENT_FILTER_VERSION;
 
-use crate::support::{fake_harness, labels, two_party_graph, until, Run, Workspace, NO_ENV};
+use crate::support::{
+    assert_session_labels, fake_harness, labels, two_party_graph, until, Run, Workspace, NO_ENV,
+};
 
 /// The task every journey here runs: one turn, completed, so the stream carries
 /// the whole lifecycle a filter then narrows.
@@ -510,4 +512,50 @@ fn a_text_rendering_shows_the_filtered_stream_and_nothing_else() {
             "the rendering lost {kept}: {lines:?}"
         );
     }
+}
+
+/// A filtered stream still names the conversation of the turns it kept, and a
+/// filter that drops the turns takes their conversation with them.
+///
+/// The two happen at one seam: an envelope's labels are stamped with its
+/// conversation and then handed to the filter that decides whether it is written
+/// at all. What a consumer receives after narrowing has to still be renderable as
+/// a transcript — and the stream has to still be gapless, because a suppressed
+/// envelope must not take a `seq` with it, which is the promise the label would
+/// otherwise be read against.
+#[test]
+fn a_filtered_stream_still_names_the_conversation_of_the_turns_it_kept() {
+    let workspace = Workspace::new();
+    let kept = run_filtered(
+        &workspace,
+        &["--event-filter", r#"{"include": [{"member": "worker"}]}"#],
+    );
+    kept.expect_code(0);
+    let labelled = assert_session_labels(&kept);
+    assert!(
+        labelled.contains("turn-started") && labelled.contains("turn-completed"),
+        "a narrowed stream lost the conversation of the turns it kept: {labelled:?}"
+    );
+    assert_gapless(&kept);
+
+    // And the other direction: the turns are the only envelopes carrying one, so
+    // excluding them leaves a stream with no conversation on it at all.
+    let without = run_filtered(
+        &workspace,
+        &["--event-filter", r#"{"exclude": [{"kind": "turn-*"}]}"#],
+    );
+    without.expect_code(0);
+    assert!(
+        assert_session_labels(&without).is_empty(),
+        "an envelope that is not a turn reached the stream with a conversation on it: {:?}",
+        without.kinds()
+    );
+    assert!(
+        distinct(&without)
+            .iter()
+            .any(|kind| kind == "member-settled"),
+        "this journey no longer observes the events the exclusion kept: {:?}",
+        without.kinds()
+    );
+    assert_gapless(&without);
 }

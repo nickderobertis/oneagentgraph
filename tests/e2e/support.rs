@@ -22,7 +22,7 @@
               shared vocabulary rather than on anything unused"
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -542,6 +542,110 @@ pub fn labels(event: &Value) -> BTreeMap<String, String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+pub const SESSION_LABELLED_KINDS: [&str; 4] = [
+    "turn-started",
+    "turn-activity",
+    "turn-completed",
+    "turn-interrupted",
+];
+
+/// Assert both halves of the session rule over a whole real stream, and answer
+/// with the kinds that carried one.
+///
+/// One helper rather than an assertion per journey, because the rule is about the
+/// *whole* stream: four kinds carry the label and every other kind a member or
+/// the graph emits carries none. A check that looked only at the events one
+/// journey cares about could not see the half that matters — the consumer reads
+/// any labelled envelope that is not a turn's activity or interruption as one
+/// transcript turn, so a label on a heartbeat is a heartbeat rendered as a turn.
+///
+/// The value is rebuilt here from the envelope's own `stream` and `member`
+/// rather than taken from the crate, so a build that changed how it derives one
+/// fails this instead of agreeing with itself.
+pub fn assert_session_labels(run: &Run) -> BTreeSet<String> {
+    let mut labelled = BTreeSet::new();
+    for event in run.events() {
+        let kind = event["kind"].as_str().expect("every envelope names a kind");
+        let Some(session) = event["labels"].get("session") else {
+            assert!(
+                !SESSION_LABELLED_KINDS.contains(&kind),
+                "{kind} carries no session label, so its turn cannot be rendered: {event}"
+            );
+            continue;
+        };
+        assert!(
+            SESSION_LABELLED_KINDS.contains(&kind),
+            "{kind} carries a session label, which a consumer renders as a transcript turn: \
+             {event}"
+        );
+        let session = session.as_str().expect("a session label is a string");
+        // The documented value, derived here rather than taken from the crate:
+        // the stream and the member joined, under the consumer's own rule.
+        let sanitized = |id: &str| -> String {
+            id.chars()
+                .map(|it| {
+                    if it.is_ascii_alphanumeric() || matches!(it, '-' | '_' | '.') {
+                        it
+                    } else {
+                        '-'
+                    }
+                })
+                .collect()
+        };
+        let stream = sanitized(event["stream"].as_str().expect("a stream"));
+        let member = sanitized(event["labels"]["member"].as_str().expect("a member"));
+        let joined = format!("{stream}.{member}");
+        if joined.chars().count() <= 128 {
+            assert_eq!(
+                session,
+                joined.trim_start_matches('.'),
+                "a session label naming something other than its stream and member: {event}"
+            );
+        } else {
+            // A pair the bound cannot hold keeps a share of each id instead, so
+            // what is asserted here is that both are still in there. That two
+            // such labels stay two conversations is the journey named for it in
+            // `tests/e2e/session.rs`.
+            let (kept, _digest) = session.rsplit_once('-').expect("a digest");
+            let (from_stream, from_member) = kept.rsplit_once('.').expect("a stream and a member");
+            assert!(
+                !from_stream.is_empty() && stream.ends_with(from_stream),
+                "a shortened session no longer names its stream: {event}"
+            );
+            assert!(
+                !from_member.is_empty() && member.starts_with(from_member),
+                "a shortened session no longer names its member: {event}"
+            );
+        }
+        assert!(
+            !session.is_empty()
+                && session.chars().count() <= 128
+                && !session.starts_with('.')
+                && session
+                    .chars()
+                    .all(|it| it.is_ascii_alphanumeric() || matches!(it, '-' | '_' | '.')),
+            "{session:?} is not an identifier the consumer accepts"
+        );
+        labelled.insert(kind.to_string());
+    }
+    labelled
+}
+
+/// Mark a generated helper script executable, so oneharness can spawn it.
+///
+/// A POSIX shell stands in for a provider in the journeys that need one identity
+/// to answer differently from another; on a platform without one, those journeys
+/// do not compile in and this does nothing.
+pub fn make_executable(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Wait for `condition`, or fail saying what never happened.

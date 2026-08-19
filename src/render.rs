@@ -60,6 +60,12 @@ pub fn line(envelope: &Envelope) -> String {
             field(envelope, "identity"),
             field(envelope, "reason")
         ),
+        EventKind::OneharnessSession => format!(
+            "{} turn {} {}",
+            field(envelope, "role"),
+            field(envelope, "turn"),
+            field(envelope, "history_id")
+        ),
         EventKind::MemberDied => {
             // The three fields answering for every member, then the exit status
             // only a member that was a child process has — omitted rather than
@@ -290,6 +296,11 @@ mod tests {
                 json!({"rule": "provider-failure", "cause": "quota",
                        "detail": "the subscription is exhausted"}),
                 "member-died provider-failure (quota): the subscription is exhausted",
+            ),
+            (
+                EventKind::OneharnessSession,
+                json!({"role": "agent", "turn": 2, "history_id": "01a00d0f"}),
+                "oneharness-session agent turn 2 01a00d0f",
             ),
             (EventKind::CronFired, json!({}), "cron-fired fired"),
             (
