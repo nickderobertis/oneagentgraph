@@ -583,7 +583,7 @@ pub fn assert_session_labels(run: &Run) -> BTreeSet<String> {
         let session = session.as_str().expect("a session label is a string");
         // The documented value, derived here rather than taken from the crate:
         // the stream and the member joined, under the consumer's own rule.
-        let accepted = |id: &str| -> String {
+        let sanitized = |id: &str| -> String {
             id.chars()
                 .map(|it| {
                     if it.is_ascii_alphanumeric() || matches!(it, '-' | '_' | '.') {
@@ -594,8 +594,8 @@ pub fn assert_session_labels(run: &Run) -> BTreeSet<String> {
                 })
                 .collect()
         };
-        let stream = accepted(event["stream"].as_str().expect("a stream"));
-        let member = accepted(event["labels"]["member"].as_str().expect("a member"));
+        let stream = sanitized(event["stream"].as_str().expect("a stream"));
+        let member = sanitized(event["labels"]["member"].as_str().expect("a member"));
         let joined = format!("{stream}.{member}");
         if joined.chars().count() <= 128 {
             assert_eq!(

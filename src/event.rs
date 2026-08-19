@@ -228,10 +228,10 @@ impl EventKind {
 // `tests/e2e/session.rs::two_members_of_an_over_long_run_are_still_two_conversations`.
 #[must_use]
 pub fn session_label(stream: &str, member: &str) -> Option<String> {
-    let stream = accepted(stream);
-    let member = accepted(member);
+    let stream = sanitized(stream);
+    let member = sanitized(member);
     let joined = format!("{stream}.{member}");
-    // Every accepted character is ASCII, so from here a byte count is a
+    // Every character the alphabet allows is ASCII, so from here a byte count is a
     // character count and a byte slice is a character slice.
     let label = if joined.len() <= MAX_SESSION_CHARS {
         joined
@@ -242,7 +242,10 @@ pub fn session_label(stream: &str, member: &str) -> Option<String> {
     (!session.is_empty()).then(|| session.to_string())
 }
 
-fn accepted(id: &str) -> String {
+/// One id rewritten into the label alphabet: every character outside
+/// `[A-Za-z0-9._-]` becomes a `-`, so the pair below is a value the consumer's
+/// rule accepts whatever the halves arrived as.
+fn sanitized(id: &str) -> String {
     id.chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
@@ -266,13 +269,13 @@ fn accepted(id: &str) -> String {
 /// tells two runs of one graph apart, so the stream keeps its tail; a member is
 /// named by a person and reads from the front, so it keeps its head.
 ///
-/// The digest is over the **whole** pair, which is what makes the result
-/// injective where the halves alone are not: two ids differing only in what was
-/// cut away still differ here. It is a plain FNV-1a rather than
-/// [`std::collections::hash_map::DefaultHasher`], whose output is documented as
-/// free to change between Rust releases — `oneagentgraph interrupt` labels a turn
-/// from a second process, and a conversation that renamed itself between builds
-/// is one a consumer would file as two.
+/// The digest is over the **whole** pair, which is what keeps two pairs apart
+/// where the cut halves alone would not: two ids differing only in what was cut
+/// away differ here too, short of a 64-bit collision. It is a plain FNV-1a
+/// rather than [`std::collections::hash_map::DefaultHasher`], whose output is
+/// documented as free to change between Rust releases — `oneagentgraph interrupt`
+/// labels a turn from a second process, and a conversation that renamed itself
+/// between builds is one a consumer would file as two.
 fn shortened(stream: &str, member: &str, joined: &str) -> String {
     // The separator, the digest, and the `-` before it are what shortening
     // costs; everything else is the two ids'.
