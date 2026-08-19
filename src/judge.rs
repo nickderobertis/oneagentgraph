@@ -698,7 +698,9 @@ fn as_payload<T: serde::Serialize>(payload: &T) -> Map<String, Value> {
 /// Stop a member a watchdog condemned, then report it.
 ///
 /// The escalation this module's own documentation describes: ask, reap, and give
-/// up on the thread rather than on the run.
+/// up on the thread rather than on the run. The reap is
+/// [`crate::scratch::reap_after_cancel`], which is what leaves the ask a moment
+/// to be answered.
 fn condemn(
     rx: &mpsc::Receiver<Answer>,
     abort: &AtomicBool,
@@ -708,7 +710,11 @@ fn condemn(
 ) -> Outcome {
     abort.store(true, Ordering::SeqCst);
     let deadline = Instant::now() + TEARDOWN_GRACE;
-    let mut reaped = crate::scratch::reap(scratch);
+    // llmlint: ignore-block[changed_behavior_has_e2e] [`crate::harness`]'s twin
+    // of this line carries the reason: the wait is Windows-only and is asserted
+    // at the platform seam.
+    let mut reaped = crate::scratch::reap_after_cancel(scratch);
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     while Instant::now() < deadline {
         match rx.recv_timeout(TEARDOWN_POLL) {
             // The engine tore itself down and answered. What it says is evidence
