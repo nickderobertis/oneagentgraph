@@ -2048,15 +2048,21 @@ impl Work {
 /// process a supervisor's own view of its child cannot see.
 ///
 /// **Nothing stamped answers `None`, not zero**, because a tree has to be
-/// *found* before it can be read and the two are different facts. Neither
-/// platform's membership exists before a member's first spawn: on POSIX the
-/// stamp is fixed at `exec`, so a member that has started nothing carries none,
-/// and on Windows a group is created by its launcher, so a scratch nobody has
-/// launched into has no group to enumerate at all. Folding that to `0` reported
-/// a tree nobody could ask as a tree charged no CPU — which is how a member
-/// still starting its CLIs was condemned, on Windows, before it had said
-/// anything. What may be concluded from `None` is nothing at all; see
-/// [`crate::member::Stall`], which declines to condemn a member on it.
+/// *found* before it can be read and the two are different facts. Membership on
+/// neither platform spans a member's whole life: on POSIX the stamp is fixed at
+/// `exec`, so it exists only while some process carries it, and on Windows the
+/// group is a job object, which enumerates only the processes in it right now.
+/// So a member has no tree to be asked about both before its first spawn and in
+/// any gap between two of them — a round driven as a succession of children has
+/// one every time a child exits. Folding that to `0` reported a tree nobody
+/// could ask as a tree charged no CPU, which is how a member still starting its
+/// CLIs was condemned, on Windows, before it had said anything.
+///
+/// What may be concluded from `None` is nothing at all, and that includes
+/// nothing about the tree before it: a reading is of the processes stamped at
+/// the moment it was taken, and a successor starts its own accounting at zero,
+/// so two readings across a gap are of two populations. [`crate::member::Stall`]
+/// is the caller that acts on this, and it states what it does with both.
 ///
 /// A tree that *is* found and is charged nothing is a different answer and keeps
 /// the old one: `Some(0)`, which is exactly the wedged member this watchdog

@@ -221,13 +221,12 @@ impl Bounds {
 /// shape that made silence alone the wrong rule — clears the clock on the child's
 /// progress and is left alone.
 ///
-/// *Did nothing*, and that is not the same fact as *was not there*. A tree has
-/// to be found before it can be read, and neither platform's membership exists
-/// until a member's first spawn — see [`crate::scratch::work`], which answers
-/// `None` for a tree that cannot be found rather than folding it to no CPU at
-/// all. So an unfindable tree is no evidence about this member, and this rule
-/// declines it in both directions: it neither condemns on it nor clears the
-/// silence with it.
+/// *Did nothing*, and that is not the same fact as *was not there*:
+/// [`crate::scratch::work`] answers `None` for a tree it cannot find, and states
+/// there when a member has one to find. The policy here is what to do with that
+/// answer, and it is to decline it in both directions — an unfindable tree
+/// neither condemns this member nor clears its silence — and to let no sample
+/// outlive the tree it was taken from.
 ///
 /// What counts as progress is a *rate*: the CPU charged to the processes stamped
 /// for this member — [`crate::scratch::work`] — against the wall time between two
@@ -252,15 +251,15 @@ impl Bounds {
 ///   member that is idle and silent, which is what a wedged one is. A member
 ///   burning CPU to no purpose is what `cancel` is for, and the heartbeat rule
 ///   still answers for a supervisor that cannot confirm its member at all.
-/// * A member that **never launches anything** is outside this rule entirely,
-///   for the same reason and at the same cost. What is given up is small and the
-///   hole it would otherwise open is not: a wedged member is one whose harness
-///   is alive and will never answer, so it has a tree by construction — the
-///   journeys in `tests/e2e/liveness.rs` condemn exactly that member, with a
-///   live idle child under it, on every platform. What is bought is the member
-///   that had not started its tree yet, which this rule condemned in its first
-///   seconds on Windows, where a group does not exist until its launcher makes
-///   one.
+/// * A member with **no tree to ask** is outside this rule entirely, for the
+///   same reason and at the same cost. What is given up is small and the hole it
+///   would otherwise open is not: a wedged member is one whose harness is alive
+///   and will never answer, so it has a tree by construction — the journeys in
+///   `tests/e2e/liveness.rs` condemn exactly that member, with a live idle child
+///   under it, on every platform. What is bought is every member that is
+///   *between* trees while it is silent — one still starting its first, and one
+///   whose round is a succession of children with a gap between two of them.
+///   Both are ordinary; neither is a member doing nothing.
 #[derive(Debug)]
 pub struct Stall {
     /// When the member started, which is the origin of the only clock this rule
@@ -300,7 +299,8 @@ enum Observed {
     ///
     /// A state of its own rather than a reading of zero, because it is not a
     /// sample: the look that follows it is a fresh baseline, exactly as the
-    /// first one is.
+    /// first one is. It replaces whatever the last look left behind, so no
+    /// verdict about one tree is ever carried across to the next.
     Unfound {
         /// When the look was taken, which is what the probe cadence counts.
         at: Instant,
@@ -409,6 +409,14 @@ impl Stall {
                 // member is silent while it is still starting the processes that
                 // would be its tree, and reading that as an idle one condemned
                 // it before its first turn.
+                //
+                // Whatever the last look left behind goes with it, including a
+                // reading of a tree that has since exited. A reading is the CPU
+                // charged to the processes stamped *now*, so one taken either
+                // side of a gap is of two different populations — the successor
+                // starts its own accounting at zero — and their difference is a
+                // rate of nothing. Discarding is what makes the first look at
+                // the next tree a baseline instead.
                 (None, _) => Observed::Unfound { at: now },
                 // How fast the tree was charged CPU over the window between the
                 // two looks decides which this is — a rate, so that neither
