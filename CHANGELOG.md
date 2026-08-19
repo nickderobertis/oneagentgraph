@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.4](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.3...v0.3.4) - 2026-08-19
+
+### Fixed
+
+- *(sweep)* stop a coverage report reading as a promise about the whole host ([#67](https://github.com/nickderobertis/oneagentgraph/pull/67))
+
 ## [0.3.3](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.2...v0.3.3) - 2026-08-19
 
 ### Added
