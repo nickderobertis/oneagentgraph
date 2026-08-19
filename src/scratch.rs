@@ -42,17 +42,18 @@
 //! | ownership lock | `flock(LOCK_EX \| LOCK_NB)` | `LockFileEx(EXCLUSIVE \| FAIL_IMMEDIATELY)` |
 //! | start token | `/proc/<pid>/stat`, `libproc` | `GetProcessTimes` creation time |
 //! | tree membership | an environment stamp fixed at `exec` | a job object every child joins |
-//! | teardown | `SIGTERM`, grace, `SIGKILL` | `TerminateJobObject` |
+//! | teardown | `SIGTERM`, grace, `SIGKILL` | a cancel token, grace, `TerminateJobObject` |
 //!
 //! The first two are the same guarantee by another name. The other two are the
 //! two places the guarantee is *not* identical, and a consumer supervising on
 //! Windows should know which:
 //!
-//! * **There is no signal to decline.** `SIGTERM`-then-`SIGKILL` is an ask
-//!   followed by a compulsion, and Windows has only the compulsion. What a
-//!   member loses is the chance to shut itself down cleanly first; what a caller
-//!   of [`reap`] is promised — nothing stamped for this scratch is still running
-//!   when it returns — is unchanged.
+//! * **The ask is not a signal.** `SIGTERM`-then-`SIGKILL` is an ask followed by
+//!   a compulsion, and nothing sent to a job object can be declined — so what
+//!   asks on Windows is the caller's own cancel token, and `reap_after_cancel`
+//!   is where it is given the grace POSIX spends between its two signals. What a
+//!   caller of [`reap`] is promised — nothing stamped for this scratch is still
+//!   running when it returns — is unchanged.
 //! * **A group is created by its launcher**, not fixed at `exec`. So a scratch
 //!   nobody launched into has no group to find, and [`stamped_for`] reports
 //!   nothing rather than guessing — the direction that retains a directory
@@ -85,6 +86,26 @@ pub const SCRATCH_ENV: &str = "ONEAGENTGRAPH_SCRATCH_DIR";
 /// The prefix every scratch directory this crate creates carries, so a sweep can
 /// tell its own leavings from a neighbour's work.
 pub const SCRATCH_PREFIX: &str = "oneagentgraph-";
+
+/// How long an ask is given to be answered before the tree is compelled to end.
+///
+/// One period per teardown, both platforms, and never twice. Short, because
+/// everything it is spent on has already been asked to stop, and long enough
+/// that an engine polling its cancel token answers well inside it instead of
+/// being destroyed mid-turn — which is the only reason a compulsion waits at
+/// all.
+#[cfg(any(unix, windows))]
+const GRACE: Duration = Duration::from_millis(200);
+
+/// What the caller has already done about this tree before asking for it to end.
+///
+/// Carried in rather than assumed, because the two platforms do not make the ask
+/// in the same layer — see [`reap_after_cancel`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ask {
+    Nothing,
+    Cancelled,
+}
 
 /// A pid paired with the kernel's start token for the process holding it.
 ///
@@ -794,23 +815,27 @@ mod platform {
     /// The signal nothing survives.
     const KILL: i32 = libc::SIGKILL;
 
-    /// How long a proven descendant is given to shut itself down before it is
-    /// killed. Short, because everything here has already been asked to stop.
-    const GRACE: std::time::Duration = std::time::Duration::from_millis(200);
-
     /// Ask every target to stop, then kill whatever declined.
     ///
     /// Each signal revalidates the identity, so a member that shut itself down
     /// on the first is never sent a second, and a number its exit released is
     /// never signalled at all.
-    pub fn terminate(_scratch: &std::path::Path, targets: &[ProcessIdentity]) -> usize {
+    ///
+    /// The caller's own ask is not read: `SIGTERM` is one of the same kind, made
+    /// here whether or not the caller made one, so the [`super::GRACE`] below is
+    /// already this teardown's only one.
+    pub fn terminate(
+        _scratch: &std::path::Path,
+        targets: &[ProcessIdentity],
+        _asked: super::Ask,
+    ) -> usize {
         let mut signalled = 0;
         for identity in targets {
             if signal(*identity, TERM) {
                 signalled += 1;
             }
         }
-        std::thread::sleep(GRACE);
+        std::thread::sleep(super::GRACE);
         for identity in targets {
             signal(*identity, KILL);
         }
@@ -861,7 +886,36 @@ mod platform {
 
     #[cfg(test)]
     mod tests {
-        use super::at_or_below;
+        use std::time::Instant;
+
+        use super::{at_or_below, terminate};
+        use crate::scratch::{Ask, GRACE};
+
+        /// One grace period, whatever the caller asked first: the `SIGTERM` this
+        /// makes is already the ask, so a cancelled teardown waits exactly as
+        /// long as an unasked one.
+        ///
+        /// The half of the rule POSIX can be red for — a wait added here on top
+        /// of the one below would be the same period spent twice, on every
+        /// teardown a watchdog runs.
+        #[test]
+        fn a_cancelled_teardown_waits_the_same_one_grace_an_unasked_one_does() {
+            for asked in [Ask::Cancelled, Ask::Nothing] {
+                let started = Instant::now();
+                // No target to signal, and a path nothing here reads — the
+                // stamp is what this platform acts on. What is measured is the
+                // escalation's own wait, not what it waits on.
+                assert_eq!(
+                    terminate(std::path::Path::new("/nonexistent"), &[], asked),
+                    0
+                );
+                let waited = started.elapsed();
+                assert!(
+                    waited >= GRACE && waited < GRACE * 2,
+                    "{asked:?} waited {waited:?}, which is not this teardown's one grace period"
+                );
+            }
+        }
 
         /// The comparison is on path components. A sibling run whose name merely
         /// starts with this one's is not below it — and what this answers is
@@ -1132,11 +1186,23 @@ mod platform {
     /// Terminate every group at or below `scratch`, and say how many of the
     /// targets they held.
     ///
-    /// One step rather than two: there is no signal for a process to decline
-    /// here, so the ask-then-compel escalation POSIX makes has nothing to ask
-    /// with. A group holding this process is left alone — a reap that took its
-    /// own supervisor down would lose the report it exists to write.
-    pub fn terminate(scratch: &Path, targets: &[ProcessIdentity]) -> usize {
+    /// Two steps as on POSIX, made in two layers rather than with two signals:
+    /// nothing sent to a job object can be declined, so the ask is the caller's
+    /// cancel token — see [`super::reap_after_cancel`] — and the wait before
+    /// [`TerminateJobObject`] is what makes it an ask at all. A caller that asked
+    /// nothing waits for nothing.
+    ///
+    /// A group holding this process is left alone — a reap that took its own
+    /// supervisor down would lose the report it exists to write.
+    pub fn terminate(scratch: &Path, targets: &[ProcessIdentity], asked: super::Ask) -> usize {
+        // llmlint: ignore-block[changed_behavior_has_e2e] no envelope this crate
+        // publishes tells a condemned member that finished recording its last
+        // turn from one that did not — the death reads the same either way — so
+        // what is asserted is the gap, by the timing test below.
+        if asked == super::Ask::Cancelled {
+            std::thread::sleep(super::GRACE);
+        }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         let own = std::process::id();
         let mut ended = 0;
         for job in groups_under(scratch, JOB_OBJECT_QUERY | JOB_OBJECT_TERMINATE) {
@@ -1597,7 +1663,41 @@ mod platform {
 
     #[cfg(test)]
     mod tests {
-        use super::{derived_from, job_name, recorded_names, sibling_name, Group, OWNER_JOB_FILE};
+        use std::time::Instant;
+
+        use super::{
+            derived_from, job_name, recorded_names, sibling_name, terminate, Group, OWNER_JOB_FILE,
+        };
+        use crate::scratch::{Ask, GRACE};
+
+        /// A teardown that follows a cancel waits the grace out before the job
+        /// object ends anything; one that follows nothing does not wait at all.
+        ///
+        /// Timed, because the gap *is* the behaviour — a teardown that returns
+        /// inside the engine's poll interval destroys a member instead of
+        /// stopping it.
+        #[test]
+        fn a_cancelled_teardown_waits_the_grace_out_and_an_unasked_one_does_not() {
+            // Nothing under it to compel: what is measured is the wait before.
+            let dir = tempfile::tempdir().expect("tempdir");
+
+            let started = Instant::now();
+            assert_eq!(terminate(dir.path(), &[], Ask::Cancelled), 0);
+            let asked = started.elapsed();
+
+            let started = Instant::now();
+            assert_eq!(terminate(dir.path(), &[], Ask::Nothing), 0);
+            let unasked = started.elapsed();
+
+            assert!(
+                asked >= GRACE,
+                "a cancel was compelled after {asked:?}, inside its own engine's poll interval"
+            );
+            assert!(
+                unasked < GRACE,
+                "a teardown nobody asked for waited {unasked:?} for an answer that was never coming"
+            );
+        }
 
         /// The names a group writes down are the ones the directory it sits in
         /// derives, so a reader that trusts nothing in the file still opens them.
@@ -1703,8 +1803,13 @@ mod platform {
         None
     }
 
-    /// Nothing is torn down through an unproven handle.
-    pub fn terminate(_scratch: &std::path::Path, _targets: &[ProcessIdentity]) -> usize {
+    /// Nothing is torn down through an unproven handle, so there is nothing for
+    /// an ask to be given time to answer either.
+    pub fn terminate(
+        _scratch: &std::path::Path,
+        _targets: &[ProcessIdentity],
+        _asked: super::Ask,
+    ) -> usize {
         0
     }
 
@@ -1901,12 +2006,40 @@ pub fn work(scratch: &Path) -> Work {
 /// process and everything it started, whether or not their parents are still
 /// alive.
 ///
+/// For a caller with nothing outstanding for the tree to answer. One that has
+/// already asked — set the engine's cancel token — wants this module's
+/// `reap_after_cancel` instead.
+///
 /// Returns how many were signalled. What "signalled" means is the platform's:
-/// POSIX asks with `SIGTERM`, waits out a short grace period, and `SIGKILL`s
-/// whatever declined; Windows has no signal to decline, so its job object is
-/// terminated in one step. Both end with the same guarantee — nothing stamped
-/// for this scratch is still running — which is the property the rule is for.
+/// POSIX asks with `SIGTERM`, waits out the grace, and `SIGKILL`s whatever
+/// declined; Windows terminates the job object the tree belongs to. Both end
+/// with the same guarantee — nothing stamped for this scratch is still running —
+/// which is the property the rule is for.
 pub fn reap(scratch: &Path) -> usize {
+    reap_with(scratch, Ask::Nothing)
+}
+
+/// [`reap`] for a caller that has already set the engine's cancel token.
+///
+/// The token is a real ask on both platforms — `oneharness_core` polls it on
+/// atomics, with no signal involved — so what it needs is time to be answered,
+/// which is the whole of what this adds. A member given it finishes the turn it
+/// was stopped in and records what it did; one whose tree is destroyed inside
+/// that first poll leaves an operator reading back a stall with no account of it
+/// at all.
+///
+/// Exactly one [`GRACE`] separates the ask from the kill on either platform.
+/// POSIX already spends it between its own `SIGTERM` and `SIGKILL`, so this
+/// changes nothing there; Windows, whose job object is a compulsion with no ask
+/// of its own, spends it here. A teardown that reaps again while waiting for its
+/// engine calls [`reap`] for the second and later ones: the ask has already had
+/// its answer time, and paying for it per poll would spend the run's patience
+/// instead.
+pub(crate) fn reap_after_cancel(scratch: &Path) -> usize {
+    reap_with(scratch, Ask::Cancelled)
+}
+
+fn reap_with(scratch: &Path, asked: Ask) -> usize {
     let stamp = scratch.display().to_string();
     let owned = stamped_for(&stamp);
     let own = own_identity();
@@ -1914,10 +2047,13 @@ pub fn reap(scratch: &Path) -> usize {
         .into_iter()
         .filter(|identity| *identity != own)
         .collect();
+    // Nothing to compel, so nothing to wait for either: an ask is only worth a
+    // grace period while there is still something under this scratch to answer
+    // it.
     if targets.is_empty() {
         return 0;
     }
-    platform::terminate(scratch, &targets)
+    platform::terminate(scratch, &targets, asked)
 }
 
 #[cfg(test)]
