@@ -36,7 +36,7 @@
 //! | sentinel / variable | what this turn does |
 //! | --- | --- |
 //! | `fake:complete-now` | the agent finishes on its first turn |
-//! | `fake:answer-file=<path>` | answer with that file's contents — a validated JSON document, for a structured-output run |
+//! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |

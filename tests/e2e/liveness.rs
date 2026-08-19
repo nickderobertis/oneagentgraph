@@ -657,14 +657,14 @@ fn a_member_the_heartbeat_rule_condemns_leaves_no_descendant_running() {
 /// The shallowest real member this crate builds: one agent, no judge, so the
 /// doubled provider is the member's own child rather than its grandchild.
 ///
-/// Both condemnation journeys use it, and that is forced rather than chosen. A
-/// condemnation races process startup: the rule fires on a clock that starts
-/// with the member, and the tree has to be up by then. The heartbeat rule leaves
-/// half a second — it is only reachable below the supervisor's refresh cadence —
-/// and the two-party chain, three real CLIs deep, did not reach its provider
-/// inside fifteen *seconds* under this suite's own load on a CI runner. The
-/// two-party tree is condemned by the journeys above and torn down by the cancel
-/// journeys below; what these two need is a tree that is reliably *there*.
+/// Both condemnation journeys use it for the margin. A condemnation races
+/// process startup: the rule fires on a clock that starts with the member, and
+/// the tree has to be up by then. The heartbeat rule leaves half a second — it
+/// is only reachable below the supervisor's refresh cadence — and a two-party
+/// chain, three real CLIs deep, spends 67–90ms of that reaching its first turn
+/// on a `windows-latest` runner. The two-party tree is condemned by the journeys
+/// above and torn down by the cancel journeys below; what these two want is the
+/// tree that clears the window by the widest margin.
 fn single_sided_graph() -> String {
     graph_with(
         concat!(

@@ -240,34 +240,24 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
 /// anything — at any bound.
 ///
 /// **The rule is the activity watchdog, and that is load-bearing rather than a
-/// preference.** Both rules condemn through the same arm, so either would drive
-/// the publication — but the heartbeat rule's window is *fixed*: the supervisor
-/// re-dates it every loop, so a deadline under the 500ms refresh cadence fires
-/// on the first tick and one over it never fires at all. Half a second, measured
-/// from the member's birth, is all a two-party member gets to start three real
-/// CLIs and have a turn — and `tests/e2e/liveness.rs`'s `single_sided_graph`
-/// records that chain missing that window by *seconds* on a CI runner, which is
-/// why both condemnation journeys there are single-sided. This one cannot be:
-/// only a two-party member publishes a pointer. Lost that race, the member is
-/// condemned having had no conversation at all, and the assertion below is
-/// vacuously red.
+/// preference.** Either rule condemns through the same arm, so either would
+/// drive the publication — but only this one cannot fire before the conversation
+/// it is meant to account for has happened *and* gone quiet, because its clock
+/// is quiet time since the member's own last event over a tree two probes agree
+/// is idle. The heartbeat rule's window is fixed at the member's birth instead,
+/// so it would race the very turn asserted on below; and shortening that race by
+/// going single-sided, the way `tests/e2e/liveness.rs` does, is not open here,
+/// because only a two-party member publishes a pointer at all. Lost, the member
+/// is condemned having had no conversation and the assertion below is vacuously
+/// red.
 ///
-/// The activity rule has no such window. Its clock is quiet time since the
-/// member's own last event, and it condemns only a tree that two probes agree is
-/// idle — so a slow start clears it on the CPU the start itself is charged, and
-/// the rule cannot fire until the conversation it is meant to account for has
-/// both happened and gone quiet. `tests/e2e/liveness.rs` condemns a two-party
-/// member under this same shape, on every platform.
-///
-/// **The retry is how the precondition is reached, and it is
-/// `tests/e2e/liveness.rs`'s own answer to this** — see
-/// `a_condemned_member_leaves_no_descendant_running`, which reaches a live
-/// descendant the same way. A run where the member never spoke is a run that
-/// never reached the state under test, so it is run again rather than passed;
-/// the budget is what stops that from being patience without end, and it fails
-/// saying the member never had a conversation rather than going green on one
-/// that had none. Nothing about the account itself is retried: a member that
-/// spoke and then published no pointer is the failure, and it is asserted once.
+/// **The retry is how the precondition is reached**, the way
+/// `tests/e2e/liveness.rs`'s `a_condemned_member_leaves_no_descendant_running`
+/// reaches a live descendant. A run where the member never spoke never reached
+/// the state under test, so it is run again rather than passed, under a budget
+/// that fails saying so. Nothing about the account itself is retried: a member
+/// that spoke and then published no pointer is the failure, and it is asserted
+/// once.
 #[test]
 fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
     let give_up_at = std::time::Instant::now() + REACH_BUDGET;
@@ -281,8 +271,9 @@ fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
         );
         // Four times the supervisor's 500ms cadence: the rule needs a baseline
         // probe and a comparison inside the window, and a bound near the cadence
-        // measures the probe interval instead. The heartbeat is left wide so the
-        // rule that fires is this one.
+        // measures the probe interval instead — `tests/e2e/liveness.rs` reaches
+        // the same rule at four. The heartbeat is left wide so the rule that
+        // fires is this one.
         let held = bounds("60", "2");
         let run = workspace.run_with(
             &[
