@@ -223,21 +223,14 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
 /// a failure of its own — it was stopped — so the records of the turns it did
 /// take are the only account of what it was doing when it stopped.
 ///
-/// **Which side had the conversation, and which one stalls.** The double steers
-/// off the prompt it is given. The agent is given the task, which carries no
-/// `fake:hang`, so it takes its turn and its oneharness invocation reports —
-/// the conversation this journey reads back. The judge is given the transcript,
-/// which carries the agent's answer, and `fake:answer-file` is what puts the
-/// sentinel there; it hangs, and is what the watchdog finds.
-///
-/// Steering it through the answer rather than off the argv is what makes that
-/// asymmetry portable, and it is not a preference. The agent side asks for a
-/// controllable turn, whose prompt arrives on stdin instead — but
-/// `oneharness run --control` opens a unix domain socket, which is why every
-/// journey driving one in `tests/e2e/interrupt.rs` is `cfg(unix)`. Where the ask
-/// is refused onejudge retries the same call without it and both sides read the
-/// same argv, so a sentinel in the task hung the agent before it had said
-/// anything — at any bound.
+/// **Which side had the conversation, and which one stalls.** The agent side
+/// runs `--control`, and the double answers a controlled turn rather than
+/// hanging on it — `fake:hang` is read off the argv, and a controlled turn's
+/// prompt arrives on stdin. So the agent takes its turn and its oneharness
+/// invocation reports, which is the conversation this journey reads back; the
+/// judge side is spawned with the task on its argv, hangs on it, and is what the
+/// watchdog finds. That asymmetry is the journey: one side accounted for, one
+/// side stopped mid-turn.
 ///
 /// **The rule is the activity watchdog, and that is load-bearing rather than a
 /// preference.** Both rules condemn through the same arm, so either would drive
@@ -250,7 +243,8 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
 /// why both condemnation journeys there are single-sided. This one cannot be:
 /// only a two-party member publishes a pointer. Lost that race, the member is
 /// condemned having had no conversation at all, and the assertion below is
-/// vacuously red.
+/// vacuously red — which is exactly how it failed on `windows-latest`, with a
+/// stream carrying no `turn-started` to lose.
 ///
 /// The activity rule has no such window. Its clock is quiet time since the
 /// member's own last event, and it condemns only a tree that two probes agree is
@@ -273,23 +267,16 @@ fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
     let give_up_at = std::time::Instant::now() + REACH_BUDGET;
     for attempt in 1.. {
         let workspace = Workspace::new();
-        // The agent's answer, which is the only place the sentinel appears.
-        let answers = workspace.write("agent.answer", "fake:hang");
-        let task = format!(
-            "say something worth reading back fake:answer-file={}",
-            answers.display()
-        );
-        // Four times the supervisor's 500ms cadence: the rule needs a baseline
-        // probe and a comparison inside the window, and a bound near the cadence
-        // measures the probe interval instead. The heartbeat is left wide so the
-        // rule that fires is this one.
+        // The stall bound, shortened to the one `tests/e2e/liveness.rs` condemns
+        // a two-party member under; the heartbeat is left wide so the rule that
+        // fires is this one.
         let held = bounds("60", "2");
         let run = workspace.run_with(
             &[
                 "run",
                 "./graph.yaml",
                 "--task",
-                &task,
+                "fake:hang after saying something worth reading back",
                 "--dir",
                 &workspace.dir().display().to_string(),
             ],
