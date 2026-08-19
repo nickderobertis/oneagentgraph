@@ -930,8 +930,6 @@ mod platform {
         fn a_scratch_nobody_has_launched_into_is_not_a_tree_proven_idle() {
             let dir = tempfile::tempdir().expect("tempdir");
 
-            // The premise: no process carries this stamp, so there is nothing
-            // under it to ask.
             assert!(
                 super::stamped_for(&dir.path().display().to_string()).is_empty(),
                 "a scratch nobody launched into named a live process"
@@ -1743,8 +1741,6 @@ mod platform {
             let dir = tempfile::tempdir().expect("tempdir");
             let group = Group::open(dir.path()).expect("a group");
 
-            // The premise, and the whole of what a starting member has: the job
-            // object exists, and it holds nothing at all.
             assert!(
                 super::stamped_for(&dir.path().display().to_string()).is_empty(),
                 "a group nobody launched into named a live process"

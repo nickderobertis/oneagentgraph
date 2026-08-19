@@ -451,13 +451,15 @@ impl Stall {
 /// lets [`crate::scratch`]'s two platform modules judge the answer their own
 /// enumeration gives for a member nobody has launched anything for — without
 /// holding a test still for a whole bound to reach the verdict.
+///
+/// The window walked is every look this rule would take in a member's first two
+/// bounds: it examines nothing until half a bound of silence has passed, and any
+/// verdict it can reach it has reached inside the second.
 #[cfg(test)]
 pub(crate) fn condemns_a_silent_member(scratch: &Path) -> bool {
     let bound = Duration::from_secs(60);
     let started = Instant::now();
     let mut stall = Stall::new(bound, started);
-    // From the first moment a quiet member is examined at all, to well past the
-    // bound: every look this rule would take in a member's first two bounds.
     let mut at = bound / 2;
     while at <= bound * 2 {
         if stall.judge(0, started + at, || crate::scratch::work(scratch)) {
