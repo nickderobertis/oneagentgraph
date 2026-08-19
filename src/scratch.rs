@@ -917,6 +917,33 @@ mod platform {
             }
         }
 
+        /// A scratch nobody has launched anything into is a tree that cannot be
+        /// **found**, and the activity watchdog may not read that as a tree that
+        /// did nothing.
+        ///
+        /// The half of the rule POSIX can be red for. Membership here is the
+        /// stamp the kernel fixes at `exec`, so a member that has spawned nothing
+        /// yet is carried by no process at all — the same blind window Windows
+        /// has for its own reason, and the one every member is silent through
+        /// while it starts.
+        #[test]
+        fn a_scratch_nobody_has_launched_into_is_not_a_tree_proven_idle() {
+            let dir = tempfile::tempdir().expect("tempdir");
+
+            assert!(
+                super::stamped_for(&dir.path().display().to_string()).is_empty(),
+                "a scratch nobody launched into named a live process"
+            );
+            assert!(
+                crate::scratch::work(dir.path()).is_none(),
+                "a tree nobody could find was reported as one charged no CPU"
+            );
+            assert!(
+                !crate::member::condemns_a_silent_member(dir.path()),
+                "a member with no tree to ask was condemned for the answer nobody gave"
+            );
+        }
+
         /// The comparison is on path components. A sibling run whose name merely
         /// starts with this one's is not below it — and what this answers is
         /// which processes to kill, so the cost of getting it wrong is reaping
@@ -1699,6 +1726,37 @@ mod platform {
             );
         }
 
+        /// A group its launcher has not started anything into is a tree that
+        /// cannot be **found**, and the activity watchdog may not read that as a
+        /// tree that did nothing.
+        ///
+        /// The half of the rule Windows was red for, and it was red every run.
+        /// Membership here is a job object its launcher creates, so a member's
+        /// tree does not exist until its first spawn — while a two-party member
+        /// spends seconds starting three CLIs and publishes nothing. Folded to a
+        /// reading of zero, two looks agreed it was idle and it was condemned
+        /// before it had a conversation at all.
+        #[test]
+        fn a_group_nobody_has_launched_into_is_not_a_tree_proven_idle() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let group = Group::open(dir.path()).expect("a group");
+
+            assert!(
+                super::stamped_for(&dir.path().display().to_string()).is_empty(),
+                "a group nobody launched into named a live process"
+            );
+            assert!(
+                crate::scratch::work(dir.path()).is_none(),
+                "a tree nobody could find was reported as one charged no CPU"
+            );
+            assert!(
+                !crate::member::condemns_a_silent_member(dir.path()),
+                "a member still starting its tree was condemned for its silence"
+            );
+
+            drop(group);
+        }
+
         /// The names a group writes down are the ones the directory it sits in
         /// derives, so a reader that trusts nothing in the file still opens them.
         #[test]
@@ -1977,21 +2035,42 @@ impl Work {
     }
 }
 
-/// Observe the work under `scratch` as it stands right now.
+/// Observe the work under `scratch` as it stands right now — or `None`, when
+/// there is no tree there to ask.
 ///
 /// The evidence is the same the reap and the sweep rest on — the stamp the
 /// kernel fixed at `exec`, or the job object that stands in for it — so this
 /// reaches a descendant whose parent has already exited, which is exactly the
 /// process a supervisor's own view of its child cannot see.
 ///
-/// An empty answer means nothing is running under this scratch, which is a
-/// member with no work to be doing rather than one whose work could not be
-/// examined: a platform that cannot enumerate a tree answers empty *every* time,
-/// so it never reads as a change.
+/// **Nothing stamped answers `None`, not zero**, because a tree has to be
+/// *found* before it can be read and the two are different facts. Membership on
+/// neither platform spans a member's whole life: on POSIX the stamp is fixed at
+/// `exec`, so it exists only while some process carries it, and on Windows the
+/// group is a job object, which enumerates only the processes in it right now.
+/// So a member has no tree to be asked about both before its first spawn and in
+/// any gap between two of them — a round driven as a succession of children has
+/// one every time a child exits. Folding that to `0` reported a tree nobody
+/// could ask as a tree charged no CPU, which is how a member still starting its
+/// CLIs was condemned, on Windows, before it had said anything.
+///
+/// What may be concluded from `None` is nothing at all, and that includes
+/// nothing about the tree before it: a reading is of the processes stamped at
+/// the moment it was taken, and a successor starts its own accounting at zero,
+/// so two readings across a gap are of two populations. [`crate::member::Stall`]
+/// is the caller that acts on this, and it states what it does with both.
+///
+/// A tree that *is* found and is charged nothing is a different answer and keeps
+/// the old one: `Some(0)`, which is exactly the wedged member this watchdog
+/// exists for.
 #[must_use]
-pub fn work(scratch: &Path) -> Work {
-    Work(
-        stamped_for(&scratch.display().to_string())
+pub fn work(scratch: &Path) -> Option<Work> {
+    let stamped = stamped_for(&scratch.display().to_string());
+    if stamped.is_empty() {
+        return None;
+    }
+    Some(Work(
+        stamped
             .into_iter()
             // A process this build cannot read counts as nothing, which is the
             // same answer a platform with no accounting at all gives: it makes a
@@ -1999,7 +2078,7 @@ pub fn work(scratch: &Path) -> Work {
             // still condemns a wedged member.
             .filter_map(|identity| platform::consumed(identity.pid))
             .fold(0u64, u64::saturating_add),
-    )
+    ))
 }
 
 /// Terminate every live process this scratch still holds — the member's own

@@ -210,6 +210,188 @@ fn a_member_whose_child_is_alive_but_idle_is_still_condemned() {
     );
 }
 
+/// One member across the whole startup window: spared while nothing is stamped
+/// for it, and condemned once its tree is there to ask and does nothing.
+///
+/// Driven at `Stall` rather than through a verb because no graph can hold a
+/// member's first spawn open on demand — that window is the member's own
+/// in-process startup, which this suite's one sanctioned double sits downstream
+/// of, and it is milliseconds here against the seconds it takes on Windows. The
+/// clock is one clock for both halves, because the transition is the subject:
+/// the first tree a silent member gets is a baseline, not a verdict.
+#[test]
+fn a_member_with_no_tree_to_ask_is_spared_and_a_wedged_one_is_still_condemned() {
+    use oneagentgraph::member::Stall;
+    use oneagentgraph::scratch::Group;
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let scratch = root.path().join("oneagentgraph-starting");
+    std::fs::create_dir_all(&scratch).expect("the scratch");
+    let bound = std::time::Duration::from_secs(1);
+
+    // A member that has started and launched nothing yet: the group exists,
+    // because its launcher made it, and it holds nothing at all.
+    let group = Group::open(&scratch).expect("a group");
+    let started = std::time::Instant::now();
+    let mut stall = Stall::new(bound, started);
+    while started.elapsed() < bound * 2 {
+        assert!(
+            !stall.condemns(0, &scratch),
+            "a member that had not started its tree yet was condemned for the silence, {:?} in",
+            started.elapsed()
+        );
+        std::thread::sleep(POLL);
+    }
+
+    // And now there is a tree to ask, and it is doing nothing: a real process,
+    // alive and reachable for the whole bound, that will never answer.
+    let mut child = parked_in(&group, &scratch);
+
+    // The same clock and the same silence: what changed is that there is now
+    // something to ask. A wedged member is exactly this — a live harness that
+    // will never answer — and it is still condemned.
+    let found = std::time::Instant::now();
+    let mut condemned = false;
+    while !condemned && found.elapsed() < bound * 8 {
+        condemned = stall.condemns(0, &scratch);
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        condemned,
+        "a member whose live tree did nothing for {:?} was spared",
+        found.elapsed()
+    );
+
+    group.terminate();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// A member whose tree is found and then **vanishes** is not condemned on the
+/// sample it left behind, and the tree that replaces it is judged from a
+/// baseline of its own.
+///
+/// The shape is a supervisory member mid-round: its turn is a succession of
+/// children, so between two of them nothing at all is stamped for it — while it
+/// is already well past its stall bound, because publishing nothing for a whole
+/// round is what made this rule necessary. Folded to a reading of zero, that gap
+/// is a tree charged no CPU next to a sample of the child that just exited, and
+/// the rule condemns a member whose round is running exactly to plan.
+///
+/// So the gap decides nothing *and* the sample does not outlive the tree: the
+/// two readings are of different processes — the successor's accounting starts
+/// at zero — so their difference is a rate of nothing. What the successor gets
+/// is what any first look gets, a baseline, and the verdict comes from the
+/// comparison after it. That last phase is what keeps the sparing honest: this
+/// member is still condemned, just on evidence about the tree it actually has.
+///
+/// Driven at `Stall` for the reason the journey above is: no graph can hold a
+/// member's tree open, empty, and full again on demand. Everything the rule
+/// reads is real — real processes, the platform's own enumeration, the kernel's
+/// own CPU accounting, one clock throughout — and only the succession is staged.
+#[test]
+fn a_member_whose_tree_vanishes_is_not_condemned_on_the_sample_it_left() {
+    use oneagentgraph::member::Stall;
+    use oneagentgraph::scratch::Group;
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let scratch = root.path().join("oneagentgraph-mid-round");
+    std::fs::create_dir_all(&scratch).expect("the scratch");
+    let group = Group::open(&scratch).expect("a group");
+
+    // The child this round is on, and the sample the next phase must not
+    // inherit: a real process, alive and charged nothing, looked at twice — an
+    // idle tree by this rule's own reckoning, and the bound has not expired yet.
+    let mut child = parked_in(&group, &scratch);
+    let started = std::time::Instant::now();
+    let mut stall = Stall::new(VANISH_BOUND, started);
+    while started.elapsed() < VANISH_BOUND * 5 / 6 {
+        assert!(
+            !stall.condemns(0, &scratch),
+            "a member was condemned {:?} into a bound of {VANISH_BOUND:?}",
+            started.elapsed()
+        );
+        std::thread::sleep(POLL);
+    }
+
+    // The child exits, and the member is between children: nothing is stamped
+    // for it, and it goes on publishing nothing right through the bound. This is
+    // the whole subject — every look from here on is into the gap, and the first
+    // of them is what the old rule condemned this member on.
+    child.kill().expect("the child stops");
+    child.wait().expect("the child is reaped");
+    until("the scratch to be named by nothing at all", || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+    while started.elapsed() < VANISH_BOUND * 2 {
+        assert!(
+            !stall.condemns(0, &scratch),
+            "a member between two children was condemned for the tree that exited, {:?} in",
+            started.elapsed()
+        );
+        std::thread::sleep(POLL);
+    }
+
+    // The next child starts, and the member is silent past twice its bound — so
+    // a rule that had kept the exited child's reading would condemn on the very
+    // first look at this one. It gets a baseline instead.
+    let mut child = parked_in(&group, &scratch);
+    std::thread::sleep(POLL * 2);
+    assert!(
+        !stall.condemns(0, &scratch),
+        "the first look at a member's next child condemned it on the one before"
+    );
+
+    // And then the rule is what it always was, on evidence about the tree this
+    // member actually has: this child does nothing either, and it is condemned.
+    let found = std::time::Instant::now();
+    let mut condemned = false;
+    while !condemned && found.elapsed() < VANISH_BOUND * 2 {
+        condemned = stall.condemns(0, &scratch);
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        condemned,
+        "a member whose next child did nothing for {:?} was spared",
+        found.elapsed()
+    );
+
+    group.terminate();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// The stall bound the journey above supervises under.
+///
+/// Long enough that the rule takes its two looks at the first child, and the
+/// gap opens, before the bound expires — the order the production shape has, and
+/// the one that makes the sparing during the gap mean anything.
+const VANISH_BOUND: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// A real parked process in `group`, returned once the platform names it under
+/// `scratch`.
+///
+/// The tree half of a wedged member, which is what both journeys above need one
+/// of: alive, reachable, and charged no CPU at all.
+fn parked_in(group: &oneagentgraph::scratch::Group, scratch: &Path) -> std::process::Child {
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args(["-p", "fake:hang"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = group.spawn(&mut parked).expect("the parked process starts");
+    until("the scratch to be named by a live process", || {
+        !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+    child
+}
+
+/// How often the two watchdog loops in this crate look at a quiet member, which
+/// is the cadence the journeys above drive the rule at rather than one of their
+/// own.
+const POLL: std::time::Duration = oneagentgraph::member::HEARTBEAT_INTERVAL;
+
 /// The same guarantee for a **two-party** member, which is supervised by a
 /// different loop — and is the shape the production failure had.
 ///
