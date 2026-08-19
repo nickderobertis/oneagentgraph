@@ -818,11 +818,14 @@ fn sweep_names_the_family_it_could_not_examine() {
         "{}",
         run.stdout
     );
-    // Both lists in the one line a reader takes the verdict from, so the zero
-    // beside them cannot be mistaken for a clean host.
+    // Both lists in the one line a reader takes the verdict from, and the scope
+    // of those lists in the same line, so the zero beside them cannot be
+    // mistaken for a clean host.
     assert!(
-        run.stdout
-            .contains("examined families: runs; unexamined families: temp ("),
+        run.stdout.contains(
+            "of the scratch families this oneagentgraph build knows it writes, \
+             examined: runs; unexamined: temp ("
+        ),
         "a zero that does not say which families it covered: {}",
         run.stdout
     );
@@ -842,9 +845,11 @@ fn sweep_names_the_family_it_could_not_examine() {
     );
     empty.expect_code(0);
     assert!(
-        empty
-            .stdout
-            .contains("examined families: runs, temp; unexamined families: none"),
+        empty.stdout.contains(
+            "of the scratch families this oneagentgraph build knows it writes, \
+             examined: runs, temp; unexamined: none; this covers those families \
+             only — not the host, and not scratch another tool owns"
+        ),
         "a root that does not exist yet was reported as one that could not be examined: {}",
         empty.stdout
     );
