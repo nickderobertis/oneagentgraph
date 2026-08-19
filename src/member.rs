@@ -28,17 +28,17 @@
 //!   once, and a threshold near the write cadence reaps healthy ones under
 //!   exactly the load it creates.
 //! * The **activity watchdog** is the slow-stall backstop: a member that
-//!   published nothing for [`crate::liveness::DEFAULT_STALL_TIMEOUT`] *and has
-//!   no live work under it* is not working. Silence alone was the rule once, and
-//!   it condemned members that were working: a supervisory member whose turn is
-//!   one long child — a whole round — publishes nothing for far longer than the
-//!   bound while being entirely healthy, and its teardown took the live worker
-//!   underneath it with it. It was style-sensitive, too, which is how it hid: a
-//!   supervisor that drove its round by *polling* emitted a tool event every few
-//!   seconds and survived, while one that *blocked* on a single call died — same
-//!   persona, same graph, opposite verdicts, on a choice the agent makes freely
-//!   turn by turn. [`Stall`] is the rule now, and what it adds is the evidence
-//!   the old one threw away.
+//!   published nothing for [`crate::liveness::DEFAULT_STALL_TIMEOUT`] *while a
+//!   tree that can be found under it did nothing* is not working. Silence alone
+//!   was the rule once, and it condemned members that were working: a supervisory
+//!   member whose turn is one long child — a whole round — publishes nothing for
+//!   far longer than the bound while being entirely healthy, and its teardown
+//!   took the live worker underneath it with it. It was style-sensitive, too,
+//!   which is how it hid: a supervisor that drove its round by *polling* emitted
+//!   a tool event every few seconds and survived, while one that *blocked* on a
+//!   single call died — same persona, same graph, opposite verdicts, on a choice
+//!   the agent makes freely turn by turn. [`Stall`] is the rule now, and what it
+//!   adds is the evidence the old one threw away.
 //!
 //! Either firing is a [`EventKind::MemberDied`], carrying the `rule` that fired,
 //! the classified `cause`, and a bounded `detail`. `docs/contract.md` scopes
@@ -221,6 +221,13 @@ impl Bounds {
 /// shape that made silence alone the wrong rule — clears the clock on the child's
 /// progress and is left alone.
 ///
+/// *Did nothing*, and that is not the same fact as *was not there*:
+/// [`crate::scratch::work`] answers `None` for a tree it cannot find, and states
+/// there when a member has one to find. The policy here is what to do with that
+/// answer, and it is to decline it in both directions — an unfindable tree
+/// neither condemns this member nor clears its silence — and to let no sample
+/// outlive the tree it was taken from.
+///
 /// What counts as progress is a *rate*: the CPU charged to the processes stamped
 /// for this member — [`crate::scratch::work`] — against the wall time between two
 /// looks at it, held against the share of a core
@@ -244,6 +251,15 @@ impl Bounds {
 ///   member that is idle and silent, which is what a wedged one is. A member
 ///   burning CPU to no purpose is what `cancel` is for, and the heartbeat rule
 ///   still answers for a supervisor that cannot confirm its member at all.
+/// * A member with **no tree to ask** is outside this rule entirely, for the
+///   same reason and at the same cost. What is given up is small and the hole it
+///   would otherwise open is not: a wedged member is one whose harness is alive
+///   and will never answer, so it has a tree by construction — the journeys in
+///   `tests/e2e/liveness.rs` condemn exactly that member, with a live idle child
+///   under it, on every platform. What is bought is every member that is
+///   *between* trees while it is silent — one still starting its first, and one
+///   whose round is a succession of children with a gap between two of them.
+///   Both are ordinary; neither is a member doing nothing.
 #[derive(Debug)]
 pub struct Stall {
     /// When the member started, which is the origin of the only clock this rule
@@ -278,6 +294,17 @@ enum Observed {
     /// Nothing has been looked at: the member is publishing normally, so there
     /// is nothing to explain and nothing worth the cost of a look.
     Nothing,
+    /// A look found no tree to ask: nothing at all is stamped for this member,
+    /// so there is no process whose CPU could answer for the silence.
+    ///
+    /// A state of its own rather than a reading of zero, because it is not a
+    /// sample: the look that follows it is a fresh baseline, exactly as the
+    /// first one is. It replaces whatever the last look left behind, so no
+    /// verdict about one tree is ever carried across to the next.
+    Unfound {
+        /// When the look was taken, which is what the probe cadence counts.
+        at: Instant,
+    },
     /// The tree was doing something — or this is the first look, which is a
     /// baseline and no evidence of idleness at all.
     Moving {
@@ -301,7 +328,7 @@ impl Observed {
     fn due(&self, now: Instant, every: Duration) -> bool {
         match self {
             Observed::Nothing => true,
-            Observed::Moving { at, .. } | Observed::Idle { at, .. } => {
+            Observed::Unfound { at } | Observed::Moving { at, .. } | Observed::Idle { at, .. } => {
                 now.duration_since(*at) >= every
             }
         }
@@ -311,7 +338,7 @@ impl Observed {
     /// which is the window that comparison is a rate over.
     fn taken(&self) -> Option<(Instant, crate::scratch::Work)> {
         match self {
-            Observed::Nothing => None,
+            Observed::Nothing | Observed::Unfound { .. } => None,
             Observed::Moving { at, work } | Observed::Idle { at, work } => Some((*at, *work)),
         }
     }
@@ -356,11 +383,14 @@ impl Stall {
     /// what is concluded from them.
     ///
     /// `observe` is called at most once, and only when a look is actually due.
+    /// It answers `None` for a member with no tree to ask at all, which is a
+    /// look that establishes nothing rather than one that found no work — see
+    /// [`crate::scratch::work`].
     fn judge(
         &mut self,
         published: u64,
         now: Instant,
-        observe: impl FnOnce() -> crate::scratch::Work,
+        observe: impl FnOnce() -> Option<crate::scratch::Work>,
     ) -> bool {
         let elapsed = millis(now.saturating_duration_since(self.started));
         let quiet = Duration::from_millis(elapsed.saturating_sub(published.max(self.cleared)));
@@ -373,12 +403,25 @@ impl Stall {
         }
         if self.observed.due(now, self.probe_every) {
             let before = self.observed.taken();
-            let work = observe();
-            self.observed = match before {
+            self.observed = match (observe(), before) {
+                // Nothing is stamped for this member, so there is no tree whose
+                // CPU could answer for the silence. Not a reading of zero: a
+                // member is silent while it is still starting the processes that
+                // would be its tree, and reading that as an idle one condemned
+                // it before its first turn.
+                //
+                // Whatever the last look left behind goes with it, including a
+                // reading of a tree that has since exited. A reading is the CPU
+                // charged to the processes stamped *now*, so one taken either
+                // side of a gap is of two different populations — the successor
+                // starts its own accounting at zero — and their difference is a
+                // rate of nothing. Discarding is what makes the first look at
+                // the next tree a baseline instead.
+                (None, _) => Observed::Unfound { at: now },
                 // How fast the tree was charged CPU over the window between the
                 // two looks decides which this is — a rate, so that neither
                 // verdict rests on how finely a platform happens to count.
-                Some((at, before)) => {
+                (Some(work), Some((at, before))) => {
                     if before.worked(work, now.saturating_duration_since(at)) {
                         // Which counts exactly as a published line does: the
                         // member has live work under it, and its stall clock
@@ -391,12 +434,40 @@ impl Stall {
                 }
                 // The first look is a baseline and nothing else. Condemning on
                 // one would be condemning on a reading rather than on a rate,
-                // and there is no rate until there is a window to divide by.
-                None => Observed::Moving { at: now, work },
+                // and there is no rate until there is a window to divide by. A
+                // tree that has just appeared is in exactly that position, which
+                // is why an unfound look leaves no sample behind.
+                (Some(work), None) => Observed::Moving { at: now, work },
             };
         }
         matches!(self.observed, Observed::Idle { .. }) && quiet > self.bound
     }
+}
+
+/// Whether the activity rule condemns a member that publishes nothing at all
+/// while `scratch` holds whatever it really holds.
+///
+/// The clock is supplied and the observation is the platform's own, which is what
+/// lets [`crate::scratch`]'s two platform modules judge the answer their own
+/// enumeration gives for a member nobody has launched anything for — without
+/// holding a test still for a whole bound to reach the verdict.
+///
+/// The window walked is every look this rule would take in a member's first two
+/// bounds: it examines nothing until half a bound of silence has passed, and any
+/// verdict it can reach it has reached inside the second.
+#[cfg(test)]
+pub(crate) fn condemns_a_silent_member(scratch: &Path) -> bool {
+    let bound = Duration::from_secs(60);
+    let started = Instant::now();
+    let mut stall = Stall::new(bound, started);
+    let mut at = bound / 2;
+    while at <= bound * 2 {
+        if stall.judge(0, started + at, || crate::scratch::work(scratch)) {
+            return true;
+        }
+        at += stall.probe_every;
+    }
+    false
 }
 
 /// The longest a quiet member goes unexamined, whatever its stall bound is.
@@ -649,21 +720,25 @@ mod tests {
         assert_eq!(moved.stall, Duration::from_secs(30));
     }
 
-    /// The activity rule, on its own terms: a member publishing normally is never
-    /// condemned and its tree is never even examined; a silent one with nothing
-    /// running under it is condemned, but only once two looks agree.
+    /// The activity rule against a real scratch directory: a member publishing
+    /// normally is never condemned and its tree is never even examined, and a
+    /// member whose tree cannot be *found* is not condemned however long it is
+    /// silent.
     ///
-    /// The scratch here is an empty directory, which is a member whose tree is
-    /// *gone* — the strongest form of "no live work". The member that has one and
-    /// is working through it is a real process tree, and so is proven by a real
-    /// run in `tests/e2e/liveness.rs` rather than here.
+    /// The scratch here is an empty directory — a member nobody has launched
+    /// anything for, which is what every member is while it starts. That is the
+    /// look this rule has no evidence in, and reading it as an idle tree is what
+    /// condemned a member on Windows before it had said anything. The member
+    /// whose tree *is* found and does nothing is the condemned one, and it is
+    /// judged over supplied readings below and driven end to end, with a live
+    /// idle child under it, in `tests/e2e/liveness.rs`.
     ///
     /// The bound is a second, and the sleeps are real, because the probe cadence
     /// is real time: the rule's whole subject is what happened *between* two
     /// looks, so a clock this test supplied would be testing arithmetic rather
     /// than the rule.
     #[test]
-    fn the_activity_rule_needs_both_silence_and_an_idle_tree() {
+    fn the_activity_rule_declines_a_member_whose_tree_cannot_be_found() {
         let scratch = tempfile::tempdir().expect("a scratch");
         let bound = Duration::from_secs(1);
         let mut stall = Stall::new(bound, Instant::now());
@@ -675,22 +750,61 @@ mod tests {
             "a member publishing normally paid for a look at its own process tree"
         );
 
-        // Quiet past half the bound, so the tree is examined — but one look is a
-        // reading rather than a change, so it is not condemned on it.
+        // Quiet past half the bound, so the tree is looked for — and there is
+        // none, which is a look that establishes nothing rather than a baseline.
         std::thread::sleep(bound / 2 + Duration::from_millis(100));
         assert!(!stall.condemns(0, scratch.path()));
-        assert!(matches!(stall.observed, Observed::Moving { .. }));
+        assert!(matches!(stall.observed, Observed::Unfound { .. }));
 
-        // A second look, agreeing with the first, past the whole bound: nothing
-        // is running under this member and it has published nothing.
+        // A second look, past the whole bound, agreeing with the first: still
+        // nothing to ask, so still nothing concluded.
         std::thread::sleep(bound / 2 + Duration::from_millis(100));
-        assert!(stall.condemns(0, scratch.path()));
+        assert!(
+            !stall.condemns(0, scratch.path()),
+            "a member with no tree to ask was condemned for the answer nobody gave"
+        );
+        assert!(matches!(stall.observed, Observed::Unfound { .. }));
 
         // And a member that publishes again is cleared, tree and all — the next
         // silence is judged from scratch rather than on the verdict this one
         // reached.
         assert!(!stall.condemns(millis(stall.started.elapsed()), scratch.path()));
         assert!(matches!(stall.observed, Observed::Nothing));
+    }
+
+    /// A tree that appears while a member is already silent is a **baseline**,
+    /// not a comparison — so the first look that finds one cannot condemn on it,
+    /// and the member is judged on what happens after it.
+    ///
+    /// The startup window, as the rule sees it: nothing, nothing, then a tree.
+    /// A rule that compared the first real reading against the unfound looks
+    /// before it would be comparing a number against no number at all.
+    #[test]
+    fn a_tree_that_appears_mid_silence_is_a_baseline_rather_than_a_verdict() {
+        let bound = Duration::from_secs(2);
+        let started = Instant::now();
+        let mut stall = Stall::new(bound, started);
+        let probe = stall.probe_every;
+
+        // The whole bound with nothing launched yet.
+        let mut at = bound / 2;
+        while at <= bound + probe {
+            assert!(!stall.judge(0, started + at, || None), "at {at:?}");
+            at += probe;
+        }
+
+        // The tree arrives, charged for the work of starting: a baseline.
+        at += probe;
+        assert!(!stall.judge(0, started + at, || Some(Work::of_micros(2_000))));
+        assert!(matches!(stall.observed, Observed::Moving { .. }));
+
+        // And from there the rule is what it always was: one comparison against
+        // that baseline, and a tree charged nothing over it is condemned.
+        at += probe;
+        assert!(
+            stall.judge(0, started + at, || Some(Work::of_micros(2_000))),
+            "a member whose tree was found and did nothing outlived the rule"
+        );
     }
 
     /// The rule's *decision*, over supplied observations rather than a process:
@@ -734,10 +848,12 @@ mod tests {
         let started = Instant::now();
         let mut stall = Stall::new(bound, started);
         let (probe, mut charged) = (stall.probe_every, 4 * core);
-        assert!(!stall.judge(0, started + bound, || Work::of_micros(charged)));
+        assert!(!stall.judge(0, started + bound, || Some(Work::of_micros(charged))));
         charged -= core;
         assert!(
-            !stall.judge(0, started + bound + probe, || Work::of_micros(charged)),
+            !stall.judge(0, started + bound + probe, || Some(Work::of_micros(
+                charged
+            ))),
             "a member whose working child exited between two looks was condemned for it"
         );
 
@@ -765,7 +881,7 @@ mod tests {
         while at < bound * 4 {
             at += stall.probe_every;
             let charged = micros_per_second.saturating_mul(millis(at)) / 1_000;
-            if stall.judge(0, started + at, || Work::of_micros(charged)) {
+            if stall.judge(0, started + at, || Some(Work::of_micros(charged))) {
                 return Some(at);
             }
         }
