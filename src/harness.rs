@@ -438,9 +438,11 @@ fn as_payload(advanced: &FallbackAdvanced) -> Map<String, Value> {
 ///
 /// Shorter than [`crate::judge`]'s escalation because the engine takes a cancel
 /// token: cancelling terminates each harness tree through oneharness's own
-/// `Finish::Terminate`, so there is no "ask, then reap what never answered" —
-/// there is one lever, the reap beside it for anything the stamp still finds, and
-/// a bounded wait before the run gives up on the thread rather than on itself.
+/// `Finish::Terminate`, so there is no second ask to make — there is one lever,
+/// the reap beside it for anything the stamp still finds, and a bounded wait
+/// before the run gives up on the thread rather than on itself. That reap is
+/// [`crate::scratch::reap_after_cancel`], which is what leaves the lever a
+/// moment to be answered.
 fn condemn(
     rx: &mpsc::Receiver<Answer>,
     cancel: &CancelToken,
@@ -450,7 +452,13 @@ fn condemn(
 ) -> Outcome {
     cancel.cancel();
     let deadline = Instant::now() + TEARDOWN_GRACE;
-    let mut reaped = crate::scratch::reap(scratch);
+    // llmlint: ignore-block[changed_behavior_has_e2e] the grace this reap leaves
+    // the cancel is Windows-only — POSIX already spent it — so no journey on a
+    // POSIX runner can be red before this line and green after it. Asserted at
+    // the seam it lives in, by `scratch::platform`'s two timing tests; the
+    // condemnation around it is `tests/e2e/liveness.rs`.
+    let mut reaped = crate::scratch::reap_after_cancel(scratch);
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     while Instant::now() < deadline {
         match rx.recv_timeout(TEARDOWN_POLL) {
             // The engine tore itself down and answered. What it says is evidence
