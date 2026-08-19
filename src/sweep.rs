@@ -23,6 +23,10 @@
 //! there is no third answer for a family, and no way to produce a report that
 //! omits one.
 //!
+//! That promise is about *these* families and nothing else, so the closing line
+//! of [`Report::lines`] names whose families it counted: an empty unexamined
+//! list was read as "nothing is accumulating" once, while the disk was full.
+//!
 //! # What is never taken
 //!
 //! Three proofs, in this order, and any one of them retains the directory:
@@ -311,8 +315,11 @@ impl Report {
             }
         }
         let (examined, unexamined) = self.family_lists();
+        // The scope rides in the same line as the lists because this is the line
+        // an operator takes the verdict from, and the one a composing report
+        // quotes into a section of its own.
         lines.push(format!(
-            "sweep: {} {} from {} director{}; examined families: {}; unexamined families: {}",
+            "sweep: {} {} from {} director{}; of the scratch families this oneagentgraph build knows it writes, examined: {}; unexamined: {}; this covers those families only — not the host, and not scratch another tool owns",
             match self.mode {
                 Mode::Report => "would reclaim",
                 Mode::Reclaim => "reclaimed",
@@ -631,11 +638,8 @@ mod tests {
         let rendered = reported.lines().join("\n");
         assert!(rendered.contains("would reclaim"), "{rendered}");
         // Both families named, every time: that is what makes a zero honest.
-        assert!(
-            rendered.contains("examined families: runs, temp"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("unexamined families: none"), "{rendered}");
+        assert!(rendered.contains("examined: runs, temp"), "{rendered}");
+        assert!(rendered.contains("unexamined: none"), "{rendered}");
 
         let swept = sweep(&families, Mode::Reclaim, Duration::ZERO, SystemTime::now());
         assert_eq!(swept.reclaimable_count(), 1);
@@ -689,12 +693,103 @@ mod tests {
             "{rendered}"
         );
         assert!(
-            rendered.contains("examined families: temp"),
+            rendered.contains("examined: temp"),
             "the families that *were* examined must still be named: {rendered}"
         );
         assert!(
-            rendered.contains("unexamined families: runs ("),
+            rendered.contains("unexamined: runs ("),
             "an unexamined family must carry its reason: {rendered}"
+        );
+    }
+
+    /// Asserted whole rather than by fragment: the overclaim this replaced was
+    /// in no one word of `unexamined families: none` but in the sentence around
+    /// it, which left a reader to assume the scope.
+    #[test]
+    fn the_closing_line_names_the_families_it_covers_when_all_were_examined() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let report = sweep(
+            &two_families(&root.path().join("state"), root.path()),
+            Mode::Report,
+            Duration::ZERO,
+            SystemTime::now(),
+        );
+        let lines = report.lines();
+        let closing = lines.last().expect("a report closes with its verdict");
+        assert_eq!(
+            closing,
+            "sweep: would reclaim 0 B from 0 directories; of the scratch families \
+             this oneagentgraph build knows it writes, examined: runs, temp; \
+             unexamined: none; this covers those families only — not the host, and \
+             not scratch another tool owns"
+        );
+    }
+
+    /// One wording for both answers: an operator comparing a sweep that reached
+    /// every family with one that could not reads the same sentence, with the
+    /// reason inside the list rather than in place of the scope.
+    #[test]
+    fn the_closing_line_names_the_families_it_covers_when_one_could_not_be() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let blocked = root.path().join("not-a-directory");
+        std::fs::write(&blocked, "").expect("write");
+
+        let report = sweep(
+            &two_families(&blocked, root.path()),
+            Mode::Reclaim,
+            Duration::ZERO,
+            SystemTime::now(),
+        );
+        let lines = report.lines();
+        let closing = lines.last().expect("a report closes with its verdict");
+        // The reason is the platform's own, so the assertion is around it.
+        assert!(
+            closing.starts_with(
+                "sweep: reclaimed 0 B from 0 directories; of the scratch families this \
+                 oneagentgraph build knows it writes, examined: temp; unexamined: runs ("
+            ),
+            "{closing}"
+        );
+        assert!(
+            closing.ends_with(
+                "); this covers those families only — not the host, and not scratch \
+                 another tool owns"
+            ),
+            "{closing}"
+        );
+    }
+
+    /// The property the two tests above pin a wording for: an operator's one
+    /// sweep verb runs this one beside other tools' sweeps of the directories
+    /// they own, and quoting this line under a heading of their own must not
+    /// turn it back into a claim about everything on the disk.
+    #[test]
+    fn the_closing_line_claims_only_this_crate_s_families_when_quoted_alone() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let report = sweep(
+            &two_families(&root.path().join("state"), root.path()),
+            Mode::Report,
+            Duration::ZERO,
+            SystemTime::now(),
+        );
+        let lines = report.lines();
+        let closing = lines.last().expect("a report closes with its verdict");
+        let (before_scope, scoped) = closing
+            .split_once("of the scratch families this oneagentgraph build knows it writes")
+            .unwrap_or_else(|| {
+                panic!("a verdict that does not say whose families it counted: {closing}")
+            });
+        assert!(
+            !before_scope.contains("examined"),
+            "a coverage list ahead of the scope that qualifies it: {closing}"
+        );
+        assert!(
+            scoped.contains("examined: runs, temp") && scoped.contains("unexamined: none"),
+            "{closing}"
+        );
+        assert!(
+            scoped.contains("not the host"),
+            "a verdict a reader could take for a statement about the host: {closing}"
         );
     }
 
@@ -711,11 +806,8 @@ mod tests {
         );
         assert_eq!(report.reclaimable_count(), 0);
         let rendered = report.lines().join("\n");
-        assert!(
-            rendered.contains("examined families: runs, temp"),
-            "{rendered}"
-        );
-        assert!(rendered.contains("unexamined families: none"), "{rendered}");
+        assert!(rendered.contains("examined: runs, temp"), "{rendered}");
+        assert!(rendered.contains("unexamined: none"), "{rendered}");
     }
 
     /// The temp family is one tenant of a root the whole host shares, so only
