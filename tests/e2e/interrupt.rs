@@ -27,6 +27,8 @@
 
 use std::path::PathBuf;
 
+#[cfg(unix)]
+use crate::support::assert_session_labels;
 use crate::support::{graph_with, until, Workspace};
 
 /// One run whose member is parked on a controllable turn, and the run id an
@@ -201,6 +203,17 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
         interrupted.stdout
     );
     assert_eq!(events[0]["labels"]["run_id"], run_id.as_str());
+    // The redirection is part of the member's conversation, so it carries the
+    // label a consumer renders that conversation from — and the verb publishes on
+    // a stream of its own, which is what the value names. This is the one journey
+    // that produces a real `turn-interrupted`, so it is where that half of the
+    // rule is held.
+    assert_eq!(
+        assert_session_labels(&interrupted),
+        ["turn-interrupted".to_string()].into_iter().collect(),
+        "{}",
+        interrupted.stdout
+    );
 
     let output = member.settled();
     let stdout = String::from_utf8_lossy(&output.stdout);
