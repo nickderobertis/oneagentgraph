@@ -22,9 +22,11 @@ use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
 use oneagentgraph::event::{
-    Artifact, Cause, Disposition, Envelope, EventFilter, EventKind, FallbackAdvanced, Labels,
-    Matcher, MemberDied, MemberStarted, Role, Runner, Source, TurnActivity, TurnCompleted,
-    TurnInterrupted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES,
+    session_label, Artifact, Cause, Disposition, Envelope, EventFilter, EventKind,
+    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Role, Runner,
+    Source, TurnActivity, TurnCompleted, TurnInterrupted, Usage, ENVELOPE_VERSION,
+    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
+    ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
 use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
@@ -51,6 +53,7 @@ const ALL_EVENT_KINDS: &[EventKind] = &[
     EventKind::TurnInterrupted,
     EventKind::MemberHeartbeat,
     EventKind::FallbackAdvanced,
+    EventKind::OneharnessSession,
     EventKind::MemberDied,
     EventKind::CronFired,
     EventKind::CronReset,
@@ -550,6 +553,132 @@ fn a_fallback_advanced_payload_names_the_identity_and_the_classified_reason() {
     assert_eq!(
         serde_json::from_value::<FallbackAdvanced>(serialized).expect("parses"),
         attributed
+    );
+}
+
+/// The documented pointer at one oneharness invocation's conversation, driven
+/// through the public payload type and the artifact beside it.
+///
+/// The block is its own fenced example rather than prose, because every field on
+/// it is one a consumer reads by name: the two that say *which* invocation, the
+/// one that says which identity ran it, and the four that resolve the record.
+#[test]
+fn an_oneharness_session_payload_points_at_the_record_the_invocation_wrote() {
+    let documented: Value = serde_json::from_str(&fenced_block("json oneharness-session"))
+        .expect("the oneharness-session example is not JSON");
+
+    let session: OneharnessSession = serde_json::from_value(documented.clone())
+        .expect("the documented oneharness-session payload does not parse");
+    assert_eq!(session.role, Role::Agent);
+    assert_eq!(session.turn, 1);
+    assert_eq!(session.identity, "claude-code:alternate");
+    assert_eq!(
+        session.session_id.as_deref(),
+        Some("54e7ad34-ce6d-4979-8b4d-531b88026e15")
+    );
+    assert_eq!(
+        serde_json::to_value(&session).expect("serializes"),
+        documented,
+        "serializing the parsed payload must reproduce the documented shape"
+    );
+
+    // The three path fields are the three arguments the reader takes, and the
+    // document says what they compose to.
+    assert!(
+        CONTRACT.contains("`<history_dir>/<history_project>/<history_session>`"),
+        "the contract no longer says how a session file is resolved from the payload"
+    );
+
+    // A harness that exposed no continuation id of its own leaves the field off
+    // rather than carrying a null — the document says "present only when".
+    let anonymous = OneharnessSession {
+        session_id: None,
+        ..session
+    };
+    let serialized = serde_json::to_value(&anonymous).expect("serializes");
+    assert!(
+        serialized.get("session_id").is_none(),
+        "an absent continuation id reached the wire: {serialized}"
+    );
+    assert_eq!(
+        serde_json::from_value::<OneharnessSession>(serialized).expect("parses"),
+        anonymous
+    );
+
+    // The one artifact it carries, and the three published fields `Artifact` has
+    // — a consumer pinned to the current release must meet no fourth.
+    let documented = backticked()
+        .into_iter()
+        .find(|token| token.starts_with(r#"{"id": "<history_id>""#))
+        .expect("the contract no longer states the oneharness-session artifact");
+    let artifact: Artifact = serde_json::from_str(
+        &documented
+            .replace("<history_id>", &anonymous.history_id)
+            .replace(
+                "<the session file's size, 0 when it cannot be read>",
+                "21400",
+            ),
+    )
+    .expect("the documented artifact does not parse");
+    assert_eq!(
+        artifact,
+        Artifact {
+            id: anonymous.history_id.clone(),
+            kind: ONEHARNESS_SESSION_ARTIFACT.to_string(),
+            bytes: 21_400,
+        },
+        "the artifact id is the history id the payload names"
+    );
+}
+
+/// The four kinds the contract says carry a `session` label are the four this
+/// build stamps one on, and the value is the documented join of the stream and
+/// the member.
+///
+/// Both halves, because the exclusion is what a consumer's transcript rests on: a
+/// kind that gained one silently would render as a turn at the far end.
+#[test]
+fn the_documented_session_label_is_on_exactly_the_kinds_this_build_stamps_it_on() {
+    let sentence = CONTRACT
+        .split("Exactly four kinds carry it — ")
+        .nth(1)
+        .and_then(|rest| rest.split(" — and").next())
+        .expect("the contract no longer lists the kinds carrying a session label");
+    let documented: BTreeSet<String> = backticked_in(sentence).into_iter().collect();
+    assert_eq!(documented.len(), 4, "{documented:?}");
+
+    for kind in ALL_EVENT_KINDS {
+        assert_eq!(
+            kind.carries_session(),
+            documented.contains(kind.as_str()),
+            "the contract and this build disagree about whether {} carries a session",
+            kind.as_str()
+        );
+    }
+
+    assert!(
+        CONTRACT.contains(&format!("at most {MAX_SESSION_CHARS} characters")),
+        "the session bound in docs/contract.md and MAX_SESSION_CHARS disagree"
+    );
+    let example = backticked()
+        .into_iter()
+        .find(|token| token.ends_with(".worker"))
+        .expect("the contract no longer shows a session value");
+    let (stream, member) = example
+        .rsplit_once('.')
+        .expect("the documented value joins a stream and a member");
+    assert_eq!(
+        session_label(stream, member).as_deref(),
+        Some(example.as_str()),
+        "this build derives a session other than the one the contract shows"
+    );
+    assert_eq!(
+        SESSION_LABEL, "session",
+        "the label key in docs/contract.md and SESSION_LABEL disagree"
+    );
+    assert!(
+        CONTRACT.contains("A `session` label"),
+        "the contract no longer names the label key this build stamps"
     );
 }
 

@@ -32,6 +32,23 @@ pub const MAX_PAYLOAD_TEXT_BYTES: usize = 4096;
 /// The character bound on a [`TurnActivity::detail`] summary.
 pub const MAX_ACTIVITY_DETAIL_CHARS: usize = 160;
 
+/// The free-form label key naming the conversation a turn belongs to.
+///
+/// A consumer renders a transcript out of the envelopes carrying it, so which
+/// kinds carry it is part of the contract rather than an implementation detail —
+/// see [`EventKind::carries_session`].
+pub const SESSION_LABEL: &str = "session";
+
+/// The character bound on a [`SESSION_LABEL`] value.
+pub const MAX_SESSION_CHARS: usize = 128;
+
+/// The hex characters a [`session_label`] that had to be shortened ends with:
+/// one 64-bit digest, which is exactly the width `{:016x}` writes.
+const SESSION_DIGEST_CHARS: usize = 16;
+
+/// The `kind` of the artifact an [`EventKind::OneharnessSession`] carries.
+pub const ONEHARNESS_SESSION_ARTIFACT: &str = "oneharness_session";
+
 /// One NDJSON event.
 ///
 /// Merge order across streams is `(ts, stream, seq)`. A consumer detects loss
@@ -98,6 +115,9 @@ pub enum EventKind {
     MemberHeartbeat,
     /// An identity chain moved past a candidate; see [`FallbackAdvanced`].
     FallbackAdvanced,
+    /// One oneharness invocation named the history record it wrote; see
+    /// [`OneharnessSession`].
+    OneharnessSession,
     /// A member's process died; see [`MemberDied`].
     MemberDied,
     /// A scheduled member fired.
@@ -130,6 +150,7 @@ impl EventKind {
             EventKind::TurnInterrupted => "turn-interrupted",
             EventKind::MemberHeartbeat => "member-heartbeat",
             EventKind::FallbackAdvanced => "fallback-advanced",
+            EventKind::OneharnessSession => "oneharness-session",
             EventKind::MemberDied => "member-died",
             EventKind::CronFired => "cron-fired",
             EventKind::CronReset => "cron-reset",
@@ -137,6 +158,149 @@ impl EventKind {
             EventKind::GraphSettled => "graph-settled",
         }
     }
+
+    /// Whether this kind names the conversation its member's turns belong to,
+    /// through a [`SESSION_LABEL`] among the envelope's extras.
+    ///
+    /// Four kinds do, and the *exclusion* is the load-bearing half rather than a
+    /// detail: a consumer reads any labelled envelope that is not
+    /// `turn-activity` or `turn-interrupted` as one transcript turn, so a
+    /// session on the thousands of heartbeats a single member publishes over a
+    /// run would render a transcript of heartbeats and make every turn count
+    /// served from it wrong. Stated here, once, and applied by
+    /// [`Emitter::emit_with`] — which both stamps the label on these four and
+    /// takes it off everything else — so no emit site can carry it by accident.
+    #[must_use]
+    pub fn carries_session(self) -> bool {
+        matches!(
+            self,
+            EventKind::TurnStarted
+                | EventKind::TurnActivity
+                | EventKind::TurnCompleted
+                | EventKind::TurnInterrupted
+        )
+    }
+}
+
+/// The conversation one member's turns on one stream belong to:
+/// `"<stream>.<member>"`, sanitised to the consumer's identifier rule.
+///
+/// That rule — non-empty, at most [`MAX_SESSION_CHARS`] characters, ASCII
+/// letters, digits, `-`, `_` and `.` only, never starting with `.` — is a
+/// *consumer's*, so it is applied here rather than assumed of the two ids: a run
+/// id and a member id are both free-form enough to carry a character that would
+/// be refused at the far end, and a session refused there is a transcript nobody
+/// can open. Anything outside the set becomes `-`, which keeps two members
+/// distinct where dropping the character would collide them.
+///
+/// [`None`] when nothing survives — an empty stream and an empty member — because
+/// a label that names no conversation is worse than no label at all.
+///
+/// # A pair that does not fit
+///
+/// Neither id is bounded: a graph names itself and a member names itself, and
+/// both reach here whole. A pair past the bound is *shortened* rather than cut
+/// off the end, because cutting off the end takes the member with it — and a
+/// label naming only the stream merges every member of one graph into a single
+/// conversation, which is the collision a consumer keying a transcript on this
+/// value has no way to see. What comes back keeps a share of each id and a digest
+/// of the whole pair, so two members stay two conversations however long the run
+/// they belong to is named.
+///
+/// # What a journey can reach, and what it cannot
+///
+/// The **length** bound is reachable from outside and has a journey: a graph
+/// names itself, [`crate::run::RunId::mint`] makes that name most of the run id,
+/// and the run id is most of a session, so a descriptive name reaches the bound.
+///
+/// The **character** and **leading-dot** rules cannot be reached that way, and
+/// deliberately: `mint` already maps its slug to lowercase ASCII, digits and `-`,
+/// and a member name is refused unless it is letters, digits, hyphens and
+/// underscores — so today no graph, member, or command line can put anything
+/// else into either half. They are kept because the rule is the *consumer's*
+/// rather than this crate's: a stream id this crate mints differently later, or a
+/// second producer stamping this label, would meet the same reader.
+// llmlint: ignore-block[changed_behavior_has_e2e] the two arms named above have
+// no journey because no graph, member, or command line reaches them — both ids
+// are already inside this alphabet by the time they arrive, by `RunId::mint` and
+// by `MemberName::parse`. Driven in this module against the values a future
+// producer could hand it; the half that *is* reachable is
+// `tests/e2e/session.rs::two_members_of_an_over_long_run_are_still_two_conversations`.
+#[must_use]
+pub fn session_label(stream: &str, member: &str) -> Option<String> {
+    let stream = accepted(stream);
+    let member = accepted(member);
+    let joined = format!("{stream}.{member}");
+    // Every accepted character is ASCII, so from here a byte count is a
+    // character count and a byte slice is a character slice.
+    let label = if joined.len() <= MAX_SESSION_CHARS {
+        joined
+    } else {
+        shortened(&stream, &member, &joined)
+    };
+    let session = label.trim_start_matches('.');
+    (!session.is_empty()).then(|| session.to_string())
+}
+
+fn accepted(id: &str) -> String {
+    id.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+// llmlint: ignore-end[changed_behavior_has_e2e]
+
+/// A pair past [`MAX_SESSION_CHARS`] brought under it, keeping both ids and the
+/// distinction between one pair and another.
+///
+/// Each id keeps at least half of what is left once the `.`, the `-` and the
+/// digest are paid for, plus whatever the other one did not need — so neither
+/// can be squeezed out by the other however lopsided the two are. Which end each
+/// keeps is the end that says which id it is: a run id ends with the
+/// milliseconds and pid [`crate::run::RunId::mint`] appends, the only part that
+/// tells two runs of one graph apart, so the stream keeps its tail; a member is
+/// named by a person and reads from the front, so it keeps its head.
+///
+/// The digest is over the **whole** pair, which is what makes the result
+/// injective where the halves alone are not: two ids differing only in what was
+/// cut away still differ here. It is a plain FNV-1a rather than
+/// [`std::collections::hash_map::DefaultHasher`], whose output is documented as
+/// free to change between Rust releases — `oneagentgraph interrupt` labels a turn
+/// from a second process, and a conversation that renamed itself between builds
+/// is one a consumer would file as two.
+fn shortened(stream: &str, member: &str, joined: &str) -> String {
+    // The separator, the digest, and the `-` before it are what shortening
+    // costs; everything else is the two ids'.
+    let budget = MAX_SESSION_CHARS - 2 - SESSION_DIGEST_CHARS;
+    let half = budget / 2;
+    let (from_stream, from_member) = if member.len() <= half {
+        (budget - member.len(), member.len())
+    } else if stream.len() <= budget - half {
+        (stream.len(), budget - stream.len())
+    } else {
+        (budget - half, half)
+    };
+    format!(
+        "{}.{}-{:016x}",
+        &stream[stream.len() - from_stream..],
+        &member[..from_member],
+        digest(joined)
+    )
+}
+
+/// FNV-1a, 64 bits: the same value for the same bytes in every process and every
+/// build, which is the property [`shortened`] needs of it.
+fn digest(value: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    value.bytes().fold(OFFSET, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
 }
 
 /// The reserved label keys, plus whatever else a producer stamped.
@@ -169,7 +333,13 @@ pub struct Labels {
 }
 
 /// Evidence too large for a payload: stored by the producing library, referenced
-/// by id, and fetched through that library's CLI.
+/// by id, and read back through that library.
+///
+/// Through the *library*, not through its command line. Nothing in this stack
+/// shells out for evidence: this crate runs oneharness through `oneharness_core`
+/// on a thread of its own process, `onepipeline` links `onevcs` the same way, and
+/// the consumer of an [`EventKind::OneharnessSession`] artifact resolves the
+/// session file by linking `oneharness_core` too.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
@@ -562,6 +732,40 @@ pub struct FallbackAdvanced {
     pub turn: Option<u64>,
 }
 
+/// The payload of an [`EventKind::OneharnessSession`] event: where one
+/// oneharness invocation's conversation was written down.
+///
+/// This is the pointer a consumer renders an agent's actual transcript from, and
+/// it is published per *invocation* rather than per member: a two-party member
+/// runs one invocation per side per turn, and each writes its own history record.
+///
+/// The three `history_*` path fields are separate rather than one path because
+/// they are the three arguments the reader takes — the store, the project inside
+/// it, and the session file's own name — so a consumer resolves the file through
+/// oneharness's own library rather than by re-deriving its layout.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OneharnessSession {
+    /// Which side of a two-party conversation made this invocation.
+    pub role: Role,
+    /// The turn it was made on, within that side.
+    pub turn: u64,
+    /// The identity that ran it, by the composed id that reproduces it.
+    pub identity: String,
+    /// The harness's own continuation id, present only when it exposed one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// The oneharness history record this invocation wrote, which is also the
+    /// id of the [`Artifact`] beside this payload.
+    pub history_id: String,
+    /// The history store the record was written into.
+    pub history_dir: String,
+    /// The project subdirectory of that store.
+    pub history_project: String,
+    /// The session file's own name, without its extension.
+    pub history_session: String,
+}
+
 /// Which side of a two-party conversation an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -844,6 +1048,33 @@ impl Emitter {
         &self.stream
     }
 
+    /// This emitter's labels as one kind of envelope carries them: with the
+    /// [`SESSION_LABEL`] on the kinds that name a conversation, and without it on
+    /// every other.
+    ///
+    /// Both directions are this emitter's to decide, because the exclusion is
+    /// what a consumer's transcript rests on: a `session` an operator stamped by
+    /// hand with `--label` would otherwise ride every heartbeat in the run and
+    /// turn each one into a transcript turn at the far end. The emitter owns the
+    /// key; nothing else may write it.
+    fn stamp_session(&self, kind: EventKind) -> Labels {
+        let mut labels = self.labels.clone();
+        // A member as well as a kind: the conversation is *that member's*, and
+        // the graph's own emitter names none.
+        let session = kind
+            .carries_session()
+            .then(|| labels.member.clone())
+            .flatten()
+            .and_then(|member| session_label(&self.stream, &member));
+        match session {
+            Some(session) => labels
+                .extra
+                .insert(SESSION_LABEL.to_string(), Value::String(session)),
+            None => labels.extra.remove(SESSION_LABEL),
+        };
+        labels
+    }
+
     /// Write one event, returning the envelope as it was written.
     ///
     /// A sink that cannot be written to is not a run failure — the events are
@@ -864,9 +1095,10 @@ impl Emitter {
         payload: Map<String, Value>,
         artifacts: Vec<Artifact>,
     ) -> Envelope {
+        let labels = self.stamp_session(kind);
         let admitted = self
             .filter
-            .allows(Source::Agentgraph, kind.as_str(), &self.labels);
+            .allows(Source::Agentgraph, kind.as_str(), &labels);
         let envelope = Envelope {
             v: ENVELOPE_VERSION,
             ts: now_rfc3339(),
@@ -884,7 +1116,7 @@ impl Emitter {
             },
             source: Source::Agentgraph,
             kind,
-            labels: self.labels.clone(),
+            labels,
             payload,
             artifacts,
         };
@@ -1064,6 +1296,7 @@ mod tests {
         EventKind::TurnInterrupted,
         EventKind::MemberHeartbeat,
         EventKind::FallbackAdvanced,
+        EventKind::OneharnessSession,
         EventKind::MemberDied,
         EventKind::CronFired,
         EventKind::CronReset,
@@ -1372,6 +1605,173 @@ mod tests {
         assert_eq!(suppressed.kind, EventKind::TurnActivity);
         assert_eq!(suppressed.labels.member.as_deref(), Some("worker"));
         assert_eq!(suppressed.v, ENVELOPE_VERSION);
+    }
+
+    /// Exactly the four kinds that name a turn carry a session, whatever the
+    /// emitter was handed — including a `session` an operator stamped by hand,
+    /// which is taken off everything else rather than riding every heartbeat in
+    /// the run into a consumer's transcript.
+    #[test]
+    fn only_the_kinds_that_name_a_turn_carry_a_session() {
+        let recorder = Recorder::default();
+        let member = Emitter::new("node-scope-1", Box::new(recorder.clone())).with_labels(Labels {
+            member: Some("worker".into()),
+            // The operator's own stamp, reaching every envelope of the run.
+            extra: [(SESSION_LABEL.to_string(), Value::from("theirs"))]
+                .into_iter()
+                .collect(),
+            ..Labels::default()
+        });
+        for kind in ALL_KINDS {
+            member.emit(*kind, Map::new());
+        }
+
+        // Named here rather than taken from `carries_session`, which is the
+        // thing under test: a build that widened it would otherwise agree with
+        // itself. The same four are held against `docs/contract.md` by
+        // `tests/contract.rs`.
+        let a_turn = [
+            EventKind::TurnStarted,
+            EventKind::TurnActivity,
+            EventKind::TurnCompleted,
+            EventKind::TurnInterrupted,
+        ];
+        for envelope in lines(&recorder) {
+            let session = envelope.labels.extra.get(SESSION_LABEL);
+            if a_turn.contains(&envelope.kind) {
+                assert_eq!(
+                    session,
+                    Some(&Value::from("node-scope-1.worker")),
+                    "{:?} does not name its conversation",
+                    envelope.kind
+                );
+            } else {
+                assert_eq!(session, None, "{:?} names a conversation", envelope.kind);
+            }
+        }
+
+        // The graph's own emitter names no member, so it names no conversation
+        // even on a kind that would carry one.
+        let graph = Emitter::new("node-scope-1", Box::new(Recorder::default()));
+        let envelope = graph.emit(EventKind::TurnStarted, Map::new());
+        assert_eq!(envelope.labels.extra.get(SESSION_LABEL), None);
+    }
+
+    /// A session is the stream and the member joined, sanitised to what the
+    /// consumer accepts — bounded, non-empty, and never opening with a `.`.
+    #[test]
+    fn a_session_is_the_stream_and_the_member_under_the_consumers_rule() {
+        assert_eq!(
+            session_label("node-scope-1786925518098-3163646", "worker").as_deref(),
+            Some("node-scope-1786925518098-3163646.worker")
+        );
+        // Anything outside the set becomes `-` rather than vanishing: two members
+        // whose ids differ only there stay two conversations.
+        assert_eq!(
+            session_label("run 1", "wörker/two").as_deref(),
+            Some("run-1.w-rker-two")
+        );
+        assert_ne!(
+            session_label("s", "a/b"),
+            session_label("s", "ab"),
+            "a dropped character collided two members into one conversation"
+        );
+
+        let long = session_label(&"s".repeat(200), "worker").expect("a session");
+        assert_eq!(long.chars().count(), MAX_SESSION_CHARS);
+
+        // A leading `.` is the one character the consumer refuses to open with,
+        // and an id that is nothing else names no conversation at all.
+        assert_eq!(session_label("", "worker").as_deref(), Some("worker"));
+        assert_eq!(session_label("..", ""), None);
+        assert_eq!(session_label("", ""), None);
+    }
+
+    /// A pair the bound cannot hold keeps **both** ids, and stays one
+    /// conversation per member.
+    ///
+    /// The failure this rules out is a run named descriptively enough to fill
+    /// the label on its own: every member of it would then answer to the same
+    /// session, and a consumer keying a transcript on that value would render
+    /// two agents' turns as one conversation with no way to tell.
+    #[test]
+    fn a_session_the_bound_cannot_hold_still_tells_two_members_apart() {
+        let stream = format!(
+            "{}-1786925518098-3163646",
+            "supervised-implementation-of-the-quarterly-reporting-service".repeat(3)
+        );
+        assert!(stream.len() > MAX_SESSION_CHARS, "{stream}");
+
+        // Each session, split back into what it kept of the two ids and the
+        // digest it ends with.
+        let parts = |session: &str| -> (String, String, String) {
+            let (kept, digest) = session
+                .rsplit_once('-')
+                .expect("a shortened session ends with a digest");
+            let (from_stream, from_member) = kept
+                .rsplit_once('.')
+                .expect("a shortened session still joins a stream and a member");
+            (
+                from_stream.to_string(),
+                from_member.to_string(),
+                digest.to_string(),
+            )
+        };
+
+        let worker = session_label(&stream, "worker").expect("a session");
+        let reviewer = session_label(&stream, "reviewer").expect("a session");
+        assert_ne!(
+            worker, reviewer,
+            "two members of one over-long run share one conversation"
+        );
+        for session in [&worker, &reviewer] {
+            assert_eq!(session.chars().count(), MAX_SESSION_CHARS, "{session}");
+            assert!(
+                session
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric()
+                        || matches!(character, '-' | '_' | '.')),
+                "{session} is not an identifier the consumer accepts"
+            );
+            let (from_stream, from_member, digest) = parts(session);
+            // The end of the run id, which is the part that tells this run from
+            // the next one, and the member whole.
+            assert!(stream.ends_with(&from_stream), "{session}");
+            assert!(
+                from_stream.contains("-1786925518098-3163646"),
+                "the conversation no longer names the run it belongs to: {session}"
+            );
+            assert!(
+                digest.len() == SESSION_DIGEST_CHARS
+                    && digest.chars().all(|it| it.is_ascii_hexdigit()),
+                "{session}"
+            );
+            assert!(session.contains(&format!(".{from_member}-")), "{session}");
+        }
+        assert_eq!(parts(&worker).1, "worker");
+        assert_eq!(parts(&reviewer).1, "reviewer");
+
+        // Two streams that differ only in what was cut away are still two
+        // conversations, because the digest is over the whole pair.
+        assert_ne!(
+            session_label(&format!("a{stream}"), "worker"),
+            session_label(&format!("b{stream}"), "worker"),
+            "a run distinguished only by what was cut away collided with another"
+        );
+
+        // Neither id can crowd the other out: both over-long, both still named.
+        let crowded = session_label(&stream, &"m".repeat(200)).expect("a session");
+        let (from_stream, from_member, _) = parts(&crowded);
+        assert_eq!(crowded.chars().count(), MAX_SESSION_CHARS, "{crowded}");
+        assert!(stream.ends_with(&from_stream), "{crowded}");
+        assert!(
+            !from_stream.is_empty() && from_member.chars().all(|it| it == 'm'),
+            "{crowded}"
+        );
+        assert!(
+            from_member.len().abs_diff(from_stream.len()) <= 1,
+            "one over-long id took the other's share: {crowded}"
+        );
     }
 
     /// An emitter whose sink is gone still numbers and returns its events: the
