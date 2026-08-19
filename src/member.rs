@@ -29,16 +29,16 @@
 //!   exactly the load it creates.
 //! * The **activity watchdog** is the slow-stall backstop: a member that
 //!   published nothing for [`crate::liveness::DEFAULT_STALL_TIMEOUT`] *while a
-//!   tree that can be found under it did nothing* is not working. Silence alone was the rule once, and
-//!   it condemned members that were working: a supervisory member whose turn is
-//!   one long child — a whole round — publishes nothing for far longer than the
-//!   bound while being entirely healthy, and its teardown took the live worker
-//!   underneath it with it. It was style-sensitive, too, which is how it hid: a
-//!   supervisor that drove its round by *polling* emitted a tool event every few
-//!   seconds and survived, while one that *blocked* on a single call died — same
-//!   persona, same graph, opposite verdicts, on a choice the agent makes freely
-//!   turn by turn. [`Stall`] is the rule now, and what it adds is the evidence
-//!   the old one threw away.
+//!   tree that can be found under it did nothing* is not working. Silence alone
+//!   was the rule once, and it condemned members that were working: a supervisory
+//!   member whose turn is one long child — a whole round — publishes nothing for
+//!   far longer than the bound while being entirely healthy, and its teardown
+//!   took the live worker underneath it with it. It was style-sensitive, too,
+//!   which is how it hid: a supervisor that drove its round by *polling* emitted
+//!   a tool event every few seconds and survived, while one that *blocked* on a
+//!   single call died — same persona, same graph, opposite verdicts, on a choice
+//!   the agent makes freely turn by turn. [`Stall`] is the rule now, and what it
+//!   adds is the evidence the old one threw away.
 //!
 //! Either firing is a [`EventKind::MemberDied`], carrying the `rule` that fired,
 //! the classified `cause`, and a bounded `detail`. `docs/contract.md` scopes

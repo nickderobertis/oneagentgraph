@@ -210,6 +210,78 @@ fn a_member_whose_child_is_alive_but_idle_is_still_condemned() {
     );
 }
 
+/// One member across the whole startup window: spared while nothing is stamped
+/// for it, and condemned once its tree is there to ask and does nothing.
+///
+/// Driven at `Stall` rather than through a verb because no graph can hold a
+/// member's first spawn open on demand — that window is the member's own
+/// in-process startup, which this suite's one sanctioned double sits downstream
+/// of, and it is milliseconds here against the seconds it takes on Windows. The
+/// clock is one clock for both halves, because the transition is the subject:
+/// the first tree a silent member gets is a baseline, not a verdict.
+#[test]
+fn a_member_with_no_tree_to_ask_is_spared_and_a_wedged_one_is_still_condemned() {
+    use oneagentgraph::member::Stall;
+    use oneagentgraph::scratch::{Group, SCRATCH_ENV};
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let scratch = root.path().join("oneagentgraph-starting");
+    std::fs::create_dir_all(&scratch).expect("the scratch");
+    let bound = std::time::Duration::from_secs(1);
+
+    // A member that has started and launched nothing yet: the group exists,
+    // because its launcher made it, and it holds nothing at all.
+    let group = Group::open(&scratch).expect("a group");
+    let started = std::time::Instant::now();
+    let mut stall = Stall::new(bound, started);
+    while started.elapsed() < bound * 2 {
+        assert!(
+            !stall.condemns(0, &scratch),
+            "a member that had not started its tree yet was condemned for the silence, {:?} in",
+            started.elapsed()
+        );
+        std::thread::sleep(POLL);
+    }
+
+    // And now there is a tree to ask, and it is doing nothing: a real process,
+    // alive and reachable for the whole bound, that will never answer.
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args(["-p", "fake:hang"])
+        .env(SCRATCH_ENV, &scratch)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = group.spawn(&mut parked).expect("the parked process starts");
+    until("the scratch to be named by a live process", || {
+        !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+    });
+
+    // The same clock and the same silence: what changed is that there is now
+    // something to ask. A wedged member is exactly this — a live harness that
+    // will never answer — and it is still condemned.
+    let found = std::time::Instant::now();
+    let mut condemned = false;
+    while !condemned && found.elapsed() < bound * 8 {
+        condemned = stall.condemns(0, &scratch);
+        std::thread::sleep(POLL);
+    }
+    assert!(
+        condemned,
+        "a member whose live tree did nothing for {:?} was spared",
+        found.elapsed()
+    );
+
+    group.terminate();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// How often the two watchdog loops in this crate look at a quiet member, which
+/// is the cadence the journey above drives the rule at rather than one of its
+/// own.
+const POLL: std::time::Duration = oneagentgraph::member::HEARTBEAT_INTERVAL;
+
 /// The same guarantee for a **two-party** member, which is supervised by a
 /// different loop — and is the shape the production failure had.
 ///
