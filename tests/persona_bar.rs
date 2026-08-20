@@ -174,7 +174,7 @@ fn out_of_reach(clause: &str) -> Vec<&'static str> {
 }
 
 #[test]
-fn no_shipped_bar_uses_the_vocabulary_of_a_demand_beyond_a_members_reach() {
+fn no_shipped_bar_uses_a_word_from_the_out_of_reach_vocabulary() {
     for (name, bar) in shipped_bars() {
         for (field, clause) in bar.clauses() {
             let found = out_of_reach(clause);
@@ -189,14 +189,16 @@ fn no_shipped_bar_uses_the_vocabulary_of_a_demand_beyond_a_members_reach() {
     }
 }
 
-/// The guard reads the class, not the sentence it was written from.
+/// A bar carrying the demand in wording that shares nothing with the sentence
+/// removed from `engineer` still trips [`OUT_OF_REACH`], and trips the prefixes
+/// that name why — asserted as the exact set, so a matcher that stopped finding
+/// one of them fails here rather than quietly narrowing the guard.
 ///
-/// A bar carrying the demand in wording that shares nothing with the one removed
-/// from `engineer` is still caught, and caught for the reason the class names —
-/// asserted as the exact set of prefixes, so a matcher that stopped finding one
-/// of them fails here rather than quietly narrowing the guard.
+/// The vocabulary is a proxy for the class and not a decision procedure for it:
+/// what it buys over comparing against a literal bar is that a demand put back in
+/// fresh words still has to avoid every one of these to get through.
 #[test]
-fn the_guard_reads_the_class_rather_than_the_wording_it_was_written_from() {
+fn a_demand_reworded_from_the_one_engineer_carried_is_still_caught() {
     let reworded = concat!(
         "name: lead\n",
         "user:\n",
