@@ -3,14 +3,9 @@
 # effort", its named recipes) removed: a shipped persona is layered onto whatever
 # base config a graph names, so it may assume no repository but the one it is
 # pointed at.
-#
-# `user.persona` is the bar a judge reviews this role's work against, and the same
-# rule holds there twice over: it is read in a repository this crate has never
-# seen, beside a task it does not know. So it still pushes for correctness,
-# validated trust boundaries, tests that drive the real interface, and coverage
-# that does not regress — but it does not decide *how* any of that is proven, and
-# it does not hold acceptance open for something that only exists after the run
-# has ended. `tests/persona_bar.rs` holds every shipped role to that.
+# The same holds of `user.persona`, the bar a judge reviews this role against:
+# see "What a bar may demand" in docs/persona-format.md, enforced by
+# tests/persona_bar.rs.
 name: engineer
 system_prompt: |
   You specialize in implementation across server-side systems, user interfaces,

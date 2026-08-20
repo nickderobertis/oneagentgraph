@@ -1,28 +1,7 @@
 //! Every bar this crate ships demands only what a member can settle inside its
-//! own run.
-//!
-//! A shipped role is layered onto a repository this crate has never seen, beside
-//! a task it does not know. `user.persona` and `user.done_when` are the review
-//! contract and the completion criterion its judge is handed, so what they
-//! demand is demanded of every dispatch a graph ever points that role at — and a
-//! demand that is not true of all of them fails the ones it is false of,
-//! whatever they were actually asked for. Two got in that way, both in
-//! `engineer`, and each failed a member whose work was finished and correct: one
-//! that decided *how* a criterion had to be proven, which only the criterion
-//! knows; and one that pointed at state arriving after the run had ended, which
-//! no worker can reach from inside the run that would have to satisfy it.
-//!
-//! So each bar is read twice — once for what it must still demand, and once for
-//! the vocabulary of that class. The second half is the one that keeps working.
-//! A literal to compare against is updated alongside the file it mirrors without
-//! anyone noticing what it gave up; a demand that comes back comes back reworded,
-//! and fresh wording still carries the words of the class it belongs to.
-//!
-//! Nothing those demands carried was dropped rather than moved: what proves a
-//! criterion is the task's own to state, and the bar defers to it.
-//! [`the_engineer_bar_still_demands_what_it_is_for`] is the other direction of
-//! the same guard — a bar emptied instead of narrowed would satisfy every stem
-//! below and review nothing at all.
+//! own run — "What a bar may demand" in `docs/persona-format.md` gives the two
+//! shapes that cannot be and why. This file holds the shipped roles there, by
+//! the vocabulary of that class rather than one wording of it.
 //!
 //! ## The audit the list was written from
 //!
@@ -40,10 +19,6 @@
 //! * `reviewer` — findings tied to specific code and ranked, each verified
 //!   against that code. Verifying a claim against the source is the work, not a
 //!   tier someone else runs over it afterwards.
-//!
-//! `tests/persona_format.rs` is the neighbouring guard on the same files: it
-//! holds what a persona may *say* against the published format. This one holds
-//! what a shipped bar may *demand*.
 
 use oneagentgraph::persona::{merge, Persona, SHIPPED_PERSONAS};
 
@@ -102,8 +77,7 @@ fn shipped_bars() -> Vec<(&'static str, Bar)> {
         .collect()
 }
 
-/// Word prefixes no shipped bar may use, each the surface of one of the two
-/// failures above.
+/// Word prefixes no shipped bar may use, one group per shape.
 ///
 /// A word naming a proof method or a check tier makes the bar decide how a
 /// criterion is met, which only that criterion knows and which a role shipped to
