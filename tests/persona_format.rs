@@ -128,7 +128,7 @@ fn the_documented_example_is_a_persona_the_crate_accepts() {
     assert!(prompt.contains("You lead the implementation."), "{prompt}");
     let bar = merged["user"]["done_when"].as_str().expect("a bar");
     assert!(bar.contains("the task is complete"), "{bar}");
-    assert!(bar.contains("proven end to end"), "{bar}");
+    assert!(bar.contains("the task's acceptance criteria"), "{bar}");
     assert_eq!(merged["user"]["max_turns"], Value::from(8));
     assert_eq!(merged["evals"].as_array().expect("evals").len(), 1);
     // The two keys the document calls this crate's own are consumed by the
@@ -212,6 +212,12 @@ fn the_document_names_exactly_the_fields_the_crate_refuses() {
 /// with `agent: {name, instructions}` blocks, over the same base with an
 /// `agent: {instructions}` preamble. Nothing here regenerates it: a role whose
 /// effective config moved has to be looked at, not re-recorded.
+///
+/// One entry has been looked at and re-recorded since, deliberately and once:
+/// `engineer`'s `user.persona`, whose review bar was corrected so that it demands
+/// nothing a member cannot settle inside its own run. `tests/persona_bar.rs` is
+/// what holds every shipped bar there, and says why. Every other entry is still
+/// the original capture.
 #[test]
 fn the_shipped_roles_merge_to_what_they_did_before_the_format_changed() {
     let expected: BTreeMap<String, Value> =

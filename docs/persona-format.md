@@ -27,7 +27,7 @@ system_prompt: |           # onejudge: the role, appended after the base's pream
 user:                      # onejudge: the simulated supervisor; omit it entirely
   persona: |               #   for a member that has none
     You are a tech lead. Push on correctness and on tests that prove behaviour.
-  done_when: "the change is proven end to end"
+  done_when: "the change meets the task's acceptance criteria"
   done_when_replaces_base: false   # ours: see "How it merges" below
   max_turns: 8
 evals:                     # onejudge: extra checks over the finished transcript
@@ -80,6 +80,19 @@ replaces the base's. A base with no `user:` block merged with a persona that
 brings none keeps having none: no empty `user:` is invented, because to onejudge
 an empty one is a supervisor with an empty persona rather than the single-turn
 run the base asked for.
+
+## What a bar may demand
+
+A role's **bar** — `user.persona` and `user.done_when` — is what its judge reviews
+against, and it is written before anyone knows which task the member will be
+handed. So it may only demand what that member can settle before its own run
+ends. Two shapes cannot be: a demand that decides *how* a criterion is proven,
+which only the criterion knows, and one that waits on something existing only
+after the run, which no member can reach from inside it. Both fail members whose
+work is finished and correct, and neither is a loss to give up — what proves a
+criterion is the task's own to state. The roles this crate ships are held there by
+`tests/persona_bar.rs`, against the vocabulary of that class rather than one
+wording of it.
 
 ## The previous spelling is refused
 
