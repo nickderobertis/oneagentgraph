@@ -30,9 +30,9 @@
 //! it. The rest are recorded here because "already sound" is a finding a later
 //! reader needs the reason for:
 //!
-//! * `docs-writer` — brings no bar of its own, and its review contract asks only
-//!   for accuracy against the code and prose a maintainer can use. Both are
-//!   readable in the run that produced them.
+//! * `docs-writer` — brings no completion criterion of its own, and its review
+//!   contract asks only for accuracy against the code and prose a maintainer can
+//!   use. Both are readable in the run that produced them.
 //! * `planner` — its bar is a property of the plan it is handed: actionable
 //!   subtasks, explicit dependencies, named interfaces.
 //! * `researcher` — cited sources, facts held apart from inferences, and no
@@ -56,17 +56,12 @@ use oneagentgraph::persona::{merge, Persona, SHIPPED_PERSONAS};
 /// under test.
 const BARE_BASE: &str = "provider:\n  kind: oneharness\n";
 
-/// The two halves of a role's bar that reach its judge, as the merge produces
-/// them.
 struct Bar {
-    /// `user.persona`: the stance the judge reviews from.
     persona: Option<String>,
-    /// `user.done_when`: the completion criterion, when the role brings one.
     done_when: Option<String>,
 }
 
 impl Bar {
-    /// Each half that is present, named by the field it came from.
     fn clauses(&self) -> Vec<(&'static str, &str)> {
         [
             ("user.persona", self.persona.as_deref()),
@@ -78,7 +73,6 @@ impl Bar {
     }
 }
 
-/// One persona document's bar, taken through the path a member's config takes.
 fn bar(name: &str, document: &str) -> Bar {
     let persona =
         Persona::parse(document, name).unwrap_or_else(|err| panic!("{name} does not load: {err}"));
@@ -101,7 +95,6 @@ fn bar(name: &str, document: &str) -> Bar {
     }
 }
 
-/// Every role this crate ships, with the bar its judge is handed.
 fn shipped_bars() -> Vec<(&'static str, Bar)> {
     SHIPPED_PERSONAS
         .iter()
@@ -197,8 +190,6 @@ fn flowing(clause: &str) -> String {
     clause.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Every prefix in [`OUT_OF_REACH`] that `clause` uses, in the order they are
-/// listed.
 fn out_of_reach(clause: &str) -> Vec<&'static str> {
     let flowing = flowing(clause);
     OUT_OF_REACH
@@ -208,10 +199,8 @@ fn out_of_reach(clause: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// The guard itself: no shipped role asks its judge for something the member
-/// cannot settle before its run ends.
 #[test]
-fn every_shipped_bar_demands_only_what_a_member_can_settle_in_its_own_run() {
+fn no_shipped_bar_uses_the_vocabulary_of_a_demand_beyond_a_members_reach() {
     for (name, bar) in shipped_bars() {
         for (field, clause) in bar.clauses() {
             let found = out_of_reach(clause);
@@ -315,7 +304,7 @@ fn the_engineer_bar_still_demands_what_it_is_for() {
 /// `engineer` is deliberately one of them: its correction narrowed the stance it
 /// reviews from and did not add a second bar beside the operator's.
 #[test]
-fn the_roles_that_bring_no_bar_of_their_own_are_the_ones_recorded_here() {
+fn the_roles_that_bring_no_completion_criterion_of_their_own_are_recorded_here() {
     let without: Vec<&str> = shipped_bars()
         .iter()
         .filter(|(_, bar)| bar.done_when.is_none())
@@ -327,8 +316,6 @@ fn the_roles_that_bring_no_bar_of_their_own_are_the_ones_recorded_here() {
         "a shipped role gained or lost a completion criterion of its own; that decides whether \
          the operator's base bar stands alone for it, so say so here"
     );
-    // And every role has the other half, which is what the guard above reads for
-    // all five.
     for (name, bar) in shipped_bars() {
         assert!(
             bar.persona.is_some(),

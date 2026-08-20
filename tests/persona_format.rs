@@ -213,11 +213,10 @@ fn the_document_names_exactly_the_fields_the_crate_refuses() {
 /// `agent: {instructions}` preamble. Nothing here regenerates it: a role whose
 /// effective config moved has to be looked at, not re-recorded.
 ///
-/// One entry has been looked at and re-recorded since, deliberately and once:
-/// `engineer`'s `user.persona`, whose review bar was corrected so that it demands
-/// nothing a member cannot settle inside its own run. `tests/persona_bar.rs` is
-/// what holds every shipped bar there, and says why. Every other entry is still
-/// the original capture.
+/// `engineer`'s entry is not that capture: its `user.persona` carries the
+/// correction that keeps a shipped bar to what a member can settle inside its own
+/// run, which `tests/persona_bar.rs` holds every role to and gives the reason
+/// for. The other four are.
 #[test]
 fn the_shipped_roles_merge_to_what_they_did_before_the_format_changed() {
     let expected: BTreeMap<String, Value> =
