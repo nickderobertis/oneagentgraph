@@ -24,8 +24,8 @@ use oneharness_core::io::runner::ProcessSupervisor;
 use serde_json::Value;
 
 use crate::event::{
-    bound_head, bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, Party,
-    TurnCompleted, TurnStarted,
+    bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, Party, TurnCompleted,
+    TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
 };
 use crate::invoke::HarnessLaunch;
 use crate::member::{
@@ -345,7 +345,16 @@ struct TheTurn {
 
 impl TheTurn {
     fn new(prompt: &str) -> Self {
-        let (instruction, instruction_truncated) = bound_head(prompt);
+        // Head-bounded: `bound_text` keeps a tail, so a field that keeps its
+        // opening trims to the same constant on a character boundary first and
+        // counts that trim as a cut. See `bound_text`'s own doc for why this
+        // field is the head-keeping one.
+        let mut head = MAX_PAYLOAD_TEXT_BYTES.min(prompt.len());
+        while !prompt.is_char_boundary(head) {
+            head -= 1;
+        }
+        let (instruction, cut) = bound_text(&prompt[..head]);
+        let instruction_truncated = cut || head < prompt.len();
         Self {
             instruction,
             instruction_truncated,
@@ -851,6 +860,46 @@ mod tests {
         assert_eq!(events[0].payload["output_truncated"], json!(true));
         // The summary bound is its own and is untouched by the new field.
         assert!(!events[0].payload.contains_key("truncated"));
+    }
+
+    /// The instruction this member's one turn answers keeps its **head** at the
+    /// same bound, and says it was cut — a turn's opening is where the model says
+    /// what it is about to do.
+    ///
+    /// This side owns its own head-trim, so it is driven here rather than
+    /// inherited from the judge side's. `é` is two bytes behind a fifteen-byte
+    /// ASCII opening, so every boundary past that opening is odd and the even
+    /// bound falls *inside* a character — the case a naive slice panics on.
+    #[test]
+    fn a_long_instruction_keeps_its_opening_at_the_published_payload_bound() {
+        let (emitter, recorder) = recorded();
+        let long = format!("write the thing{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        TheTurn::new(&long).open(&emitter);
+
+        let events = recorder.events();
+        let instruction = events[0].payload["instruction"]
+            .as_str()
+            .expect("an instruction");
+        assert!(instruction.starts_with("write the thing"), "{instruction}");
+        assert!(
+            instruction.len() < MAX_PAYLOAD_TEXT_BYTES,
+            "the cut did not walk back to a boundary: {}",
+            instruction.len()
+        );
+        assert_eq!(events[0].payload["instruction_truncated"], json!(true));
+
+        // And a prompt inside the bound is served whole, saying nothing about a
+        // cut that never happened.
+        let (emitter, recorder) = recorded();
+        TheTurn::new("write the thing").open(&emitter);
+        let events = recorder.events();
+        assert_eq!(events[0].payload["instruction"], json!("write the thing"));
+        assert_eq!(
+            events[0].payload.get("instruction_truncated"),
+            None,
+            "an uncut instruction claimed a cut: {:?}",
+            events[0].payload
+        );
     }
 
     /// A cancelled run's next event answers oneharness's own short-circuit, so a

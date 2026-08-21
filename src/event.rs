@@ -692,7 +692,8 @@ impl Party {
 // what this crate *writes*, and every value in them is made correct where it is
 // minted rather than re-checked where it is read: `role` comes only from
 // [`Party`], the instants only from [`crate::clock::now_rfc3339`], and the bounds
-// only from [`bound_head`] / [`bound_text`]. `Deserialize` is here so the
+// only from [`bound_text`] and the head-trim its own doc directs a caller to
+// make. `Deserialize` is here so the
 // contract test can round-trip them and a consumer can read them back — the
 // trust boundary an envelope really crosses is `deny_unknown_fields`, which every
 // one of them carries, exactly as `MemberDied` and `TurnInterrupted` have since
@@ -1075,8 +1076,19 @@ fn is_false(value: &bool) -> bool {
 /// it had to be cut.
 ///
 /// The cut lands on a character boundary, and it takes the **tail**: what names a
-/// failure is the last of a harness's output, not its startup chatter. A caller
-/// that wants the head says so by trimming before it gets here.
+/// failure is the last of a harness's output, not its startup chatter. This is
+/// the crate's only payload-text bound — a caller that wants the other end says
+/// so by trimming to the same constant before it gets here, and reports its own
+/// trim as a cut, so there is one number and one helper rather than a second of
+/// each drifting away from it.
+///
+/// Which end a field keeps is a property of the field, and both directions are
+/// settled. [`TurnActivity::output`] keeps its tail, which is what this does
+/// unaided. [`TurnStarted::instruction`] and [`TurnMessage::text`] keep their
+/// **head** — a turn's opening is where the model says what it is about to do,
+/// and that is what an operator watching a live dispatch opens the event to
+/// read — so their two call sites, in [`crate::harness`] and [`crate::judge`],
+/// trim first.
 #[must_use]
 pub fn bound_text(text: &str) -> (String, bool) {
     if text.len() <= MAX_PAYLOAD_TEXT_BYTES {
@@ -1087,31 +1099,6 @@ pub fn bound_text(text: &str) -> (String, bool) {
         start += 1;
     }
     (text[start..].to_string(), true)
-}
-
-/// The same bound, read from the other end: keep the **head** of one payload
-/// text field and report whether it had to be cut.
-///
-/// This is the trim [`bound_text`]'s own documentation directs a head-wanting
-/// caller to make, factored here so the two directions cannot drift apart on the
-/// bound or on the flag they report. It is not a second bound — it is
-/// [`MAX_PAYLOAD_TEXT_BYTES`], cut on a character boundary, exactly as above.
-///
-/// Which end a field keeps is a property of the field. A turn's opening is where
-/// the model says what it is about to do, and that is what an operator watching
-/// a live dispatch opens the event to read, so [`TurnStarted::instruction`] and
-/// [`TurnMessage::text`] keep their head; [`TurnActivity::output`] keeps its
-/// tail, because what names a failure is the last of a tool's output.
-#[must_use]
-pub fn bound_head(text: &str) -> (String, bool) {
-    if text.len() <= MAX_PAYLOAD_TEXT_BYTES {
-        return (text.to_string(), false);
-    }
-    let mut end = MAX_PAYLOAD_TEXT_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    (text[..end].to_string(), true)
 }
 
 /// Bound one [`TurnActivity::detail`] to [`MAX_ACTIVITY_DETAIL_CHARS`],
@@ -1406,32 +1393,6 @@ mod tests {
         // And an even offset needs no walk, so the whole bound is used.
         let aligned = format!("{}TAIL", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
         let (bounded, cut) = bound_text(&aligned);
-        assert!(cut);
-        assert_eq!(bounded.len(), MAX_PAYLOAD_TEXT_BYTES);
-    }
-
-    /// The head-keeping direction, at the same bound and never splitting a
-    /// character: what a turn is about to do is at the *start* of what it said.
-    #[test]
-    fn a_head_bounded_field_keeps_the_opening_at_the_same_size() {
-        let (short, cut) = bound_head("brief");
-        assert_eq!((short.as_str(), cut), ("brief", false));
-
-        // `é` is two bytes, so an odd-length ASCII head puts the cut *inside* a
-        // character and it has to walk back to the previous boundary — the case
-        // a naive slice panics on, met from the other end than `bound_text`.
-        let long = format!("HEADS{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
-        let (bounded, cut) = bound_head(&long);
-        assert!(cut);
-        assert!(
-            bounded.len() < MAX_PAYLOAD_TEXT_BYTES,
-            "the cut did not move to a boundary"
-        );
-        assert!(bounded.starts_with("HEADS"));
-
-        // And an even offset needs no walk, so the whole bound is used.
-        let aligned = format!("HEAD{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
-        let (bounded, cut) = bound_head(&aligned);
         assert!(cut);
         assert_eq!(bounded.len(), MAX_PAYLOAD_TEXT_BYTES);
     }

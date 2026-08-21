@@ -75,8 +75,9 @@ use onejudge::Observation;
 use serde_json::Value;
 
 use crate::event::{
-    bound_head, bound_text, Artifact, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
-    OneharnessSession, Party, Role, TurnCompleted, TurnStarted, ONEHARNESS_SESSION_ARTIFACT,
+    bound_text, Artifact, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
+    OneharnessSession, Party, Role, TurnCompleted, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
+    ONEHARNESS_SESSION_ARTIFACT,
 };
 use crate::invoke::JudgeLaunch;
 use crate::member::{
@@ -361,7 +362,15 @@ fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
 fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
     match observation {
         Observation::TurnOpened(opened) => {
-            let (instruction, instruction_truncated) = bound_head(opened.instruction);
+            // Head-bounded: `bound_text` keeps a tail, so a field that keeps
+            // its opening trims to the same constant on a character boundary
+            // first and counts that trim as a cut.
+            let mut head = MAX_PAYLOAD_TEXT_BYTES.min(opened.instruction.len());
+            while !opened.instruction.is_char_boundary(head) {
+                head -= 1;
+            }
+            let (instruction, cut) = bound_text(&opened.instruction[..head]);
+            let instruction_truncated = cut || head < opened.instruction.len();
             emitter.emit(
                 EventKind::TurnStarted,
                 as_payload(&TurnStarted {
@@ -390,7 +399,13 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
             );
         }
         Observation::Message(message) => {
-            let (text, truncated) = bound_head(message.text);
+            // Head-bounded, on the same terms as the instruction above.
+            let mut head = MAX_PAYLOAD_TEXT_BYTES.min(message.text.len());
+            while !message.text.is_char_boundary(head) {
+                head -= 1;
+            }
+            let (text, cut) = bound_text(&message.text[..head]);
+            let truncated = cut || head < message.text.len();
             emitter.emit(
                 EventKind::TurnMessage,
                 as_payload(&crate::event::TurnMessage {
@@ -1170,24 +1185,43 @@ mod tests {
         assert_eq!(events[0].payload["detail"], json!(""));
     }
 
-    /// The two long fields are bounded from opposite ends, each at this crate's
-    /// own published payload bound and each saying whether it was cut: a reply
-    /// keeps its opening, an observation keeps its tail.
+    /// The three long fields are bounded from the end each is read from, at this
+    /// crate's one published payload bound and each saying whether it was cut:
+    /// the instruction a turn answers and the party's own reply keep their
+    /// opening, an observation keeps its tail.
+    ///
+    /// Every text here is multi-byte behind an odd-length ASCII opening, so the
+    /// bound lands *inside* a character and the two head-keeping sites have to
+    /// walk back to the previous boundary. That is the case a naive slice panics
+    /// on, and each site owns its own trim — so each is driven here rather than
+    /// one shared helper being trusted for all three.
     #[test]
-    fn a_reply_keeps_its_opening_and_an_observation_keeps_its_tail() {
+    fn each_live_text_is_bounded_from_the_end_it_is_read_from() {
         let (emitter, recorder) = recorded();
-        let long = format!("the plan is{}", "x".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        // `é` is two bytes and `the plan is` is eleven, so every character
+        // boundary past the opening is odd and the even bound falls between two.
+        let long = format!("the plan is{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        let asked = format!("write the thing{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
         let result = onejudge::ToolEvent {
             kind: "tool_result".into(),
             name: None,
             input: None,
             output: Some(format!(
                 "{}the test suite failed",
-                "x".repeat(MAX_PAYLOAD_TEXT_BYTES)
+                "é".repeat(MAX_PAYLOAD_TEXT_BYTES)
             )),
             index: 1,
             tool_call_id: None,
         };
+        ingest(
+            &Observation::TurnOpened(onejudge::TurnOpened {
+                turn: 1,
+                role: onejudge::Role::Assistant,
+                instruction: &asked,
+                started_at: "2026-08-21T09:15:02.847Z".into(),
+            }),
+            &emitter,
+        );
         ingest(
             &Observation::Message(onejudge::TurnMessage {
                 turn: 1,
@@ -1205,17 +1239,58 @@ mod tests {
         );
 
         let events = recorder.events();
-        let text = events[0].payload["text"].as_str().expect("a reply");
-        assert!(text.starts_with("the plan is"), "{text}");
-        assert!(text.len() <= MAX_PAYLOAD_TEXT_BYTES);
-        assert_eq!(events[0].payload["truncated"], json!(true));
+        let instruction = events[0].payload["instruction"]
+            .as_str()
+            .expect("an instruction");
+        assert!(instruction.starts_with("write the thing"), "{instruction}");
+        assert!(
+            instruction.len() < MAX_PAYLOAD_TEXT_BYTES,
+            "the cut did not walk back to a boundary: {}",
+            instruction.len()
+        );
+        assert_eq!(events[0].payload["instruction_truncated"], json!(true));
 
-        let output = events[1].payload["output"]
+        let text = events[1].payload["text"].as_str().expect("a reply");
+        assert!(text.starts_with("the plan is"), "{text}");
+        assert!(
+            text.len() < MAX_PAYLOAD_TEXT_BYTES,
+            "the cut did not walk back to a boundary: {}",
+            text.len()
+        );
+        assert_eq!(events[1].payload["truncated"], json!(true));
+
+        let output = events[2].payload["output"]
             .as_str()
             .expect("an observation");
         assert!(output.ends_with("the test suite failed"), "{output}");
         assert!(output.len() <= MAX_PAYLOAD_TEXT_BYTES);
-        assert_eq!(events[1].payload["output_truncated"], json!(true));
+        assert_eq!(events[2].payload["output_truncated"], json!(true));
+    }
+
+    /// A text that stops exactly on the bound is served whole and says it was not
+    /// cut — the boundary either side of the head-trim's walk-back.
+    #[test]
+    fn a_text_that_ends_on_the_bound_is_not_reported_as_cut() {
+        let (emitter, recorder) = recorded();
+        let exact = "é".repeat(MAX_PAYLOAD_TEXT_BYTES / 2);
+        assert_eq!(exact.len(), MAX_PAYLOAD_TEXT_BYTES);
+        ingest(
+            &Observation::Message(onejudge::TurnMessage {
+                turn: 1,
+                role: onejudge::Role::Assistant,
+                text: &exact,
+            }),
+            &emitter,
+        );
+
+        let events = recorder.events();
+        assert_eq!(events[0].payload["text"], json!(exact));
+        assert_eq!(
+            events[0].payload.get("truncated"),
+            None,
+            "an uncut reply claimed a cut: {:?}",
+            events[0].payload
+        );
     }
 
     /// Every candidate each side stepped past is published, carrying the side and
