@@ -23,8 +23,8 @@ use oneagentgraph::error::{
 };
 use oneagentgraph::event::{
     session_label, Artifact, Cause, Disposition, Envelope, EventFilter, EventKind,
-    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Role, Runner,
-    Source, TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
+    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Party, Role,
+    Runner, Source, TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
     ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
     ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
@@ -422,10 +422,16 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
 fn a_turn_started_payload_names_the_turn_and_what_it_answers() {
     assert!(
         CONTRACT.contains(
-            "`turn-started` (`turn`, `role`, the `instruction` that turn answers, \
-                           and `started_at`)"
+            "`turn-started` (`turn`, the `role` that takes it — `assistant`, `user` or `system` \
+             — the `instruction` that turn answers, and `started_at`)"
         ),
         "the contract no longer describes the turn-started payload this test pins"
+    );
+    // The closed set of parties, held against the only thing that mints one.
+    assert_eq!(
+        [Party::Assistant, Party::User, Party::System].map(Party::as_str),
+        ["assistant", "user", "system"],
+        "a party this build publishes is not one the contract names"
     );
 
     let started = TurnStarted {

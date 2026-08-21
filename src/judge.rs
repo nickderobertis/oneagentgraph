@@ -76,7 +76,7 @@ use serde_json::Value;
 
 use crate::event::{
     bound_head, bound_text, Artifact, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
-    OneharnessSession, Role, TurnCompleted, TurnStarted, ONEHARNESS_SESSION_ARTIFACT,
+    OneharnessSession, Party, Role, TurnCompleted, TurnStarted, ONEHARNESS_SESSION_ARTIFACT,
 };
 use crate::invoke::JudgeLaunch;
 use crate::member::{
@@ -366,7 +366,7 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
                 EventKind::TurnStarted,
                 as_payload(&TurnStarted {
                     turn: opened.turn as u64,
-                    role: role(opened.role),
+                    role: party(opened.role).as_str().to_string(),
                     instruction,
                     instruction_truncated,
                     started_at: opened.started_at.clone(),
@@ -395,7 +395,7 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
                 EventKind::TurnMessage,
                 as_payload(&crate::event::TurnMessage {
                     turn: message.turn as u64,
-                    role: role(message.role),
+                    role: party(message.role).as_str().to_string(),
                     text,
                     truncated,
                 }),
@@ -406,7 +406,7 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
                 EventKind::TurnCompleted,
                 as_payload(&TurnCompleted {
                     turn: closed.turn as u64,
-                    role: role(closed.role),
+                    role: party(closed.role).as_str().to_string(),
                     usage: closed.usage.map(usage).unwrap_or_default(),
                     started_at: closed.started_at.clone(),
                     finished_at: closed.finished_at.clone(),
@@ -416,15 +416,17 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
     }
 }
 
-/// One party of the conversation, as the wire names it.
+/// One party of the conversation, as this crate's own closed set.
 ///
-/// onejudge's own spelling, taken through its serialization rather than restated,
-/// so a party renamed upstream reaches the stream renamed rather than mapped onto
-/// a name it no longer has.
-fn role(role: onejudge::Role) -> String {
-    match serde_json::to_value(role) {
-        Ok(Value::String(name)) => name,
-        _ => String::new(),
+/// Total, so there is no fallback that could put a party on the wire that is not
+/// one — and a variant added upstream is a compile error here rather than an
+/// event nobody can attribute. The unit test below holds each arm against
+/// onejudge's own serialization, so the two spellings cannot drift.
+fn party(role: onejudge::Role) -> Party {
+    match role {
+        onejudge::Role::Assistant => Party::Assistant,
+        onejudge::Role::User => Party::User,
+        onejudge::Role::System => Party::System,
     }
 }
 
@@ -1097,6 +1099,23 @@ mod tests {
             events[3].payload["finished_at"],
             json!("2026-08-21T09:16:11.002Z")
         );
+    }
+
+    /// Every party this crate publishes keeps onejudge's own spelling for it, so
+    /// the total mapping above cannot drift from the engine it converts.
+    #[test]
+    fn every_party_keeps_the_spelling_the_engine_gives_it() {
+        for role in [
+            onejudge::Role::Assistant,
+            onejudge::Role::User,
+            onejudge::Role::System,
+        ] {
+            assert_eq!(
+                serde_json::to_value(role).expect("serializes"),
+                json!(party(role).as_str()),
+                "onejudge renamed {role:?}"
+            );
+        }
     }
 
     /// A supervisor turn that reported no usage closes with an empty object, not

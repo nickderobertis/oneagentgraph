@@ -3459,6 +3459,33 @@ fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
          streamed events: {:?}",
         run.kinds()
     );
+
+    // A member that publishes no tool events still takes a turn, and still says
+    // so at both ends. The turn is announced at the settle rather than on a first
+    // event that never comes, so a consumer counting turns from `turn-started` is
+    // not served a `turn-completed` for a turn it was never told about.
+    let opened = run.of_kind("turn-started");
+    assert_eq!(opened.len(), 1, "{:?}", run.kinds());
+    let completed = run.of_kind("turn-completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(
+        opened[0]["payload"]["turn"],
+        completed[0]["payload"]["turn"]
+    );
+    assert_eq!(
+        opened[0]["payload"]["started_at"], completed[0]["payload"]["started_at"],
+        "the turn closed at bounds its own opening never named"
+    );
+    assert_eq!(
+        completed[0]["payload"]["role"],
+        serde_json::json!("assistant")
+    );
+    assert!(
+        completed[0]["payload"]["usage"]["input_tokens"].is_number(),
+        "a buffered member's turn was closed with no accounting: {}",
+        completed[0]
+    );
+
     let report = stored_report(&run, "reporter");
     assert_eq!(
         report["results"][0]["text"],

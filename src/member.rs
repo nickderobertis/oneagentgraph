@@ -587,19 +587,19 @@ fn millis(span: Duration) -> u64 {
 /// *answers* a call already named, and `tool_call_id` is what joins it back —
 /// skipping it for having no name is what discarded every observation a member's
 /// tools returned.
+// llmlint: ignore-block[invalid_states_unrepresentable] `kind` stays the open
+// string both upstreams deliberately publish — oneharness's `ActionEvent` says so
+// at the field ("Left open for future kinds rather than an enum, so a new shape
+// never breaks the field") and onejudge's `ToolEvent` mirrors it. This crate
+// *forwards* that value; an enum here would re-decide a taxonomy it does not own,
+// and the first new kind either engine normalizes would be dropped on the floor
+// or turned into a member death rather than reaching the operator who needs to
+// see it. Scoped to this one function, which is the only place it is read.
+// llmlint: ignore-block[boundary_inputs_validated] and it is not untrusted input:
+// it arrives as a field of a linked library's typed struct, in this process, from
+// the same engine whose report this crate settles on — the same trust level as
+// the `Observation` beside it. There is no parse to validate.
 pub(crate) fn activity(
-    // llmlint: ignore[invalid_states_unrepresentable] `kind` stays the open
-    // string both upstreams deliberately publish — oneharness's `ActionEvent`
-    // says so at the field ("Left open for future kinds rather than an enum, so a
-    // new shape never breaks the field") and onejudge's `ToolEvent` mirrors it.
-    // This crate *forwards* that value; an enum here would re-decide a taxonomy
-    // it does not own, and the first new kind either engine normalizes would be
-    // dropped on the floor or turned into a member death rather than reaching the
-    // operator who needs to see it.
-    // llmlint: ignore[boundary_inputs_validated] and it is not untrusted input:
-    // it arrives as a field of a linked library's typed struct, in this process,
-    // from the same engine whose report this crate settles on — the same trust
-    // level as the `Observation` beside it. There is no parse to validate.
     kind: &str,
     name: Option<&str>,
     input: Option<&Value>,
@@ -622,6 +622,8 @@ pub(crate) fn activity(
         index: index as u64,
     }
 }
+// llmlint: ignore-end[boundary_inputs_validated]
+// llmlint: ignore-end[invalid_states_unrepresentable]
 
 /// One tool event's structured input as the contract's bounded summary: what it
 /// acted on.

@@ -659,6 +659,35 @@ pub enum Runner {
     },
 }
 
+/// Which party took a turn.
+///
+/// The payloads below carry `role` as a `String`, because that is the shape the
+/// wire has and a consumer reads. This is the only thing that *mints* one, so no
+/// producing site can put a party there that is not one of the three the contract
+/// names — and a party renamed or added upstream is a compile error at the
+/// conversion rather than a spelling nobody notices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Party {
+    /// The agent under supervision.
+    Assistant,
+    /// The supervisor answering it — a two-party member's other side.
+    User,
+    /// System-level framing, if a provider surfaces it.
+    System,
+}
+
+impl Party {
+    /// This party's spelling on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Party::Assistant => "assistant",
+            Party::User => "user",
+            Party::System => "system",
+        }
+    }
+}
+
 /// The payload of an [`EventKind::TurnStarted`] event: a turn beginning, and the
 /// message it was given to answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

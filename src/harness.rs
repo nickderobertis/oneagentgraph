@@ -9,7 +9,7 @@
 
 use std::path::Path;
 use std::process::{Child, Command};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,8 +24,8 @@ use oneharness_core::io::runner::ProcessSupervisor;
 use serde_json::Value;
 
 use crate::event::{
-    bound_head, bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, TurnCompleted,
-    TurnStarted,
+    bound_head, bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, Party,
+    TurnCompleted, TurnStarted,
 };
 use crate::invoke::HarnessLaunch;
 use crate::member::{
@@ -107,7 +107,6 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 started,
                 cancel: cancel.clone(),
                 turn,
-                opened: Opened::Not,
             };
             let outcome = run_supervised(
                 &request,
@@ -305,29 +304,13 @@ struct Events {
     /// rather than only when the terminate path reaches it.
     cancel: CancelToken,
     turn: TheTurn,
-    /// Whether [`turn`](Self::turn) has been opened on the stream yet.
-    /// `oneharness run` is a single turn, so these are the only two states there
-    /// are, and they are named rather than a bare flag: "not opened yet" and
-    /// "opened" are the whole lifecycle, and a boolean lets a later reader take
-    /// it for a `bool` field that happens to be about something else.
-    opened: Opened,
-}
-
-/// Whether this member's one turn has reached the stream.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Opened {
-    Not,
-    Yes,
 }
 
 impl EventSink for Events {
     fn event(&mut self, _harness_id: &str, event: &ActionEvent) -> SinkStep {
         self.activity
             .store(elapsed_millis(self.started), Ordering::SeqCst);
-        if self.opened == Opened::Not {
-            self.opened = Opened::Yes;
-            self.turn.open(&self.emitter);
-        }
+        self.turn.open(&self.emitter);
         ingest(event, &self.emitter);
         if self.cancel.is_cancelled() {
             SinkStep::Stop
@@ -350,6 +333,14 @@ struct TheTurn {
     instruction: String,
     instruction_truncated: bool,
     started_at: String,
+    /// Whether this turn has already been announced on the stream. Shared,
+    /// because two places announce it and neither knows about the other: the
+    /// event sink on the member's first tool event, and [`close`](Self::close)
+    /// for a member whose run published none — a config that asks not to stream,
+    /// or a harness whose output exposes no machine-readable trace. The turn
+    /// happened either way, so a `turn-completed` is never served without the
+    /// `turn-started` it answers.
+    opened: Arc<AtomicBool>,
 }
 
 impl TheTurn {
@@ -359,15 +350,20 @@ impl TheTurn {
             instruction,
             instruction_truncated,
             started_at: crate::clock::now_rfc3339(),
+            opened: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Announce the turn, once however often this is called.
     fn open(&self, emitter: &Emitter) {
+        if self.opened.swap(true, Ordering::SeqCst) {
+            return;
+        }
         emitter.emit(
             EventKind::TurnStarted,
             as_payload(&TurnStarted {
                 turn: THE_ONLY_TURN,
-                role: THE_ONLY_ROLE.to_string(),
+                role: THE_ONLY_ROLE.as_str().to_string(),
                 instruction: self.instruction.clone(),
                 instruction_truncated: self.instruction_truncated,
                 started_at: self.started_at.clone(),
@@ -377,11 +373,12 @@ impl TheTurn {
 
     /// Close the turn on what the report says it consumed.
     fn close(&self, emitter: &Emitter, report: &RunReport) {
+        self.open(emitter);
         emitter.emit(
             EventKind::TurnCompleted,
             as_payload(&TurnCompleted {
                 turn: THE_ONLY_TURN,
-                role: THE_ONLY_ROLE.to_string(),
+                role: THE_ONLY_ROLE.as_str().to_string(),
                 usage: ran(report).map(usage).unwrap_or_default(),
                 started_at: self.started_at.clone(),
                 finished_at: crate::clock::now_rfc3339(),
@@ -398,7 +395,7 @@ const THE_ONLY_TURN: u64 = 1;
 
 /// Who takes that turn. A single-sided member has no supervisor to answer it, so
 /// the one party there is is the agent.
-const THE_ONLY_ROLE: &str = "assistant";
+const THE_ONLY_ROLE: Party = Party::Assistant;
 
 /// The candidate whose result is this member's turn, when one ran.
 ///
@@ -723,7 +720,6 @@ mod tests {
             started: Instant::now(),
             cancel: CancelToken::new(),
             turn: TheTurn::new("write the thing"),
-            opened: Opened::Not,
         };
         for _ in 0..3 {
             assert!(matches!(
@@ -870,7 +866,6 @@ mod tests {
             started: Instant::now(),
             cancel: cancel.clone(),
             turn: TheTurn::new("write the thing"),
-            opened: Opened::Not,
         };
         assert!(matches!(
             sink.event("claude-code", &call(Some("bash"))),
