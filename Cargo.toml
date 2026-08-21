@@ -126,7 +126,19 @@ test-doubles = []
 # is onejudge's own loop, driven and covered by onejudge's suite; a journey here
 # would have to make a supervisor side produce no work and then time this crate's
 # watchdog against it, which asserts the dependency's behaviour through a race.
-onejudge = { version = "0.4.0", features = ["cli"] }
+#
+# 0.5.0 is the seventh raise and a compile floor again: it is the first release
+# with `run_plan_observing_reporting_failure` and the `Observation` seam behind
+# it, which is the *whole* of a turn rather than its tool half — the instruction
+# the turn is answering, each party's own reply, and that one turn's usage and
+# bounds. Below it none of `Observation`, `TurnOpened`, `TurnMessage` or
+# `TurnClosed` exists and `ToolEvent` carries neither `output` nor
+# `tool_call_id`, so `src/judge.rs` does not compile. What it buys an operator is
+# what `docs/contract.md` now describes: a live dispatch that shows what the agent
+# did, what it said, and what each turn cost — none of which a journal could carry
+# while this crate received only the tool half and discarded even the events in it
+# that named no tool.
+onejudge = { version = "0.5.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #

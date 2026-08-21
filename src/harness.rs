@@ -14,21 +14,23 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use oneharness_core::domain::events::ActionEvent;
-use oneharness_core::domain::report::FallbackReport;
+use oneharness_core::domain::report::{FallbackReport, RunReport, RunResult};
+use oneharness_core::domain::signals::Usage;
 use oneharness_core::io::cancel::CancelToken;
 use oneharness_core::io::run::{
     run_supervised, EventSink, RunControls, RunOutcome, RunRequest, SinkStep,
 };
 use oneharness_core::io::runner::ProcessSupervisor;
-use serde_json::{Map, Value};
+use serde_json::Value;
 
 use crate::event::{
-    bound_detail, bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
+    bound_head, bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, TurnCompleted,
+    TurnStarted,
 };
 use crate::invoke::HarnessLaunch;
 use crate::member::{
-    died_payload, payload, settle_report, summarize, unstartable, Bounds, Death, Kind, Outcome,
-    Rule, Stall, HEARTBEAT_INTERVAL,
+    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Kind, Outcome, Rule,
+    Stall, HEARTBEAT_INTERVAL,
 };
 
 /// How long a condemned member's engine is given to answer the cancellation
@@ -66,24 +68,28 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
         Ok(group) => Arc::new(group),
         Err(err) => {
             let reason = err.to_string();
-            emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+            emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
         }
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
     let request = launch.request();
+    // Minted before the engine is handed the request: this member's one turn
+    // begins here, and its opening and its close have to name the same instant.
+    let turn = TheTurn::new(&launch.prompt);
     let activity = Arc::new(AtomicU64::new(0));
     let cancel = CancelToken::new();
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
 
     let engine = {
-        let (emitter, activity, cancel, group) = (
+        let (emitter, activity, cancel, group, turn) = (
             emitter.clone(),
             Arc::clone(&activity),
             cancel.clone(),
             Arc::clone(&group),
+            turn.clone(),
         );
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
@@ -100,7 +106,8 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 activity,
                 started,
                 cancel: cancel.clone(),
-                turn: Turn::Unopened,
+                turn,
+                opened: false,
             };
             let outcome = run_supervised(
                 &request,
@@ -135,12 +142,14 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
     // refused rather than reported as running.
     if let Err(err) = engine {
         let reason = format!("cannot start this member's engine thread: {err}");
-        emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+        emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
         return Outcome::Unstartable(reason);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
-    supervise(&rx, &cancel, emitter, bounds, scratch, started, &activity)
+    supervise(
+        &rx, &cancel, emitter, bounds, scratch, started, &activity, &turn,
+    )
 }
 
 /// Watch a member's engine to its end: the two watchdogs, and the answer.
@@ -148,9 +157,9 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
 /// Split from [`run`] so the containment this module promises can be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Seven values, none derivable from another: where the answer arrives, the lever
+// Eight values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
-// and the two halves of the activity clock.
+// the two halves of the activity clock, and the turn a settle closes.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -160,6 +169,7 @@ fn supervise(
     scratch: &Path,
     started: Instant,
     activity: &Arc<AtomicU64>,
+    turn: &TheTurn,
 ) -> Outcome {
     let heartbeat_file = scratch.join("member.heartbeat");
     let mut last_heartbeat = Instant::now();
@@ -171,7 +181,7 @@ fn supervise(
     let mut stall = Stall::new(bounds.stall, started);
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
-            Ok(answer) => return finish(answer, emitter, scratch),
+            Ok(answer) => return finish(answer, emitter, scratch, turn),
             // A sender dropped without an answer means the engine thread
             // panicked: this member's failure, not the graph's.
             //
@@ -294,16 +304,17 @@ struct Events {
     /// documented short-circuit — a condemned member stops at its next event
     /// rather than only when the terminate path reaches it.
     cancel: CancelToken,
-    turn: Turn,
+    turn: TheTurn,
+    opened: bool,
 }
 
 impl EventSink for Events {
     fn event(&mut self, _harness_id: &str, event: &ActionEvent) -> SinkStep {
         self.activity
             .store(elapsed_millis(self.started), Ordering::SeqCst);
-        if self.turn == Turn::Unopened {
-            self.turn = Turn::Open;
-            emit_turn_started(&self.emitter, THE_ONLY_TURN);
+        if !self.opened {
+            self.opened = true;
+            self.turn.open(&self.emitter);
         }
         ingest(event, &self.emitter);
         if self.cancel.is_cancelled() {
@@ -314,12 +325,57 @@ impl EventSink for Events {
     }
 }
 
-/// Whether this member's one turn has been opened. `oneharness run` is a single
-/// turn, so these are the only two states there are.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Turn {
-    Unopened,
-    Open,
+/// The one turn a single-sided member takes: `oneharness run` is a single turn,
+/// so this member's turn *is* its run, and the run's bounds are the turn's.
+///
+/// Held from before the engine is handed the request, because `started_at` has to
+/// be the same instant on the turn's opening and on its close — and the close is
+/// read off a report that arrives minutes later.
+#[derive(Clone)]
+struct TheTurn {
+    /// The task prose this turn is answering, head-bounded — a turn's opening is
+    /// what an operator watching a dispatch reads it for.
+    instruction: String,
+    instruction_truncated: bool,
+    started_at: String,
+}
+
+impl TheTurn {
+    fn new(prompt: &str) -> Self {
+        let (instruction, instruction_truncated) = bound_head(prompt);
+        Self {
+            instruction,
+            instruction_truncated,
+            started_at: crate::clock::now_rfc3339(),
+        }
+    }
+
+    fn open(&self, emitter: &Emitter) {
+        emitter.emit(
+            EventKind::TurnStarted,
+            as_payload(&TurnStarted {
+                turn: THE_ONLY_TURN,
+                role: THE_ONLY_ROLE.to_string(),
+                instruction: self.instruction.clone(),
+                instruction_truncated: self.instruction_truncated,
+                started_at: self.started_at.clone(),
+            }),
+        );
+    }
+
+    /// Close the turn on what the report says it consumed.
+    fn close(&self, emitter: &Emitter, report: &RunReport) {
+        emitter.emit(
+            EventKind::TurnCompleted,
+            as_payload(&TurnCompleted {
+                turn: THE_ONLY_TURN,
+                role: THE_ONLY_ROLE.to_string(),
+                usage: ran(report).map(usage).unwrap_or_default(),
+                started_at: self.started_at.clone(),
+                finished_at: crate::clock::now_rfc3339(),
+            }),
+        );
+    }
 }
 
 /// The turn index every event of a single-sided member's run is attributed to.
@@ -328,39 +384,74 @@ enum Turn {
 /// this is the number the NDJSON reader this replaces defaulted to.
 const THE_ONLY_TURN: u64 = 1;
 
-fn emit_turn_started(emitter: &Emitter, turn: u64) {
-    emitter.emit(
-        EventKind::TurnStarted,
-        payload([("turn", Value::from(turn))]),
-    );
+/// Who takes that turn. A single-sided member has no supervisor to answer it, so
+/// the one party there is is the agent.
+const THE_ONLY_ROLE: &str = "assistant";
+
+/// The candidate whose result is this member's turn, when one ran.
+///
+/// oneharness's own ordering rule, read the way onejudge reads it: a fallback run
+/// holds the candidates it stepped past *before* the one that ran, so the last
+/// result carrying the named id is the turn.
+fn ran(report: &RunReport) -> Option<&RunResult> {
+    let Some(fallback) = report.fallback.as_ref() else {
+        // Not a fallback run: the results are the candidates that were asked, in
+        // order, and the first of them is this member's turn.
+        return report.results.first();
+    };
+    // A chain that fell through every candidate names none, and there is no turn
+    // to account for. Matched from the end because a model fan-out repeats a
+    // harness id across candidates, so the *last* one carrying it is the one that
+    // ran.
+    let ran = fallback.ran.as_deref()?;
+    report
+        .results
+        .iter()
+        .rev()
+        .find(|result| result.harness_id == ran || result.harness == ran)
+        .or_else(|| report.results.last())
 }
 
-/// Turn one live tool event into the contract's bounded summary.
+/// One turn's accounting, field for field with oneharness's own.
 ///
-/// The same rule [`crate::judge`] applies, and the same one the NDJSON reader
-/// applied before it: an event this crate cannot name is skipped rather than
-/// published with a hole in it — a `tool_result` carries no tool name, and
-/// reporting one as an unnamed action would say the member did something it
-/// cannot name.
+/// Spelled out rather than round-tripped through JSON so a signal added upstream
+/// is a compile error here rather than a figure silently dropped.
+fn usage(result: &RunResult) -> crate::event::Usage {
+    let Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost_usd,
+    } = result.usage;
+    crate::event::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost_usd,
+    }
+}
+
+/// Publish one live tool event, through the payload builder both member kinds
+/// share — see [`crate::member::activity`].
 fn ingest(event: &ActionEvent, emitter: &Emitter) {
-    let Some(name) = event.name.as_deref() else {
-        return;
-    };
-    let (detail, truncated) = bound_detail(&summarize(event.input.as_ref()));
     emitter.emit(
         EventKind::TurnActivity,
-        payload([
-            ("kind", Value::String(event.kind.clone())),
-            ("name", Value::String(name.to_string())),
-            ("detail", Value::String(detail)),
-            ("truncated", Value::Bool(truncated)),
-        ]),
+        as_payload(&activity(
+            &event.kind,
+            event.name.as_deref(),
+            event.input.as_ref(),
+            event.output.as_deref(),
+            event.tool_call_id.as_deref(),
+            event.index,
+        )),
     );
 }
 
 /// An answered run is not automatically a settled member: a grouping failure or
 /// a non-zero exit outranks whatever report came back with it.
-fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
+fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, turn: &TheTurn) -> Outcome {
     let Answer { outcome, ungrouped } = answer;
     let outcome = match outcome {
         Ok(outcome) => outcome,
@@ -368,7 +459,7 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
         // anything is spawned — so no process ever existed, exactly as a failed
         // `Command::spawn` meant here before.
         Err(reason) => {
-            emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+            emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
         }
     };
@@ -401,6 +492,10 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             }),
         );
     }
+    // The turn closes before the member settles, carrying what this one turn
+    // consumed: a single-sided member's turn *is* its run, so the accounting the
+    // report holds is that turn's own rather than a total over several.
+    turn.close(emitter, &outcome.report);
     settle_report(emitter, &document, true, scratch)
 }
 
@@ -424,13 +519,6 @@ fn advance(emitter: &Emitter, fallback: Option<&FallbackReport>) {
             turn: None,
         };
         emitter.emit(EventKind::FallbackAdvanced, as_payload(&advanced));
-    }
-}
-
-fn as_payload(advanced: &FallbackAdvanced) -> Map<String, Value> {
-    match serde_json::to_value(advanced) {
-        Ok(Value::Object(map)) => map,
-        _ => Map::new(),
     }
 }
 
@@ -516,7 +604,7 @@ fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
         disposition: None,
         stderr_tail: None,
     };
-    emitter.emit(EventKind::MemberDied, died_payload(&payload));
+    emitter.emit(EventKind::MemberDied, as_payload(&payload));
     Outcome::Died(Death { rule, payload })
 }
 
@@ -555,6 +643,8 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use serde_json::json;
+
+    use crate::event::MAX_PAYLOAD_TEXT_BYTES;
 
     use super::*;
     use crate::event::Envelope;
@@ -597,7 +687,7 @@ mod tests {
             input: Some(json!({"command": "just check", "n": 3})),
             output: None,
             index: 0,
-            tool_call_id: None,
+            tool_call_id: Some("t1".into()),
             started_at: None,
             finished_at: None,
             duration_ms: None,
@@ -620,7 +710,8 @@ mod tests {
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             cancel: CancelToken::new(),
-            turn: Turn::Unopened,
+            turn: TheTurn::new("write the thing"),
+            opened: false,
         };
         for _ in 0..3 {
             assert!(matches!(
@@ -641,6 +732,17 @@ mod tests {
             ]
         );
         assert_eq!(events[0].payload["turn"], json!(1));
+        // The turn names who takes it, what it was asked, and when it began —
+        // the three an operator watching a live dispatch has no other source for.
+        assert_eq!(events[0].payload["role"], json!("assistant"));
+        assert_eq!(events[0].payload["instruction"], json!("write the thing"));
+        assert!(
+            events[0].payload["started_at"]
+                .as_str()
+                .is_some_and(|at| at.ends_with('Z')),
+            "the turn opened at no instant: {:?}",
+            events[0].payload
+        );
         assert_eq!(events[1].payload["name"], json!("bash"));
         assert_eq!(events[1].payload["kind"], json!("tool_call"));
         assert_eq!(events[1].payload["detail"], json!("just check"));
@@ -650,14 +752,97 @@ mod tests {
         );
     }
 
-    /// An event this crate cannot name is skipped rather than published with a
-    /// hole in it — and it does not open a turn either, because a turn with no
-    /// action in it says the member did something it cannot name.
+    /// A `tool_result` names no tool because it answers one already named, and it
+    /// is published all the same: the observation, and the call identity that
+    /// joins it back. Discarding it for having no name is what threw away every
+    /// observation this member's tools returned.
     #[test]
-    fn a_live_event_with_no_tool_name_is_skipped() {
+    fn an_observation_reaches_the_stream_with_the_identity_of_the_call_it_answers() {
         let (emitter, recorder) = recorded();
-        ingest(&call(None), &emitter);
-        assert!(recorder.events().is_empty(), "an unnamed event published");
+        ingest(
+            &ActionEvent {
+                kind: "tool_result".into(),
+                output: Some("2 passed; 0 failed".into()),
+                input: None,
+                index: 4,
+                ..call(None)
+            },
+            &emitter,
+        );
+        let events = recorder.events();
+        assert_eq!(events.len(), 1, "the observation was discarded: {events:?}");
+        assert_eq!(events[0].kind, EventKind::TurnActivity);
+        assert_eq!(events[0].payload["kind"], json!("tool_result"));
+        assert_eq!(events[0].payload["name"], Value::Null);
+        assert_eq!(events[0].payload["output"], json!("2 passed; 0 failed"));
+        assert_eq!(events[0].payload["tool_call_id"], json!("t1"));
+        assert_eq!(events[0].payload["index"], json!(4));
+    }
+
+    /// An observation the trace did not expose is absent; one that was genuinely
+    /// empty is an empty string. A consumer can tell the two apart, and a call
+    /// carries neither.
+    #[test]
+    fn an_absent_observation_and_an_empty_one_are_different_facts() {
+        let (emitter, recorder) = recorded();
+        let unexposed = ActionEvent {
+            kind: "tool_result".into(),
+            output: None,
+            input: None,
+            ..call(None)
+        };
+        ingest(&unexposed, &emitter);
+        ingest(
+            &ActionEvent {
+                output: Some(String::new()),
+                ..unexposed
+            },
+            &emitter,
+        );
+        ingest(&call(Some("bash")), &emitter);
+
+        let events = recorder.events();
+        assert_eq!(events.len(), 3);
+        assert!(
+            !events[0].payload.contains_key("output"),
+            "an observation the trace never exposed was published as one: {:?}",
+            events[0].payload
+        );
+        assert_eq!(events[1].payload["output"], json!(""));
+        assert!(
+            !events[2].payload.contains_key("output"),
+            "a call was published carrying an observation: {:?}",
+            events[2].payload
+        );
+    }
+
+    /// A long observation keeps its **tail** at this crate's own payload bound,
+    /// and says it was cut — what names a failure is the last of a tool's output.
+    #[test]
+    fn a_long_observation_keeps_its_tail_at_the_published_payload_bound() {
+        let (emitter, recorder) = recorded();
+        let long = format!(
+            "{}the test suite failed",
+            "x".repeat(MAX_PAYLOAD_TEXT_BYTES)
+        );
+        ingest(
+            &ActionEvent {
+                kind: "tool_result".into(),
+                output: Some(long),
+                input: None,
+                ..call(None)
+            },
+            &emitter,
+        );
+        let events = recorder.events();
+        let output = events[0].payload["output"]
+            .as_str()
+            .expect("an observation");
+        assert!(output.ends_with("the test suite failed"), "{output}");
+        assert!(output.len() <= MAX_PAYLOAD_TEXT_BYTES);
+        assert_eq!(events[0].payload["output_truncated"], json!(true));
+        // The summary bound is its own and is untouched by the new field.
+        assert!(!events[0].payload.contains_key("truncated"));
     }
 
     /// A cancelled run's next event answers oneharness's own short-circuit, so a
@@ -672,7 +857,8 @@ mod tests {
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
             cancel: cancel.clone(),
-            turn: Turn::Unopened,
+            turn: TheTurn::new("write the thing"),
+            opened: false,
         };
         assert!(matches!(
             sink.event("claude-code", &call(Some("bash"))),
@@ -713,6 +899,7 @@ mod tests {
             dir.path(),
             Instant::now(),
             &Arc::new(AtomicU64::new(0)),
+            &TheTurn::new("write the thing"),
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");

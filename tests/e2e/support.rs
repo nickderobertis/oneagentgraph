@@ -544,9 +544,10 @@ pub fn labels(event: &Value) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
-pub const SESSION_LABELLED_KINDS: [&str; 4] = [
+pub const SESSION_LABELLED_KINDS: [&str; 5] = [
     "turn-started",
     "turn-activity",
+    "turn-message",
     "turn-completed",
     "turn-interrupted",
 ];
@@ -555,11 +556,12 @@ pub const SESSION_LABELLED_KINDS: [&str; 4] = [
 /// with the kinds that carried one.
 ///
 /// One helper rather than an assertion per journey, because the rule is about the
-/// *whole* stream: four kinds carry the label and every other kind a member or
+/// *whole* stream: five kinds carry the label and every other kind a member or
 /// the graph emits carries none. A check that looked only at the events one
 /// journey cares about could not see the half that matters — the consumer reads
-/// any labelled envelope that is not a turn's activity or interruption as one
-/// transcript turn, so a label on a heartbeat is a heartbeat rendered as a turn.
+/// any labelled envelope that is not a turn's activity, message or interruption
+/// as one transcript turn, so a label on a heartbeat is a heartbeat rendered as a
+/// turn.
 ///
 /// The value is rebuilt here from the envelope's own `stream` and `member`
 /// rather than taken from the crate, so a build that changed how it derives one

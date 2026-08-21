@@ -106,6 +106,9 @@ pub enum EventKind {
     TurnStarted,
     /// A bounded tool summary from inside a turn; see [`TurnActivity`].
     TurnActivity,
+    /// One party's own words for a turn, as the turn happens; see
+    /// [`TurnMessage`].
+    TurnMessage,
     /// A turn finished; see [`TurnCompleted`].
     TurnCompleted,
     /// An operator asked a member's in-flight turn to do something else; see
@@ -146,6 +149,7 @@ impl EventKind {
             EventKind::MemberStarted => "member-started",
             EventKind::TurnStarted => "turn-started",
             EventKind::TurnActivity => "turn-activity",
+            EventKind::TurnMessage => "turn-message",
             EventKind::TurnCompleted => "turn-completed",
             EventKind::TurnInterrupted => "turn-interrupted",
             EventKind::MemberHeartbeat => "member-heartbeat",
@@ -162,20 +166,25 @@ impl EventKind {
     /// Whether this kind names the conversation its member's turns belong to,
     /// through a [`SESSION_LABEL`] among the envelope's extras.
     ///
-    /// Four kinds do, and the *exclusion* is the load-bearing half rather than a
+    /// Five kinds do, and the *exclusion* is the load-bearing half rather than a
     /// detail: a consumer reads any labelled envelope that is not
-    /// `turn-activity` or `turn-interrupted` as one transcript turn, so a
-    /// session on the thousands of heartbeats a single member publishes over a
-    /// run would render a transcript of heartbeats and make every turn count
-    /// served from it wrong. Stated here, once, and applied by
-    /// [`Emitter::emit_with`] — which both stamps the label on these four and
+    /// `turn-activity`, `turn-message` or `turn-interrupted` as one transcript
+    /// turn, so a session on the thousands of heartbeats a single member
+    /// publishes over a run would render a transcript of heartbeats and make
+    /// every turn count served from it wrong. Stated here, once, and applied by
+    /// [`Emitter::emit_with`] — which both stamps the label on these five and
     /// takes it off everything else — so no emit site can carry it by accident.
+    ///
+    /// `turn-message` carries one because a consumer renders it *into* a
+    /// transcript, and excludes it from the turn count for the reason
+    /// `turn-activity` is excluded: it is part of a turn, not one.
     #[must_use]
     pub fn carries_session(self) -> bool {
         matches!(
             self,
             EventKind::TurnStarted
                 | EventKind::TurnActivity
+                | EventKind::TurnMessage
                 | EventKind::TurnCompleted
                 | EventKind::TurnInterrupted
         )
@@ -650,45 +659,129 @@ pub enum Runner {
     },
 }
 
-/// The payload of an [`EventKind::TurnActivity`] event: a bounded tool summary.
+/// The payload of an [`EventKind::TurnStarted`] event: a turn beginning, and the
+/// message it was given to answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TurnActivity {
-    /// The kind of tool call.
-    pub kind: String,
-    /// The tool's name.
-    pub name: String,
-    /// A summary bounded by [`MAX_ACTIVITY_DETAIL_CHARS`].
-    pub detail: String,
-    /// Whether a text field above was cut to its documented bound.
+pub struct TurnStarted {
+    /// The turn's 1-based index within this member's conversation.
+    pub turn: u64,
+    /// Which party is about to speak: `assistant`, `user`, or `system`.
+    pub role: String,
+    /// The message this turn answers, head-bounded to
+    /// [`MAX_PAYLOAD_TEXT_BYTES`] — the task on the first turn, the supervisor's
+    /// last instruction afterwards.
+    pub instruction: String,
+    /// Whether [`instruction`](Self::instruction) was cut to that bound. The
+    /// rest is not lost: the settled report artifact carries the same text
+    /// whole, and this says where to look for it.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub instruction_truncated: bool,
+    /// When the turn began: RFC 3339, millisecond precision, UTC.
+    pub started_at: String,
+}
+
+/// The payload of an [`EventKind::TurnMessage`] event: one party's own words for
+/// one turn, published as the turn happens.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnMessage {
+    /// The turn this reply belongs to, as [`TurnStarted::turn`].
+    pub turn: u64,
+    /// Who is speaking: `assistant`, `user`, or `system`.
+    pub role: String,
+    /// That party's own words, head-bounded to [`MAX_PAYLOAD_TEXT_BYTES`].
+    pub text: String,
+    /// Whether [`text`](Self::text) was cut to that bound. As on
+    /// [`TurnStarted::instruction_truncated`], the settled report artifact still
+    /// carries the whole of it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
 }
 
-/// The payload of an [`EventKind::TurnCompleted`] event.
+/// The payload of an [`EventKind::TurnActivity`] event: one tool call, or the
+/// observation that answered one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnActivity {
+    /// `tool_call` (the model invoked a tool) or `tool_result` (the observation
+    /// returned to it).
+    pub kind: String,
+    /// The tool's name; `null` on a `tool_result`, which answers a call already
+    /// named rather than naming one of its own. Serialized either way: a stable
+    /// shape beats an omitted field.
+    pub name: Option<String>,
+    /// A summary of the call's structured input, bounded by
+    /// [`MAX_ACTIVITY_DETAIL_CHARS`].
+    pub detail: String,
+    /// Whether [`detail`](Self::detail) was cut to that bound.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// What the tool returned, tail-bounded to [`MAX_PAYLOAD_TEXT_BYTES`] —
+    /// what names a failure is the last of a tool's output. Absent on a
+    /// `tool_call`, and on a `tool_result` whose trace exposed no observation;
+    /// an observation that was genuinely empty is `Some("")`, never absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
+    /// Whether [`output`](Self::output) was cut to that bound. The settled
+    /// report artifact carries the observation whole.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub output_truncated: bool,
+    /// The harness's own identity for this call, which is what joins a
+    /// `tool_result` to the `tool_call` it answers; `null` when the harness
+    /// exposed none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// This event's position within the turn, so ordering is expressible.
+    pub index: u64,
+}
+
+/// The payload of an [`EventKind::TurnCompleted`] event: **one** turn ending,
+/// with what that turn cost and the interval it ran over.
+///
+/// Per turn, which is what this event's name has always said. The run's totals
+/// are not here and never were per-turn — they are in the settled report
+/// artifact, which carries them for the whole conversation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnCompleted {
-    /// What the turn consumed.
+    /// The turn that ended, as [`TurnStarted::turn`].
+    pub turn: u64,
+    /// Who spoke: `assistant`, `user`, or `system`.
+    pub role: String,
+    /// What this one turn consumed.
     pub usage: Usage,
+    /// When the turn began — the same value its [`TurnStarted`] carried.
+    pub started_at: String,
+    /// When the turn ended: RFC 3339, millisecond precision, UTC.
+    pub finished_at: String,
 }
 
 /// What one turn consumed.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Field for field with the accounting oneharness normalizes and onejudge
+/// aggregates, because this *is* that object — a graph re-spells nothing it
+/// merely forwards. Every figure is independently optional: absent means the
+/// provider reported none, which is a different fact from a turn that cost
+/// nothing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Usage {
-    /// Input tokens.
-    pub tokens_in: u64,
-    /// Output tokens.
-    pub tokens_out: u64,
-    /// Tokens read from the prompt cache.
-    pub cache_read: u64,
-    /// Tokens written to the prompt cache.
-    pub cache_write: u64,
-    /// What the turn cost.
-    pub cost: f64,
-    /// How long the turn took.
-    pub duration: f64,
+    /// Prompt/input tokens billed, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Completion/output tokens billed, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    /// Prompt tokens served from the provider's prompt cache, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Prompt tokens written to the provider's prompt cache, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+    /// Total cost in USD, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
 }
 
 /// The payload of an [`EventKind::TurnInterrupted`] event.
@@ -948,6 +1041,31 @@ pub fn bound_text(text: &str) -> (String, bool) {
         start += 1;
     }
     (text[start..].to_string(), true)
+}
+
+/// The same bound, read from the other end: keep the **head** of one payload
+/// text field and report whether it had to be cut.
+///
+/// This is the trim [`bound_text`]'s own documentation directs a head-wanting
+/// caller to make, factored here so the two directions cannot drift apart on the
+/// bound or on the flag they report. It is not a second bound — it is
+/// [`MAX_PAYLOAD_TEXT_BYTES`], cut on a character boundary, exactly as above.
+///
+/// Which end a field keeps is a property of the field. A turn's opening is where
+/// the model says what it is about to do, and that is what an operator watching
+/// a live dispatch opens the event to read, so [`TurnStarted::instruction`] and
+/// [`TurnMessage::text`] keep their head; [`TurnActivity::output`] keeps its
+/// tail, because what names a failure is the last of a tool's output.
+#[must_use]
+pub fn bound_head(text: &str) -> (String, bool) {
+    if text.len() <= MAX_PAYLOAD_TEXT_BYTES {
+        return (text.to_string(), false);
+    }
+    let mut end = MAX_PAYLOAD_TEXT_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
 }
 
 /// Bound one [`TurnActivity::detail`] to [`MAX_ACTIVITY_DETAIL_CHARS`],
@@ -1246,6 +1364,32 @@ mod tests {
         assert_eq!(bounded.len(), MAX_PAYLOAD_TEXT_BYTES);
     }
 
+    /// The head-keeping direction, at the same bound and never splitting a
+    /// character: what a turn is about to do is at the *start* of what it said.
+    #[test]
+    fn a_head_bounded_field_keeps_the_opening_at_the_same_size() {
+        let (short, cut) = bound_head("brief");
+        assert_eq!((short.as_str(), cut), ("brief", false));
+
+        // `é` is two bytes, so an odd-length ASCII head puts the cut *inside* a
+        // character and it has to walk back to the previous boundary — the case
+        // a naive slice panics on, met from the other end than `bound_text`.
+        let long = format!("HEADS{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        let (bounded, cut) = bound_head(&long);
+        assert!(cut);
+        assert!(
+            bounded.len() < MAX_PAYLOAD_TEXT_BYTES,
+            "the cut did not move to a boundary"
+        );
+        assert!(bounded.starts_with("HEADS"));
+
+        // And an even offset needs no walk, so the whole bound is used.
+        let aligned = format!("HEAD{}", "é".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        let (bounded, cut) = bound_head(&aligned);
+        assert!(cut);
+        assert_eq!(bounded.len(), MAX_PAYLOAD_TEXT_BYTES);
+    }
+
     /// A tool summary is bounded in characters and collapsed to one line, so a
     /// multi-line command cannot break the rendering it lands in.
     #[test]
@@ -1295,6 +1439,7 @@ mod tests {
         EventKind::MemberStarted,
         EventKind::TurnStarted,
         EventKind::TurnActivity,
+        EventKind::TurnMessage,
         EventKind::TurnCompleted,
         EventKind::TurnInterrupted,
         EventKind::MemberHeartbeat,
@@ -1391,7 +1536,12 @@ mod tests {
         };
         assert_eq!(
             kinds(&both),
-            vec!["turn-started", "turn-completed", "turn-interrupted"]
+            vec![
+                "turn-started",
+                "turn-message",
+                "turn-completed",
+                "turn-interrupted"
+            ]
         );
     }
 
@@ -1610,7 +1760,7 @@ mod tests {
         assert_eq!(suppressed.v, ENVELOPE_VERSION);
     }
 
-    /// Exactly the four kinds that name a turn carry a session, whatever the
+    /// Exactly the five kinds that name a turn carry a session, whatever the
     /// emitter was handed — including a `session` an operator stamped by hand,
     /// which is taken off everything else rather than riding every heartbeat in
     /// the run into a consumer's transcript.
@@ -1631,11 +1781,12 @@ mod tests {
 
         // Named here rather than taken from `carries_session`, which is the
         // thing under test: a build that widened it would otherwise agree with
-        // itself. The same four are held against `docs/contract.md` by
+        // itself. The same five are held against `docs/contract.md` by
         // `tests/contract.rs`.
         let a_turn = [
             EventKind::TurnStarted,
             EventKind::TurnActivity,
+            EventKind::TurnMessage,
             EventKind::TurnCompleted,
             EventKind::TurnInterrupted,
         ];

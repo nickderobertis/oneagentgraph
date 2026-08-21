@@ -14,6 +14,7 @@
 //! ```jsonl
 //! {"type":"system","subtype":"init","session_id":"…"}
 //! {"type":"assistant","message":{"content":[{"type":"tool_use",…}]}}
+//! {"type":"user","message":{"content":[{"type":"tool_result",…}]}}
 //! {"type":"result","subtype":"success","result":"…","usage":{…}}
 //! ```
 //!
@@ -615,6 +616,16 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
             "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
                 {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
         }));
+        // And the observation that call returned, which is how Claude Code
+        // reports one: a `user` message carrying a `tool_result` block joined to
+        // the call by its id. A transcript of calls with no results is not a
+        // transcript a harness ever produces, and it is exactly the half this
+        // suite could not see while every result was discarded upstream.
+        emit(&json!({
+            "type": "user", "session_id": session,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": TOOL_RESULT}]},
+        }));
     }
     // Resolved before the terminal line rather than inside it: a turn this
     // process cannot answer publishes no `result` at all, which is what a
@@ -636,6 +647,13 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     }));
     Answered::Yes
 }
+
+/// What the one tool call this double makes returns.
+///
+/// Multi-line on purpose: an observation is not a one-liner, and a rendering that
+/// pasted the whole of one into a log line is what the tail bound and the
+/// last-line rendering exist for.
+const TOOL_RESULT: &str = "running the gate\n2 passed; 0 failed";
 
 /// Whether a turn was one this double could take.
 ///

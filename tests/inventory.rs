@@ -19,7 +19,7 @@ use std::collections::BTreeSet;
 use std::process::{Child, Command};
 
 use oneagentgraph::event::{Cause, Disposition, MemberDied, Runner};
-use oneharness_core::domain::report::RunReport;
+use oneharness_core::domain::report::{FallbackReport, RunReport, RunResult};
 use oneharness_core::io::cancel::CancelToken;
 use oneharness_core::io::run::{RunControls, RunOutcome, RunRequest};
 use oneharness_core::io::runner::ProcessSupervisor;
@@ -178,6 +178,9 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
         field!(RunOutcome, failure_summary),
         field!(RunReport, control),
         field!(RunReport, fallback),
+        field!(RunReport, results),
+        field!(FallbackReport, ran),
+        field!(RunResult, usage),
     ]
     .into_iter()
     // `RunControls<'_>` stringifies with its lifetime; the document writes the

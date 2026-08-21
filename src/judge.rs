@@ -5,7 +5,7 @@
 //! [`crate::invoke`] wrote is loaded through onejudge's own
 //! [`onejudge::cli::Config`], resolved into its own [`onejudge::cli::Plan`], and
 //! driven by its own run driver
-//! ([`onejudge::cli::run_plan_streaming_reporting_failure`]).
+//! ([`onejudge::cli::run_plan_observing_reporting_failure`]).
 //! Nothing about the conversation is re-implemented here — the loop, the
 //! `done_when` re-judgement, the evals, and the report are onejudge's, exactly as
 //! they were when this crate spawned its CLI.
@@ -16,11 +16,21 @@
 //!
 //! # What changes when a member is not a process
 //!
-//! **Events arrive live, typed.** The sink is called with a
-//! [`StreamEvent`] the instant a tool event is observed —
-//! the same events the NDJSON hop carried, without the round-trip through
-//! another process's stdout and back through a parser. There is no reconciliation
-//! to do: a turn index is a `usize`, not a field that might be missing.
+//! **The whole of a turn arrives live, typed.** The sink is called with an
+//! [`onejudge::Observation`] the instant the engine produces one, without the
+//! round-trip through another process's stdout and back through a parser. There
+//! is no reconciliation to do: a turn index is a `usize`, not a field that might
+//! be missing.
+//!
+//! That seam is wider than the events the NDJSON hop carried, and every part of
+//! it is published: the turn's opening and the instruction it answers
+//! ([`crate::event::EventKind::TurnStarted`]), each tool call **and the
+//! observation that answered it**
+//! ([`crate::event::EventKind::TurnActivity`]), each party's own reply
+//! ([`crate::event::EventKind::TurnMessage`]), and that one turn's usage and
+//! bounds ([`crate::event::EventKind::TurnCompleted`]). An operator watching a
+//! live dispatch reads what the agent did and what it said off the journal,
+//! rather than waiting for the settled report.
 //!
 //! **A failure is typed, not a stderr tail.** onejudge classifies a provider
 //! failure with its own `ProviderErrorKind` — which is oneharness's normalized
@@ -61,17 +71,17 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use onejudge::cli::{Config, Overrides, RunFailure, RunSummary};
-use onejudge::StreamEvent;
-use serde_json::{Map, Value};
+use onejudge::Observation;
+use serde_json::Value;
 
 use crate::event::{
-    bound_detail, bound_text, Artifact, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
-    OneharnessSession, Role, ONEHARNESS_SESSION_ARTIFACT,
+    bound_head, bound_text, Artifact, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
+    OneharnessSession, Role, TurnCompleted, TurnStarted, ONEHARNESS_SESSION_ARTIFACT,
 };
 use crate::invoke::JudgeLaunch;
 use crate::member::{
-    died_payload, payload, settle_report, summarize, unstartable, Bounds, Death, Outcome, Rule,
-    Stall, HEARTBEAT_INTERVAL,
+    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Outcome, Rule, Stall,
+    HEARTBEAT_INTERVAL,
 };
 
 /// How long a condemned member's engine is given to answer the teardown before
@@ -111,7 +121,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         Ok(group) => Arc::new(group),
         Err(err) => {
             let reason = err.to_string();
-            emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+            emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
         }
     };
@@ -123,7 +133,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             agent_config: launch.agent_config.clone(),
         })),
         Err(reason) => {
-            emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+            emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
         }
     };
@@ -160,17 +170,17 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         // [`crate::harness`] makes, because since that conversion both member
         // kinds put their engine on a thread of this one process.
         std::thread::Builder::new().spawn(move || {
-            let mut turn = 0usize;
-            let mut sink = move |event: &StreamEvent<'_>| {
+            let mut sink = move |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
-                ingest(event, &emitter, &mut turn);
+                ingest(observation, &emitter);
                 if abort.load(Ordering::SeqCst) {
                     ControlFlow::Break(())
                 } else {
                     ControlFlow::Continue(())
                 }
             };
-            let answer = onejudge::cli::run_plan_streaming_reporting_failure(plan, &mut sink);
+            let answer = onejudge::cli::run_plan_observing_reporting_failure(plan, &mut sink)
+                .map_err(Box::new);
             // A send that fails means the supervisor already condemned this
             // member and stopped listening; the engine still tore itself down on
             // the way here, which is what that teardown was waiting for.
@@ -186,7 +196,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // refused rather than reported as running.
     if let Err(err) = engine {
         let reason = format!("cannot start this member's engine thread: {err}");
-        emitter.emit(EventKind::MemberDied, died_payload(&unstartable(&reason)));
+        emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
         return Outcome::Unstartable(reason);
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -341,34 +351,102 @@ fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
     Ok(plan)
 }
 
-/// Turn one live tool event into envelopes.
+/// Turn one live observation into the envelope that carries it.
 ///
-/// The same two the NDJSON reader in [`crate::member`] produces, and on the same
-/// terms: a turn index that moved opens a turn, and an event this crate cannot
-/// name is skipped rather than published with a hole in it — a `tool_result`
-/// carries no tool name, and reporting one as an unnamed action would say the
-/// member did something it cannot name.
-fn ingest(event: &StreamEvent<'_>, emitter: &Emitter, turn: &mut usize) {
-    let Some(name) = event.event.name.as_deref() else {
-        return;
-    };
-    if event.turn != *turn {
-        *turn = event.turn;
-        emitter.emit(
-            EventKind::TurnStarted,
-            payload([("turn", Value::from(event.turn as u64))]),
-        );
+/// Total over the seam: every observation onejudge produces is published, and
+/// nothing is dropped for being unnamed. The turn index no longer has to be
+/// inferred from an event that moved past it — the engine opens and closes each
+/// turn itself, so what a consumer reads is the conversation's own structure
+/// rather than this crate's reconstruction of it.
+fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
+    match observation {
+        Observation::TurnOpened(opened) => {
+            let (instruction, instruction_truncated) = bound_head(opened.instruction);
+            emitter.emit(
+                EventKind::TurnStarted,
+                as_payload(&TurnStarted {
+                    turn: opened.turn as u64,
+                    role: role(opened.role),
+                    instruction,
+                    instruction_truncated,
+                    started_at: opened.started_at.clone(),
+                }),
+            );
+        }
+        Observation::Tool(event) => {
+            // Through the payload builder both member kinds share — see
+            // [`crate::member::activity`].
+            let event = event.event;
+            emitter.emit(
+                EventKind::TurnActivity,
+                as_payload(&activity(
+                    &event.kind,
+                    event.name.as_deref(),
+                    event.input.as_ref(),
+                    event.output.as_deref(),
+                    event.tool_call_id.as_deref(),
+                    event.index,
+                )),
+            );
+        }
+        Observation::Message(message) => {
+            let (text, truncated) = bound_head(message.text);
+            emitter.emit(
+                EventKind::TurnMessage,
+                as_payload(&crate::event::TurnMessage {
+                    turn: message.turn as u64,
+                    role: role(message.role),
+                    text,
+                    truncated,
+                }),
+            );
+        }
+        Observation::TurnClosed(closed) => {
+            emitter.emit(
+                EventKind::TurnCompleted,
+                as_payload(&TurnCompleted {
+                    turn: closed.turn as u64,
+                    role: role(closed.role),
+                    usage: closed.usage.map(usage).unwrap_or_default(),
+                    started_at: closed.started_at.clone(),
+                    finished_at: closed.finished_at.clone(),
+                }),
+            );
+        }
     }
-    let (detail, truncated) = bound_detail(&summarize(event.event.input.as_ref()));
-    emitter.emit(
-        EventKind::TurnActivity,
-        payload([
-            ("kind", Value::String(event.event.kind.clone())),
-            ("name", Value::String(name.to_string())),
-            ("detail", Value::String(detail)),
-            ("truncated", Value::Bool(truncated)),
-        ]),
-    );
+}
+
+/// One party of the conversation, as the wire names it.
+///
+/// onejudge's own spelling, taken through its serialization rather than restated,
+/// so a party renamed upstream reaches the stream renamed rather than mapped onto
+/// a name it no longer has.
+fn role(role: onejudge::Role) -> String {
+    match serde_json::to_value(role) {
+        Ok(Value::String(name)) => name,
+        _ => String::new(),
+    }
+}
+
+/// One turn's accounting, field for field with onejudge's own.
+///
+/// Spelled out rather than round-tripped through JSON so a field added upstream
+/// is a compile error here rather than a figure silently dropped.
+fn usage(usage: &onejudge::Usage) -> crate::event::Usage {
+    let onejudge::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost_usd,
+    } = *usage;
+    crate::event::Usage {
+        input_tokens,
+        output_tokens,
+        cache_read_tokens,
+        cache_write_tokens,
+        cost_usd,
+    }
 }
 
 /// Settle or condemn a member whose engine answered.
@@ -688,13 +766,6 @@ mod location {
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
-fn as_payload<T: serde::Serialize>(payload: &T) -> Map<String, Value> {
-    match serde_json::to_value(payload) {
-        Ok(Value::Object(map)) => map,
-        _ => Map::new(),
-    }
-}
-
 /// Stop a member a watchdog condemned, then report it.
 ///
 /// The escalation this module's own documentation describes: ask, reap, and give
@@ -769,7 +840,7 @@ fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
         disposition: None,
         stderr_tail: None,
     };
-    emitter.emit(EventKind::MemberDied, died_payload(&payload));
+    emitter.emit(EventKind::MemberDied, as_payload(&payload));
     Outcome::Died(Death { rule, payload })
 }
 
@@ -785,7 +856,8 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::event::Envelope;
+    use crate::event::{Envelope, MAX_PAYLOAD_TEXT_BYTES};
+    use onejudge::StreamEvent;
 
     /// A sink a test can read its own events back out of.
     #[derive(Clone, Default)]
@@ -936,43 +1008,60 @@ mod tests {
         assert_eq!(kinds, vec![EventKind::MemberDied]);
     }
 
-    /// One live tool event opens its turn and reports what it acted on; a turn
-    /// that has already been opened is not opened twice.
-    #[test]
-    fn a_live_event_opens_its_turn_once_and_summarizes_what_it_acted_on() {
-        let (emitter, recorder) = recorded();
-        let mut turn = 0usize;
-        let call = onejudge::ToolEvent {
+    fn call() -> onejudge::ToolEvent {
+        onejudge::ToolEvent {
             kind: "tool_call".into(),
             name: Some("bash".into()),
             input: Some(json!({"command": "just check", "n": 3})),
             output: None,
             index: 0,
+            tool_call_id: Some("t1".into()),
+        }
+    }
+
+    /// The whole of a turn reaches the stream: its opening and what it was asked,
+    /// each tool call, the party's own reply, and the turn's own cost and bounds.
+    ///
+    /// Every one of these is an observation this crate already received and threw
+    /// away one line into `ingest`, which is why a view built on the journal could
+    /// not show what the agent did or what it said.
+    #[test]
+    fn a_whole_turn_reaches_the_stream_as_it_happens() {
+        let (emitter, recorder) = recorded();
+        let call = call();
+        let usage = onejudge::Usage {
+            input_tokens: Some(900),
+            output_tokens: Some(120),
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            cost_usd: Some(0.42),
         };
-        ingest(
-            &StreamEvent {
+        for observation in [
+            Observation::TurnOpened(onejudge::TurnOpened {
+                turn: 1,
+                role: onejudge::Role::Assistant,
+                instruction: "write the thing",
+                started_at: "2026-08-21T09:15:02.847Z".into(),
+            }),
+            Observation::Tool(StreamEvent {
                 turn: 1,
                 event: &call,
-            },
-            &emitter,
-            &mut turn,
-        );
-        ingest(
-            &StreamEvent {
+            }),
+            Observation::Message(onejudge::TurnMessage {
                 turn: 1,
-                event: &call,
-            },
-            &emitter,
-            &mut turn,
-        );
-        ingest(
-            &StreamEvent {
-                turn: 2,
-                event: &call,
-            },
-            &emitter,
-            &mut turn,
-        );
+                role: onejudge::Role::Assistant,
+                text: "done",
+            }),
+            Observation::TurnClosed(onejudge::TurnClosed {
+                turn: 1,
+                role: onejudge::Role::Assistant,
+                usage: Some(&usage),
+                started_at: "2026-08-21T09:15:02.847Z".into(),
+                finished_at: "2026-08-21T09:16:11.002Z".into(),
+            }),
+        ] {
+            ingest(&observation, &emitter);
+        }
 
         let events = recorder.events();
         let kinds: Vec<_> = events.iter().map(|event| event.kind).collect();
@@ -981,59 +1070,133 @@ mod tests {
             vec![
                 EventKind::TurnStarted,
                 EventKind::TurnActivity,
-                EventKind::TurnActivity,
-                EventKind::TurnStarted,
-                EventKind::TurnActivity,
+                EventKind::TurnMessage,
+                EventKind::TurnCompleted,
             ]
+        );
+        assert_eq!(events[0].payload["turn"], json!(1));
+        assert_eq!(events[0].payload["role"], json!("assistant"));
+        assert_eq!(events[0].payload["instruction"], json!("write the thing"));
+        assert_eq!(
+            events[0].payload["started_at"],
+            json!("2026-08-21T09:15:02.847Z")
         );
         assert_eq!(events[1].payload["name"], json!("bash"));
         assert_eq!(events[1].payload["kind"], json!("tool_call"));
         assert_eq!(events[1].payload["detail"], json!("just check"));
-        assert_eq!(events[3].payload["turn"], json!(2));
+        assert_eq!(events[1].payload["tool_call_id"], json!("t1"));
+        assert_eq!(events[2].payload["text"], json!("done"));
+        assert_eq!(events[2].payload["role"], json!("assistant"));
+        // This one turn's cost, on this one turn — not a run total served once at
+        // the end, which is what a journal carried before.
+        assert_eq!(
+            events[3].payload["usage"],
+            json!({"input_tokens": 900, "output_tokens": 120, "cost_usd": 0.42})
+        );
+        assert_eq!(
+            events[3].payload["finished_at"],
+            json!("2026-08-21T09:16:11.002Z")
+        );
     }
 
-    /// An event this crate cannot name is skipped rather than published with a
-    /// hole in it — a `tool_result` carries no tool name, and reporting one as an
-    /// unnamed action would say the member did something it cannot name.
+    /// A supervisor turn that reported no usage closes with an empty object, not
+    /// with zeroes: a turn nobody accounted for is a different fact from one that
+    /// cost nothing.
     #[test]
-    fn a_live_event_with_no_tool_name_is_skipped() {
+    fn a_turn_whose_provider_reported_nothing_publishes_no_figures_at_all() {
         let (emitter, recorder) = recorded();
-        let mut turn = 0usize;
+        ingest(
+            &Observation::TurnClosed(onejudge::TurnClosed {
+                turn: 2,
+                role: onejudge::Role::User,
+                usage: None,
+                started_at: "2026-08-21T09:16:11.002Z".into(),
+                finished_at: "2026-08-21T09:16:12.500Z".into(),
+            }),
+            &emitter,
+        );
+        let events = recorder.events();
+        assert_eq!(events[0].payload["role"], json!("user"));
+        assert_eq!(events[0].payload["usage"], json!({}));
+    }
+
+    /// A `tool_result` names no tool because it answers one already named, and it
+    /// is published all the same — carrying the observation and the identity of
+    /// the call it answers.
+    #[test]
+    fn an_observation_reaches_the_stream_with_the_identity_of_the_call_it_answers() {
+        let (emitter, recorder) = recorded();
         let result = onejudge::ToolEvent {
             kind: "tool_result".into(),
             name: None,
             input: None,
-            output: Some("done".into()),
+            output: Some("2 passed; 0 failed".into()),
             index: 1,
+            tool_call_id: Some("t1".into()),
         };
         ingest(
-            &StreamEvent {
+            &Observation::Tool(StreamEvent {
                 turn: 1,
                 event: &result,
-            },
+            }),
             &emitter,
-            &mut turn,
-        );
-        assert!(recorder.events().is_empty(), "an unnamed event published");
-        assert_eq!(turn, 0, "an unnamed event opened a turn");
-
-        // An event with a name but no input still publishes: what it acted on is
-        // simply empty.
-        let bare = onejudge::ToolEvent {
-            name: Some("read".into()),
-            ..result
-        };
-        ingest(
-            &StreamEvent {
-                turn: 1,
-                event: &bare,
-            },
-            &emitter,
-            &mut turn,
         );
         let events = recorder.events();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].payload["detail"], json!(""));
+        assert_eq!(events.len(), 1, "the observation was discarded: {events:?}");
+        assert_eq!(events[0].payload["kind"], json!("tool_result"));
+        assert_eq!(events[0].payload["name"], Value::Null);
+        assert_eq!(events[0].payload["output"], json!("2 passed; 0 failed"));
+        assert_eq!(events[0].payload["tool_call_id"], json!("t1"));
+        assert_eq!(events[0].payload["index"], json!(1));
+        assert_eq!(events[0].payload["detail"], json!(""));
+    }
+
+    /// The two long fields are bounded from opposite ends, each at this crate's
+    /// own published payload bound and each saying whether it was cut: a reply
+    /// keeps its opening, an observation keeps its tail.
+    #[test]
+    fn a_reply_keeps_its_opening_and_an_observation_keeps_its_tail() {
+        let (emitter, recorder) = recorded();
+        let long = format!("the plan is{}", "x".repeat(MAX_PAYLOAD_TEXT_BYTES));
+        let result = onejudge::ToolEvent {
+            kind: "tool_result".into(),
+            name: None,
+            input: None,
+            output: Some(format!(
+                "{}the test suite failed",
+                "x".repeat(MAX_PAYLOAD_TEXT_BYTES)
+            )),
+            index: 1,
+            tool_call_id: None,
+        };
+        ingest(
+            &Observation::Message(onejudge::TurnMessage {
+                turn: 1,
+                role: onejudge::Role::Assistant,
+                text: &long,
+            }),
+            &emitter,
+        );
+        ingest(
+            &Observation::Tool(StreamEvent {
+                turn: 1,
+                event: &result,
+            }),
+            &emitter,
+        );
+
+        let events = recorder.events();
+        let text = events[0].payload["text"].as_str().expect("a reply");
+        assert!(text.starts_with("the plan is"), "{text}");
+        assert!(text.len() <= MAX_PAYLOAD_TEXT_BYTES);
+        assert_eq!(events[0].payload["truncated"], json!(true));
+
+        let output = events[1].payload["output"]
+            .as_str()
+            .expect("an observation");
+        assert!(output.ends_with("the test suite failed"), "{output}");
+        assert!(output.len() <= MAX_PAYLOAD_TEXT_BYTES);
+        assert_eq!(events[1].payload["output_truncated"], json!(true));
     }
 
     /// Every candidate each side stepped past is published, carrying the side and

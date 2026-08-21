@@ -115,6 +115,16 @@ turn index, so the NDJSON reader defaulted every event to turn 1. `oneharness ru
 *is* one turn. `src/harness.rs` therefore opens turn 1 on the first event and
 never renumbers — the same stream, from the shape rather than from a default.
 
+That shape is also what closes the turn. A single-sided member's turn *is* its
+run, so its `turn-completed` carries the accounting off the candidate that ran —
+the one `FallbackReport::ran` names, else the first of `RunReport::results`, which
+is oneharness's own ordering rule and the one onejudge reads it by — and its
+bounds are the run's:
+opened before the request is handed to the engine, closed when the engine answers.
+`RunResult::usage` is field for field with `crate::event::Usage`, and
+`src/harness.rs` destructures it rather than round-tripping through JSON so a
+signal added upstream is a compile error here.
+
 Whether a given member streams at all is not this crate's to decide, and the
 conversion kept it that way: `src/invoke.rs`'s `reporting` reads the member's own
 resolved config, because a config asking for a schema cannot stream in oneharness

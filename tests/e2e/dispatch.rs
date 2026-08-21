@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use oneagentgraph::persona::MEMBER_OWNED;
 
 use crate::support::{
@@ -37,6 +39,7 @@ fn a_member_completes_through_the_real_supervisor_loop() {
         "member-started",
         "turn-started",
         "turn-activity",
+        "turn-message",
         "turn-completed",
         "member-settled",
         "graph-settled",
@@ -58,17 +61,21 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert!(!activity.is_empty(), "{kinds:?}");
     for event in &activity {
         let payload = &event["payload"];
-        for named in ["kind", "name", "detail"] {
+        for named in ["kind", "detail"] {
             assert!(
                 payload[named].is_string(),
                 "turn-activity carried no {named}: {payload}"
             );
         }
+        // `name` is on every activity, `null` on the results that answer a call
+        // rather than making one — a stable shape either way.
         assert!(
-            payload["name"]
-                .as_str()
-                .is_some_and(|name| !name.is_empty()),
-            "an action this crate could not name was published anyway: {payload}"
+            payload.get("name").is_some(),
+            "turn-activity omitted `name` rather than nulling it: {payload}"
+        );
+        assert!(
+            payload["index"].as_u64().is_some(),
+            "turn-activity carried no index: {payload}"
         );
         // The contract's bound on a tool summary, on the wire where a consumer
         // meets it.
@@ -81,20 +88,126 @@ fn a_member_completes_through_the_real_supervisor_loop() {
                 <= 160,
             "the tool detail outgrew its documented bound: {payload}"
         );
-        assert!(payload["truncated"].is_boolean(), "{payload}");
     }
-    for event in &run.of_kind("turn-started") {
+
+    // The half a live journal never carried: the observation a tool returned,
+    // and the identity of the call it answers. Both come off the real harness
+    // transcript, through real oneharness and real onejudge.
+    let calls: Vec<&Value> = activity
+        .iter()
+        .filter(|event| event["payload"]["kind"] == "tool_call")
+        .collect();
+    let results: Vec<&Value> = activity
+        .iter()
+        .filter(|event| event["payload"]["kind"] == "tool_result")
+        .collect();
+    assert!(!calls.is_empty(), "{activity:?}");
+    assert!(
+        !results.is_empty(),
+        "every observation this member's tools returned was discarded: {activity:?}"
+    );
+    for result in &results {
+        let payload = &result["payload"];
+        assert_eq!(
+            payload["name"],
+            Value::Null,
+            "a result named a tool it only answers: {payload}"
+        );
         assert!(
-            event["payload"]["turn"].as_u64().is_some(),
-            "turn-started named no turn: {event}"
+            payload["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("2 passed; 0 failed")),
+            "the observation never reached the journal: {payload}"
+        );
+        let answered = payload["tool_call_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a result joined to no call: {payload}"));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call["payload"]["tool_call_id"] == answered),
+            "a result naming a call this stream never carried: {payload}"
         );
     }
-    // `turn-completed` carries the usage the contract names. It comes off the
-    // report onejudge returns to this process, so a caller reading only the
-    // stream still gets the accounting rather than having to open the artifact.
+
+    // What the agent actually said, published as the turn happened rather than
+    // only inside the settled report.
+    let messages = run.of_kind("turn-message");
+    assert!(!messages.is_empty(), "{kinds:?}");
+    assert!(
+        messages.iter().any(|event| {
+            event["payload"]["role"] == "assistant" && event["payload"]["text"] == "done"
+        }),
+        "the agent's own reply never reached the journal: {messages:?}"
+    );
+    for event in &messages {
+        assert!(
+            event["payload"]["turn"].as_u64().is_some(),
+            "a message belonging to no turn: {event}"
+        );
+    }
+
+    // Every turn names itself, who took it, what it was asked, and when it began.
+    let opened = run.of_kind("turn-started");
+    assert!(!opened.is_empty(), "{kinds:?}");
+    for event in &opened {
+        let payload = &event["payload"];
+        assert!(
+            payload["turn"].as_u64().is_some(),
+            "turn-started named no turn: {event}"
+        );
+        for named in ["role", "instruction", "started_at"] {
+            assert!(
+                payload[named].is_string(),
+                "turn-started carried no {named}: {payload}"
+            );
+        }
+    }
+    assert!(
+        opened.iter().any(|event| {
+            event["payload"]["role"] == "assistant"
+                && event["payload"]["instruction"]
+                    .as_str()
+                    .is_some_and(|it| it.contains("write the thing"))
+        }),
+        "no turn named the task it was answering: {opened:?}"
+    );
+
+    // `turn-completed` is **per turn**: this dispatch takes an agent turn and a
+    // supervisor turn, and each closes with its own accounting and its own
+    // bounds. One figure for the whole run is what a journal used to carry, and
+    // it left every turn but one with an empty usage object.
     let completed = run.of_kind("turn-completed");
-    assert_eq!(completed.len(), 1, "{completed:?}");
-    let usage = &completed[0]["payload"]["usage"];
+    assert!(
+        completed.len() >= 2,
+        "a dispatch of several turns still reports one usage: {completed:?}"
+    );
+    let turns: Vec<u64> = completed
+        .iter()
+        .map(|event| event["payload"]["turn"].as_u64().expect("a turn"))
+        .collect();
+    assert_eq!(
+        turns.len(),
+        opened.len(),
+        "a turn opened and never closed, or closed without opening: {kinds:?}"
+    );
+    for event in &completed {
+        let payload = &event["payload"];
+        for named in ["role", "started_at", "finished_at"] {
+            assert!(
+                payload[named].is_string(),
+                "turn-completed carried no {named}: {payload}"
+            );
+        }
+    }
+    // The agent's turn is the one that spent tokens, and it carries the usage the
+    // contract names. It comes off onejudge's own per-turn accounting, so a
+    // caller reading only the stream gets it without opening the artifact.
+    let agent = completed
+        .iter()
+        .find(|event| event["payload"]["role"] == "assistant")
+        .unwrap_or_else(|| panic!("no agent turn closed: {completed:?}"));
+    let usage = &agent["payload"]["usage"];
     assert!(
         usage.is_object(),
         "turn-completed carried no usage: {usage}"
@@ -3133,22 +3246,27 @@ fn a_single_sided_member_answers_with_the_structured_document_its_config_asks_fo
 
     // The member beside it declares neither a schema nor `stream`, and runs
     // exactly as it did before: the tool events only a streamed member
-    // publishes.
-    let activity: Vec<String> = run
+    // publishes — its call, and the observation that answered it.
+    let activity: Vec<(String, String)> = run
         .of_kind("turn-activity")
         .iter()
-        .filter_map(|event| labels(event).get("member").cloned())
+        .filter_map(|event| {
+            Some((
+                labels(event).get("member").cloned()?,
+                event["payload"]["kind"].as_str()?.to_string(),
+            ))
+        })
         .collect();
-    assert_eq!(
-        activity
-            .iter()
-            .filter(|member| member.as_str() == "reporter")
-            .count(),
-        1,
-        "the streaming member published no tool event: {activity:?}"
-    );
+    for expected in ["tool_call", "tool_result"] {
+        assert!(
+            activity
+                .iter()
+                .any(|(member, kind)| member == "reporter" && kind == expected),
+            "the streaming member published no {expected}: {activity:?}"
+        );
+    }
     assert!(
-        !activity.iter().any(|member| member.as_str() == "drafter"),
+        !activity.iter().any(|(member, _)| member == "drafter"),
         "a member that does not stream published a streamed event: {activity:?}"
     );
 }
