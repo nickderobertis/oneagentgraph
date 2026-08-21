@@ -139,6 +139,16 @@ impl Workspace {
         self.root.path().join(name)
     }
 
+    /// The binary an unreachable harness points at: a path inside this
+    /// workspace that nothing ever creates.
+    ///
+    /// Absolute, so `which` reads it as a path rather than searching `PATH` for
+    /// it, and inside a freshly-made temporary directory, so it is absent on
+    /// every host rather than absent on the hosts that happen to lack a harness.
+    pub fn unreachable_harness(&self) -> String {
+        self.at("no-such-harness-binary").display().to_string()
+    }
+
     /// Write one file into the workspace, creating what holds it.
     pub fn write(&self, name: &str, content: &str) -> PathBuf {
         let path = self.at(name);
@@ -416,6 +426,27 @@ pub fn single_sided_graph(fake: &str) -> String {
 /// Where the doubled paid harness's path goes in a graph document: oneharness's
 /// own `ONEHARNESS_BIN_<ID>` override, in the graph's `env:` block.
 pub const FAKE_HARNESS_KEY: &str = "env.ONEHARNESS_BIN_CLAUDE_CODE";
+
+/// Where an *unreachable* harness's path goes: the same `ONEHARNESS_BIN_<ID>`
+/// override, on a second identity, so a member that has to die for want of a
+/// harness dies on every host.
+///
+/// A chain naming a bare `codex` is not that. It reads as "an identity this
+/// journey gives no binary for", which is only true on a host without Codex
+/// installed: where Codex *is* installed and authenticated, the member takes a
+/// real, paid turn instead of dying and the journey asserting the death fails.
+/// Pointing the override at a path that does not exist puts `which` in the same
+/// `available: false` state a missing Codex gives, so the journeys keep
+/// asserting the provider failure they are about rather than the host's
+/// installation. Pair it with [`UNREACHABLE_CHAIN`].
+pub const UNREACHABLE_HARNESS_KEY: &str = "env.ONEHARNESS_BIN_CODEX";
+
+/// The one-identity chain [`UNREACHABLE_HARNESS_KEY`] makes unreachable.
+///
+/// A second identity rather than `claude-code`, because the override keys on the
+/// harness id: aiming `claude-code` at nothing would take the working members'
+/// double down with it.
+pub const UNREACHABLE_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n";
 
 /// A graph whose `env:` block needs nothing beyond the doubled harness.
 pub const NO_ENV: &[(&str, &str)] = &[];
