@@ -55,7 +55,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Map, Value};
 
 use crate::event::{
-    bound_text, Cause, Emitter, EventKind, Labels, MemberDied, MemberStarted, Runner,
+    bound_detail, bound_text, Cause, Emitter, EventKind, Labels, MemberDied, MemberStarted, Runner,
+    TurnActivity,
 };
 use crate::invoke::{Invocation, Launch};
 use crate::liveness::{
@@ -571,14 +572,62 @@ fn millis(span: Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// One live tool event as the contract's activity payload, whichever engine
+/// produced it.
+///
+/// Takes the six fields rather than the event around them, because each engine
+/// has its own event type — onejudge's `ToolEvent` and oneharness's
+/// `ActionEvent` — carrying exactly these six under the same names. What a
+/// consumer reads must not depend on which member kind it came from, and neither
+/// must the bounds: the summary is bounded in characters and the observation in
+/// bytes, from opposite ends, and both decisions live here rather than once per
+/// member kind.
+///
+/// A `tool_result` is published like any other event. It names no tool because it
+/// *answers* a call already named, and `tool_call_id` is what joins it back —
+/// skipping it for having no name is what discarded every observation a member's
+/// tools returned.
+// llmlint: ignore-block[invalid_states_unrepresentable] `kind` stays the open
+// string both upstreams deliberately publish — oneharness's `ActionEvent` says so
+// at the field ("Left open for future kinds rather than an enum, so a new shape
+// never breaks the field") and onejudge's `ToolEvent` mirrors it. This crate
+// *forwards* that value; an enum here would re-decide a taxonomy it does not own,
+// and the first new kind either engine normalizes would be dropped on the floor
+// or turned into a member death rather than reaching the operator who needs to
+// see it. Scoped to this one function, which is the only place it is read.
+// llmlint: ignore-block[boundary_inputs_validated] and it is not untrusted input:
+// it arrives as a field of a linked library's typed struct, in this process, from
+// the same engine whose report this crate settles on — the same trust level as
+// the `Observation` beside it. There is no parse to validate.
+pub(crate) fn activity(
+    kind: &str,
+    name: Option<&str>,
+    input: Option<&Value>,
+    output: Option<&str>,
+    tool_call_id: Option<&str>,
+    index: usize,
+) -> TurnActivity {
+    let (detail, truncated) = bound_detail(&summarize(input));
+    // `bound_text`, so an observation keeps its **tail**: what names a failure is
+    // the last of a tool's output, not its startup chatter.
+    let bounded = output.map(bound_text);
+    TurnActivity {
+        kind: kind.to_string(),
+        name: name.map(str::to_string),
+        detail,
+        truncated,
+        output: bounded.as_ref().map(|(text, _)| text.clone()),
+        output_truncated: bounded.is_some_and(|(_, cut)| cut),
+        tool_call_id: tool_call_id.map(str::to_string),
+        index: index as u64,
+    }
+}
+// llmlint: ignore-end[boundary_inputs_validated]
+// llmlint: ignore-end[invalid_states_unrepresentable]
+
 /// One tool event's structured input as the contract's bounded summary: what it
 /// acted on.
-///
-/// Takes the input itself rather than the event around it, because each engine
-/// has its own event type — onejudge's `ToolEvent` and oneharness's
-/// `ActionEvent` — and the `input` both carry is the only part this needs. The
-/// summary must be the same whichever member produced it.
-pub(crate) fn summarize(input: Option<&Value>) -> String {
+fn summarize(input: Option<&Value>) -> String {
     match input {
         Some(Value::Object(fields)) => fields
             .values()
@@ -617,14 +666,6 @@ pub(crate) fn settle_report(
     // of its report is not a reason to report it as anything else. The payload
     // says where it went either way, which is what an operator needs to look.
     let stored = std::fs::write(&path, &rendered).is_ok();
-    emitter.emit_with(
-        EventKind::TurnCompleted,
-        payload([(
-            "usage",
-            document.get("usage").cloned().unwrap_or(Value::Null),
-        )]),
-        Vec::new(),
-    );
     emitter.emit_with(
         EventKind::MemberSettled,
         payload([
@@ -665,9 +706,14 @@ pub(crate) fn settle_report(
     }
 }
 
-/// A `member-died` payload as the wire carries it.
-pub(crate) fn died_payload(died: &MemberDied) -> Map<String, Value> {
-    match serde_json::to_value(died) {
+/// One payload, built from the declared type that describes it.
+///
+/// Every kind whose payload has a type in [`crate::event`] reaches the wire
+/// through here rather than through a field list assembled beside it: a type
+/// nothing serializes is free to drift from what is published, which is how
+/// `Usage` came to declare six fields the wire had never carried.
+pub(crate) fn as_payload<T: serde::Serialize>(value: &T) -> Map<String, Value> {
+    match serde_json::to_value(value) {
         Ok(Value::Object(map)) => map,
         _ => Map::new(),
     }
@@ -1004,7 +1050,7 @@ mod tests {
     /// was no process — and says so as `spawn`, with the reason as its detail.
     #[test]
     fn a_member_that_never_started_carries_a_typed_cause_and_no_process_facts() {
-        let payload = died_payload(&unstartable("cannot start oneharness: No such file"));
+        let payload = as_payload(&unstartable("cannot start oneharness: No such file"));
         assert_eq!(payload["rule"], Value::from("unstartable"));
         assert_eq!(payload["cause"], Value::from("spawn"));
         assert!(payload["detail"]

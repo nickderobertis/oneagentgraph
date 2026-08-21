@@ -22,17 +22,35 @@ pub fn line(envelope: &Envelope) -> String {
             program if program.is_empty() => field(envelope, "engine"),
             program => program,
         },
-        EventKind::TurnStarted => format!("turn {}", field(envelope, "turn")),
+        EventKind::TurnStarted => turn_head(envelope),
         EventKind::TurnActivity => {
-            let (name, detail) = (field(envelope, "name"), field(envelope, "detail"));
-            [name, detail]
-                .iter()
-                .filter(|part| !part.is_empty())
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(" ")
+            // A result names no tool — it answers one — so its `kind` is what
+            // identifies it, and what it returned is where the detail is. Only
+            // the last line of that, as `member-died` renders its own: an
+            // observation runs to the payload bound and a line does not.
+            let head = match field(envelope, "name") {
+                name if name.is_empty() => field(envelope, "kind"),
+                name => name,
+            };
+            let body = match field(envelope, "detail") {
+                detail if detail.is_empty() => field(envelope, "output")
+                    .lines()
+                    .next_back()
+                    .unwrap_or_default()
+                    .to_string(),
+                detail => detail,
+            };
+            joined(&[head, body])
         }
-        EventKind::TurnCompleted => usage(envelope),
+        EventKind::TurnMessage => {
+            // The opening line of what was said, which is what a person watching
+            // a live dispatch reads the event for; the whole of it is on the
+            // wire for a consumer that wants it.
+            let text = field(envelope, "text");
+            let opening = text.lines().next().unwrap_or_default().to_string();
+            joined(&[turn_head(envelope), opening])
+        }
+        EventKind::TurnCompleted => joined(&[turn_head(envelope), usage(envelope)]),
         EventKind::TurnInterrupted => {
             let delivered = envelope
                 .payload
@@ -105,6 +123,28 @@ pub fn line(envelope: &Envelope) -> String {
         format!("{} {member} {kind}", envelope.ts)
     } else {
         format!("{} {member} {kind} {detail}", envelope.ts)
+    }
+}
+
+/// The parts of a rendering that had something to say, in order.
+fn joined(parts: &[String]) -> String {
+    parts
+        .iter()
+        .filter(|part| !part.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Which turn of whose conversation an event belongs to.
+fn turn_head(envelope: &Envelope) -> String {
+    let turn = field(envelope, "turn");
+    if turn.is_empty() {
+        return String::new();
+    }
+    match field(envelope, "role") {
+        role if role.is_empty() => format!("turn {turn}"),
+        role => format!("turn {turn} ({role})"),
     }
 }
 
@@ -246,20 +286,37 @@ mod tests {
             ),
             (
                 EventKind::TurnStarted,
-                json!({"turn": 2}),
-                "turn-started turn 2",
+                json!({"turn": 2, "role": "assistant",
+                       "instruction": "verify it", "started_at": "2026-08-08T06:12:20.000Z"}),
+                "turn-started turn 2 (assistant)",
             ),
             (
                 EventKind::TurnActivity,
-                json!({"name": "bash", "detail": "just check"}),
+                json!({"kind": "tool_call", "name": "bash", "detail": "just check", "index": 0}),
                 "turn-activity bash just check",
+            ),
+            // A result names no tool, so its kind identifies it and the last line
+            // of what it returned is the detail.
+            (
+                EventKind::TurnActivity,
+                json!({"kind": "tool_result", "name": Value::Null, "detail": "",
+                       "output": "running\n2 passed; 0 failed", "index": 1}),
+                "turn-activity tool_result 2 passed; 0 failed",
+            ),
+            (
+                EventKind::TurnMessage,
+                json!({"turn": 2, "role": "assistant", "text": "done\nand verified"}),
+                "turn-message turn 2 (assistant) done",
             ),
             (
                 EventKind::TurnCompleted,
-                json!({"usage": {"input_tokens": 10, "output_tokens": 5,
+                json!({"turn": 2, "role": "assistant",
+                       "usage": {"input_tokens": 10, "output_tokens": 5,
                                  "cache_read_tokens": 4, "cache_write_tokens": null,
-                                 "cost_usd": 0.002}}),
-                "turn-completed in=10 out=5 cache_r=4 cache_w=- cost=0.002",
+                                 "cost_usd": 0.002},
+                       "started_at": "2026-08-08T06:12:20.000Z",
+                       "finished_at": "2026-08-08T06:12:22.847Z"}),
+                "turn-completed turn 2 (assistant) in=10 out=5 cache_r=4 cache_w=- cost=0.002",
             ),
             (
                 EventKind::TurnInterrupted,

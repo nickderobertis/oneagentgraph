@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::support::{fake_harness, graph_with, until, Workspace, FAKE_HARNESS_KEY};
+use crate::support::{
+    fake_harness, graph_with, until, Workspace, FAKE_HARNESS_KEY, UNREACHABLE_CHAIN,
+    UNREACHABLE_HARNESS_KEY,
+};
 
 /// The chain every journey below drives, whose `ticker` takes its first turn the
 /// moment the graph starts.
@@ -494,14 +497,11 @@ fn a_deferred_first_turn_that_fails_fails_the_run() {
     let workspace = Workspace::new();
     let release = workspace.at("paced-release");
     let recorded = workspace.at("ticker.prompt");
-    // A chain naming an identity this journey gives no binary for: oneharness
-    // reaches nothing and the member dies, which is a death rather than a task it
-    // drove and did not finish.
-    workspace.write(
-        "failing.toml",
-        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
-    );
-    workspace.graph(
+    // A chain whose one identity this journey gives an unreachable binary for:
+    // oneharness reaches nothing and the member dies, which is a death rather
+    // than a task it drove and did not finish.
+    workspace.write("failing.toml", UNREACHABLE_CHAIN);
+    workspace.graph(&graph_with(
         &deferred_graph(
             &fake_harness(),
             &release.display().to_string(),
@@ -512,7 +512,8 @@ fn a_deferred_first_turn_that_fails_fails_the_run() {
             "  ticker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml",
             "  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml",
         ),
-    );
+        &[(UNREACHABLE_HARNESS_KEY, workspace.unreachable_harness())],
+    ));
     let child = workspace.spawn_with(
         &[
             "run",
@@ -1088,13 +1089,11 @@ fn a_cron_only_graph_quiesces_after_its_initial_firing() {
 #[test]
 fn a_failed_initial_scheduled_run_skips_its_chain_and_settles() {
     let workspace = Workspace::new();
-    workspace.write(
-        "failing.toml",
-        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
-    );
-    workspace.graph(
-        "version: 1\nname: failed-initial-cron\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
-    );
+    workspace.write("failing.toml", UNREACHABLE_CHAIN);
+    workspace.graph(&graph_with(
+        "version: 1\nname: failed-initial-cron\nenv: {}\nmembers:\n  ticker:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n    schedule: {every: 3600}\n  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    deps: [ticker]\n",
+        &[(UNREACHABLE_HARNESS_KEY, workspace.unreachable_harness())],
+    ));
     let run = workspace.run_task("fake:complete-now: failed initial schedule");
     run.expect_code(1);
     assert!(run.of_kind("cron-fired").is_empty());
@@ -1190,10 +1189,7 @@ fn a_failed_initial_scheduled_run_can_fire_again_while_non_cron_work_is_live() {
 fn cron_iterations_keep_failed_independent_dependencies_blocked() {
     let workspace = Workspace::new();
     let release = workspace.at("independent-failure-release");
-    workspace.write(
-        "failing.toml",
-        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
-    );
+    workspace.write("failing.toml", UNREACHABLE_CHAIN);
     let graph = graph_with(
         &scheduled_graph(
             &fake_harness(),
@@ -1204,9 +1200,12 @@ fn cron_iterations_keep_failed_independent_dependencies_blocked() {
             "members:\n",
             "members:\n  gate:\n    kind: oneharness\n    oneharness_config: ./failing.toml\n",
         ),
-        // A second dependency on `report`, appended to the list the skeleton
-        // already gave it.
-        &[("members.report.deps.1", "gate")],
+        &[
+            // A second dependency on `report`, appended to the list the skeleton
+            // already gave it.
+            ("members.report.deps.1", "gate".to_string()),
+            (UNREACHABLE_HARNESS_KEY, workspace.unreachable_harness()),
+        ],
     );
     workspace.graph(&graph);
     let child = workspace.spawn_with(

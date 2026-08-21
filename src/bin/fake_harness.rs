@@ -14,6 +14,7 @@
 //! ```jsonl
 //! {"type":"system","subtype":"init","session_id":"…"}
 //! {"type":"assistant","message":{"content":[{"type":"tool_use",…}]}}
+//! {"type":"user","message":{"content":[{"type":"tool_result",…}]}}
 //! {"type":"result","subtype":"success","result":"…","usage":{…}}
 //! ```
 //!
@@ -36,6 +37,8 @@
 //! | sentinel / variable | what this turn does |
 //! | --- | --- |
 //! | `fake:complete-now` | the agent finishes on its first turn |
+//! | `fake:noisy-tool` | bury this turn's tool observation under kilobytes of startup chatter |
+//! | `fake:bare-tool` | take a first tool whose trace exposes neither a call identity nor an observation |
 //! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
@@ -230,6 +233,14 @@ fn main() -> std::process::ExitCode {
             .unwrap_or_default()
     };
     let prompt = format!("{system}\n{task}");
+
+    // Neither flag is there when the prompt is **large**: past oneharness's own
+    // 64 KiB threshold it omits the positional and pipes the prompt to this
+    // process's stdin instead (claude-code's `--input-format text`). This double
+    // reads only the argv, so a journey whose prompt clears that threshold gets
+    // an empty task here and every sentinel in it silently stops steering. Keep a
+    // journey's texts under it, or teach this to read that stdin — the latter is
+    // a second delivery path nothing has needed yet.
 
     // A controlled turn has none of the task yet — it arrives on stdin — so its
     // recordings are made per turn, in [`turn`], against the prompt that turn was
@@ -610,10 +621,39 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // `json` document, which is exactly why oneharness upgrades the format for a
     // run that asked for events.
     if shape == Shape::Stream {
+        // A trace that exposes neither a call identity nor an observation, which
+        // is a shape oneharness's normalizer states outright it can produce —
+        // `ActionEvent::tool_call_id` is `None` "when the harness exposed no
+        // identity", and `output` is `null` "when the trace exposes it" is false.
+        // Not every CLI carries the ids the Anthropic block shape does, and a
+        // consumer must be able to tell the two facts from an event that has
+        // them.
+        if steers(prompt, "bare-tool") {
+            emit(&json!({
+                "type": "assistant", "session_id": session,
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"path": "AGENTS.md"}}]},
+            }));
+            emit(&json!({
+                "type": "user", "session_id": session,
+                "message": {"role": "user", "content": [{"type": "tool_result"}]},
+            }));
+        }
         emit(&json!({
             "type": "assistant", "session_id": session,
             "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
                 {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
+        }));
+        // And the observation that call returned, which is how Claude Code
+        // reports one: a `user` message carrying a `tool_result` block joined to
+        // the call by its id. A transcript of calls with no results is not a
+        // transcript a harness ever produces, and it is exactly the half this
+        // suite could not see while every result was discarded upstream.
+        emit(&json!({
+            "type": "user", "session_id": session,
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": tool_result(prompt)}]},
         }));
     }
     // Resolved before the terminal line rather than inside it: a turn this
@@ -635,6 +675,31 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
         "total_cost_usd": 0.002,
     }));
     Answered::Yes
+}
+
+/// What the one tool call this double makes returns.
+///
+/// Multi-line on purpose: an observation is not a one-liner, and a rendering that
+/// pasted the whole of one into a log line is what the tail bound and the
+/// last-line rendering exist for.
+const TOOL_RESULT: &str = "running the gate\n2 passed; 0 failed";
+
+/// How much startup chatter `fake:noisy-tool` puts in front of that, in bytes.
+///
+/// Past `oneagentgraph`'s own 4096-byte payload bound by a clear margin, so a
+/// journey asserting the tail survived is asserting against a cut that really
+/// happened rather than against an off-by-one.
+const NOISE_BYTES: usize = 6000;
+
+/// The observation this turn's tool returns, which `fake:noisy-tool` buries under
+/// startup chatter — the shape a real gate log has, and the one a tail bound
+/// exists for.
+fn tool_result(prompt: &str) -> String {
+    if steers(prompt, "noisy-tool") {
+        format!("{}\n{TOOL_RESULT}", "noise ".repeat(NOISE_BYTES / 6))
+    } else {
+        TOOL_RESULT.to_string()
+    }
 }
 
 /// Whether a turn was one this double could take.

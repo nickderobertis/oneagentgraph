@@ -13,6 +13,8 @@
 
 use std::collections::BTreeMap;
 
+use serde_json::Value;
+
 use oneagentgraph::persona::MEMBER_OWNED;
 
 use crate::support::{
@@ -37,6 +39,7 @@ fn a_member_completes_through_the_real_supervisor_loop() {
         "member-started",
         "turn-started",
         "turn-activity",
+        "turn-message",
         "turn-completed",
         "member-settled",
         "graph-settled",
@@ -58,17 +61,21 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert!(!activity.is_empty(), "{kinds:?}");
     for event in &activity {
         let payload = &event["payload"];
-        for named in ["kind", "name", "detail"] {
+        for named in ["kind", "detail"] {
             assert!(
                 payload[named].is_string(),
                 "turn-activity carried no {named}: {payload}"
             );
         }
+        // `name` is on every activity, `null` on the results that answer a call
+        // rather than making one — a stable shape either way.
         assert!(
-            payload["name"]
-                .as_str()
-                .is_some_and(|name| !name.is_empty()),
-            "an action this crate could not name was published anyway: {payload}"
+            payload.get("name").is_some(),
+            "turn-activity omitted `name` rather than nulling it: {payload}"
+        );
+        assert!(
+            payload["index"].as_u64().is_some(),
+            "turn-activity carried no index: {payload}"
         );
         // The contract's bound on a tool summary, on the wire where a consumer
         // meets it.
@@ -81,20 +88,126 @@ fn a_member_completes_through_the_real_supervisor_loop() {
                 <= 160,
             "the tool detail outgrew its documented bound: {payload}"
         );
-        assert!(payload["truncated"].is_boolean(), "{payload}");
     }
-    for event in &run.of_kind("turn-started") {
+
+    // The half a live journal never carried: the observation a tool returned,
+    // and the identity of the call it answers. Both come off the real harness
+    // transcript, through real oneharness and real onejudge.
+    let calls: Vec<&Value> = activity
+        .iter()
+        .filter(|event| event["payload"]["kind"] == "tool_call")
+        .collect();
+    let results: Vec<&Value> = activity
+        .iter()
+        .filter(|event| event["payload"]["kind"] == "tool_result")
+        .collect();
+    assert!(!calls.is_empty(), "{activity:?}");
+    assert!(
+        !results.is_empty(),
+        "every observation this member's tools returned was discarded: {activity:?}"
+    );
+    for result in &results {
+        let payload = &result["payload"];
+        assert_eq!(
+            payload["name"],
+            Value::Null,
+            "a result named a tool it only answers: {payload}"
+        );
         assert!(
-            event["payload"]["turn"].as_u64().is_some(),
-            "turn-started named no turn: {event}"
+            payload["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("2 passed; 0 failed")),
+            "the observation never reached the journal: {payload}"
+        );
+        let answered = payload["tool_call_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a result joined to no call: {payload}"));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call["payload"]["tool_call_id"] == answered),
+            "a result naming a call this stream never carried: {payload}"
         );
     }
-    // `turn-completed` carries the usage the contract names. It comes off the
-    // report onejudge returns to this process, so a caller reading only the
-    // stream still gets the accounting rather than having to open the artifact.
+
+    // What the agent actually said, published as the turn happened rather than
+    // only inside the settled report.
+    let messages = run.of_kind("turn-message");
+    assert!(!messages.is_empty(), "{kinds:?}");
+    assert!(
+        messages.iter().any(|event| {
+            event["payload"]["role"] == "assistant" && event["payload"]["text"] == "done"
+        }),
+        "the agent's own reply never reached the journal: {messages:?}"
+    );
+    for event in &messages {
+        assert!(
+            event["payload"]["turn"].as_u64().is_some(),
+            "a message belonging to no turn: {event}"
+        );
+    }
+
+    // Every turn names itself, who took it, what it was asked, and when it began.
+    let opened = run.of_kind("turn-started");
+    assert!(!opened.is_empty(), "{kinds:?}");
+    for event in &opened {
+        let payload = &event["payload"];
+        assert!(
+            payload["turn"].as_u64().is_some(),
+            "turn-started named no turn: {event}"
+        );
+        for named in ["role", "instruction", "started_at"] {
+            assert!(
+                payload[named].is_string(),
+                "turn-started carried no {named}: {payload}"
+            );
+        }
+    }
+    assert!(
+        opened.iter().any(|event| {
+            event["payload"]["role"] == "assistant"
+                && event["payload"]["instruction"]
+                    .as_str()
+                    .is_some_and(|it| it.contains("write the thing"))
+        }),
+        "no turn named the task it was answering: {opened:?}"
+    );
+
+    // `turn-completed` is **per turn**: this dispatch takes an agent turn and a
+    // supervisor turn, and each closes with its own accounting and its own
+    // bounds. One figure for the whole run is what a journal used to carry, and
+    // it left every turn but one with an empty usage object.
     let completed = run.of_kind("turn-completed");
-    assert_eq!(completed.len(), 1, "{completed:?}");
-    let usage = &completed[0]["payload"]["usage"];
+    assert!(
+        completed.len() >= 2,
+        "a dispatch of several turns still reports one usage: {completed:?}"
+    );
+    let turns: Vec<u64> = completed
+        .iter()
+        .map(|event| event["payload"]["turn"].as_u64().expect("a turn"))
+        .collect();
+    assert_eq!(
+        turns.len(),
+        opened.len(),
+        "a turn opened and never closed, or closed without opening: {kinds:?}"
+    );
+    for event in &completed {
+        let payload = &event["payload"];
+        for named in ["role", "started_at", "finished_at"] {
+            assert!(
+                payload[named].is_string(),
+                "turn-completed carried no {named}: {payload}"
+            );
+        }
+    }
+    // The agent's turn is the one that spent tokens, and it carries the usage the
+    // contract names. It comes off onejudge's own per-turn accounting, so a
+    // caller reading only the stream gets it without opening the artifact.
+    let agent = completed
+        .iter()
+        .find(|event| event["payload"]["role"] == "assistant")
+        .unwrap_or_else(|| panic!("no agent turn closed: {completed:?}"));
+    let usage = &agent["payload"]["usage"];
     assert!(
         usage.is_object(),
         "turn-completed carried no usage: {usage}"
@@ -3013,6 +3126,236 @@ fn a_single_sided_member_runs_one_agent_with_no_judge() {
     );
 }
 
+/// A single-sided member closes its one turn with **that turn's** accounting:
+/// which turn, who took it, when it ran, and what it cost.
+///
+/// The half a `kind: oneharness` member could not say at all. Its
+/// `turn-completed` used to come off the settle, carrying whatever `usage` key
+/// the report happened to have — and oneharness's report has none at the top
+/// level, so the event a consumer billed on was `usage: null` every time. The
+/// figures are on the candidate that ran, which is where this now reads them.
+#[test]
+fn a_single_sided_member_closes_its_turn_with_that_turns_own_accounting() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    let run = workspace.run_task("fake:complete-now: account for this turn");
+    run.expect_code(0);
+
+    let completed = run.of_kind("turn-completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    let payload = &completed[0]["payload"];
+    assert_eq!(payload["turn"], serde_json::json!(1));
+    assert_eq!(payload["role"], serde_json::json!("assistant"));
+
+    // The turn's bounds, and the opening it shares with its own `turn-started`:
+    // a consumer joins the two on that instant rather than on arrival order.
+    let opened = run.of_kind("turn-started");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert_eq!(
+        payload["started_at"], opened[0]["payload"]["started_at"],
+        "the turn closed at bounds its own opening never named: {payload}"
+    );
+    assert!(
+        payload["finished_at"]
+            .as_str()
+            .is_some_and(|at| at.ends_with('Z')),
+        "the turn closed at no instant: {payload}"
+    );
+    // And it names the task it was answering, which is the whole of what an
+    // operator watching one of these has to go on.
+    assert!(
+        opened[0]["payload"]["instruction"]
+            .as_str()
+            .is_some_and(|it| it.contains("account for this turn")),
+        "the turn named no instruction: {}",
+        opened[0]
+    );
+
+    // The accounting itself, off the candidate that ran — the same figures the
+    // stored report carries for it, so the stream and the artifact agree.
+    let usage = &payload["usage"];
+    let reported = &stored_report(&run, "reporter")["results"][0]["usage"];
+    for counted in [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "cost_usd",
+    ] {
+        assert!(
+            usage.get(counted).is_some_and(|value| value.is_number()),
+            "the usage a consumer bills on has no {counted}: {usage}"
+        );
+        assert_eq!(
+            usage[counted], reported[counted],
+            "the stream and the stored report disagree about {counted}"
+        );
+    }
+}
+
+/// A tool whose trace exposed neither a call identity nor an observation still
+/// reaches the journal, and says which facts it does not have by leaving them
+/// out — rather than by an empty string that reads as an answer.
+///
+/// Both are shapes oneharness's own normalizer states it produces: not every CLI
+/// carries the ids the Anthropic block shape does, and a trace need not expose
+/// what a tool returned. A consumer that could not tell "nothing was returned"
+/// from "nothing was recorded" would report the first as the second.
+#[test]
+fn a_tool_whose_trace_exposed_neither_an_id_nor_an_observation_still_reaches_the_journal() {
+    let workspace = Workspace::new();
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV));
+    let run = workspace.run_task("fake:complete-now: fake:bare-tool report what you can");
+    run.expect_code(0);
+
+    let activity = run.of_kind("turn-activity");
+    let bare = activity
+        .iter()
+        .find(|event| event["payload"]["name"] == "Read")
+        .unwrap_or_else(|| panic!("the anonymous call never reached the journal: {activity:?}"));
+    assert!(
+        !bare["payload"]
+            .as_object()
+            .expect("a payload")
+            .contains_key("tool_call_id"),
+        "an identity the harness never exposed was published as one: {bare}"
+    );
+    // It is still an ordered event of the turn, and it still names what it acted
+    // on, so what is missing is only what was really missing.
+    assert_eq!(bare["payload"]["index"], serde_json::json!(0));
+    assert_eq!(bare["payload"]["detail"], serde_json::json!("AGENTS.md"));
+
+    let observation = activity
+        .iter()
+        .filter(|event| event["payload"]["kind"] == "tool_result")
+        .find(|event| {
+            !event["payload"]
+                .as_object()
+                .expect("a payload")
+                .contains_key("tool_call_id")
+        })
+        .unwrap_or_else(|| panic!("the anonymous result never reached the journal: {activity:?}"));
+    assert!(
+        !observation["payload"]
+            .as_object()
+            .expect("a payload")
+            .contains_key("output"),
+        "an observation the trace never exposed was published as an empty one: {observation}"
+    );
+    assert_eq!(observation["payload"]["name"], Value::Null);
+    // And the call beside it, whose trace did expose both, still carries them —
+    // so this is a property of the event rather than of the build.
+    assert!(
+        activity.iter().any(|event| {
+            event["payload"]["tool_call_id"] == "t1"
+                && event["payload"]["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("2 passed; 0 failed"))
+        }),
+        "{activity:?}"
+    );
+}
+
+/// Every newly-published text is bounded at this crate's own payload bound, from
+/// the end that field is read from, and says whether it was cut.
+///
+/// Head for the instruction a turn answers and for a party's own reply — a turn's
+/// opening is where the model says what it is about to do. Tail for a tool's
+/// observation — what names a failure is the last of its output, not its startup
+/// chatter. All three over a real run: the task is longer than the bound, the
+/// agent answers with a document longer than the bound, and its one tool buries
+/// the observation under kilobytes of noise.
+#[test]
+fn a_live_turns_long_text_is_bounded_from_the_end_that_field_is_read_from() {
+    const BOUND: usize = 4096;
+    let workspace = Workspace::new();
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV));
+
+    // Past the bound and recognisable at both ends, so an assertion can tell
+    // which end survived — but only just past it. The supervisor's prompt embeds
+    // the whole transcript, and a transcript over oneharness's 64 KiB large-input
+    // threshold is delivered on the harness's stdin instead of its argv, which
+    // the double does not read: see `src/bin/fake_harness.rs`.
+    let padding = BOUND / 4;
+    let reply = workspace.at("long-answer.txt");
+    std::fs::write(
+        &reply,
+        format!("REPLY-OPENING {} REPLY-ENDING", "reply ".repeat(padding)),
+    )
+    .expect("the long answer");
+    let task = format!(
+        "fake:complete-now: fake:noisy-tool fake:answer-file={} TASK-OPENING {} TASK-ENDING",
+        reply.display(),
+        "restate ".repeat(padding)
+    );
+    assert!(task.len() > BOUND, "the task is not past the bound");
+
+    let run = workspace.run_task(&task);
+    run.expect_code(0);
+
+    // The instruction a turn answers keeps its head.
+    let opened = run.of_kind("turn-started");
+    let first = opened
+        .iter()
+        .find(|event| event["payload"]["turn"] == 1)
+        .unwrap_or_else(|| panic!("no first turn: {opened:?}"));
+    let instruction = first["payload"]["instruction"]
+        .as_str()
+        .expect("an instruction");
+    assert!(instruction.len() <= BOUND, "{}", instruction.len());
+    assert!(
+        !instruction.contains("TASK-ENDING"),
+        "an instruction past the bound was published whole"
+    );
+    assert_eq!(
+        first["payload"]["instruction_truncated"],
+        serde_json::json!(true),
+        "a cut instruction did not say so: {first}"
+    );
+
+    // A party's own reply keeps its head too.
+    let long = run
+        .of_kind("turn-message")
+        .into_iter()
+        .find(|event| event["payload"]["truncated"] == serde_json::json!(true))
+        .unwrap_or_else(|| panic!("no reply was cut: {}", run.stdout));
+    let text = long["payload"]["text"].as_str().expect("a reply");
+    assert!(text.starts_with("REPLY-OPENING"), "{text}");
+    assert!(text.len() <= BOUND, "{}", text.len());
+    assert!(!text.contains("REPLY-ENDING"));
+
+    // An observation keeps its tail: the summary line a harness ends on is what
+    // says whether the work passed.
+    let observation = run
+        .of_kind("turn-activity")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "tool_result")
+        .unwrap_or_else(|| panic!("no observation reached the stream: {}", run.stdout));
+    let output = observation["payload"]["output"]
+        .as_str()
+        .expect("an observation");
+    assert!(output.ends_with("2 passed; 0 failed"), "{output}");
+    assert!(output.len() <= BOUND, "{}", output.len());
+    assert_eq!(
+        observation["payload"]["output_truncated"],
+        serde_json::json!(true),
+        "a cut observation did not say so: {observation}"
+    );
+    // The tool summary beside it keeps its own, much smaller bound: a new field
+    // was added rather than an existing one widened to carry it.
+    let summary = run
+        .of_kind("turn-activity")
+        .into_iter()
+        .find(|event| event["payload"]["kind"] == "tool_call")
+        .unwrap_or_else(|| panic!("no call reached the stream: {}", run.stdout));
+    assert!(
+        summary["payload"]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.chars().count() <= 160),
+        "{summary}"
+    );
+}
+
 /// The report one member stored, read from the path its settle named.
 fn stored_report(run: &crate::support::Run, member: &str) -> serde_json::Value {
     let settled = run
@@ -3133,22 +3476,27 @@ fn a_single_sided_member_answers_with_the_structured_document_its_config_asks_fo
 
     // The member beside it declares neither a schema nor `stream`, and runs
     // exactly as it did before: the tool events only a streamed member
-    // publishes.
-    let activity: Vec<String> = run
+    // publishes — its call, and the observation that answered it.
+    let activity: Vec<(String, String)> = run
         .of_kind("turn-activity")
         .iter()
-        .filter_map(|event| labels(event).get("member").cloned())
+        .filter_map(|event| {
+            Some((
+                labels(event).get("member").cloned()?,
+                event["payload"]["kind"].as_str()?.to_string(),
+            ))
+        })
         .collect();
-    assert_eq!(
-        activity
-            .iter()
-            .filter(|member| member.as_str() == "reporter")
-            .count(),
-        1,
-        "the streaming member published no tool event: {activity:?}"
-    );
+    for expected in ["tool_call", "tool_result"] {
+        assert!(
+            activity
+                .iter()
+                .any(|(member, kind)| member == "reporter" && kind == expected),
+            "the streaming member published no {expected}: {activity:?}"
+        );
+    }
     assert!(
-        !activity.iter().any(|member| member.as_str() == "drafter"),
+        !activity.iter().any(|(member, _)| member == "drafter"),
         "a member that does not stream published a streamed event: {activity:?}"
     );
 }
@@ -3174,6 +3522,33 @@ fn a_single_sided_member_that_asks_not_to_stream_still_settles_on_its_report() {
          streamed events: {:?}",
         run.kinds()
     );
+
+    // A member that publishes no tool events still takes a turn, and still says
+    // so at both ends. The turn is announced at the settle rather than on a first
+    // event that never comes, so a consumer counting turns from `turn-started` is
+    // not served a `turn-completed` for a turn it was never told about.
+    let opened = run.of_kind("turn-started");
+    assert_eq!(opened.len(), 1, "{:?}", run.kinds());
+    let completed = run.of_kind("turn-completed");
+    assert_eq!(completed.len(), 1, "{completed:?}");
+    assert_eq!(
+        opened[0]["payload"]["turn"],
+        completed[0]["payload"]["turn"]
+    );
+    assert_eq!(
+        opened[0]["payload"]["started_at"], completed[0]["payload"]["started_at"],
+        "the turn closed at bounds its own opening never named"
+    );
+    assert_eq!(
+        completed[0]["payload"]["role"],
+        serde_json::json!("assistant")
+    );
+    assert!(
+        completed[0]["payload"]["usage"]["input_tokens"].is_number(),
+        "a buffered member's turn was closed with no accounting: {}",
+        completed[0]
+    );
+
     let report = stored_report(&run, "reporter");
     assert_eq!(
         report["results"][0]["text"],

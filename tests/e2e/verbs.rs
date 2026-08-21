@@ -388,6 +388,44 @@ fn text_output_renders_the_same_events_as_json() {
             "a text line is not an event: {line:?}"
         );
     }
+
+    // What a person watching this mode actually reads off a live turn, on a real
+    // run: which turn and whose, the tool and what it acted on, the observation
+    // it answered with, and the reply — each on one line, whatever the payload
+    // behind it runs to.
+    let line = |starting: &str| -> &str {
+        rendered
+            .iter()
+            .find(|line| line.contains(starting))
+            .unwrap_or_else(|| panic!("the text rendering never carried {starting}: {rendered:?}"))
+    };
+    assert!(
+        line("turn-started").ends_with("turn 1 (assistant)"),
+        "{}",
+        line("turn-started")
+    );
+    assert!(
+        line("turn-activity Bash").ends_with("Bash just check"),
+        "{}",
+        line("turn-activity Bash")
+    );
+    // A result names no tool, so its kind identifies it and the last line of the
+    // observation is what it says — never the whole of one.
+    assert!(
+        line("turn-activity tool_result").ends_with("tool_result 2 passed; 0 failed"),
+        "{}",
+        line("turn-activity tool_result")
+    );
+    assert!(
+        line("turn-message").ends_with("turn 1 (assistant) done"),
+        "{}",
+        line("turn-message")
+    );
+    assert!(
+        line("turn-completed").contains("turn 1 (assistant) in=10 out=5"),
+        "{}",
+        line("turn-completed")
+    );
 }
 
 /// `--detach` prints `{run_id, events_path, pid}` and exits 0, and the run it

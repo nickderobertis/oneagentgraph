@@ -23,9 +23,9 @@ use oneagentgraph::error::{
 };
 use oneagentgraph::event::{
     session_label, Artifact, Cause, Disposition, Envelope, EventFilter, EventKind,
-    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Role, Runner,
-    Source, TurnActivity, TurnCompleted, TurnInterrupted, Usage, ENVELOPE_VERSION,
-    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
+    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Party, Role,
+    Runner, Source, TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
+    ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
     ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
 use oneagentgraph::liveness::{
@@ -49,6 +49,7 @@ const ALL_EVENT_KINDS: &[EventKind] = &[
     EventKind::MemberStarted,
     EventKind::TurnStarted,
     EventKind::TurnActivity,
+    EventKind::TurnMessage,
     EventKind::TurnCompleted,
     EventKind::TurnInterrupted,
     EventKind::MemberHeartbeat,
@@ -351,34 +352,88 @@ fn the_event_kinds_paragraph_names_exactly_the_event_kind_variants() {
 }
 
 #[test]
-fn a_turn_activity_payload_carries_the_documented_bounded_summary() {
+fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     assert!(
-        CONTRACT.contains("(bounded tool summary: kind, name, 160-char detail)"),
+        CONTRACT.contains(
+            "one tool call or the observation answering one: kind, name, 160-char detail, the \
+             `output` a result returned, the `tool_call_id` joining the two, and the `index` \
+             within the turn"
+        ),
         "the contract no longer describes the turn-activity payload this test pins"
     );
 
-    let within_bounds = TurnActivity {
-        kind: "tool".to_string(),
-        name: "Bash".to_string(),
+    let call = TurnActivity {
+        kind: "tool_call".to_string(),
+        name: Some("Bash".to_string()),
         detail: "cargo test --locked".to_string(),
         truncated: false,
+        output: None,
+        output_truncated: false,
+        tool_call_id: Some("t1".to_string()),
+        index: 0,
     };
     assert_eq!(
-        serde_json::to_value(&within_bounds).expect("serializes"),
-        json!({"kind": "tool", "name": "Bash", "detail": "cargo test --locked"}),
-        "an untruncated summary must not carry a `truncated` key"
+        serde_json::to_value(&call).expect("serializes"),
+        json!({"kind": "tool_call", "name": "Bash", "detail": "cargo test --locked",
+               "tool_call_id": "t1", "index": 0}),
+        "an untruncated call must carry neither truncation flag, and no `output`"
+    );
+
+    // The observation answering it: no name of its own, joined by the same id.
+    // `name` is serialized as `null` rather than omitted, so a consumer meets one
+    // shape whichever kind of activity it reads.
+    let result = TurnActivity {
+        kind: "tool_result".to_string(),
+        name: None,
+        detail: String::new(),
+        output: Some(String::new()),
+        ..call.clone()
+    };
+    assert_eq!(
+        serde_json::to_value(&result).expect("serializes"),
+        json!({"kind": "tool_result", "name": Value::Null, "detail": "", "output": "",
+               "tool_call_id": "t1", "index": 0}),
+        "an observation that was genuinely empty must be distinguishable from an absent one"
+    );
+
+    // A harness that exposed no identity for the call **omits** the field rather
+    // than nulling it, which is where it differs from `name`: a party that could
+    // not be named is a fact about the event, an identity nobody published is
+    // nothing to say.
+    let anonymous = TurnActivity {
+        tool_call_id: None,
+        ..call.clone()
+    };
+    let serialized = serde_json::to_value(&anonymous).expect("serializes");
+    assert!(
+        !serialized
+            .as_object()
+            .expect("an object")
+            .contains_key("tool_call_id"),
+        "an identity nobody published was written as one: {serialized}"
+    );
+    assert_eq!(
+        serde_json::from_value::<TurnActivity>(serialized).expect("parses"),
+        anonymous,
+        "an omitted identity must read back as absent"
+    );
+    assert!(
+        carries_name(&anonymous) && carries_name(&result),
+        "`name` must stay on the wire whether or not the event has one"
     );
 
     let cut = TurnActivity {
         detail: "x".repeat(MAX_ACTIVITY_DETAIL_CHARS),
         truncated: true,
-        ..within_bounds.clone()
+        output: Some("y".repeat(MAX_PAYLOAD_TEXT_BYTES)),
+        output_truncated: true,
+        ..call
     };
     let serialized = serde_json::to_value(&cut).expect("serializes");
     assert_eq!(
-        serialized["truncated"],
-        json!(true),
-        "a summary cut to its bound must say so"
+        (&serialized["truncated"], &serialized["output_truncated"]),
+        (&json!(true), &json!(true)),
+        "a payload cut to its bound must say so, per field"
     );
     assert_eq!(
         serde_json::from_value::<TurnActivity>(serialized).expect("parses"),
@@ -387,38 +442,213 @@ fn a_turn_activity_payload_carries_the_documented_bounded_summary() {
     );
 }
 
+/// Whether one activity payload writes a `name` key at all — it must, whether or
+/// not the event has one, so a consumer meets a single shape.
+fn carries_name(activity: &TurnActivity) -> bool {
+    serde_json::to_value(activity)
+        .expect("serializes")
+        .as_object()
+        .expect("an object")
+        .contains_key("name")
+}
+
+/// `turn-started` names the turn, who takes it, what it was asked, and when it
+/// began — the four the contract lists.
 #[test]
-fn a_turn_completed_payload_carries_the_documented_usage() {
+fn a_turn_started_payload_names_the_turn_and_what_it_answers() {
     assert!(
-        CONTRACT.contains("(usage: tokens in/out, cache r/w, cost, duration)"),
+        CONTRACT.contains(
+            "`turn-started` (`turn`, the `role` that takes it — `assistant`, `user` or `system` \
+             — the `instruction` that turn answers, and `started_at`)"
+        ),
+        "the contract no longer describes the turn-started payload this test pins"
+    );
+    // The closed set of parties, held against the only thing that mints one.
+    assert_eq!(
+        [Party::Assistant, Party::User, Party::System].map(Party::as_str),
+        ["assistant", "user", "system"],
+        "a party this build publishes is not one the contract names"
+    );
+
+    let started = TurnStarted {
+        turn: 3,
+        role: "assistant".to_string(),
+        instruction: "verify it before you call it done".to_string(),
+        instruction_truncated: false,
+        started_at: "2026-08-21T09:15:02.847Z".to_string(),
+    };
+    assert_eq!(
+        serde_json::to_value(&started).expect("serializes"),
+        json!({"turn": 3, "role": "assistant",
+               "instruction": "verify it before you call it done",
+               "started_at": "2026-08-21T09:15:02.847Z"}),
+        "an unbounded instruction must not carry a truncation flag"
+    );
+    let cut = TurnStarted {
+        instruction_truncated: true,
+        ..started
+    };
+    let serialized = serde_json::to_value(&cut).expect("serializes");
+    assert_eq!(serialized["instruction_truncated"], json!(true));
+    assert_eq!(
+        serde_json::from_value::<TurnStarted>(serialized).expect("parses"),
+        cut
+    );
+}
+
+/// `turn-message` carries one party's own words, attributed to the turn and the
+/// role a consumer renders them under.
+#[test]
+fn a_turn_message_payload_carries_one_partys_own_words() {
+    assert!(
+        CONTRACT.contains(
+            "`turn-message` (one party's own words for a turn: `turn`, `role`, \
+                           `text`)"
+        ),
+        "the contract no longer describes the turn-message payload this test pins"
+    );
+
+    let message = TurnMessage {
+        turn: 1,
+        role: "assistant".to_string(),
+        text: "done".to_string(),
+        truncated: false,
+    };
+    assert_eq!(
+        serde_json::to_value(&message).expect("serializes"),
+        json!({"turn": 1, "role": "assistant", "text": "done"})
+    );
+    let cut = TurnMessage {
+        text: "x".repeat(MAX_PAYLOAD_TEXT_BYTES),
+        truncated: true,
+        ..message
+    };
+    let serialized = serde_json::to_value(&cut).expect("serializes");
+    assert_eq!(serialized["truncated"], json!(true));
+    assert_eq!(
+        serde_json::from_value::<TurnMessage>(serialized).expect("parses"),
+        cut
+    );
+}
+
+#[test]
+fn a_turn_completed_payload_carries_one_turns_own_usage() {
+    assert!(
+        CONTRACT.contains(
+            "`turn-completed` (**one turn**: `turn`, `role`, `started_at`, `finished_at`, and \
+             that turn's own usage — input/output tokens, cache reads and writes, cost in USD)"
+        ),
         "the contract no longer describes the turn-completed payload this test pins"
     );
 
     let completed = TurnCompleted {
+        turn: 2,
+        role: "user".to_string(),
         usage: Usage {
-            tokens_in: 12_000,
-            tokens_out: 900,
-            cache_read: 8_000,
-            cache_write: 1_500,
-            cost: 0.42,
-            duration: 61.5,
+            input_tokens: Some(12_000),
+            output_tokens: Some(900),
+            cache_read_tokens: Some(8_000),
+            cache_write_tokens: Some(1_500),
+            cost_usd: Some(0.42),
         },
+        started_at: "2026-08-21T09:15:02.847Z".to_string(),
+        finished_at: "2026-08-21T09:16:11.002Z".to_string(),
     };
     let serialized = serde_json::to_value(&completed).expect("serializes");
     assert_eq!(
         serialized,
-        json!({"usage": {
-            "tokens_in": 12_000,
-            "tokens_out": 900,
-            "cache_read": 8_000,
-            "cache_write": 1_500,
-            "cost": 0.42,
-            "duration": 61.5,
-        }})
+        json!({"turn": 2, "role": "user", "usage": {
+            "input_tokens": 12_000,
+            "output_tokens": 900,
+            "cache_read_tokens": 8_000,
+            "cache_write_tokens": 1_500,
+            "cost_usd": 0.42,
+        },
+        "started_at": "2026-08-21T09:15:02.847Z",
+        "finished_at": "2026-08-21T09:16:11.002Z"})
     );
     assert_eq!(
         serde_json::from_value::<TurnCompleted>(serialized).expect("parses"),
         completed
+    );
+
+    // A provider that reported nothing leaves an empty object, never zeroes: a
+    // turn that cost nothing is a different fact from one nobody accounted for.
+    let unreported = TurnCompleted {
+        usage: Usage::default(),
+        ..completed
+    };
+    assert_eq!(
+        serde_json::to_value(&unreported).expect("serializes")["usage"],
+        json!({})
+    );
+}
+
+/// The declared usage is field for field with the object this crate actually
+/// publishes, and declares nothing the wire has never carried.
+///
+/// Both directions, against **both** upstreams whose accounting reaches this
+/// stream: onejudge hands a two-party member's per-turn usage over, oneharness a
+/// single-sided member's, and the two are the same shape. Driven through their
+/// own serialization rather than a restated field list, so a rename upstream
+/// fails here — and the struct literal below fails to *compile* if a field is
+/// added on this side, which is the direction that let `duration` sit in the
+/// contract for a release without ever being on the wire.
+#[test]
+fn the_declared_usage_is_field_for_field_with_what_this_crate_publishes() {
+    let mine = Usage {
+        input_tokens: Some(12_000),
+        output_tokens: Some(900),
+        cache_read_tokens: Some(8_000),
+        cache_write_tokens: Some(1_500),
+        cost_usd: Some(0.42),
+    };
+    let keys = |value: &Value| -> BTreeSet<String> {
+        value
+            .as_object()
+            .expect("an object")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    let ours = serde_json::to_value(&mine).expect("serializes");
+
+    let judged = serde_json::to_value(onejudge::Usage {
+        input_tokens: Some(12_000),
+        output_tokens: Some(900),
+        cache_read_tokens: Some(8_000),
+        cache_write_tokens: Some(1_500),
+        cost_usd: Some(0.42),
+    })
+    .expect("serializes");
+    assert_eq!(
+        keys(&ours),
+        keys(&judged),
+        "the declared usage no longer describes onejudge's own"
+    );
+    assert_eq!(
+        ours, judged,
+        "a figure this crate re-spells is a figure a consumer cannot join"
+    );
+
+    let harnessed = serde_json::to_value(oneharness_core::domain::signals::Usage {
+        input_tokens: Some(12_000),
+        output_tokens: Some(900),
+        cache_read_tokens: Some(8_000),
+        cache_write_tokens: Some(1_500),
+        cost_usd: Some(0.42),
+    })
+    .expect("serializes");
+    assert_eq!(
+        keys(&ours),
+        keys(&harnessed),
+        "the declared usage no longer describes oneharness's own"
+    );
+
+    // And a figure nobody reported is absent rather than zero.
+    assert_eq!(
+        serde_json::to_value(Usage::default()).expect("serializes"),
+        json!({})
     );
 }
 
@@ -631,7 +861,7 @@ fn an_oneharness_session_payload_points_at_the_record_the_invocation_wrote() {
     );
 }
 
-/// The four kinds the contract says carry a `session` label are the four this
+/// The five kinds the contract says carry a `session` label are the five this
 /// build stamps one on, and the value is the documented join of the stream and
 /// the member.
 ///
@@ -640,12 +870,12 @@ fn an_oneharness_session_payload_points_at_the_record_the_invocation_wrote() {
 #[test]
 fn the_documented_session_label_is_on_exactly_the_kinds_this_build_stamps_it_on() {
     let sentence = CONTRACT
-        .split("Exactly four kinds carry it — ")
+        .split("Exactly five kinds carry it — ")
         .nth(1)
         .and_then(|rest| rest.split(" — and").next())
         .expect("the contract no longer lists the kinds carrying a session label");
     let documented: BTreeSet<String> = backticked_in(sentence).into_iter().collect();
-    assert_eq!(documented.len(), 4, "{documented:?}");
+    assert_eq!(documented.len(), 5, "{documented:?}");
 
     for kind in ALL_EVENT_KINDS {
         assert_eq!(

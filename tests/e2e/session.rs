@@ -354,8 +354,9 @@ const REACH_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
 /// other kind the run put on its stream carries none.
 ///
 /// The exclusion is the half that matters: a consumer reads a labelled envelope
-/// that is not a turn's activity or interruption as one transcript turn, so a
-/// label on the heartbeats or the settle would render a transcript of them.
+/// that is not a turn's activity, message or interruption as one transcript
+/// turn, so a label on the heartbeats or the settle would render a transcript of
+/// them.
 #[test]
 fn a_real_runs_turns_are_labelled_with_their_conversation_and_nothing_else_is() {
     let workspace = Workspace::new();
@@ -365,10 +366,15 @@ fn a_real_runs_turns_are_labelled_with_their_conversation_and_nothing_else_is() 
     let labelled = assert_session_labels(&run);
     assert_eq!(
         labelled,
-        ["turn-activity", "turn-completed", "turn-started"]
-            .into_iter()
-            .map(str::to_string)
-            .collect(),
+        [
+            "turn-activity",
+            "turn-completed",
+            "turn-message",
+            "turn-started"
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect(),
         "the turns of a settled member are not the events carrying a conversation: {:?}",
         run.kinds()
     );
