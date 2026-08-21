@@ -396,6 +396,32 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
         "an observation that was genuinely empty must be distinguishable from an absent one"
     );
 
+    // A harness that exposed no identity for the call **omits** the field rather
+    // than nulling it, which is where it differs from `name`: a party that could
+    // not be named is a fact about the event, an identity nobody published is
+    // nothing to say.
+    let anonymous = TurnActivity {
+        tool_call_id: None,
+        ..call.clone()
+    };
+    let serialized = serde_json::to_value(&anonymous).expect("serializes");
+    assert!(
+        !serialized
+            .as_object()
+            .expect("an object")
+            .contains_key("tool_call_id"),
+        "an identity nobody published was written as one: {serialized}"
+    );
+    assert_eq!(
+        serde_json::from_value::<TurnActivity>(serialized).expect("parses"),
+        anonymous,
+        "an omitted identity must read back as absent"
+    );
+    assert!(
+        carries_name(&anonymous) && carries_name(&result),
+        "`name` must stay on the wire whether or not the event has one"
+    );
+
     let cut = TurnActivity {
         detail: "x".repeat(MAX_ACTIVITY_DETAIL_CHARS),
         truncated: true,
@@ -414,6 +440,16 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
         cut,
         "the turn-activity payload must round-trip"
     );
+}
+
+/// Whether one activity payload writes a `name` key at all — it must, whether or
+/// not the event has one, so a consumer meets a single shape.
+fn carries_name(activity: &TurnActivity) -> bool {
+    serde_json::to_value(activity)
+        .expect("serializes")
+        .as_object()
+        .expect("an object")
+        .contains_key("name")
 }
 
 /// `turn-started` names the turn, who takes it, what it was asked, and when it

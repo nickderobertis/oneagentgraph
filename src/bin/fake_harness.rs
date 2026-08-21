@@ -38,6 +38,7 @@
 //! | --- | --- |
 //! | `fake:complete-now` | the agent finishes on its first turn |
 //! | `fake:noisy-tool` | bury this turn's tool observation under kilobytes of startup chatter |
+//! | `fake:bare-tool` | take a first tool whose trace exposes neither a call identity nor an observation |
 //! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
@@ -620,6 +621,24 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // `json` document, which is exactly why oneharness upgrades the format for a
     // run that asked for events.
     if shape == Shape::Stream {
+        // A trace that exposes neither a call identity nor an observation, which
+        // is a shape oneharness's normalizer states outright it can produce —
+        // `ActionEvent::tool_call_id` is `None` "when the harness exposed no
+        // identity", and `output` is `null` "when the trace exposes it" is false.
+        // Not every CLI carries the ids the Anthropic block shape does, and a
+        // consumer must be able to tell the two facts from an event that has
+        // them.
+        if steers(prompt, "bare-tool") {
+            emit(&json!({
+                "type": "assistant", "session_id": session,
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "name": "Read", "input": {"path": "AGENTS.md"}}]},
+            }));
+            emit(&json!({
+                "type": "user", "session_id": session,
+                "message": {"role": "user", "content": [{"type": "tool_result"}]},
+            }));
+        }
         emit(&json!({
             "type": "assistant", "session_id": session,
             "message": {"id": "m1", "type": "message", "role": "assistant", "content": [

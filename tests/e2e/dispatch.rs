@@ -3193,6 +3193,69 @@ fn a_single_sided_member_closes_its_turn_with_that_turns_own_accounting() {
     }
 }
 
+/// A tool whose trace exposed neither a call identity nor an observation still
+/// reaches the journal, and says which facts it does not have by leaving them
+/// out — rather than by an empty string that reads as an answer.
+///
+/// Both are shapes oneharness's own normalizer states it produces: not every CLI
+/// carries the ids the Anthropic block shape does, and a trace need not expose
+/// what a tool returned. A consumer that could not tell "nothing was returned"
+/// from "nothing was recorded" would report the first as the second.
+#[test]
+fn a_tool_whose_trace_exposed_neither_an_id_nor_an_observation_still_reaches_the_journal() {
+    let workspace = Workspace::new();
+    workspace.graph(&two_party_graph(&fake_harness(), NO_ENV));
+    let run = workspace.run_task("fake:complete-now: fake:bare-tool report what you can");
+    run.expect_code(0);
+
+    let activity = run.of_kind("turn-activity");
+    let bare = activity
+        .iter()
+        .find(|event| event["payload"]["name"] == "Read")
+        .unwrap_or_else(|| panic!("the anonymous call never reached the journal: {activity:?}"));
+    assert!(
+        !bare["payload"]
+            .as_object()
+            .expect("a payload")
+            .contains_key("tool_call_id"),
+        "an identity the harness never exposed was published as one: {bare}"
+    );
+    // It is still an ordered event of the turn, and it still names what it acted
+    // on, so what is missing is only what was really missing.
+    assert_eq!(bare["payload"]["index"], serde_json::json!(0));
+    assert_eq!(bare["payload"]["detail"], serde_json::json!("AGENTS.md"));
+
+    let observation = activity
+        .iter()
+        .filter(|event| event["payload"]["kind"] == "tool_result")
+        .find(|event| {
+            !event["payload"]
+                .as_object()
+                .expect("a payload")
+                .contains_key("tool_call_id")
+        })
+        .unwrap_or_else(|| panic!("the anonymous result never reached the journal: {activity:?}"));
+    assert!(
+        !observation["payload"]
+            .as_object()
+            .expect("a payload")
+            .contains_key("output"),
+        "an observation the trace never exposed was published as an empty one: {observation}"
+    );
+    assert_eq!(observation["payload"]["name"], Value::Null);
+    // And the call beside it, whose trace did expose both, still carries them —
+    // so this is a property of the event rather than of the build.
+    assert!(
+        activity.iter().any(|event| {
+            event["payload"]["tool_call_id"] == "t1"
+                && event["payload"]["output"]
+                    .as_str()
+                    .is_some_and(|output| output.contains("2 passed; 0 failed"))
+        }),
+        "{activity:?}"
+    );
+}
+
 /// Every newly-published text is bounded at this crate's own payload bound, from
 /// the end that field is read from, and says whether it was cut.
 ///

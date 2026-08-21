@@ -688,6 +688,19 @@ impl Party {
     }
 }
 
+// llmlint: ignore-block[boundary_inputs_validated] the four payloads below are
+// what this crate *writes*, and every value in them is made correct where it is
+// minted rather than re-checked where it is read: `role` comes only from
+// [`Party`], the instants only from [`crate::clock::now_rfc3339`], and the bounds
+// only from [`bound_head`] / [`bound_text`]. `Deserialize` is here so the
+// contract test can round-trip them and a consumer can read them back — the
+// trust boundary an envelope really crosses is `deny_unknown_fields`, which every
+// one of them carries, exactly as `MemberDied` and `TurnInterrupted` have since
+// they were written. Validating the *values* on the way in would be worse than no
+// check: a bound is a promise about what a producer wrote, so a longer text from
+// a newer producer is not a malformed envelope, and refusing a role or a kind
+// this build has not heard of would drop the first event a widened contract
+// carries instead of showing it to the operator it was widened for.
 /// The payload of an [`EventKind::TurnStarted`] event: a turn beginning, and the
 /// message it was given to answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -757,8 +770,10 @@ pub struct TurnActivity {
     #[serde(default, skip_serializing_if = "is_false")]
     pub output_truncated: bool,
     /// The harness's own identity for this call, which is what joins a
-    /// `tool_result` to the `tool_call` it answers; `null` when the harness
-    /// exposed none.
+    /// `tool_result` to the `tool_call` it answers. **Omitted** — not `null` —
+    /// when the harness exposed none, which is where it differs from
+    /// [`name`](Self::name): a party that could not be named is a fact about
+    /// this event, while an identity nobody published is nothing to say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     /// This event's position within the turn, so ordering is expressible.
@@ -785,6 +800,8 @@ pub struct TurnCompleted {
     /// When the turn ended: RFC 3339, millisecond precision, UTC.
     pub finished_at: String,
 }
+
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// What one turn consumed.
 ///
