@@ -107,7 +107,7 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 started,
                 cancel: cancel.clone(),
                 turn,
-                opened: false,
+                opened: Opened::Not,
             };
             let outcome = run_supervised(
                 &request,
@@ -305,15 +305,27 @@ struct Events {
     /// rather than only when the terminate path reaches it.
     cancel: CancelToken,
     turn: TheTurn,
-    opened: bool,
+    /// Whether [`turn`](Self::turn) has been opened on the stream yet.
+    /// `oneharness run` is a single turn, so these are the only two states there
+    /// are, and they are named rather than a bare flag: "not opened yet" and
+    /// "opened" are the whole lifecycle, and a boolean lets a later reader take
+    /// it for a `bool` field that happens to be about something else.
+    opened: Opened,
+}
+
+/// Whether this member's one turn has reached the stream.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Opened {
+    Not,
+    Yes,
 }
 
 impl EventSink for Events {
     fn event(&mut self, _harness_id: &str, event: &ActionEvent) -> SinkStep {
         self.activity
             .store(elapsed_millis(self.started), Ordering::SeqCst);
-        if !self.opened {
-            self.opened = true;
+        if self.opened == Opened::Not {
+            self.opened = Opened::Yes;
             self.turn.open(&self.emitter);
         }
         ingest(event, &self.emitter);
@@ -711,7 +723,7 @@ mod tests {
             started: Instant::now(),
             cancel: CancelToken::new(),
             turn: TheTurn::new("write the thing"),
-            opened: false,
+            opened: Opened::Not,
         };
         for _ in 0..3 {
             assert!(matches!(
@@ -858,7 +870,7 @@ mod tests {
             started: Instant::now(),
             cancel: cancel.clone(),
             turn: TheTurn::new("write the thing"),
-            opened: false,
+            opened: Opened::Not,
         };
         assert!(matches!(
             sink.event("claude-code", &call(Some("bash"))),

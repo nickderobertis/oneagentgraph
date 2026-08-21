@@ -37,6 +37,7 @@
 //! | sentinel / variable | what this turn does |
 //! | --- | --- |
 //! | `fake:complete-now` | the agent finishes on its first turn |
+//! | `fake:noisy-tool` | bury this turn's tool observation under kilobytes of startup chatter |
 //! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
@@ -231,6 +232,14 @@ fn main() -> std::process::ExitCode {
             .unwrap_or_default()
     };
     let prompt = format!("{system}\n{task}");
+
+    // Neither flag is there when the prompt is **large**: past oneharness's own
+    // 64 KiB threshold it omits the positional and pipes the prompt to this
+    // process's stdin instead (claude-code's `--input-format text`). This double
+    // reads only the argv, so a journey whose prompt clears that threshold gets
+    // an empty task here and every sentinel in it silently stops steering. Keep a
+    // journey's texts under it, or teach this to read that stdin — the latter is
+    // a second delivery path nothing has needed yet.
 
     // A controlled turn has none of the task yet — it arrives on stdin — so its
     // recordings are made per turn, in [`turn`], against the prompt that turn was
@@ -624,7 +633,8 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
         emit(&json!({
             "type": "user", "session_id": session,
             "message": {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "t1", "content": TOOL_RESULT}]},
+                {"type": "tool_result", "tool_use_id": "t1",
+                 "content": tool_result(prompt)}]},
         }));
     }
     // Resolved before the terminal line rather than inside it: a turn this
@@ -654,6 +664,24 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
 /// pasted the whole of one into a log line is what the tail bound and the
 /// last-line rendering exist for.
 const TOOL_RESULT: &str = "running the gate\n2 passed; 0 failed";
+
+/// How much startup chatter `fake:noisy-tool` puts in front of that, in bytes.
+///
+/// Past `oneagentgraph`'s own 4096-byte payload bound by a clear margin, so a
+/// journey asserting the tail survived is asserting against a cut that really
+/// happened rather than against an off-by-one.
+const NOISE_BYTES: usize = 6000;
+
+/// The observation this turn's tool returns, which `fake:noisy-tool` buries under
+/// startup chatter — the shape a real gate log has, and the one a tail bound
+/// exists for.
+fn tool_result(prompt: &str) -> String {
+    if steers(prompt, "noisy-tool") {
+        format!("{}\n{TOOL_RESULT}", "noise ".repeat(NOISE_BYTES / 6))
+    } else {
+        TOOL_RESULT.to_string()
+    }
+}
 
 /// Whether a turn was one this double could take.
 ///
