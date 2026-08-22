@@ -1545,26 +1545,16 @@ fn a_forged_group_record_cannot_redirect_a_reap() {
 /// The contract's defaults are what a run uses when nothing overrides them —
 /// and a run really is supervised under them.
 ///
-/// The constants are only half of it, and the weaker half:
-/// [`tests/contract.rs`](../contract.rs) holds them against `docs/contract.md`,
-/// and these hold them against what a consumer of the library reads. The other
-/// half is that a run with **no** liveness variable set is governed by them,
-/// which no other journey in this file can show — every watchdog journey here
-/// shortens the bound to reach its rule, so a default quietly replaced by one of
-/// those seconds-long values would pass all of them.
+/// Every other watchdog journey here shortens the bound to reach its rule, so a
+/// default quietly replaced by one of those seconds-long values would pass all
+/// of them. This one sets nothing and drives the member
+/// [`a_member_whose_child_is_alive_but_idle_is_still_condemned`] kills inside a
+/// four-second bound — same task, same silent idle child — for three times that,
+/// and only the cancel ends it.
 ///
-/// So this one sets nothing and drives the member the shortened bound kills:
-/// the same task string as
-/// [`a_member_whose_child_is_alive_but_idle_is_still_condemned`], whose child is
-/// a real process, alive and charged no CPU throughout. That journey condemns it
-/// inside a four-second bound; this one holds it silent and idle for
-/// [`SILENT_FOR`] — three times that — and the only thing that ends it is the
-/// cancel. The two differ in one thing: whether the bound is overridden.
-///
-/// What no journey can do is wait out half an hour to watch the bound itself
-/// expire. That number is held against the document by `tests/contract.rs`, and
-/// the rule is driven at it in
-/// `oneagentgraph::member::tests::the_default_bound_condemns_an_idle_tree_long_after_the_bound_it_replaces`.
+/// Watching the bound itself expire would take half an hour. `tests/contract.rs`
+/// holds that number against the document, and `member::tests` drives the rule
+/// at it.
 #[test]
 fn the_documented_defaults_are_what_a_run_supervises_under() {
     use oneagentgraph::liveness::{
@@ -1595,9 +1585,8 @@ fn the_documented_defaults_are_what_a_run_supervises_under() {
         &[],
     );
 
-    // The clock this journey measures is the member's own, so it starts once the
-    // member is really there to be judged: a tree stamped for it, and a provider
-    // that recorded itself on the way into the wait it never returns from.
+    // The silence is timed from when there is a member to judge, rather than
+    // from when the command started.
     until("the member's tree to be stamped", || {
         entered.exists()
             && member_scratch(&state).is_some_and(|scratch| {
