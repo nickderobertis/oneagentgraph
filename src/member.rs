@@ -961,46 +961,32 @@ mod tests {
         );
     }
 
-    /// The **default** bound, driven over the two silences that moved it: a
-    /// member quiet for ten minutes with live work under it, and one quiet for
-    /// ten minutes with nothing under it doing anything. Opposite verdicts, and
-    /// neither of them reached at ten minutes.
+    /// The rule at its **default** bound: a working tree is never condemned, and
+    /// an idle one only long past the ten-minute bound this replaces — which is
+    /// where members were being killed while their reports were still in flight.
     ///
-    /// Driven at [`DEFAULT_STALL_TIMEOUT`] itself rather than at a bound of this
-    /// test's choosing, because here the number *is* the subject. The members
-    /// condemned in anger died 601 seconds after their last tool call — the
-    /// ten-minute bound this replaces plus the probe that established it — each
-    /// of them mid-report, and what this holds is that the same silence at the
-    /// same moment is now survived.
-    ///
-    /// The rule is kept rather than relaxed: the idle member is still condemned,
-    /// just later. A test that only proved the sparing would pass equally well
-    /// against a watchdog that had been switched off.
+    /// Driven at [`DEFAULT_STALL_TIMEOUT`] itself, because here the number is
+    /// the subject rather than the rule. Both halves are asserted: the sparing
+    /// alone would pass just as well against a watchdog switched off.
     #[test]
-    fn the_default_bound_outlasts_a_report_a_member_spends_ten_minutes_writing() {
-        /// The bound this one replaces, which is the moment both halves below
-        /// have to get past.
-        const CONDEMNED_AT: Duration = Duration::from_secs(600);
-        /// Two hundredths of a core: a tree doing work, on the same rate the
-        /// rule reads everywhere else.
+    fn the_default_bound_condemns_an_idle_tree_long_after_the_bound_it_replaces() {
+        /// The bound this one replaces, and the moment both halves must get past.
+        const REPLACED: Duration = Duration::from_secs(600);
+        /// Two hundredths of a core: a tree doing work, on the rate the rule
+        /// reads everywhere else.
         const WORKING: u64 = 1_000_000 / 50;
 
-        // Quiet and working — the supervisory member blocked on one long child,
-        // which is the shape silence alone used to kill. Not condemned at ten
-        // minutes and not condemned at any point in the four bounds walked.
         assert_eq!(
             condemned(DEFAULT_STALL_TIMEOUT, WORKING),
             None,
             "a member with live work under it was condemned under the default bound"
         );
 
-        // Quiet and idle — a member genuinely doing nothing, which this rule
-        // still exists to condemn. What moved is when.
         let at = condemned(DEFAULT_STALL_TIMEOUT, 0)
             .expect("a member doing nothing at all is still condemned");
         assert!(
-            at > CONDEMNED_AT + MAX_PROBE_INTERVAL,
-            "a member was condemned at {at:?}, back inside the window that killed five members \
+            at > REPLACED + MAX_PROBE_INTERVAL,
+            "a member was condemned at {at:?}, back inside the window that killed five of them \
              while they were writing their reports"
         );
         assert!(
