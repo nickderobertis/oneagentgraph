@@ -1592,7 +1592,6 @@ fn the_documented_defaults_are_what_a_run_supervises_under() {
             "--dir",
             &workspace.dir().display().to_string(),
         ],
-        // Nothing at all, which is the whole point of this journey.
         &[],
     );
 
