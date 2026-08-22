@@ -452,7 +452,7 @@ fn a_two_party_member_whose_conversation_is_working_is_not_condemned_for_its_sil
 
 /// The stall bound both watchdog journeys above supervise under.
 ///
-/// Shortened from the contract's ten minutes, because what is under test is the
+/// Shortened from the contract's half an hour, because what is under test is the
 /// rule rather than the number — the default is asserted separately below. Not
 /// *too* short: the rule now takes two observations of the member's tree to
 /// establish that it is idle, so a bound near the supervisor's own cadence would
@@ -1549,7 +1549,7 @@ fn the_documented_defaults_are_what_a_run_supervises_under() {
         DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
     };
     assert_eq!(DEFAULT_HEARTBEAT_TIMEOUT.as_secs(), 60);
-    assert_eq!(DEFAULT_STALL_TIMEOUT.as_secs(), 600);
+    assert_eq!(DEFAULT_STALL_TIMEOUT.as_secs(), 1800);
     assert_eq!(HEARTBEAT_TIMEOUT_ENV, "ONEAGENTGRAPH_HEARTBEAT_TIMEOUT");
     assert_eq!(STALL_TIMEOUT_ENV, "ONEAGENTGRAPH_STALL_TIMEOUT");
     assert!(!fake_harness().is_empty());
