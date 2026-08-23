@@ -4,10 +4,22 @@
 //! Each of these drives a real member through a real turn with a real pre-turn
 //! command: the compiled `oneagentgraph` validates the declared argv, spawns it
 //! into the member's own process group, bounds it, drains its pipes, folds what
-//! it printed into the prompt, and hands that prompt to real `oneharness`. What
-//! the member's *harness* was actually asked is read back from the harness
-//! itself, which is the far end of the whole path and the only place a context
-//! that never reached the turn would be missing.
+//! it printed into the prompt, and hands that prompt to real `oneharness`.
+//!
+//! Every journey asserts first on the **user-facing surface** — the exit code,
+//! the `pre-turn-context` and `turn-started` envelopes on stdout, and the
+//! `--output text` rendering of them — because that is what a consumer of this
+//! CLI actually has.
+//!
+//! Each then reads what the harness was handed, and that is a second assertion
+//! rather than a shortcut past the first. `turn-started` carries the instruction
+//! bounded at 4096 bytes, by a contract that predates this field; the prompt is
+//! not bounded, and a 16 KiB view is several times that. So the recording is the
+//! only place the *whole* instruction is observable, and it is the far end of the
+//! path — a context that reached the event but not the harness would be missing
+//! there and nowhere else. It is this suite's established way of asking what a
+//! member was really given: `tests/e2e/dispatch.rs` proves every task-text
+//! journey through the same sentinel.
 
 // llmlint: ignore-file[e2e_not_mocked] these journeys use the repository's sole
 // sanctioned fake at oneharness's `ONEHARNESS_BIN_<ID>` paid-provider seam. The
@@ -89,12 +101,109 @@ fn asked_once(recorded: &std::path::Path) -> String {
     asked.into_iter().next().expect("one turn")
 }
 
+/// The instruction each of a run's turns opened with, off the run's own stream.
+///
+/// The user-facing half of every assertion below: `turn-started` carries what
+/// the turn was asked, bounded at the contract's 4096 bytes.
+fn opened(run: &Run) -> Vec<String> {
+    run.of_kind("turn-started")
+        .into_iter()
+        .filter_map(|event| event["payload"]["instruction"].as_str().map(str::to_string))
+        .collect()
+}
+
 /// Every `pre-turn-context` payload the run published, in order.
 fn views(run: &Run) -> Vec<Value> {
     run.of_kind("pre-turn-context")
         .into_iter()
         .map(|event| event["payload"].clone())
         .collect()
+}
+
+/// A view a run could never honour is refused by `validate`, before a member is
+/// launched and before a paid turn is spent — with the member, the view, and
+/// what is wrong with it named.
+///
+/// The trust boundary this field sits behind, driven where an operator meets it:
+/// a `pre_turn` is an argv this engine hands to a process, and a typo in one is
+/// answered by one sentence on standard error rather than by a member that runs
+/// a nameless program before every turn, forever.
+#[test]
+fn a_view_a_run_could_not_honour_is_refused_before_anything_is_launched() {
+    let workspace = Workspace::new();
+    for (views, expected) in [
+        ("    - {command: []}\n", "an empty one names none"),
+        ("    - {command: ['   ']}\n", "an empty one names none"),
+        (
+            "    - {command: [queue-depth], label: '  '}\n",
+            "cannot be blank or carry a control character",
+        ),
+        (
+            "    - {command: [queue-depth], timeout: 0}\n",
+            "is not a bound this view can run under",
+        ),
+        (
+            "    - {command: [queue-depth], timeout: 3000}\n",
+            "is not a bound this view can run under",
+        ),
+        (
+            &"    - {command: [queue-depth]}\n".repeat(5),
+            "the ceiling is",
+        ),
+    ] {
+        workspace.graph(&watching_graph(views, &[]));
+        let run = workspace.run(&["validate", "./graph.yaml"]);
+        run.expect_code(2);
+        assert!(
+            run.stderr.contains(expected) && run.stderr.contains("watcher"),
+            "{views}: {}",
+            run.stderr
+        );
+    }
+
+    // A NUL cannot be written into a YAML document by hand, so it is placed the
+    // way any other value is — and refused the same way.
+    workspace.graph(&watching_graph(
+        "    - {command: [PROGRAM]}\n",
+        &[(
+            "members.watcher.pre_turn.0.command.0",
+            "queue\u{0}depth".to_string(),
+        )],
+    ));
+    let run = workspace.run(&["validate", "./graph.yaml"]);
+    run.expect_code(2);
+    assert!(run.stderr.contains("carries a NUL"), "{}", run.stderr);
+
+    // And a document declaring the schema before the field is refused by the
+    // field's name rather than run with its views silently dropped.
+    workspace.graph(
+        &watching_graph(
+            "    - {command: [PROGRAM]}\n",
+            &[(
+                "members.watcher.pre_turn.0.command.0",
+                "queue-depth".to_string(),
+            )],
+        )
+        .replace("version: 7", "version: 6"),
+    );
+    let run = workspace.run(&["validate", "./graph.yaml"]);
+    run.expect_code(2);
+    assert!(
+        run.stderr.contains("`pre_turn`") && run.stderr.contains("requires graph schema version 7"),
+        "{}",
+        run.stderr
+    );
+
+    // The same graph with a view a run *can* honour passes, so what these
+    // refusals reject is the typo rather than the field.
+    workspace.graph(&watching_graph(
+        "    - {command: [PROGRAM, --json], label: queue, timeout: 20}\n",
+        &[(
+            "members.watcher.pre_turn.0.command.0",
+            "queue-depth".to_string(),
+        )],
+    ));
+    workspace.run(&["validate", "./graph.yaml"]).expect_code(0);
 }
 
 /// A member's declared views run before its turn and their output is what that
@@ -179,14 +288,12 @@ fn a_declared_view_reaches_the_turn_it_was_prepared_for() {
 
     // And what the operator watching the turn open sees is the context, because
     // `turn-started` carries the instruction the turn really received.
-    let started = run.of_kind("turn-started");
-    assert_eq!(started.len(), 1, "{started:?}");
+    let opened = opened(&run);
+    assert_eq!(opened.len(), 1, "{opened:?}");
     assert!(
-        started[0]["payload"]["instruction"]
-            .as_str()
-            .is_some_and(|instruction| instruction.contains("queue depth 4")),
+        opened[0].contains("<view name=\"queue\">\nqueue depth 4, oldest 12m\n</view>"),
         "the turn opened claiming an instruction it was not given: {}",
-        started[0]
+        opened[0]
     );
 }
 
@@ -263,6 +370,17 @@ fn a_view_that_fails_leaves_the_turn_happening_and_says_which() {
             "a degraded view published no reason: {view}"
         );
     }
+    // The same degradation on the instruction the turn opened with, which is
+    // the user-facing envelope carrying it.
+    let opened = opened(&run);
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    assert!(
+        opened[0].contains("<view name=\"queue\" unavailable=")
+            && opened[0].contains("report on what the views say."),
+        "the published instruction did not carry the degraded view: {}",
+        opened[0]
+    );
+
     // And rendered for a person on the same terms as a death — the view, what
     // became of it, and the reason — because `--output text` is a rendering of
     // these same events rather than separate content, and a kind with no
@@ -347,6 +465,11 @@ fn a_view_that_never_finishes_is_stopped_at_its_own_bound() {
         prompt.contains("report anyway."),
         "the turn lost its own task: {prompt}"
     );
+    let opened = opened(&run);
+    assert!(
+        opened.len() == 1 && opened[0].contains("unavailable=") && opened[0].contains("1s"),
+        "the published instruction did not say the view was given up on: {opened:?}"
+    );
     assert!(
         spent < Duration::from_secs(120),
         "the member waited {spent:?} on a view bounded at one second"
@@ -407,6 +530,11 @@ fn a_view_longer_than_the_bound_is_cut_and_says_so_where_the_model_reads_it() {
         "the turn lost its own task: {}",
         &prompt[prompt.len().saturating_sub(400)..]
     );
+    let opened = opened(&run);
+    assert!(
+        opened.len() == 1 && opened[0].contains("truncated=\"kept the first"),
+        "the published instruction served a cut view as a whole one: {opened:?}"
+    );
 }
 
 /// A member that declares no view is asked exactly what it always was, and
@@ -451,6 +579,11 @@ fn a_member_with_no_view_is_asked_exactly_what_it_always_was() {
         run.of_kind("pre-turn-context").is_empty(),
         "a member that declared no view published one: {:?}",
         run.kinds()
+    );
+    assert_eq!(
+        opened(&run),
+        vec![task],
+        "the published instruction gained something the member never declared"
     );
 }
 
@@ -545,8 +678,23 @@ fn a_scheduled_members_views_run_again_for_every_turn() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Both turns were asked with the view in front of them, which is what a
-    // per-member gather would have given only the first.
+    // Both turns opened with the view in front of them, on the run's own stream:
+    // a per-member gather would have given that to the first turn only.
+    let published = String::from_utf8_lossy(&output.stdout);
+    let opened: Vec<String> = published
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        // The watcher's own turns: the member holding the run open takes one too,
+        // and it declared no view.
+        .filter(|event| event["kind"] == "turn-started" && event["labels"]["member"] == "watcher")
+        .filter_map(|event| event["payload"]["instruction"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        opened.len() >= 2 && opened.iter().all(|it| it.contains("<view name=\"queue\">")),
+        "a later turn opened without the view its member declared: {opened:?}"
+    );
+
+    // And the same at the far end, where the whole instruction is observable.
     let asked = asked(&recorded);
     assert!(asked.len() >= 2, "the member took {} turns", asked.len());
     for prompt in &asked {

@@ -30,13 +30,32 @@
 
 use std::io::Write as _;
 
+/// Refuse the argv rather than run something nobody asked for.
+///
+/// The same bar this file already holds an unknown argument to, applied to a
+/// value that is missing or is not the number the flag takes: a journey whose
+/// document has a typo in it would otherwise get a view that ran, printed
+/// something plausible, and asserted green for the wrong reason.
+fn refuse(why: &str) -> ! {
+    eprintln!("oneagentgraph-fake-view: {why}");
+    std::process::exit(2);
+}
+
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut exit = 0;
     let mut hang = false;
     let mut at = 0;
     while at < argv.len() {
-        let value = |at: usize| -> String { argv.get(at + 1).cloned().unwrap_or_default() };
+        let value = |at: usize| -> &str {
+            argv.get(at + 1)
+                .unwrap_or_else(|| refuse(&format!("{} takes a value", argv[at])))
+        };
+        let number = |at: usize| -> i32 {
+            value(at).parse().unwrap_or_else(|_| {
+                refuse(&format!("{} takes a number, not {:?}", argv[at], value(at)))
+            })
+        };
         match argv[at].as_str() {
             "--say" => {
                 println!("{}", value(at));
@@ -45,13 +64,13 @@ fn main() {
             // Rows rather than one long line, because what a view prints is rows
             // and a bound that lands mid-row is what a reader has to notice.
             "--bulk" => {
-                let bytes: usize = value(at).parse().unwrap_or_default();
+                let bytes = number(at);
                 let mut written = 0;
                 let mut row = 0;
                 while written < bytes {
                     let line = format!("row {row} of the prepared view\n");
                     print!("{line}");
-                    written += line.len();
+                    written += i32::try_from(line.len()).unwrap_or(i32::MAX);
                     row += 1;
                 }
                 at += 2;
@@ -61,7 +80,7 @@ fn main() {
                 at += 2;
             }
             "--fail" => {
-                exit = value(at).parse().unwrap_or(1);
+                exit = number(at);
                 at += 2;
             }
             "--hang" => {
@@ -70,10 +89,7 @@ fn main() {
             }
             // An argument nobody taught this about is a journey asserting against
             // a view it never configured, which passes for the wrong reason.
-            other => {
-                eprintln!("oneagentgraph-fake-view: unknown argument {other:?}");
-                std::process::exit(2);
-            }
+            other => refuse(&format!("unknown argument {other:?}")),
         }
     }
     // Before the hang, so a journey that reads what a wedged view printed reads
