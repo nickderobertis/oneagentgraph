@@ -80,10 +80,26 @@ echo "llmlint 1.0.0-ambient"
 /// What one `just lint-llm-diff` invocation produced.
 struct Verdict {
     ok: bool,
+    /// The tier's product on a green run: the judge's report.
+    stdout: String,
+    /// Its diagnostics, and its report when the run failed.
+    stderr: String,
+    /// Both, for an assertion that does not care which stream carried it.
     report: String,
 }
 
 impl Verdict {
+    fn new(output: &std::process::Output) -> Self {
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        Self {
+            ok: output.status.success(),
+            report: format!("--- stdout ---\n{stdout}\n--- stderr ---\n{stderr}"),
+            stdout,
+            stderr,
+        }
+    }
+
     fn assert_green(&self, what: &str) -> &Self {
         assert!(self.ok, "{what} should have passed:\n{}", self.report);
         self
@@ -258,14 +274,7 @@ impl Workspace {
         let output = command
             .output()
             .expect("`just` runs the recipe — install it and retry");
-        Verdict {
-            ok: output.status.success(),
-            report: format!(
-                "--- stdout ---\n{}\n--- stderr ---\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            ),
-        }
+        Verdict::new(&output)
     }
 
     /// Run the fingerprint the way an operator diagnosing a cache miss would.
@@ -278,14 +287,7 @@ impl Workspace {
         command.envs(&self.env);
         command.envs(overrides.iter().copied());
         let output = command.output().expect("bash runs the fingerprint");
-        Verdict {
-            ok: output.status.success(),
-            report: format!(
-                "--- stdout ---\n{}\n--- stderr ---\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr),
-            ),
-        }
+        Verdict::new(&output)
     }
 
     /// What the cached target wrote, from the Nx output file it speaks through.
@@ -355,7 +357,7 @@ fn write_executable(path: &Path, body: &str) {
     std::fs::create_dir_all(path.parent().expect("an executable has a parent"))
         .expect("create the directory holding an executable");
     std::fs::write(path, body).expect("write an executable");
-    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+    std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
         .expect("make it executable");
 }
 
@@ -394,6 +396,15 @@ fn an_unchanged_tree_and_base_replays_the_first_verdict_instead_of_re_judging() 
     first
         .assert_green("the first run")
         .assert_says(PASS_VERDICT);
+    // The verdict is what this command is for, so it lands on stdout — both times.
+    // Everything else it says, provenance included, is a diagnostic on stderr.
+    for run in [&first, &second] {
+        assert!(
+            run.stdout.contains(PASS_VERDICT) && !run.stderr.contains(PASS_VERDICT),
+            "the verdict did not come back on stdout alone:\n{}",
+            run.report
+        );
+    }
     // A replayed run has to say everything a fresh one did: the report *is* the
     // record, so a summary reconstructed from somewhere else would be a second
     // source of truth about a verdict nobody re-rolled.
@@ -600,8 +611,15 @@ fn findings_and_a_toolchain_that_never_reached_a_verdict_both_fail_and_re_judge(
                 run.report
             );
             // Whatever the run managed to say still reaches the operator who has to
-            // clear it; what it must never do is become a stored answer.
+            // clear it; what it must never do is become a stored answer. A failed
+            // run's report is a diagnostic, so it comes back on stderr rather than
+            // as this command's output.
             run.assert_says(FAIL_FINDING).assert_says(JUDGED);
+            assert!(
+                run.stderr.contains(FAIL_FINDING) && run.stdout.is_empty(),
+                "a failing run put diagnostics on stdout:\n{}",
+                run.report
+            );
         }
         assert_eq!(
             workspace.judge_runs(),
