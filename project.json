@@ -11,6 +11,10 @@
     "lint": { "command": "just _crate-lint", "inputs": ["crateSource"] },
     "test": { "command": "just _crate-test", "inputs": ["crateSource"] },
     "doc": { "command": "just _crate-doc", "inputs": ["crateSource"] },
+    "lint-llm-diff": {
+      "command": "bash scripts/llmlint-judge.sh",
+      "outputs": ["{workspaceRoot}/.logs/llmlint-diff.report"]
+    },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test", "doc"]

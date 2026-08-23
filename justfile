@@ -11,6 +11,13 @@
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
+# Recipe parameters reach the shell as `$1`, `$2`, ... rather than only as `{{name}}`
+# text spliced into the command. `lint-llm-diff` needs that: its base ref and its
+# passthrough Nx arguments come from a caller, and interpolating them would let the
+# shell parse whatever they contain before anything could validate it. Additive —
+# `{{name}}` still works, so the recipes below are unchanged.
+set positional-arguments
+
 # llmlint: ignore-file[tool_output_is_signal] recipes that hand straight to cargo,
 # clippy, rustdoc, or cargo-deny inherit those tools' diagnostics, which already
 # name the exact problem and its fix; a wrapper message would bury them. The
@@ -249,7 +256,58 @@ lint-llm-validate *args:
     llmlint validate {{args}}
 
 # The blocking `llmlint` PR check; `just gate` runs it before you push.
+#
+# The judge is non-deterministic — this tier has returned opposite verdicts on one
+# unchanged tree — so the run goes through the cached Nx `lint-llm-diff` target
+# rather than straight to llmlint: an unchanged tree judged against an unchanged
+# base replays that run's own report instead of rolling the dice again. There is no
+# verdict record to write, restore, or race on; Nx's task cache is the whole
+# mechanism. The base ref is resolved to a commit *here*, before Nx hashes it, so a
+# rebased or advanced base misses rather than replaying a verdict computed against
+# a different comparison — and the resolved commit is reported with the verdict,
+# because "green" means green against that commit.
+#
+# Only a clean run is cached, because Nx caches successful tasks only. Findings
+# (llmlint exit 1) and a toolchain that never reached a verdict (exit >= 2) both
+# re-judge on the next invocation. A wrong *green* sticks until the tree, the base
+# commit, or the judge configuration moves — `--skip-nx-cache` re-judges but
+# neither reads nor writes the cache, so the next ordinary run replays the same
+# entry.
+#
+# `just lint-llm-diff <base> --skip-nx-cache` is the one supported way to force a
+# real re-judge, and it is deliberately per-invocation: the trailing arguments go
+# to Nx now rather than to llmlint. An ambient global cache skip
+# (`NX_SKIP_NX_CACHE` / `NX_DISABLE_NX_CACHE`, exported to re-judge this tier and
+# inherited by everything else) is reported and ignored here, because it would
+# re-roll a non-deterministic judge from every unrelated command and break the
+# journeys whose contract is cache replay. Every other Nx target still honours it.
+#
+# The report comes from `.logs/llmlint-diff.report`, the target's declared Nx
+# output, rather than from what Nx forwarded: Nx resolves a task on its child's
+# `exit` event, which can beat the drain of a pipe the child wrote to just before
+# exiting, so a report finished milliseconds before exit is lost from the stream
+# intermittently. The file is stored on a clean run and restored on a hit, so a
+# replayed verdict says exactly what the judged one did. It is also the thing to
+# `tail -f` while the judge is still thinking.
+#
+# The base ref and the passthrough Nx arguments are a caller's, so they reach the
+# shell as positional arguments rather than as interpolated text — nothing the
+# caller supplies is parsed as shell before it is checked. What checks it is
+# `git rev-parse --verify`, which either yields a commit id or refuses the run: the
+# target is handed that resolved id and re-checks its shape, and the passthrough
+# arguments go to `scripts/nx.sh` as separate argv words for Nx to accept or reject.
+#
+# Provenance comes from Nx's own cache reporting, which Nx writes itself: the task
+# line it annotates, or the summary line it prints only when it replayed a task
+# instead of running it. Both are matched because only the first is safe at any
+# size, and both are matched with the colour stripped — Nx renders them with ANSI
+# escapes under some parents (a nextest-driven run is one), which pushes the escape
+# in front of the anchor and reports every replay as a fresh judgement.
+# `tests/llmlint_cache.rs` asserts both the judged and the replayed wording, so an
+# Nx upgrade that renames them fails the suite rather than quietly reporting every
+# run as freshly judged.
 # llmlint scoped to the files this branch changed since it forked from main.
-lint-llm-diff base="origin/main" *args:
+lint-llm-diff base="origin/main" *nx_args:
     @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
-    llmlint --diff --diff-base "{{base}}" {{args}}
+    @# llmlint: ignore[tool_output_is_signal] The judge's per-rule report and its one-line provenance are this tier's product; a quiet success here would delete the tier's result and leave a replayed run saying less than a fresh one. `@#` so the directive itself stays out of that report.
+    @base_sha=$(git rev-parse --verify --quiet "$1^{commit}") || { echo "lint-llm-diff: '$1' does not resolve to a commit; fetch it or pass an existing base" >&2; exit 1; }; if [ -n "${NX_SKIP_NX_CACHE:-}${NX_DISABLE_NX_CACHE:-}" ]; then echo "lint-llm-diff: ignoring the ambient global Nx cache skip; force a fresh judgement of this tier alone with 'just lint-llm-diff $1 --skip-nx-cache'" >&2; fi; unset NX_SKIP_NX_CACHE NX_DISABLE_NX_CACHE; report=.logs/llmlint-diff.report; echo "lint-llm-diff: base $base_sha; the judge's report lands in $report ('tail -f' it to follow a fresh run)" >&2; capture=$(mktemp) || { echo "lint-llm-diff: could not open temporary storage for Nx's output; free disk space and retry" >&2; exit 1; }; trap 'rm -f "$capture"' EXIT; status=0; LLMLINT_DIFF_BASE_SHA="$base_sha" ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run oneagentgraph:lint-llm-diff "${@:2}" >"$capture" 2>&1 || status=$?; if [ "$status" -eq 0 ]; then cat "$report" 2>/dev/null || echo "lint-llm-diff: the task left no report at $report" >&2; else { cat "$report" 2>/dev/null || echo "lint-llm-diff: the task left no report at $report"; } >&2; fi; cat "$capture" >&2; esc=$(printf '\033'); if sed "s/${esc}\[[0-9;]*[a-zA-Z]//g" "$capture" | grep -qE '^Nx read the output from the cache instead of running the command|^> nx run oneagentgraph:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)'; then echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2; else echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2; fi; exit "$status"
