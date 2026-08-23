@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.7](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.6...v0.3.7) - 2026-08-23
+
+### Fixed
+
+- make the judged tier replay one verdict per tree, base and judge configuration ([#73](https://github.com/nickderobertis/oneagentgraph/pull/73))
+
 ## [0.3.6](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.5...v0.3.6) - 2026-08-21
 
 ### Fixed
