@@ -74,10 +74,25 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
-    let request = launch.request();
+    // Before the request, because it is what the request carries: every view this
+    // member declared runs now, and what they printed goes in front of the prose
+    // its turn answers. A member that declared none is handed its prose untouched
+    // and nothing here starts a process — see [`crate::preturn`], which also owns
+    // why none of these can fail the member.
+    let prompt = crate::preturn::instruction(
+        &launch.views,
+        &launch.worktree,
+        &group,
+        scratch,
+        emitter,
+        &launch.prompt,
+    );
+    let request = launch.request(&prompt);
     // Minted before the engine is handed the request: this member's one turn
     // begins here, and its opening and its close have to name the same instant.
-    let turn = TheTurn::new(&launch.prompt);
+    // Over the instruction the turn really receives, views and all, because that
+    // is what `turn-started` is read to see.
+    let turn = TheTurn::new(&prompt);
     let activity = Arc::new(AtomicU64::new(0));
     let cancel = CancelToken::new();
     let started = Instant::now();
@@ -637,7 +652,14 @@ fn elapsed_millis(since: Instant) -> u64 {
 /// `docs/oneharness-library.md`'s table, and `tests/inventory.rs` holds this
 /// literal's field names against it.
 impl HarnessLaunch {
-    pub(crate) fn request(&self) -> RunRequest {
+    /// The request for one turn, answering `prompt`.
+    ///
+    /// The prompt is a parameter rather than the launch's own field because it is
+    /// the one thing about a turn that is decided *per turn*: a member's declared
+    /// views run immediately before each of them, and what they printed goes in
+    /// front of the prose. A member with no views is handed
+    /// [`HarnessLaunch::prompt`] exactly.
+    pub(crate) fn request(&self, prompt: &str) -> RunRequest {
         RunRequest {
             config: Some(self.config.clone()),
             // A parameter, never `set_current_dir`: one process hosts every
@@ -650,7 +672,7 @@ impl HarnessLaunch {
             // config on the argv this replaces and leaving it `None` would hand
             // the decision back to a layer that already made it.
             stream: Some(self.reporting.streams()),
-            prompt: vec![self.prompt.clone()],
+            prompt: vec![prompt.to_string()],
             ..RunRequest::default()
         }
     }
@@ -1074,8 +1096,9 @@ mod tests {
             worktree: std::path::PathBuf::from("/work/api"),
             prompt: "report in".to_string(),
             reporting: Reporting::Streamed,
+            views: Vec::new(),
         };
-        let request = launch.request();
+        let request = launch.request(&launch.prompt);
         assert_eq!(
             request.config.as_deref(),
             Some(Path::new("/scratch/oneharness.toml"))
@@ -1096,6 +1119,6 @@ mod tests {
             reporting: Reporting::Buffered,
             ..launch
         };
-        assert_eq!(buffered.request().stream, Some(false));
+        assert_eq!(buffered.request(&buffered.prompt).stream, Some(false));
     }
 }

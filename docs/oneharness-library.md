@@ -51,6 +51,12 @@ single-sided member maps onto a `RunRequest` field, and
 `tests/inventory.rs` parses that column and names each field in a `RunRequest`
 literal, so a rename upstream fails there rather than here.
 
+The `prompt` is the one value built **per turn** rather than once per member:
+`HarnessLaunch::request` takes it, because a member's declared `pre_turn` views
+run immediately before each turn and what they printed goes in front of the
+member's own prose — see `src/preturn.rs`. A member declaring none is handed
+`HarnessLaunch::prompt` exactly, so nothing about this request changes for it.
+
 ## What the process boundary provided, and what replaced it
 
 **A per-member environment — replaced by the process's own.** `src/member.rs`

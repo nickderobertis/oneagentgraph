@@ -1068,6 +1068,7 @@ mod tests {
                 worktree: std::path::PathBuf::from("/work"),
                 prompt: "report".into(),
                 reporting: crate::invoke::Reporting::Streamed,
+                views: Vec::new(),
             }))),
             start_after: None,
         };

@@ -151,9 +151,74 @@ pub struct OneharnessMember {
     /// Present on a cron member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    /// Commands run immediately before each of this member's turns, whose output
+    /// is prepended to the instruction that turn receives.
+    ///
+    /// A supervisory member opens each turn by going and looking — spending tool
+    /// calls to rediscover state that already exists and is already labelled, and
+    /// reporting on whichever half of it the turn got to. This is how such a
+    /// member is *handed* that state instead: its first act becomes reading a
+    /// prepared view, and it investigates only what looks strange.
+    ///
+    /// Scoped to this member kind because here a member's turn **is** its run, so
+    /// "immediately before the turn" is an exact moment rather than an
+    /// approximation of one. A two-party member's turns are onejudge's to open,
+    /// and this crate has no seam inside them. Requires graph schema version
+    /// [`FIRST_PRE_TURN_VERSION`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pre_turn: Vec<PreTurn>,
     /// Members whose successful settle precedes this member's first run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
+}
+
+/// One command run immediately before a member's turn, whose output becomes part
+/// of that turn's context.
+///
+/// An argv, never a command line: what a member declares here is spawned
+/// directly, so nothing in it is a shell's to expand, split, or interpret. That
+/// is also why it is checked here rather than where it is spawned — see
+/// [`validate`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreTurn {
+    /// The program and its arguments.
+    pub command: Vec<String>,
+    /// What this view is called, in the turn's context and on the stream.
+    ///
+    /// A name the *member's own prose* can refer to — "read the queue view" — so
+    /// it is the operator's word rather than the program's. Absent is the program
+    /// itself, which is a name too, just a less useful one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// How many seconds this command may take before the turn goes on without
+    /// it. [`DEFAULT_PRE_TURN_SECONDS`] when it names none.
+    ///
+    /// Its own bound, deliberately unrelated to the member's turn: a member with
+    /// no per-turn deadline at all — a single-sided member is one — would
+    /// otherwise wait on a hung view forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+}
+
+impl PreTurn {
+    /// How long this command may run, which is what it named or the default.
+    #[must_use]
+    pub fn seconds(&self) -> u64 {
+        self.timeout.unwrap_or(DEFAULT_PRE_TURN_SECONDS)
+    }
+
+    /// What this view is called: the label its author gave it, else the program.
+    ///
+    /// Never empty for a command [`validate`] accepted, because that refuses both
+    /// an empty label and an empty program.
+    #[must_use]
+    pub fn view(&self) -> &str {
+        match &self.label {
+            Some(label) => label,
+            None => self.command.first().map_or("", String::as_str),
+        }
+    }
 }
 
 /// The agent side of a onejudge member.
@@ -264,11 +329,38 @@ fn default_stream() -> bool {
 /// own clock range, so it refuses the typo without refusing a cadence.
 pub const MAX_SCHEDULE_SECONDS: u64 = u32::MAX as u64;
 
+/// How long a [`PreTurn`] command that names no `timeout` may run.
+///
+/// A view is a thing a turn *waits on*, so this is the span past which waiting
+/// costs more than the context is worth. Half a minute is generous for reading
+/// prepared state off a disk or a socket and short enough that a member whose
+/// every view is wedged still opens its turn promptly.
+pub const DEFAULT_PRE_TURN_SECONDS: u64 = 30;
+
+/// The longest a [`PreTurn`] command may be given, whatever it names.
+///
+/// Not a preference: the ceiling is what keeps this feature from becoming a way
+/// to wedge a member. Every declared view timing out costs
+/// [`MAX_PRE_TURN_COMMANDS`] × this — twenty minutes — which is inside
+/// [`crate::liveness::DEFAULT_STALL_TIMEOUT`], so a member cannot be held past
+/// its own supervision by the views it declared.
+pub const MAX_PRE_TURN_SECONDS: u64 = 300;
+
+/// How many [`PreTurn`] commands one member may declare.
+///
+/// Each view is bounded on its own
+/// ([`crate::preturn::MAX_PRE_TURN_OUTPUT_BYTES`]), and a list nobody bounded
+/// would make the *total* injected context unbounded again — which is the cost
+/// the per-view bound exists to stop. Four is a prepared view, a queue, a
+/// timeline, and one more; a member wanting a fifth wants one command that
+/// assembles them.
+pub const MAX_PRE_TURN_COMMANDS: usize = 4;
+
 /// The first graph schema version this crate still reads.
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// How a member's own `task` is read: as the prose it has always been, or as a
 /// template naming the run's task.
@@ -348,6 +440,17 @@ pub const FIRST_EVENT_FILTER_VERSION: u32 = 5;
 /// Omitting it is unaffected under every version: a name resolves to a shipped
 /// persona and anything else to a path or URL, exactly as before.
 pub const FIRST_PERSONA_CATALOG_VERSION: u32 = 6;
+
+/// The first graph schema version in which a single-sided member may declare
+/// [`pre_turn`](OneharnessMember::pre_turn) commands.
+///
+/// A gate on the *field*, the way [`FIRST_MEMBER_JOB_VERSION`] is one: a member
+/// that declares none behaves exactly as it always did — no command is run and
+/// the instruction its turn receives is untouched — so a document written before
+/// this existed is unaffected under every version. What the gate buys is that a
+/// document *using* it says which schema it was written against, rather than
+/// being handed to a build that would silently run no view at all.
+pub const FIRST_PRE_TURN_VERSION: u32 = 7;
 
 /// The first graph schema version in which a single-sided member may carry its
 /// own [`task`](OneharnessMember::task) and [`dir`](OneharnessMember::dir).
@@ -544,6 +647,7 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                          is no job — omit it to run the task the graph was given"
                     )));
                 }
+                pre_turn(name, member, graph.version)?;
                 if let Some(schedule) = member.schedule {
                     if schedule.every == 0 {
                         return Err(Error::InvalidConfig(format!(
@@ -576,6 +680,86 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                         }
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Everything a member's [`pre_turn`](OneharnessMember::pre_turn) list has to be
+/// before any of it reaches a process.
+///
+/// This is the trust boundary for a **declared command**, and it is the same one
+/// a graph's `env:` block and a command judge already sit behind: a value that
+/// arrives from a YAML document and ends up at `Command::spawn` is checked where
+/// the document is read, so a typo is `validate`'s one-sentence answer rather
+/// than a spawn refusal a member dies on, once per turn, forever.
+///
+/// # Errors
+///
+/// [`crate::error::Error::InvalidConfig`] naming the member, which view, and
+/// what is wrong with it.
+fn pre_turn(name: &str, member: &OneharnessMember, schema: u32) -> Result<(), crate::error::Error> {
+    use crate::error::Error;
+    if member.pre_turn.is_empty() {
+        return Ok(());
+    }
+    if schema < FIRST_PRE_TURN_VERSION {
+        return Err(Error::InvalidConfig(format!(
+            "member {name:?} uses oneharness `pre_turn`, which requires graph schema version \
+             {FIRST_PRE_TURN_VERSION}"
+        )));
+    }
+    if member.pre_turn.len() > MAX_PRE_TURN_COMMANDS {
+        return Err(Error::InvalidConfig(format!(
+            "member {name:?}: `pre_turn` declares {} commands, and every turn waits on all of \
+             them and carries all of their output — the ceiling is {MAX_PRE_TURN_COMMANDS}",
+            member.pre_turn.len()
+        )));
+    }
+    for (at, view) in member.pre_turn.iter().enumerate() {
+        let at = format!("member {name:?}: `pre_turn[{at}]`");
+        // A program, and a program that is a name rather than whitespace. An
+        // empty list is a view that runs nothing; a blank program is a spawn of
+        // the current directory on POSIX and of nothing at all on Windows.
+        let Some(program) = view
+            .command
+            .first()
+            .filter(|program| !program.trim().is_empty())
+        else {
+            return Err(Error::InvalidConfig(format!(
+                "{at}: `command` is the program this view runs, and an empty one names none — it \
+                 is an argv this run spawns directly, so the program is its first element"
+            )));
+        };
+        // A NUL cannot cross into a process on either platform: POSIX arguments
+        // are NUL-terminated and Windows refuses one outright, so a word carrying
+        // one is refused here rather than becoming a spawn error every turn.
+        if let Some(word) = view.command.iter().find(|word| word.contains('\0')) {
+            return Err(Error::InvalidConfig(format!(
+                "{at}: {word:?} carries a NUL, which no argument can — this is an argv handed \
+                 straight to a process"
+            )));
+        }
+        if let Some(label) = &view.label {
+            // The label names the view inside the turn's own context, so a blank
+            // one names nothing and a control character forges the framing around
+            // it — see `crate::preturn`, which is what renders it.
+            if label.trim().is_empty() || label.chars().any(char::is_control) {
+                return Err(Error::InvalidConfig(format!(
+                    "{at}: `label` {label:?} is what this view is called in the turn's context, \
+                     so it cannot be blank or carry a control character — omit it to be called \
+                     {program:?}"
+                )));
+            }
+        }
+        if let Some(seconds) = view.timeout {
+            if seconds == 0 || seconds > MAX_PRE_TURN_SECONDS {
+                return Err(Error::InvalidConfig(format!(
+                    "{at}: `timeout` of {seconds} seconds is not a bound this view can run under \
+                     — it is between 1 and {MAX_PRE_TURN_SECONDS}, and omitting it is \
+                     {DEFAULT_PRE_TURN_SECONDS}"
+                )));
             }
         }
     }
@@ -1007,6 +1191,149 @@ mod tests {
         // An `events` block naming no filter is the stream every graph already
         // has, and is not a refusal.
         assert!(validate(&parse(&document("    include: [{kind: '*'}]\n"))).is_ok());
+    }
+
+    /// A member's pre-turn views are a schema-gated field, and a member that
+    /// declares none serializes without the key — so a document written before
+    /// this existed round-trips unchanged and keeps running exactly as it did.
+    #[test]
+    fn pre_turn_views_require_the_schema_that_has_them() {
+        let document = |version: u32| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n  watcher:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n",
+                    "    pre_turn:\n      - {{command: [queue-depth, --json], label: queue}}\n",
+                ),
+                version
+            )
+        };
+        let graph = parse(&document(FIRST_PRE_TURN_VERSION));
+        validate(&graph).expect("the schema that has the field accepts it");
+        let Member::Oneharness(watcher) = &graph.members["watcher"] else {
+            panic!("a single-sided member declares the views")
+        };
+        assert_eq!(
+            watcher.pre_turn,
+            vec![PreTurn {
+                command: vec!["queue-depth".into(), "--json".into()],
+                label: Some("queue".into()),
+                timeout: None,
+            }]
+        );
+        // What an omitted `timeout` and an omitted `label` mean, read through the
+        // accessors every caller uses rather than through the fields.
+        assert_eq!(watcher.pre_turn[0].seconds(), DEFAULT_PRE_TURN_SECONDS);
+        assert_eq!(watcher.pre_turn[0].view(), "queue");
+        assert_eq!(
+            PreTurn {
+                command: vec!["queue-depth".into()],
+                label: None,
+                timeout: Some(5),
+            }
+            .view(),
+            "queue-depth"
+        );
+
+        for older in FIRST_SCHEMA_VERSION..FIRST_PRE_TURN_VERSION {
+            let err =
+                validate(&parse(&document(older))).expect_err("the field postdates this schema");
+            assert!(err.to_string().contains("`pre_turn`"), "{older}: {err}");
+            assert!(
+                err.to_string().contains(&format!(
+                    "requires graph schema version {FIRST_PRE_TURN_VERSION}"
+                )),
+                "{older}: {err}"
+            );
+        }
+
+        // And a member declaring none validates under every schema this build
+        // reads, and serializes without the key.
+        for version in FIRST_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let unchanged = ONE_MEMBER.replace("version: 1", &format!("version: {version}"));
+            let graph = parse(&unchanged);
+            let Member::Oneharness(build) = &graph.members["build"] else {
+                panic!("the member is single-sided")
+            };
+            assert!(build.pre_turn.is_empty());
+            assert!(validate(&graph).is_ok(), "{unchanged}");
+            let rendered = serde_norway::to_string(&graph).expect("a graph serializes");
+            assert!(!rendered.contains("pre_turn"), "{rendered}");
+        }
+    }
+
+    /// A view that could never run, or could never be waited on, is refused with
+    /// the reason — before any of it reaches a process.
+    #[test]
+    fn a_pre_turn_view_a_run_could_not_honour_is_refused() {
+        let document = |views: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n  watcher:\n    kind: oneharness\n",
+                    "    oneharness_config: ./a.toml\n    pre_turn:\n{}",
+                ),
+                SCHEMA_VERSION, views
+            )
+        };
+        for (views, expected) in [
+            ("      - {command: []}\n", "an empty one names none"),
+            ("      - {command: ['  ']}\n", "an empty one names none"),
+            ("      - {command: [\"q\\0z\"]}\n", "carries a NUL"),
+            (
+                "      - {command: [q], label: ' '}\n",
+                "cannot be blank or carry a control character",
+            ),
+            (
+                "      - {command: [q], label: \"a\\nb\"}\n",
+                "cannot be blank or carry a control character",
+            ),
+            (
+                "      - {command: [q], timeout: 0}\n",
+                "is not a bound this view can run under",
+            ),
+            (
+                &format!(
+                    "      - {{command: [q], timeout: {}}}\n",
+                    MAX_PRE_TURN_SECONDS + 1
+                ),
+                "is not a bound this view can run under",
+            ),
+            (
+                &"      - {command: [q]}\n".repeat(MAX_PRE_TURN_COMMANDS + 1),
+                "the ceiling is",
+            ),
+        ] {
+            let err = validate(&parse(&document(views))).unwrap_err();
+            assert!(err.to_string().contains(expected), "{views}: {err}");
+            assert!(err.to_string().contains("watcher"), "{views}: {err}");
+        }
+        // The ceiling itself is a list a member may have, and a timeout at the
+        // ceiling is one it may name.
+        assert!(validate(&parse(&document(
+            &"      - {command: [q]}\n".repeat(MAX_PRE_TURN_COMMANDS)
+        )))
+        .is_ok());
+        assert!(validate(&parse(&document(&format!(
+            "      - {{command: [q], timeout: {MAX_PRE_TURN_SECONDS}}}\n"
+        ))))
+        .is_ok());
+    }
+
+    /// The views belong to a single-sided member, and a two-party one naming them
+    /// is refused by the field's name — its turns are onejudge's to open, so a
+    /// key accepted there would be one nothing ever ran.
+    #[test]
+    fn a_two_party_member_cannot_declare_pre_turn_views() {
+        let document = concat!(
+            "version: 7\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+            "    base_config: ./b.yaml\n    mode: bypass\n",
+            "    agent: {oneharness_config: ./a.toml}\n",
+            "    judge: {oneharness_config: ./j.toml}\n",
+            "    pre_turn:\n      - {command: [queue-depth]}\n",
+        );
+        let err = serde_norway::from_str::<GraphConfig>(document)
+            .expect_err("a two-party member has no pre_turn");
+        assert!(err.to_string().contains("pre_turn"), "{err}");
     }
 
     /// The contract's own default: a side streams unless a graph turns it off.

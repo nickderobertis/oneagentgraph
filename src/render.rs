@@ -22,6 +22,21 @@ pub fn line(envelope: &Envelope) -> String {
             program if program.is_empty() => field(envelope, "engine"),
             program => program,
         },
+        // The view, what became of it, and — for one that produced no context —
+        // the reason, which is the whole point of publishing it.
+        EventKind::PreTurnContext => {
+            let head = format!(
+                "{} {}",
+                field(envelope, "label"),
+                field(envelope, "outcome")
+            );
+            let detail = field(envelope, "detail");
+            if detail.is_empty() {
+                format!("{head} ({} bytes)", field(envelope, "bytes"))
+            } else {
+                format!("{head}: {}", detail.lines().next_back().unwrap_or_default())
+            }
+        }
         EventKind::TurnStarted => turn_head(envelope),
         EventKind::TurnActivity => {
             // A result names no tool — it answers one — so its `kind` is what
@@ -283,6 +298,21 @@ mod tests {
                 EventKind::MemberStarted,
                 json!({"runner": "library", "engine": "onejudge"}),
                 "member-started onejudge",
+            ),
+            (
+                EventKind::PreTurnContext,
+                json!({"label": "queue", "command": ["queue-depth"],
+                       "outcome": "captured", "bytes": 214}),
+                "pre-turn-context queue captured (214 bytes)",
+            ),
+            // A view that contributed nothing renders the reason instead, which
+            // is what an operator watching a live dispatch is reading it for.
+            (
+                EventKind::PreTurnContext,
+                json!({"label": "queue", "command": ["queue-depth"],
+                       "outcome": "failed", "bytes": 0,
+                       "detail": "connecting\nqueue-depth exited 2: no such queue"}),
+                "pre-turn-context queue failed: queue-depth exited 2: no such queue",
             ),
             (
                 EventKind::TurnStarted,

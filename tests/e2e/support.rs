@@ -461,6 +461,17 @@ pub fn fake_provider() -> String {
     env!("CARGO_BIN_EXE_oneagentgraph-fake-provider").to_string()
 }
 
+/// The compiled program a journey's graph declares as a `pre_turn` view.
+///
+/// Not a fake of anything this crate owns: a view *is* an argv the operator
+/// supplies, so this is the input to that capability rather than a seam standing
+/// in for part of it. Everything around it in those journeys is real — the
+/// validation, the member's own process group, the bound, the pipes, and the
+/// prompt the real harness is handed.
+pub fn fake_view() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-view").to_string()
+}
+
 /// The real `oneharness` this suite drives.
 ///
 /// Resolved from the environment so a host or CI can pin an install, and

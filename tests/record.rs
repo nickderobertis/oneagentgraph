@@ -21,12 +21,13 @@
 //! * `member-started.json` — the three shapes of the payload a supervisor reads
 //!   first, on the same terms: one per runner, plus the one a member publishes
 //!   when it comes up without taking a turn.
-//! * `graph.v4.yaml` / `graph.v5.yaml` / `graph.v6.yaml` — the graph config
+//! * `graph.v4.yaml` … `graph.v7.yaml` — the graph config
 //!   schema, which is versioned for the same reason and read on the *other* side
 //!   of the same promise: this build does not write these, an author does, and a
 //!   document written against an older schema has to keep meaning what it said.
 //!   Each differs from the one before it by exactly what that version added: the
-//!   `events` block in version 5, the `personas` catalog in version 6.
+//!   `events` block in version 5, the `personas` catalog in version 6, the
+//!   member's own pre-turn views in version 7.
 //!
 //! Regenerating an old golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -44,8 +45,8 @@ use std::collections::BTreeMap;
 
 use oneagentgraph::config::{
     AgentSide, ConfigRef, Events, GraphConfig, JudgeHarness, JudgeSide, Member, OneharnessMember,
-    OnejudgeMember, Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION,
-    SCHEMA_VERSION,
+    OnejudgeMember, PreTurn, Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION,
+    FIRST_PRE_TURN_VERSION, SCHEMA_VERSION,
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
@@ -61,7 +62,8 @@ use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
 /// One member of each kind, so the golden covers both arms of the tagged union;
 /// the `events` block version 5 added — carrying a matcher of each shape the
 /// grammar has: a source, a kind glob, and the reserved labels; and the
-/// `personas` catalog version 6 added.
+/// `personas` catalog version 6 added; and the member's own pre-turn views
+/// version 7 added.
 fn golden_graph() -> GraphConfig {
     GraphConfig {
         version: SCHEMA_VERSION,
@@ -101,6 +103,11 @@ fn golden_graph() -> GraphConfig {
                         start_after: Some(1800),
                         resettable: true,
                     }),
+                    pre_turn: vec![PreTurn {
+                        command: vec!["./views/queue-depth".into(), "--json".into()],
+                        label: Some("queue".into()),
+                        timeout: Some(20),
+                    }],
                     deps: Vec::new(),
                 }),
             ),
@@ -132,7 +139,7 @@ fn golden_graph() -> GraphConfig {
 /// back to the same graph, and validates as a runnable one.
 #[test]
 fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
-    let golden = include_str!("golden/graph.v6.yaml");
+    let golden = include_str!("golden/graph.v7.yaml");
     let written = serde_norway::to_string(&golden_graph()).expect("a graph serializes");
     assert_eq!(
         written, golden,
@@ -164,6 +171,64 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
     assert_eq!(
         read.personas.as_deref(),
         Some(std::path::Path::new("./personas"))
+    );
+
+    // The views this version added, read back rather than merely parsed for the
+    // same reason: a list that survived the trip empty is a member that opens
+    // every turn by going and looking, which is the state *this* version exists
+    // to end.
+    let Member::Oneharness(reporter) = &read.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert_eq!(reporter.pre_turn.len(), 1);
+    assert_eq!(reporter.pre_turn[0].view(), "queue");
+    assert_eq!(reporter.pre_turn[0].seconds(), 20);
+}
+
+/// A graph written against the schema before `pre_turn` existed reads unchanged,
+/// gains no `pre_turn` key when written back, and is refused by the field's name
+/// if a member declares one anyway.
+///
+/// The same three-part promise the two journeys below hold, for the field version
+/// 7 added: a member that predates it starts no extra process and receives
+/// exactly the instruction it always did, and a document declaring that schema
+/// and asking for a view is told which version has it rather than being run with
+/// the views silently dropped.
+#[test]
+fn a_version_six_graph_still_reads_and_is_refused_the_views_it_predates() {
+    let golden = include_str!("golden/graph.v6.yaml");
+    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 6 graph still reads");
+    assert_eq!(graph.version, FIRST_PRE_TURN_VERSION - 1);
+    let Member::Oneharness(reporter) = &graph.members["reporter"] else {
+        panic!("reporter is oneharness")
+    };
+    assert!(
+        reporter.pre_turn.is_empty(),
+        "version 6 has no pre-turn views"
+    );
+    oneagentgraph::config::validate(&graph).expect("a version 6 graph still validates");
+
+    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    assert!(
+        !written.contains("pre_turn"),
+        "an absent view list must stay absent, or an older reader now meets a key it \
+         rejects: {written}"
+    );
+    assert_eq!(written, golden, "a version 6 document did not round-trip");
+
+    let asking: GraphConfig = serde_norway::from_str(&golden.replace(
+        "    persona: ./reporter.yaml\n",
+        "    persona: ./reporter.yaml\n    pre_turn:\n    - command: [queue-depth]\n",
+    ))
+    .expect("it still parses");
+    let error = oneagentgraph::config::validate(&asking)
+        .expect_err("the field postdates the schema this document declares");
+    assert!(error.to_string().contains("`pre_turn`"), "{error}");
+    assert!(
+        error.to_string().contains(&format!(
+            "requires graph schema version {FIRST_PRE_TURN_VERSION}"
+        )),
+        "{error}"
     );
 }
 

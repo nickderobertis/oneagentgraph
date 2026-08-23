@@ -102,6 +102,9 @@ pub enum EventKind {
     GraphStarted,
     /// A member's first process started.
     MemberStarted,
+    /// One of a member's declared pre-turn commands ran, and this is what it
+    /// contributed to the turn about to begin; see [`PreTurnContext`].
+    PreTurnContext,
     /// A turn began on one side of a member's conversation.
     TurnStarted,
     /// A bounded tool summary from inside a turn; see [`TurnActivity`].
@@ -147,6 +150,7 @@ impl EventKind {
         match self {
             EventKind::GraphStarted => "graph-started",
             EventKind::MemberStarted => "member-started",
+            EventKind::PreTurnContext => "pre-turn-context",
             EventKind::TurnStarted => "turn-started",
             EventKind::TurnActivity => "turn-activity",
             EventKind::TurnMessage => "turn-message",
@@ -687,6 +691,87 @@ impl Party {
         }
     }
 }
+
+// llmlint: ignore-block[boundary_inputs_validated] on exactly the terms the block
+// below states for the four payloads after it: this pair is what this crate
+// *writes*, minted correct at the one site that builds it (`crate::preturn`,
+// which is also where the declared command was already validated by
+// `crate::config::validate`), and `Deserialize` is here so the contract test can
+// round-trip it and a consumer can read it back. The trust boundary an envelope
+// crosses is `deny_unknown_fields`, which it carries.
+/// The payload of an [`EventKind::PreTurnContext`] event: what one of a member's
+/// declared pre-turn commands contributed to the turn about to begin.
+///
+/// One per declared view per turn, published whether the view produced context
+/// or not — a supervisor told to open its turn by reading a prepared view has to
+/// be able to see, from the run's own stream, that there was none to read. A
+/// degradation nobody published is exactly the failure this whole capability is a
+/// fix for: a report about state, made without the state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PreTurnContext {
+    /// What the view is called: the member's own `label`, else its program.
+    pub label: String,
+    /// The argv the member declared, as declared.
+    ///
+    /// The whole of it rather than a bounded rendering, on the same terms as a
+    /// child runner's [`Runner::Process::args`]: this is a value out of the
+    /// operator's own graph document, not output from anything, and what an
+    /// operator reading a degradation needs first is which command it was.
+    pub command: Vec<String>,
+    /// What became of it.
+    pub outcome: PreTurnOutcome,
+    /// How many bytes of it reached the turn's context; `0` for every outcome
+    /// but [`PreTurnOutcome::Captured`].
+    pub bytes: u64,
+    /// Whether that output was cut at
+    /// [`crate::preturn::MAX_PRE_TURN_OUTPUT_BYTES`]. The turn's own context says
+    /// so too — a cut a reader cannot see is a view that reads as complete.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+    /// Why a view that captured nothing captured nothing, bounded by
+    /// [`MAX_PAYLOAD_TEXT_BYTES`]: the spawn's own error, the exit status and the
+    /// tail of standard error, or the bound that expired. Absent for a view that
+    /// produced context, which has nothing to explain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+/// What became of one pre-turn command.
+///
+/// A closed set for [`Cause`]'s reason: this is what a supervisor branches on to
+/// tell "the view says the queue is empty" from "there was no view", and the two
+/// are opposite facts. Every variant but [`Captured`](Self::Captured) is a turn
+/// that happened *without* the context it declared — never a member that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PreTurnOutcome {
+    /// The command ran, exited `0`, and printed something.
+    Captured,
+    /// The command ran and exited `0` having printed nothing at all.
+    Empty,
+    /// The command ran and exited non-zero, or was killed by a signal.
+    Failed,
+    /// The command could not be started at all.
+    Unspawnable,
+    /// The command did not finish inside its own bound and was stopped.
+    TimedOut,
+}
+
+impl PreTurnOutcome {
+    /// This outcome's spelling on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PreTurnOutcome::Captured => "captured",
+            PreTurnOutcome::Empty => "empty",
+            PreTurnOutcome::Failed => "failed",
+            PreTurnOutcome::Unspawnable => "unspawnable",
+            PreTurnOutcome::TimedOut => "timed_out",
+        }
+    }
+}
+// llmlint: ignore-end[boundary_inputs_validated]
 
 // llmlint: ignore-block[boundary_inputs_validated] the four payloads below are
 // what this crate *writes*, and every value in them is made correct where it is

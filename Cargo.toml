@@ -49,10 +49,11 @@ include = [
 name = "oneagentgraph"
 path = "src/main.rs"
 
-# The deterministic doubles the e2e suite drives as real subprocesses: one stands
-# in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, the
-# other speaks onejudge's `CommandProvider` JSON-lines protocol. Both are behind
-# `test-doubles` so a published `cargo install oneagentgraph` never builds them.
+# The deterministic programs the e2e suite drives as real subprocesses: one stands
+# in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, one
+# speaks onejudge's `CommandProvider` JSON-lines protocol, and one is a program a
+# journey's graph points a `pre_turn` view at. All are behind `test-doubles` so a
+# published `cargo install oneagentgraph` never builds them.
 [[bin]]
 name = "oneagentgraph-fake-harness"
 path = "src/bin/fake_harness.rs"
@@ -63,14 +64,23 @@ name = "oneagentgraph-fake-provider"
 path = "src/bin/fake_provider.rs"
 required-features = ["test-doubles"]
 
+# The program a journey's graph declares as a `pre_turn` view. Not a seam: a view
+# is an argv the operator supplies, so this is the *input* to that capability
+# rather than a stand-in for any part of it — see the binary's own documentation.
+[[bin]]
+name = "oneagentgraph-fake-view"
+path = "src/bin/fake_view.rs"
+required-features = ["test-doubles"]
+
 [lib]
 name = "oneagentgraph"
 path = "src/lib.rs"
 
 [features]
-# The deterministic doubles the e2e suite spawns: a paid-harness stand-in and a
-# onejudge `CommandProvider` backend. Non-default, so neither is ever in a
-# consumer's build; `just check` and the coverage run enable them.
+# The deterministic programs the e2e suite spawns: a paid-harness stand-in, a
+# onejudge `CommandProvider` backend, and a program a journey points a `pre_turn`
+# view at. Non-default, so none is ever in a consumer's build; `just check` and
+# the coverage run enable them.
 test-doubles = []
 
 [dependencies]

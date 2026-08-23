@@ -15,18 +15,19 @@ use std::collections::BTreeSet;
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
-    Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION, FIRST_SCHEMA_VERSION,
-    FIRST_START_AFTER_VERSION, SCHEMA_VERSION,
+    PreTurn, Schedule, DEFAULT_PRE_TURN_SECONDS, FIRST_EVENT_FILTER_VERSION,
+    FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION, FIRST_SCHEMA_VERSION,
+    FIRST_START_AFTER_VERSION, MAX_PRE_TURN_COMMANDS, MAX_PRE_TURN_SECONDS, SCHEMA_VERSION,
 };
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
 use oneagentgraph::event::{
     session_label, Artifact, Cause, Disposition, Envelope, EventFilter, EventKind,
-    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Party, Role,
-    Runner, Source, TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
-    ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
-    ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
+    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Party,
+    PreTurnContext, PreTurnOutcome, Role, Runner, Source, TurnActivity, TurnCompleted,
+    TurnInterrupted, TurnMessage, TurnStarted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS,
+    MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS, ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
 use oneagentgraph::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
@@ -47,6 +48,7 @@ const README: &str = include_str!("../README.md");
 const ALL_EVENT_KINDS: &[EventKind] = &[
     EventKind::GraphStarted,
     EventKind::MemberStarted,
+    EventKind::PreTurnContext,
     EventKind::TurnStarted,
     EventKind::TurnActivity,
     EventKind::TurnMessage,
@@ -1354,6 +1356,11 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
                 start_after: Some(1800),
                 resettable: true,
             }),
+            pre_turn: vec![PreTurn {
+                command: vec!["./views/queue-depth".to_string(), "--json".to_string()],
+                label: Some("queue".to_string()),
+                timeout: Some(20),
+            }],
             deps: Vec::new(),
         }
     );
@@ -1488,6 +1495,196 @@ fn the_documented_persona_catalog_is_gated_and_omitted_when_unset() {
     }
 }
 
+/// The documented pre-turn views are optional, gated on the schema that has
+/// them, and omitted from a member that declares none — so a document written
+/// before they existed round-trips byte-identically and its turns are untouched.
+#[test]
+fn the_documented_pre_turn_views_are_gated_and_omitted_when_unset() {
+    let documented = fenced_block("yaml");
+    assert!(
+        documented.contains("pre_turn:"),
+        "the documented reporter must show its own pre-turn views"
+    );
+    let mut graph: GraphConfig =
+        serde_norway::from_str(&documented).expect("the documented graph parses");
+    let Some(Member::Oneharness(reporter)) = graph.members.get("reporter") else {
+        panic!("reporter is oneharness")
+    };
+    let view = reporter
+        .pre_turn
+        .first()
+        .expect("the reporter declares one");
+    assert_eq!(view.view(), "queue");
+    assert_eq!(view.seconds(), 20);
+    assert!(
+        view.seconds() <= MAX_PRE_TURN_SECONDS,
+        "the documented view names a bound this build would refuse"
+    );
+    assert!(reporter.pre_turn.len() <= MAX_PRE_TURN_COMMANDS);
+
+    // A member that declares none serializes without the key, so a graph written
+    // before this existed is a document an older reader still accepts.
+    let Some(Member::Oneharness(reporter)) = graph.members.get_mut("reporter") else {
+        panic!("reporter is oneharness")
+    };
+    reporter.pre_turn.clear();
+    let rendered = serde_norway::to_string(&graph).expect("the graph serializes");
+    assert!(
+        !rendered.contains("pre_turn"),
+        "an absent view list must stay absent for older consumers: {rendered}"
+    );
+
+    for older in FIRST_SCHEMA_VERSION..FIRST_PRE_TURN_VERSION {
+        let older = documented.replace(
+            &format!("version: {SCHEMA_VERSION}"),
+            &format!("version: {older}"),
+        );
+        let mut graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        // The documented graph's catalog and events block postdate every schema
+        // in this loop too; dropping them leaves the views as the one refusal.
+        graph.personas = None;
+        graph.events = None;
+        let error = oneagentgraph::config::validate(&graph)
+            .expect_err("the field postdates this schema version");
+        assert!(error.to_string().contains("`pre_turn`"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_PRE_TURN_VERSION}"
+            )),
+            "{error}"
+        );
+    }
+}
+
+/// The bounds the document states are the constants this build applies, and a
+/// view that names no bound gets the one the document names.
+#[test]
+fn the_documented_pre_turn_bounds_are_the_ones_this_build_holds_a_view_to() {
+    for (stated, held) in [
+        (
+            format!("`timeout` defaults to {DEFAULT_PRE_TURN_SECONDS} seconds"),
+            "the default bound",
+        ),
+        (
+            format!("cannot exceed {MAX_PRE_TURN_SECONDS}"),
+            "the bound ceiling",
+        ),
+        (
+            format!(
+                "bounded** at {} bytes per view",
+                oneagentgraph::preturn::MAX_PRE_TURN_OUTPUT_BYTES
+            ),
+            "the output bound",
+        ),
+        (
+            format!("at most {MAX_PRE_TURN_COMMANDS} views"),
+            "the view ceiling",
+        ),
+    ] {
+        assert!(
+            CONTRACT.contains(&stated),
+            "{held} in docs/contract.md and this build's constant disagree; the document must \
+             state {stated:?}"
+        );
+    }
+    // Every view timing out still costs less than the bound a member is
+    // supervised under, which is the property that keeps this from being a way
+    // to wedge one.
+    assert!(
+        std::time::Duration::from_secs(MAX_PRE_TURN_SECONDS * MAX_PRE_TURN_COMMANDS as u64)
+            < DEFAULT_STALL_TIMEOUT
+    );
+    // And a view that names no bound is held to the documented default.
+    assert_eq!(
+        PreTurn {
+            command: vec!["queue-depth".to_string()],
+            label: None,
+            timeout: None,
+        }
+        .seconds(),
+        DEFAULT_PRE_TURN_SECONDS
+    );
+}
+
+/// The documented `pre-turn-context` payload is the one this build publishes,
+/// field for field and outcome for outcome.
+#[test]
+fn a_pre_turn_context_payload_carries_the_documented_view() {
+    let documented = CONTRACT
+        .lines()
+        .find(|line| line.starts_with("Event kinds:"))
+        .expect("the contract names its event kinds");
+    for field in [
+        "label",
+        "command",
+        "outcome",
+        "bytes",
+        "truncated",
+        "detail",
+    ] {
+        assert!(
+            documented.contains(&format!("`{field}`")),
+            "the contract no longer names the `{field}` this payload carries"
+        );
+    }
+
+    let captured = PreTurnContext {
+        label: "queue".to_string(),
+        command: vec!["./views/queue-depth".to_string(), "--json".to_string()],
+        outcome: PreTurnOutcome::Captured,
+        bytes: 214,
+        truncated: false,
+        detail: None,
+    };
+    let wire = serde_json::to_value(&captured).expect("serializes");
+    assert_eq!(wire["outcome"], json!("captured"));
+    assert_eq!(wire["bytes"], json!(214));
+    // Both absent rather than false/null: a view that was not cut and has
+    // nothing to explain says neither, so an older consumer meets no new key.
+    assert!(wire.get("truncated").is_none(), "{wire}");
+    assert!(wire.get("detail").is_none(), "{wire}");
+    assert_eq!(
+        serde_json::from_value::<PreTurnContext>(wire).expect("reads back"),
+        captured
+    );
+
+    // Every outcome the document names is one this build spells the same way.
+    for outcome in [
+        PreTurnOutcome::Captured,
+        PreTurnOutcome::Empty,
+        PreTurnOutcome::Failed,
+        PreTurnOutcome::Unspawnable,
+        PreTurnOutcome::TimedOut,
+    ] {
+        assert!(
+            documented.contains(&format!("`{}`", outcome.as_str())),
+            "the contract does not name the `{}` outcome this build publishes",
+            outcome.as_str()
+        );
+        assert_eq!(
+            serde_json::to_value(outcome).expect("serializes"),
+            json!(outcome.as_str())
+        );
+    }
+
+    // The reason a degraded view carries is bounded like every payload text
+    // field, and the event is not one a consumer renders as a transcript turn.
+    let cut = PreTurnContext {
+        outcome: PreTurnOutcome::Failed,
+        bytes: 0,
+        truncated: true,
+        detail: Some("x".repeat(MAX_PAYLOAD_TEXT_BYTES)),
+        ..captured
+    };
+    let wire = serde_json::to_value(&cut).expect("serializes");
+    assert_eq!(wire["truncated"], json!(true));
+    assert_eq!(
+        wire["detail"].as_str().map(str::len),
+        Some(MAX_PAYLOAD_TEXT_BYTES)
+    );
+    assert!(!EventKind::PreTurnContext.carries_session());
+}
+
 /// The document's rule for telling a catalog *name* from a path or URL is the
 /// crate's own [`is_persona_name`], and every form the document names is decided
 /// the way it says.
@@ -1603,6 +1800,19 @@ fn the_documented_member_job_fields_round_trip_and_stay_omitted_when_unset() {
     assert_eq!(reparsed, graph);
 }
 
+/// Everything the documented graph carries that postdates `schedule.start_after`,
+/// removed — so a document read under an older schema is refused for the field
+/// that journey is about rather than for whichever newer one comes first.
+fn drop_what_postdates_the_schedule(graph: &mut GraphConfig) {
+    graph.events = None;
+    graph.personas = None;
+    for member in graph.members.values_mut() {
+        if let Member::Oneharness(member) = member {
+            member.pre_turn.clear();
+        }
+    }
+}
+
 /// The contract documents `start_after`, a schedule naming none waits `every`
 /// from the schema that has it, and one written before serializes without it.
 ///
@@ -1657,12 +1867,11 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
         );
         let mut graph: GraphConfig =
             serde_norway::from_str(&declared).expect("an older graph parses");
-        // The documented graph also carries an `events` block and a `personas`
-        // catalog, both of which postdate every schema in this loop; dropping
-        // them leaves the schedule as the one thing being read under the older
-        // version.
-        graph.events = None;
-        graph.personas = None;
+        // The documented graph also carries an `events` block, a `personas`
+        // catalog, and a member's own pre-turn views, all of which postdate
+        // every schema in this loop; dropping them leaves the schedule as the
+        // one thing being read under the older version.
+        drop_what_postdates_the_schedule(&mut graph);
         oneagentgraph::config::validate(&graph)
             .unwrap_or_else(|err| panic!("version {older} must still validate: {err}"));
         let named = document.replacen(
@@ -1671,8 +1880,7 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
             1,
         );
         let mut graph: GraphConfig = serde_norway::from_str(&named).expect("the graph parses");
-        graph.events = None;
-        graph.personas = None;
+        drop_what_postdates_the_schedule(&mut graph);
         let refused =
             oneagentgraph::config::validate(&graph).expect_err("start_after postdates this schema");
         assert!(
