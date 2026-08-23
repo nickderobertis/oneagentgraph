@@ -83,6 +83,18 @@ over projects by hand in a recipe, and declare a cross-project dependency in the
 consuming `project.json` — an undeclared one silently drops that project out of
 `nx affected`, so a pull request runs a gate that never touched it.
 
+**The judged tier is memoized, because the judge is not deterministic.** It has
+returned opposite verdicts on one unchanged tree inside a single `gate`, so
+`just lint-llm-diff` runs through a cached Nx target keyed on the whole
+workspace, the resolved base commit, and a fingerprint of the judge
+configuration — one tree against one base gets one answer. Only a green is
+cached: findings and a toolchain that never reached a verdict both re-judge.
+`just lint-llm-diff <base> --skip-nx-cache` is the one supported re-judge lever,
+and an ambient `NX_SKIP_NX_CACHE` is reported and ignored by this tier alone. The
+report is `.logs/llmlint-diff.report`, the target's declared Nx output, rather
+than what Nx forwarded — Nx resolves a task on its child's `exit`, which can beat
+the drain of the pipe carrying the last thing it said.
+
 ## Invariants (non-negotiable)
 
 - **Coverage is enforced at 95% line coverage.** `just check` fails below it.

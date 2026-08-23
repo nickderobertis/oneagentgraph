@@ -10,11 +10,13 @@
       "{workspaceRoot}/justfile"
     ],
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "wholeWorkspace": ["{workspaceRoot}/**/*"],
     "crateSource": [
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/tests/**/*",
       "{workspaceRoot}/docs/contract.md",
       "{workspaceRoot}/docs/persona-format.md",
+      "{workspaceRoot}/scripts/**/*",
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",
@@ -34,6 +36,14 @@
     "check": {
       "cache": false,
       "dependsOn": ["format-check", "lint", "test"]
+    },
+    "lint-llm-diff": {
+      "cache": true,
+      "inputs": [
+        "wholeWorkspace",
+        { "env": "LLMLINT_DIFF_BASE_SHA" },
+        { "runtime": "./scripts/llmlint-fingerprint.sh" }
+      ]
     }
   }
 }
