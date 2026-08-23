@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.9](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.8...v0.3.9) - 2026-08-23
+
+### Added
+
+- run scripts before an agent's turn and inject their output into its context ([#77](https://github.com/nickderobertis/oneagentgraph/pull/77))
+
 ## [0.3.8](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.7...v0.3.8) - 2026-08-23
 
 ### Fixed
