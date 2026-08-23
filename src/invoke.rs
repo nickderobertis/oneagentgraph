@@ -136,7 +136,18 @@ pub struct HarnessLaunch {
     /// every other member.
     pub worktree: PathBuf,
     /// The task prose this member's turn is given.
+    ///
+    /// The *member's* prose. What its turn actually receives is this with
+    /// [`views`](Self::views) folded in front of it, which is decided per turn
+    /// rather than here: a scheduled member runs its views every firing, so a
+    /// prompt built once would be the first turn's context served forever.
     pub prompt: String,
+    /// The views run immediately before each of this member's turns, whose output
+    /// is prepended to what that turn receives — see [`crate::preturn`].
+    ///
+    /// Empty for a member that declared none, which is a member no part of that
+    /// module touches.
+    pub views: Vec<crate::preturn::View>,
     /// How this member's turn reports what it did, which is **its own resolved
     /// config's** decision — see [`Reporting`]. Carried as the decision rather
     /// than re-derived at the call, because a run that asked the config twice
@@ -276,6 +287,11 @@ pub fn build(
                     ),
                     prompt: member_task(member.task.as_deref(), context)?,
                     reporting: reporting(&config, &member.oneharness_config.0)?,
+                    views: member
+                        .pre_turn
+                        .iter()
+                        .map(crate::preturn::View::declared)
+                        .collect(),
                 })),
                 persona: persona_label,
                 env: Vec::new(),
@@ -1652,6 +1668,7 @@ mod tests {
             task: Some(task.to_string()),
             dir: None,
             schedule: None,
+            pre_turn: Vec::new(),
             deps: Vec::new(),
         })
     }
@@ -1905,7 +1922,7 @@ mod tests {
             // as `None` — which would hand it back to the config layer that has
             // already answered.
             assert_eq!(
-                launch.request().stream,
+                launch.request(&launch.prompt).stream,
                 Some(streams),
                 "{config:?} produced {launch:?}"
             );

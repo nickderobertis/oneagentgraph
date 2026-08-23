@@ -43,7 +43,7 @@ A graph is YAML — members, the oneharness config each side uses, personas,
 schedules, and dependencies:
 
 ```yaml
-version: 6
+version: 7
 name: node-scope
 members:
   worker:
@@ -63,6 +63,13 @@ by path. A persona is a onejudge config fragment: it is written in onejudge's ow
 field names, and onejudge's schema decides what it may say. [The persona
 format](docs/persona-format.md) documents it, including the `agent:` block
 earlier versions defined, which is now refused with no compatibility path.
+
+A single-sided member may declare `pre_turn` commands — run immediately before
+each of its turns, with what they printed prepended to what that turn is asked.
+A supervisory member's first act becomes reading a prepared view rather than
+spending tool calls rediscovering state that already exists. A view that cannot
+be started, fails, prints nothing, or outruns its own bound leaves the turn
+happening without it and publishes a `pre-turn-context` saying which.
 
 When a member's turn goes the wrong way, `oneagentgraph interrupt RUN MEMBER
 --input "do this instead"` redirects it in place instead of discarding it the way
