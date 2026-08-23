@@ -35,9 +35,24 @@ use std::process::Command;
 /// This checkout, which every journey copies rather than mutates.
 const REPO: &str = env!("CARGO_MANIFEST_DIR");
 /// What the stand-in judge prints when it finds nothing.
-const PASS_VERDICT: &str = "fake-judge: 4 passed, 0 failed";
+///
+/// It reaches the judge through the environment rather than being spliced into
+/// its script: a payload pasted into a shell body is parsed as shell, and a real
+/// judge's report is full of the backticks, `$` and `$(` that would then run.
+/// This same fixture shape in a sibling repository pasted a report line
+/// containing `` `llmlint history <id>` `` into a double-quoted `echo`, which
+/// re-entered the stand-in on `PATH` and forked the host to its process limit. A
+/// parameter expansion of a value the shell never parsed cannot do that, whatever
+/// the value says.
+///
+/// So both payloads carry the backticks a real judge's report is full of, and the
+/// command inside them is one no host has — anyone who re-splices these into the
+/// script gets an assertion failure on a verdict that came back short, rather than
+/// a fork bomb.
+const PASS_VERDICT: &str = "fake-judge: 4 passed, 0 failed — full report: `llmlint-history 0ff1ce`";
 /// What it prints when it does, on the run that also exits non-zero.
-const FAIL_FINDING: &str = "fake-judge finding: robust_shell in scripts/llmlint-judge.sh";
+const FAIL_FINDING: &str = "fake-judge finding: robust_shell in scripts/llmlint-judge.sh — \
+     full report: `llmlint-history 0ff1ce`";
 /// The recipe's provenance line for a run that paid the judge.
 const JUDGED: &str = "judged this diff against base";
 /// The recipe's provenance line for a run that replayed one that already had.
@@ -62,10 +77,10 @@ if [[ ${1:-} == "config" ]]; then
 fi
 printf '%s\n' "$*" >>"$FAKE_LLMLINT_LOG"
 if [[ ${FAKE_LLMLINT_EXIT:-0} != 0 ]]; then
-  echo "FAIL_FINDING"
+  printf '%s\n' "$FAKE_LLMLINT_FINDING"
   exit "$FAKE_LLMLINT_EXIT"
 fi
-echo "PASS_VERDICT"
+printf '%s\n' "$FAKE_LLMLINT_VERDICT"
 "#;
 
 /// An llmlint that answers only `--version`, for the journeys that put one in
@@ -181,12 +196,7 @@ impl Workspace {
         let home = dir.path().join("home");
         let pinned_bin = home.join(".local/bin");
         let judge_log = dir.path().join("judge-runs.log");
-        write_executable(
-            &pinned_bin.join("llmlint"),
-            &FAKE_LLMLINT
-                .replace("FAIL_FINDING", FAIL_FINDING)
-                .replace("PASS_VERDICT", PASS_VERDICT),
-        );
+        write_executable(&pinned_bin.join("llmlint"), FAKE_LLMLINT);
         std::fs::write(&judge_log, "").expect("open the judge-run log");
 
         // A plugin outside the tree: no file input can see it, so only the judge
@@ -219,6 +229,10 @@ impl Workspace {
                 "FAKE_LLMLINT_LOG".to_string(),
                 judge_log.display().to_string(),
             ),
+            // The judge's two payloads, handed to it as data rather than pasted
+            // into its script — see [`PASS_VERDICT`].
+            ("FAKE_LLMLINT_VERDICT".to_string(), PASS_VERDICT.to_string()),
+            ("FAKE_LLMLINT_FINDING".to_string(), FAIL_FINDING.to_string()),
             // Nx renders its cache reporting with ANSI escapes under some parents,
             // and `cargo llvm-cov nextest` is one of them: that pushed an escape in
             // front of the anchor the recipe matches on and reported every replay as
