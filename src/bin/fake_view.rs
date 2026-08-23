@@ -51,9 +51,26 @@ fn main() {
             argv.get(at + 1)
                 .unwrap_or_else(|| refuse(&format!("{} takes a value", argv[at])))
         };
-        let number = |at: usize| -> i32 {
+        // Each flag's own type, and neither is `parse::<i32>()` for both: a
+        // negative `--bulk` would print nothing at all, which reads exactly like a
+        // view that ran and had nothing to say — the one thing these journeys
+        // must be able to tell apart.
+        let count = |at: usize| -> usize {
             value(at).parse().unwrap_or_else(|_| {
-                refuse(&format!("{} takes a number, not {:?}", argv[at], value(at)))
+                refuse(&format!(
+                    "{} takes a count of bytes, not {:?}",
+                    argv[at],
+                    value(at)
+                ))
+            })
+        };
+        let code = |at: usize| -> i32 {
+            value(at).parse().unwrap_or_else(|_| {
+                refuse(&format!(
+                    "{} takes an exit code, not {:?}",
+                    argv[at],
+                    value(at)
+                ))
             })
         };
         match argv[at].as_str() {
@@ -64,13 +81,13 @@ fn main() {
             // Rows rather than one long line, because what a view prints is rows
             // and a bound that lands mid-row is what a reader has to notice.
             "--bulk" => {
-                let bytes = number(at);
+                let bytes = count(at);
                 let mut written = 0;
                 let mut row = 0;
                 while written < bytes {
                     let line = format!("row {row} of the prepared view\n");
                     print!("{line}");
-                    written += i32::try_from(line.len()).unwrap_or(i32::MAX);
+                    written += line.len();
                     row += 1;
                 }
                 at += 2;
@@ -80,7 +97,7 @@ fn main() {
                 at += 2;
             }
             "--fail" => {
-                exit = number(at);
+                exit = code(at);
                 at += 2;
             }
             "--hang" => {
