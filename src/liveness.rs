@@ -27,7 +27,25 @@ pub const DEFAULT_HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(60);
 pub const STALL_TIMEOUT_ENV: &str = "ONEAGENTGRAPH_STALL_TIMEOUT";
 
 /// How long a member may record nothing before the activity watchdog fires.
-pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+///
+/// Half an hour, because the two errors this number chooses between are
+/// different sizes: over-waiting on a wedged member costs minutes, and the
+/// heartbeat rule and `cancel` still answer for it, while condemning a working
+/// one destroys everything it has not emitted — and a member writing a long
+/// report has emitted nothing until it lands. Ten minutes sat inside that, where
+/// five members were condemned mid-report.
+///
+/// Streamed provider output is deliberately not counted as activity;
+/// [`crate::member::Stall`] records that decision and what it rests on.
+//
+// llmlint: ignore-block[changed_behavior_has_e2e] observing the window between
+// this value and the one it replaces means holding a member silent for over ten
+// minutes, which outlasts the whole suite. Either side of it is covered:
+// `tests/e2e/liveness.rs` drives both a run supervised under this constant and a
+// member the rule still condemns, and `member::tests` drives the rule at this
+// constant itself.
+pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(1800);
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The lock file, inside a scratch directory, that proves who owns it.
 pub const OWNER_LOCK_FILE: &str = "owner.lock";

@@ -38,7 +38,10 @@
 //!   a tool event every few seconds and survived, while one that *blocked* on a
 //!   single call died — same persona, same graph, opposite verdicts, on a choice
 //!   the agent makes freely turn by turn. [`Stall`] is the rule now, and what it
-//!   adds is the evidence the old one threw away.
+//!   adds is the evidence the old one threw away. Its bound is half an hour and
+//!   its clock is cleared by published events and by live work, never by
+//!   streamed provider output — [`Stall`] records why that signal is not
+//!   available to count, and against which engine versions that was read.
 //!
 //! Either firing is a [`EventKind::MemberDied`], carrying the `rule` that fired,
 //! the classified `cause`, and a bounded `detail`. `docs/contract.md` scopes
@@ -261,6 +264,50 @@ impl Bounds {
 ///   *between* trees while it is silent — one still starting its first, and one
 ///   whose round is a succession of children with a gap between two of them.
 ///   Both are ordinary; neither is a member doing nothing.
+///
+/// # What clears this clock, and what deliberately does not
+///
+/// Two things clear it, and the second is the paragraphs above: live work under
+/// the member. The first is the member's own published events — every tool call
+/// and every tool result, and on a two-party member each turn boundary as well,
+/// because [`crate::judge`]'s sink stamps the clock for every `Observation` it
+/// is handed while [`crate::harness`]'s stamps it for every `ActionEvent`.
+///
+/// **Streamed provider output does not clear it, because at this crate's pins
+/// nothing delivers it here.** Read at oneagentgraph 0.3.6, against the two
+/// engines this crate links:
+///
+/// * `oneharness_core` 0.10.1 delivers a streaming run's events to an
+///   `EventSink` as `ActionEvent`s, whose `kind` is `tool_call` or
+///   `tool_result`. A turn's prose is not on that channel at all, so a
+///   single-sided member spending ten minutes generating a report hands this
+///   clock nothing to stamp.
+/// * `onejudge` 0.5.0 publishes `Observation::Message` **after**
+///   `respond_streaming` has returned — the turn's finished text, as it is
+///   appended to the transcript. That is a turn boundary rather than progress
+///   within a turn, so it clears the clock only once the report it would have
+///   vouched for already exists.
+/// * The `alive N ago` an operator-facing view prints is `member-heartbeat`,
+///   which [`crate::harness`] and [`crate::judge`] emit on their supervisor's
+///   own timer whatever the member is doing. It is this process saying it is
+///   running, not the member; counting it as activity would switch this rule off
+///   rather than sharpen it, and it is itself an instance of the failure this
+///   rule exists inside — what the supervisor reports and what is true coming
+///   apart.
+///
+/// That per-kind asymmetry is worth keeping in view, because it is what makes
+/// the same silence read two ways: a two-party member whose round is several
+/// turns is stamped at each of them and survives a long quiet stretch, while a
+/// single-sided member inside one long turn is stamped by tool events alone and
+/// its report is invisible until it lands. A member observed surviving ten
+/// minutes of quiet is therefore no evidence that a silent member is safe.
+///
+/// So for a member that is genuinely quiet, the bound is the whole of the
+/// judgement, which is why it is set where
+/// [`crate::liveness::DEFAULT_STALL_TIMEOUT`] sets it. The narrower fix stays
+/// available and is the one to take the moment either engine grows an
+/// incremental text observation: stamp the clock at the sink that receives it,
+/// and this bound goes back to being a backstop rather than the judgement.
 #[derive(Debug)]
 pub struct Stall {
     /// When the member started, which is the origin of the only clock this rule
@@ -473,10 +520,10 @@ pub(crate) fn condemns_a_silent_member(scratch: &Path) -> bool {
 
 /// The longest a quiet member goes unexamined, whatever its stall bound is.
 ///
-/// The contract's default bound is ten minutes and an eighth of it would be over
-/// a minute — long enough that a member which did its work early in the window
-/// and then wedged would still be holding a stale verdict when the bound
-/// expired.
+/// The contract's default bound is half an hour and an eighth of it would be
+/// nearly four minutes — long enough that a member which did its work early in
+/// the window and then wedged would still be holding a stale verdict when the
+/// bound expired.
 const MAX_PROBE_INTERVAL: Duration = Duration::from_secs(15);
 
 /// One duration read out of the environment.
@@ -755,7 +802,7 @@ mod tests {
     fn the_bounds_are_the_contract_s_defaults_until_the_environment_moves_them() {
         assert_eq!(Bounds::from_env(&env(&[])), Ok(Bounds::default()));
         assert_eq!(Bounds::default().heartbeat, Duration::from_secs(60));
-        assert_eq!(Bounds::default().stall, Duration::from_secs(600));
+        assert_eq!(Bounds::default().stall, Duration::from_secs(1800));
 
         let moved = Bounds::from_env(&env(&[
             (HEARTBEAT_TIMEOUT_ENV, "1.5"),
@@ -911,6 +958,40 @@ mod tests {
         assert!(
             at > bound && at <= bound + 2 * probe,
             "a wedged member was condemned at {at:?}, which is not just past a {bound:?} bound"
+        );
+    }
+
+    /// The rule at its **default** bound: a working tree is never condemned, and
+    /// an idle one only long past the ten-minute bound this replaces — which is
+    /// where members were being killed while their reports were still in flight.
+    ///
+    /// Driven at [`DEFAULT_STALL_TIMEOUT`] itself, because here the number is
+    /// the subject rather than the rule. Both halves are asserted: the sparing
+    /// alone would pass just as well against a watchdog switched off.
+    #[test]
+    fn the_default_bound_condemns_an_idle_tree_long_after_the_bound_it_replaces() {
+        /// The bound this one replaces, and the moment both halves must get past.
+        const REPLACED: Duration = Duration::from_secs(600);
+        /// Two hundredths of a core: a tree doing work, on the rate the rule
+        /// reads everywhere else.
+        const WORKING: u64 = 1_000_000 / 50;
+
+        assert_eq!(
+            condemned(DEFAULT_STALL_TIMEOUT, WORKING),
+            None,
+            "a member with live work under it was condemned under the default bound"
+        );
+
+        let at = condemned(DEFAULT_STALL_TIMEOUT, 0)
+            .expect("a member doing nothing at all is still condemned");
+        assert!(
+            at > REPLACED + MAX_PROBE_INTERVAL,
+            "a member was condemned at {at:?}, back inside the window that killed five of them \
+             while they were writing their reports"
+        );
+        assert!(
+            at > DEFAULT_STALL_TIMEOUT && at <= DEFAULT_STALL_TIMEOUT + 2 * MAX_PROBE_INTERVAL,
+            "a wedged member was condemned at {at:?} rather than just past its own bound"
         );
     }
 

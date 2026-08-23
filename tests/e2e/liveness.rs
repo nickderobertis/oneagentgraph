@@ -31,7 +31,7 @@
 use std::path::Path;
 
 use crate::support::{
-    as_env, bounds, fake_harness, graph_with, labels, until, Workspace, FAKE_HARNESS_KEY,
+    as_env, bounds, fake_harness, graph_with, labels, until, Run, Workspace, FAKE_HARNESS_KEY,
 };
 // The one Unix-only journey's own helper: on a platform without `SIGTERM` it
 // compiles away, and an import left behind is a `-D warnings` build failure
@@ -452,7 +452,7 @@ fn a_two_party_member_whose_conversation_is_working_is_not_condemned_for_its_sil
 
 /// The stall bound both watchdog journeys above supervise under.
 ///
-/// Shortened from the contract's ten minutes, because what is under test is the
+/// Shortened from the contract's half an hour, because what is under test is the
 /// rule rather than the number — the default is asserted separately below. Not
 /// *too* short: the rule now takes two observations of the member's tree to
 /// establish that it is idle, so a bound near the supervisor's own cadence would
@@ -1542,17 +1542,85 @@ fn a_forged_group_record_cannot_redirect_a_reap() {
     );
 }
 
-/// The contract's defaults are what a run uses when nothing overrides them.
+/// The contract's defaults are what a run uses when nothing overrides them —
+/// and a run really is supervised under them.
+///
+/// Every other watchdog journey here shortens the bound to reach its rule, so a
+/// default quietly replaced by one of those seconds-long values would pass all
+/// of them. This one sets nothing and drives the member
+/// [`a_member_whose_child_is_alive_but_idle_is_still_condemned`] kills inside a
+/// four-second bound — same task, same silent idle child — for three times that,
+/// and only the cancel ends it.
+///
+/// Watching the bound itself expire would take half an hour. `tests/contract.rs`
+/// holds that number against the document, and `member::tests` drives the rule
+/// at it.
 #[test]
 fn the_documented_defaults_are_what_a_run_supervises_under() {
     use oneagentgraph::liveness::{
         DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
     };
     assert_eq!(DEFAULT_HEARTBEAT_TIMEOUT.as_secs(), 60);
-    assert_eq!(DEFAULT_STALL_TIMEOUT.as_secs(), 600);
+    assert_eq!(DEFAULT_STALL_TIMEOUT.as_secs(), 1800);
     assert_eq!(HEARTBEAT_TIMEOUT_ENV, "ONEAGENTGRAPH_HEARTBEAT_TIMEOUT");
     assert_eq!(STALL_TIMEOUT_ENV, "ONEAGENTGRAPH_STALL_TIMEOUT");
-    assert!(!fake_harness().is_empty());
+
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph());
+    let state = workspace.state();
+    let entered = workspace.at("provider.started");
+
+    let member = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &format!(
+                "fake:hang doing nothing at all fake:record-prompt={}",
+                entered.display()
+            ),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+
+    // The silence is timed from when there is a member to judge, rather than
+    // from when the command started.
+    until("the member's tree to be stamped", || {
+        entered.exists()
+            && member_scratch(&state).is_some_and(|scratch| {
+                !oneagentgraph::scratch::stamped_for(&scratch.display().to_string()).is_empty()
+            })
+    });
+    std::thread::sleep(SILENT_FOR);
+
+    let run_id = run_id(&state);
+    workspace.run(&["cancel", &run_id, "--kill"]).expect_code(0);
+    let output = member.wait_with_output().expect("the run exits");
+    let run = Run {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+
+    // Silent throughout — otherwise the survival is the member publishing rather
+    // than the bound it was supervised under.
+    assert!(
+        run.of_kind("turn-activity").is_empty(),
+        "the member published while it was supposed to be silent: {:?}",
+        run.kinds()
+    );
+    let condemned: Vec<_> = run
+        .of_kind("member-died")
+        .into_iter()
+        .filter(|died| died["payload"]["rule"] == serde_json::json!("activity"))
+        .collect();
+    assert!(
+        condemned.is_empty(),
+        "a member silent and idle for {SILENT_FOR:?} was condemned by the activity rule under the \
+         contract's own bound: {condemned:?}"
+    );
 }
 
 /// How long a reaped descendant is watched for a tick it should no longer be
