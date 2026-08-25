@@ -40,6 +40,7 @@
 //! | `fake:noisy-tool` | bury this turn's tool observation under kilobytes of startup chatter |
 //! | `fake:bare-tool` | take a first tool whose trace exposes neither a call identity nor an observation |
 //! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
+//! | `fake:silent-reply` | take the turn, do the work, and report **no text** — a completed turn that said nothing, whose stdout is still full of wire framing |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
@@ -905,6 +906,17 @@ fn answer(prompt: &str) -> Result<String, String> {
         };
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // A turn that ran, called its tool, and reported no words of its own. Beside
+    // the two above rather than at the top, for their reason: the supervisor's
+    // prompt embeds the transcript, so this sentinel arrives on that side too and
+    // must not be read there.
+    //
+    // The stdout around it is untouched — the whole stream-json transcript, ids,
+    // usage and all — because that is the point: raw output is protocol exhaust,
+    // and a turn reporting no text is not a turn whose exhaust is its answer.
+    if steers(prompt, "silent-reply") {
+        return Ok(String::new());
+    }
     if steers(prompt, "complete-now") {
         Ok("done".into())
     } else {

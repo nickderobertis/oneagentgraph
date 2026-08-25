@@ -148,20 +148,53 @@ test-doubles = []
 # did, what it said, and what each turn cost — none of which a journal could carry
 # while this crate received only the tool half and discarded even the events in it
 # that named no tool.
-onejudge = { version = "0.5.0", features = ["cli"] }
+#
+# 0.5.3 is the eighth raise, and it buys two things at once — which is the whole
+# reason it moves in lockstep with the `oneharness-core` requirement below.
+#
+#   1. **0.5.2's reply fix, which is inert below it.** onejudge's oneharness
+#      provider used to substitute the harness process's raw stdout for a reply
+#      whose reported text was empty, so a completed turn that said nothing
+#      published its own wire framing as the agent's words — and a user turn's
+#      instruction *is* the transcript's last message, so the exhaust was
+#      re-inlined into the next prompt as well as published. Measured on this
+#      host before the bump: a 699 MB single event line whose model-authored
+#      content was 0 characters, a 3.6 GB run journal behind it, and a read-only
+#      listing verb needing 5.7 GB of RSS. This crate relays that reply verbatim
+#      (`Observation::Message` -> `turn-message`, `Observation::TurnOpened` ->
+#      `turn-started`), so it is this crate's stream the fix lands on and this
+#      crate's journey that proves it:
+#      `tests/e2e/dispatch.rs::a_turn_that_reported_no_text_relays_nothing_rather_than_the_harnesss_output`,
+#      which fails against 0.5.0 with the whole stream-json transcript in the
+#      `turn-message` payload.
+#   2. **One `oneharness-core` in the graph.** 0.5.3 is the release that links
+#      0.12.0, which is what the requirement below now names. Every release from
+#      0.3.9 to 0.5.2 asked for 0.8, so this crate's own lockfile resolved
+#      `oneharness-core` twice and every fix landed in 0.9-0.12 reached only half
+#      of the tree — the half onejudge does not drive.
+onejudge = { version = "0.5.3", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
-# **0.10.1 is a compile floor.** It is the first release with
+# **0.10.1 is the compile floor.** It is the first release with
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
-# it `src/harness.rs` deliberately does not build.
+# it `src/harness.rs` deliberately does not build. Both names are unchanged at
+# 0.12.0; that was re-measured for this bump rather than assumed, and
+# `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# onejudge asks for 0.8 and drives oneharness itself, so two copies are in the
-# graph. Nothing crosses between them: every value onejudge hands back arrives as
-# JSON and is parsed into this copy's types. Do not thread a `oneharness_core::`
-# value through a `onejudge::` signature.
-oneharness-core = "0.10.1"
+# **0.12.0 is what is linked, and it is linked exactly once.** This crate used to
+# ask for 0.10 while onejudge asked for 0.8, so the graph carried two copies and
+# every oneharness fix released into 0.9-0.12 reached only the half onejudge does
+# not drive — a fix nobody had, on the side that needed it. onejudge 0.5.3 is the
+# first release asking for 0.12, which is why the two requirements move together
+# and why neither may be bumped alone: split them again and the second copy comes
+# back — which `tests/inventory.rs` asserts against the committed lockfile, since
+# nothing else here can see a copy that is not this crate's own requirement.
+# The rule that went with the split is retired with it, because there is no
+# longer a second set of types to confuse this one with; what remains true is the
+# ordinary one — a value onejudge hands back is onejudge's own type.
+oneharness-core = "0.12.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
