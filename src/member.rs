@@ -274,8 +274,15 @@ impl Bounds {
 /// is handed while [`crate::harness`]'s stamps it for every `ActionEvent`.
 ///
 /// **Streamed provider output does not clear it, because at this crate's pins
-/// nothing delivers it here.** Re-read at oneagentgraph 0.3.9, against the two
-/// engines this crate links — both bullets survived the bump unchanged:
+/// nothing delivers it here.** Re-read on 2026-08-24 against the two engines
+/// this crate links — both bullets survived the bump unchanged. The stamp is a
+/// date rather than a release of this crate on purpose: it records when the
+/// upstream channels were last actually read, which a version bumped by the
+/// release automation would silently claim on its behalf. The two versions
+/// named below are not stamps but live claims about what is linked, so this
+/// module's `the_engines_this_rule_was_read_against_are_the_ones_the_manifest_links`
+/// holds each against `Cargo.toml`. It is named in prose rather than linked
+/// because it is a `#[cfg(test)]` item, which rustdoc cannot resolve:
 ///
 /// * `oneharness_core` 0.12.0 delivers a streaming run's events to an
 ///   `EventSink` as `ActionEvent`s, whose `kind` is `tool_call` or
@@ -789,6 +796,70 @@ pub fn labels(run_id: &str, member: &str, persona: Option<&str>) -> Labels {
 mod tests {
     use super::*;
     use crate::scratch::Work;
+
+    /// This module's own source, so the rule's prose is held against the
+    /// manifest by the same file that states it.
+    const SOURCE: &str = include_str!("member.rs");
+    /// The manifest, which owns which release of each engine is actually linked.
+    const MANIFEST: &str = include_str!("../Cargo.toml");
+
+    /// The version [`Stall`]'s doc bullet names for `engine`, written as a Rust
+    /// path (`oneharness_core`) the way the prose refers to the crate.
+    ///
+    /// The needle is assembled at run time rather than written as one literal,
+    /// so this function cannot match its own source and report itself.
+    fn version_the_rule_names(engine: &str) -> &str {
+        let needle = format!("/// * `{engine}` ");
+        let (_, rest) = SOURCE
+            .split_once(&needle)
+            .unwrap_or_else(|| panic!("the rule still names `{engine}` in a bullet of its own"));
+        rest.split_whitespace()
+            .next()
+            .unwrap_or_else(|| panic!("the `{engine}` bullet still opens with a version"))
+    }
+
+    /// The version the manifest takes for `krate`, spelled as the package name.
+    ///
+    /// Both requirement shapes in this manifest — a bare `"0.12.0"` and a
+    /// `{ version = "0.5.3", .. }` table — put the version in the first quoted
+    /// string after the key, so one reader covers each.
+    fn version_the_manifest_takes(krate: &str) -> &str {
+        let (_, rest) = MANIFEST
+            .split_once(&format!("\n{krate} = "))
+            .unwrap_or_else(|| panic!("the manifest still takes `{krate}`"));
+        let (_, quoted) = rest
+            .split_once('"')
+            .unwrap_or_else(|| panic!("the `{krate}` requirement is quoted"));
+        quoted
+            .split_once('"')
+            .unwrap_or_else(|| panic!("the `{krate}` requirement's quote closes"))
+            .0
+    }
+
+    /// The stall rule rests on what each engine does *not* deliver, and the
+    /// manifest is what decides which release of each is linked.
+    ///
+    /// Without this the two bullets are a claim about the linked engines that
+    /// only a reader could falsify: a bump that left them naming the releases
+    /// they were written against would describe channels nobody had re-read,
+    /// and the rule they justify is the one that decides whether a live member
+    /// gets condemned. `tests/inventory.rs` guards `docs/oneharness-library.md`
+    /// the same way and for the same reason.
+    #[test]
+    fn the_engines_this_rule_was_read_against_are_the_ones_the_manifest_links() {
+        for (engine, krate) in [
+            ("oneharness_core", "oneharness-core"),
+            ("onejudge", "onejudge"),
+        ] {
+            let named = version_the_rule_names(engine);
+            let linked = version_the_manifest_takes(krate);
+            assert_eq!(
+                named, linked,
+                "the stall rule was read against `{engine}` {named}, but the manifest links \
+                 {linked} — re-read the channel and restate the bullet"
+            );
+        }
+    }
 
     fn env(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs
