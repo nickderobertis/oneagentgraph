@@ -274,15 +274,15 @@ impl Bounds {
 /// is handed while [`crate::harness`]'s stamps it for every `ActionEvent`.
 ///
 /// **Streamed provider output does not clear it, because at this crate's pins
-/// nothing delivers it here.** Read at oneagentgraph 0.3.6, against the two
-/// engines this crate links:
+/// nothing delivers it here.** Re-read at oneagentgraph 0.3.9, against the two
+/// engines this crate links — both bullets survived the bump unchanged:
 ///
-/// * `oneharness_core` 0.10.1 delivers a streaming run's events to an
+/// * `oneharness_core` 0.12.0 delivers a streaming run's events to an
 ///   `EventSink` as `ActionEvent`s, whose `kind` is `tool_call` or
 ///   `tool_result`. A turn's prose is not on that channel at all, so a
 ///   single-sided member spending ten minutes generating a report hands this
 ///   clock nothing to stamp.
-/// * `onejudge` 0.5.0 publishes `Observation::Message` **after**
+/// * `onejudge` 0.5.3 publishes `Observation::Message` **after**
 ///   `respond_streaming` has returned — the turn's finished text, as it is
 ///   appended to the transcript. That is a turn boundary rather than progress
 ///   within a turn, so it clears the clock only once the report it would have

@@ -8,15 +8,21 @@
 > where it lives. `src/harness.rs` is the module; `src/judge.rs` is its twin for
 > the other member kind, and the two are deliberately the same shape.
 >
-> **What unblocked it** is `oneharness-core` **0.10.1**: a
+> **What provides it** is `oneharness-core` **0.12.0**, the release this crate
+> links today: a
 > [`ProcessSupervisor`](#grouping-the-seam-this-whole-document-was-written-to-get)
 > trait with a `spawning(&mut Command)` / `spawned(&Child)` pair, and
 > `io::run::run_supervised` as the entry point that takes one. That is the seam
 > this document proposed, added upstream as proposed — a second entry point
 > rather than a field on `RunControls`, so the exhaustive literals embedders had
-> already written kept compiling. It is a **compile floor**, not a preference:
-> below 0.10.1 neither name exists and `src/harness.rs` does not build, which is
-> what stops a future edit from quietly falling back to unsupervised `run`.
+> already written kept compiling. Both names arrived in **0.10.1** and are
+> unchanged here, re-measured against 0.12.0 rather than assumed; the floor is a
+> **compile floor**, not a preference, because below 0.10.1 neither exists and
+> `src/harness.rs` does not build, which is what stops a future edit from quietly
+> falling back to unsupervised `run`. The version emphasised above is the linked
+> one rather than the first one for the reason `tests/inventory.rs` checks it: a
+> reader asks this document what *is* driving their run, and a fixed blocker once
+> went unnoticed for two dispatches behind a version nobody had re-read.
 
 Why `src/harness.rs` calls a library where `src/member.rs` used to spawn a
 process, what that process boundary provided, and the seam that replaced each of

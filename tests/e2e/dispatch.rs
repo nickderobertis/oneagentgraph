@@ -270,6 +270,82 @@ fn a_member_completes_through_the_real_supervisor_loop() {
     assert!(settled[0]["payload"]["verdict"].is_array());
 }
 
+/// A two-party turn that reported **no text** relays nothing, and the next turn
+/// is asked nothing — never the harness process's raw output.
+///
+/// This is the whole of what a supervisor sees when an agent says nothing, and
+/// both halves are read off the real stream because both used to carry the same
+/// wrong thing. onejudge's oneharness provider substituted `result.stdout` for a
+/// reply with no text, so the assistant's own words became the wire framing the
+/// harness happened to print — and the *next* prompt is that reply verbatim
+/// ([`onejudge::TurnOpened::instruction`] for a user turn is the transcript's
+/// last message), so the exhaust was re-inlined into the conversation as well as
+/// published. Measured on this host: a 699 MB single event line whose
+/// model-authored content was 0 characters, a 3.6 GB journal behind it, and a
+/// read-only listing verb needing 5.7 GB of RSS to walk what it left.
+///
+/// The turn here really runs — it calls its tool, and its stdout carries the
+/// whole stream-json transcript, session id, usage and all. Only the reported
+/// text is absent, which is the one case the substitution fired on.
+#[test]
+fn a_turn_that_reported_no_text_relays_nothing_rather_than_the_harnesss_output() {
+    let workspace = Workspace::new();
+    let run = workspace.run_task("fake:silent-reply: say nothing at all");
+    run.expect_code(0);
+
+    // Markers of the stdout that turn did produce, so the assertions below are
+    // against the exhaust that was actually available to leak rather than a
+    // guess at its shape. Every one of them belongs to the harness's own
+    // stream-json wire format and to nothing this crate publishes — a session id
+    // would not qualify, because `oneharness-session` reports one by contract.
+    let framing = ["\"subtype\"", "\"is_error\"", "num_turns", "total_cost_usd"];
+
+    let messages = run.of_kind("turn-message");
+    let agent = messages
+        .iter()
+        .find(|event| event["payload"]["role"] == "assistant")
+        .unwrap_or_else(|| panic!("the agent's turn published no message: {messages:?}"));
+    let text = agent["payload"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a message with no text: {agent}"));
+    assert_eq!(
+        text, "",
+        "a turn that reported nothing published something: {agent}"
+    );
+    // A relayed empty reply is a whole reply, not a cut one — the bound never
+    // ran, so claiming it did would tell a consumer to go and fetch a rest that
+    // does not exist. `truncated` is omitted when false, so absent and `false`
+    // are the same answer and only `true` is a failure.
+    assert_ne!(
+        agent["payload"]["truncated"],
+        serde_json::json!(true),
+        "an empty reply claimed it was cut: {agent}"
+    );
+
+    // The re-inlining half: the supervisor's turn is opened with the agent's
+    // last reply as its instruction, so an empty reply is an empty instruction.
+    let opened = run.of_kind("turn-started");
+    let supervisor = opened
+        .iter()
+        .find(|event| event["payload"]["role"] == "user")
+        .unwrap_or_else(|| panic!("no supervisor turn opened: {opened:?}"));
+    assert_eq!(
+        supervisor["payload"]["instruction"],
+        serde_json::json!(""),
+        "the next turn was asked the harness's raw output: {supervisor}"
+    );
+
+    // And nothing anywhere on the stream carries it, so the assertions above
+    // cannot pass by the exhaust having merely moved to another kind.
+    let stream = &run.stdout;
+    for leaked in framing {
+        assert!(
+            !stream.contains(leaked),
+            "the harness's raw output reached the stream as {leaked}"
+        );
+    }
+}
+
 /// A single-sided member says the same thing the two-party one above does, and
 /// differs only in the `engine`: it is driven in this process, through
 /// oneharness's own library, over the config this crate resolved for it.
