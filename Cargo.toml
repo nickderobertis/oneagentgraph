@@ -189,7 +189,9 @@ onejudge = { version = "0.5.3", features = ["cli"] }
 # not drive — a fix nobody had, on the side that needed it. onejudge 0.5.3 is the
 # first release asking for 0.12, which is why the two requirements move together
 # and why neither may be bumped alone: split them again and the second copy comes
-# back. The rule that went with the split is retired with it, because there is no
+# back — which `tests/inventory.rs` asserts against the committed lockfile, since
+# nothing else here can see a copy that is not this crate's own requirement.
+# The rule that went with the split is retired with it, because there is no
 # longer a second set of types to confuse this one with; what remains true is the
 # ordinary one — a value onejudge hands back is onejudge's own type.
 oneharness-core = "0.12.0"

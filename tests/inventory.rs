@@ -9,6 +9,12 @@
 //! name it restates is built as the type this crate serializes, and the version
 //! it credits is read out of `Cargo.toml`.
 //!
+//! One test here is not about the document at all and lives here because its
+//! subject is the same engine:
+//! [`the_graph_resolves_one_oneharness_core_and_it_is_the_one_the_manifest_takes`]
+//! reads `Cargo.lock`, because how many copies of that engine a build links is a
+//! question only the resolution can answer.
+//!
 //! The load-bearing one is [`the_seam_the_conversion_rests_on_is_still_there`]:
 //! the grouping hooks are the entire reason this conversion was safe to make, and
 //! a build that quietly lost them would leave the activity watchdog looking at an
@@ -30,6 +36,13 @@ const INVENTORY: &str = include_str!("../docs/oneharness-library.md");
 const CONTRACT: &str = include_str!("../docs/contract.md");
 /// The manifest, which owns the `oneharness-core` version the inventory names.
 const MANIFEST: &str = include_str!("../Cargo.toml");
+/// The committed lockfile, which owns how many `oneharness-core`s the graph
+/// actually resolves — a question the manifest cannot answer, because the second
+/// copy was never this crate's own requirement.
+///
+/// Shipped to consumers too: `cargo package` carries `Cargo.lock` because this
+/// crate has binaries, so the test below runs in a published crate as well as here.
+const LOCKFILE: &str = include_str!("../Cargo.lock");
 
 /// Both halves of the grouping seam, recorded here as an implementation of the
 /// upstream trait.
@@ -212,10 +225,7 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
 /// exactly how a fixed blocker went unnoticed for two dispatches.
 #[test]
 fn the_status_block_names_the_version_the_manifest_takes() {
-    let (_, rest) = MANIFEST
-        .split_once("\noneharness-core = \"")
-        .expect("the manifest still takes `oneharness-core` by version");
-    let (linked, _) = rest.split_once('"').expect("the requirement is quoted");
+    let linked = version_the_manifest_takes();
 
     let (_, rest) = INVENTORY
         .split_once("`oneharness-core` **")
@@ -227,6 +237,57 @@ fn the_status_block_names_the_version_the_manifest_takes() {
         named, linked,
         "the inventory credits `oneharness-core` {named} with a seam the {linked} the manifest \
          takes is what provides"
+    );
+}
+
+/// The `oneharness-core` release this crate's own manifest takes.
+///
+/// One reader for both tests below: the version the document is held against and
+/// the version the graph is held against have to be the same one, or the two
+/// could agree with each other while agreeing with nothing that runs.
+fn version_the_manifest_takes() -> &'static str {
+    let (_, rest) = MANIFEST
+        .split_once("\noneharness-core = \"")
+        .expect("the manifest still takes `oneharness-core` by version");
+    let (linked, _) = rest.split_once('"').expect("the requirement is quoted");
+    linked
+}
+
+/// The graph resolves **one** `oneharness-core`, and it is the one the manifest
+/// takes.
+///
+/// This crate used to ask for 0.10 while `onejudge` asked for 0.8, so the
+/// lockfile carried both and every oneharness fix released between them reached
+/// only the half `onejudge` does not drive — a fix nobody had, on the side that
+/// needed it. Nothing else in the repository notices that: `cargo build` is happy
+/// with two copies, `deny.toml` sets `multiple-versions = "allow"` for the
+/// ordinary duplicates a real graph has, and the manifest cannot see the second
+/// one because it was never this crate's own requirement. Only the resolution can
+/// answer it, so the resolution is what is asserted.
+///
+/// Equality with the manifest is exact rather than semver-compatible on purpose:
+/// every sibling requirement here is a full `x.y.z` carrying a dated, measured
+/// reason in `Cargo.toml`, and `just upgrade` moves the manifest with the lock.
+/// A lock that drifted a patch ahead of the prose is the prose going stale, which
+/// is the same failure this file's other tests exist to catch.
+#[test]
+fn the_graph_resolves_one_oneharness_core_and_it_is_the_one_the_manifest_takes() {
+    let resolved: Vec<&str> = LOCKFILE
+        .split("name = \"oneharness-core\"\nversion = \"")
+        .skip(1)
+        .map(|rest| {
+            rest.split_once('"')
+                .expect("a locked package's version is quoted")
+                .0
+        })
+        .collect();
+
+    assert_eq!(
+        resolved,
+        [version_the_manifest_takes()],
+        "the graph should carry exactly one `oneharness-core`, the one the manifest takes; \
+         a second entry means a dependency — `onejudge` is the one that drives it — asks for \
+         an incompatible range again, and the two requirements have to move together"
     );
 }
 
