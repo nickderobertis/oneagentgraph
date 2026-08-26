@@ -8,7 +8,7 @@
 > where it lives. `src/harness.rs` is the module; `src/judge.rs` is its twin for
 > the other member kind, and the two are deliberately the same shape.
 >
-> **What provides it** is `oneharness-core` **0.12.0**, the release this crate
+> **What provides it** is `oneharness-core` **0.12.1**, the release this crate
 > links today: a
 > [`ProcessSupervisor`](#grouping-the-seam-this-whole-document-was-written-to-get)
 > trait with a `spawning(&mut Command)` / `spawned(&Child)` pair, and
@@ -16,7 +16,7 @@
 > this document proposed, added upstream as proposed — a second entry point
 > rather than a field on `RunControls`, so the exhaustive literals embedders had
 > already written kept compiling. Both names arrived in **0.10.1** and are
-> unchanged here, re-measured against 0.12.0 rather than assumed; the floor is a
+> unchanged here, re-measured against 0.12.1 rather than assumed; the floor is a
 > **compile floor**, not a preference, because below 0.10.1 neither exists and
 > `src/harness.rs` does not build, which is what stops a future edit from quietly
 > falling back to unsupervised `run`. The version emphasised above is the linked

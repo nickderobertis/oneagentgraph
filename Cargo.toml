@@ -132,10 +132,12 @@ test-doubles = []
 # activity watchdog condemns it rather than a subprocess reporting a finished
 # turn. The behaviour is onejudge's and so is its coverage; what is decided here
 # is only that a graph links the release carrying it.
-# llmlint: ignore-block[changed_behavior_has_e2e] the settling this release fixes
-# is onejudge's own loop, driven and covered by onejudge's suite; a journey here
-# would have to make a supervisor side produce no work and then time this crate's
-# watchdog against it, which asserts the dependency's behaviour through a race.
+# llmlint: ignore-block[changed_behavior_has_e2e] these releases change
+# dependency-owned behavior rather than this crate's logic: onejudge's settling
+# loop and oneharness-core's event parser are driven and covered by their own
+# suites. Recreating either here would assert an upstream implementation through
+# a timing race or parser fixture; this crate's existing real journeys and gate
+# instead prove that the linked libraries still satisfy its public boundary.
 #
 # 0.5.0 is the seventh raise and a compile floor again: it is the first release
 # with `run_plan_observing_reporting_failure` and the `Observation` seam behind
@@ -167,12 +169,20 @@ test-doubles = []
 #      `tests/e2e/dispatch.rs::a_turn_that_reported_no_text_relays_nothing_rather_than_the_harnesss_output`,
 #      which fails against 0.5.0 with the whole stream-json transcript in the
 #      `turn-message` payload.
-#   2. **One `oneharness-core` in the graph.** 0.5.3 is the release that links
-#      0.12.0, which is what the requirement below now names. Every release from
+#   2. **One `oneharness-core` in the graph.** 0.5.3 is the first release that links
+#      0.12.0. Every release from
 #      0.3.9 to 0.5.2 asked for 0.8, so this crate's own lockfile resolved
 #      `oneharness-core` twice and every fix landed in 0.9-0.12 reached only half
 #      of the tree — the half onejudge does not drive.
-onejudge = { version = "0.5.3", features = ["cli"] }
+#
+# 0.5.4 is the ninth raise: its published requirement moves onejudge to
+# `oneharness-core` 0.12.1, whose Codex app-server parser now normalizes the
+# controlled turn's tool events. Without both releases, a judged Codex turn can
+# do work while this crate's `Observation::Tool` path and run journal see none
+# of it. Re-read on 2026-08-26 in the published sources: onejudge's `TurnEvents`
+# still forwards each `ActionEvent` through the live callback, and its manifest
+# takes 0.12.1, so the parser fix reaches the two-party side this crate drives.
+onejudge = { version = "0.5.4", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
@@ -180,21 +190,21 @@ onejudge = { version = "0.5.3", features = ["cli"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.12.0; that was re-measured for this bump rather than assumed, and
+# 0.12.1; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.12.0 is what is linked, and it is linked exactly once.** This crate used to
+# **0.12.1 is what is linked, and it is linked exactly once.** This crate used to
 # ask for 0.10 while onejudge asked for 0.8, so the graph carried two copies and
 # every oneharness fix released into 0.9-0.12 reached only the half onejudge does
-# not drive — a fix nobody had, on the side that needed it. onejudge 0.5.3 is the
-# first release asking for 0.12, which is why the two requirements move together
+# not drive — a fix nobody had, on the side that needed it. onejudge 0.5.4 asks
+# for 0.12.1, which is why the two requirements move together
 # and why neither may be bumped alone: split them again and the second copy comes
 # back — which `tests/inventory.rs` asserts against the committed lockfile, since
 # nothing else here can see a copy that is not this crate's own requirement.
 # The rule that went with the split is retired with it, because there is no
 # longer a second set of types to confuse this one with; what remains true is the
 # ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.12.0"
+oneharness-core = "0.12.1"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

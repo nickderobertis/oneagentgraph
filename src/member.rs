@@ -274,7 +274,7 @@ impl Bounds {
 /// is handed while [`crate::harness`]'s stamps it for every `ActionEvent`.
 ///
 /// **Streamed provider output does not clear it, because at this crate's pins
-/// nothing delivers it here.** Re-read on 2026-08-24 against the two engines
+/// nothing delivers it here.** Re-read on 2026-08-26 against the two engines
 /// this crate links — both bullets survived the bump unchanged. The stamp is a
 /// date rather than a release of this crate on purpose: it records when the
 /// upstream channels were last actually read, which a version bumped by the
@@ -284,12 +284,12 @@ impl Bounds {
 /// holds each against `Cargo.toml`. It is named in prose rather than linked
 /// because it is a `#[cfg(test)]` item, which rustdoc cannot resolve:
 ///
-/// * `oneharness_core` 0.12.0 delivers a streaming run's events to an
+/// * `oneharness_core` 0.12.1 delivers a streaming run's events to an
 ///   `EventSink` as `ActionEvent`s, whose `kind` is `tool_call` or
 ///   `tool_result`. A turn's prose is not on that channel at all, so a
 ///   single-sided member spending ten minutes generating a report hands this
 ///   clock nothing to stamp.
-/// * `onejudge` 0.5.3 publishes `Observation::Message` **after**
+/// * `onejudge` 0.5.4 publishes `Observation::Message` **after**
 ///   `respond_streaming` has returned — the turn's finished text, as it is
 ///   appended to the transcript. That is a turn boundary rather than progress
 ///   within a turn, so it clears the clock only once the report it would have
@@ -820,8 +820,8 @@ mod tests {
 
     /// The version the manifest takes for `krate`, spelled as the package name.
     ///
-    /// Both requirement shapes in this manifest — a bare `"0.12.0"` and a
-    /// `{ version = "0.5.3", .. }` table — put the version in the first quoted
+    /// Both requirement shapes in this manifest — a bare `"0.12.1"` and a
+    /// `{ version = "0.5.4", .. }` table — put the version in the first quoted
     /// string after the key, so one reader covers each.
     fn version_the_manifest_takes(krate: &str) -> &str {
         let (_, rest) = MANIFEST
