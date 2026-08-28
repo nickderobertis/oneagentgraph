@@ -73,9 +73,10 @@ one NDJSON stream.
 `just --list` is the index; do not hand-roll equivalents. `just check` is the
 deterministic gate and `just gate` is the complete pre-push bar — `check` plus
 the diff-scoped llmlint tier — and a change is not done until `gate` is green.
-`deps-check`, `msrv`, and `lint-windows` sit outside both because each needs
-something a clean clone does not have — a network advisory database, a second
-toolchain, a cross compiler; CI covers all three as jobs of their own.
+`deps-check`, `msrv`, `lint-windows`, and `release-probe-check` sit outside both
+because each needs something a clean clone does not have — a network advisory
+database, a second toolchain, a cross compiler, the public registries; CI covers
+all four as jobs of their own.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
@@ -139,6 +140,21 @@ because a tag from the default `GITHUB_TOKEN` triggers nothing — fires
 them. **Nothing else writes a version:** maturin reads it from `Cargo.toml` via
 `dynamic = ["version"]` and `scripts/npm-build.mjs` stamps it from the same
 place.
+
+**What this repository releases is declared, so a consumer can wait on it.**
+`release-targets.json` names one registry-qualified identifier per *consumable*
+artifact — `crate:oneagentgraph`, `pypi:oneagentgraph-cli`,
+`npm:oneagentgraph-cli`. The crate and the command line are separate targets
+because they have already been at separate versions: a host pinned the CLI
+release that added a producer and got an older linked crate that emitted nothing.
+The per-platform npm packages are *covered* by the launcher rather than declared —
+nothing depends on one by name. `scripts/release-probe.sh` answers one identifier
+with the version that registry serves now, with **nothing** when it has never
+served it, and with a non-zero exit when it could establish neither; those last
+two are different answers and collapsing them is the worst thing this can get
+wrong, because a consumer holds forever on one and launches on the other.
+`npm/test/release-targets.test.mjs` derives the published set from the release
+configuration itself and fails on drift in either direction.
 
 Bump policy, **pre-1.0**: `feat` → minor, `feat!` / `BREAKING CHANGE` → minor (a
 breaking change pre-1.0 is not yet a major), `fix` / `perf` / `refactor` /

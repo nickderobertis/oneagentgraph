@@ -200,6 +200,15 @@ deps-check:
     @# them would leave a failing gate with no actionable detail.
     @cargo machete
 
+# Separate from `check` on the same terms `deps-check` is: two of the probe's
+# three answers are what a public registry serves, and the deterministic gate
+# stays offline. Its third answer — "not answered" — needs no network and is in
+# `check`, at npm/test/release-probe.test.mjs.
+# Prove scripts/release-probe.sh against the public registries.
+release-probe-check:
+    @command -v node >/dev/null || { echo "node not installed: this drives the probe from a node test — run 'just bootstrap'" >&2; exit 1; }
+    @node --test npm/test/live/release-probe.test.mjs
+
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.
 # Build under the declared MSRV.

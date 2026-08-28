@@ -17,6 +17,13 @@ version has exactly one source — `Cargo.toml`, written by release-plz — and
 `scripts/npm-build.mjs` stamps it into the launcher and every platform pin at
 publish time. Never hand-edit a version here.
 
+`test/` also carries the two checks that are about the release rather than about
+npm — the release-target declaration and the release probe — because this is the
+packaging project and they read the same `release.yml` the matrix gate does. The
+probe's registry-served answers live under `test/live/`, outside the
+`npm/test/*.test.mjs` the `test` target runs, so `just check` stays offline;
+`just release-probe-check` is what runs them.
+
 Nothing in this directory is published from a developer's machine:
 `.github/workflows/release.yml` assembles, packs, and publishes it, and
 `scripts/publish-npm.sh` makes that publish idempotent.

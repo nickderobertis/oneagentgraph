@@ -146,6 +146,23 @@ jobs:
           tool: just,cargo-deny,cargo-machete
       - run: just deps-check
 
+  # The release probe against the real registries. Its own job for the reason
+  # `deny` has one: it needs the public network, which `just check` stays free
+  # of. Not gated on `changes` — what it proves is the release declaration, which
+  # a packaging-only change is exactly as likely to break as a crate change.
+  #
+  # The probe's third answer, "not answered", needs no network and runs inside
+  # `check`; this job is the other two, which only a registry can give.
+  release-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: ./.github/actions/setup-just
+      - run: just release-probe-check
+
   # Prove the end-user install path on every platform: install the binary the
   # documented way and smoke-test the real artifact through scripts/
   # smoke-published.sh — the same assertions the post-publish verify jobs run
