@@ -39,6 +39,7 @@
 //! | `fake:complete-now` | the agent finishes on its first turn |
 //! | `fake:noisy-tool` | bury this turn's tool observation under kilobytes of startup chatter |
 //! | `fake:bare-tool` | take a first tool whose trace exposes neither a call identity nor an observation |
+//! | `fake:no-tool` | take the turn having called no tool at all — the toolless half of a quiet exchange |
 //! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
 //! | `fake:silent-reply` | take the turn, do the work, and report **no text** — a completed turn that said nothing, whose stdout is still full of wire framing |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
@@ -621,7 +622,11 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // A tool transcript is a stream-json line and has nowhere to go in a single
     // `json` document, which is exactly why oneharness upgrades the format for a
     // run that asked for events.
-    if shape == Shape::Stream {
+    // A turn that reports without touching anything: no `tool_use`, no
+    // `tool_result`, so the trace onejudge attaches to this turn is empty. That is
+    // one of the three legs its no-op streak is measured on, and the only one this
+    // double could not produce — every stream-shaped turn called a tool.
+    if shape == Shape::Stream && !steers(prompt, "no-tool") {
         // A trace that exposes neither a call identity nor an observation, which
         // is a shape oneharness's normalizer states outright it can produce —
         // `ActionEvent::tool_call_id` is `None` "when the harness exposed no

@@ -289,7 +289,7 @@ impl Bounds {
 ///   `tool_result`. A turn's prose is not on that channel at all, so a
 ///   single-sided member spending ten minutes generating a report hands this
 ///   clock nothing to stamp.
-/// * `onejudge` 0.5.4 publishes `Observation::Message` **after**
+/// * `onejudge` 0.6.1 publishes `Observation::Message` **after**
 ///   `respond_streaming` has returned — the turn's finished text, as it is
 ///   appended to the transcript. That is a turn boundary rather than progress
 ///   within a turn, so it clears the clock only once the report it would have
@@ -821,7 +821,7 @@ mod tests {
     /// The version the manifest takes for `krate`, spelled as the package name.
     ///
     /// Both requirement shapes in this manifest — a bare `"0.12.1"` and a
-    /// `{ version = "0.5.4", .. }` table — put the version in the first quoted
+    /// `{ version = "0.6.1", .. }` table — put the version in the first quoted
     /// string after the key, so one reader covers each.
     fn version_the_manifest_takes(krate: &str) -> &str {
         let (_, rest) = MANIFEST

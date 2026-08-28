@@ -182,7 +182,32 @@ test-doubles = []
 # of it. Re-read on 2026-08-26 in the published sources: onejudge's `TurnEvents`
 # still forwards each `ActionEvent` through the live callback, and its manifest
 # takes 0.12.1, so the parser fix reaches the two-party side this crate drives.
-onejudge = { version = "0.5.4", features = ["cli"] }
+#
+# 0.6.0 is the tenth raise, and like 0.4.0 it is not a compile floor — every call
+# above still resolves against 0.5.4. It is taken because onejudge's own settling
+# rule was ending the one member shape a graph runs to *keep* something alive.
+# Two consecutive quiet exchanges — no tool events, both messages short, the same
+# reply again — settle the conversation, which is a stalled loop everywhere except
+# an observer whose *contract* is to report nothing, and there it is a healthy
+# watch: a measured run lost its monitor five minutes in and ran roughly two hours
+# unwatched while every indicator stayed green, because a member that settled is a
+# member that finished and its loss announces itself nowhere. 0.6.0 adds
+# `user.settle_on_noop`, defaulting to `true`, so no existing config changes
+# behaviour; a base config that writes `false` keeps the streak measured and stops
+# it ending the run, with `max_turns` still the bound. What is decided here is not
+# the loop — that is onejudge's, with onejudge's coverage — but that the setting is
+# *reachable*: an operator writes it in the base config their `kind: onejudge`
+# member names, and this crate is what reads that file, merges a persona over it,
+# and builds the plan, so a key dropped on the way through would read as configured
+# and change nothing. `tests/e2e/dispatch.rs`'s
+# `a_base_configs_settle_on_noop_reaches_the_loop_the_member_runs` drives one quiet
+# conversation twice through the real member and reads the difference off the turns
+# it was allowed to take.
+#
+# 0.6.1 is what the lockfile resolves, and it carries nothing this crate compiles
+# against: it adds onejudge's own release-target declaration. It is taken because
+# it is the newest 0.6, not for anything it buys here.
+onejudge = { version = "0.6.1", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
@@ -196,9 +221,10 @@ onejudge = { version = "0.5.4", features = ["cli"] }
 # **0.12.1 is what is linked, and it is linked exactly once.** This crate used to
 # ask for 0.10 while onejudge asked for 0.8, so the graph carried two copies and
 # every oneharness fix released into 0.9-0.12 reached only the half onejudge does
-# not drive — a fix nobody had, on the side that needed it. onejudge 0.5.4 asks
-# for 0.12.1, which is why the two requirements move together
-# and why neither may be bumped alone: split them again and the second copy comes
+# not drive — a fix nobody had, on the side that needed it. onejudge 0.6.1 asks
+# for `^0.12.0`, which the 0.12.1 here satisfies out of that one copy, which is
+# why the two requirements move together and why neither may be bumped past what
+# the other admits: split them again and the second copy comes
 # back — which `tests/inventory.rs` asserts against the committed lockfile, since
 # nothing else here can see a copy that is not this crate's own requirement.
 # The rule that went with the split is retired with it, because there is no
