@@ -48,9 +48,11 @@ set -euo pipefail
 
 readonly NOT_ANSWERED=3
 readonly USER_AGENT="oneagentgraph-release-probe (https://github.com/nickderobertis/oneagentgraph)"
-# Two attempts at fifteen seconds leaves the answer well inside the sixty the
-# contract allows, even when the first attempt burns its whole budget.
-readonly ATTEMPTS=2
+# One attempt, well inside the sixty seconds the contract allows even when it
+# burns its whole budget. Deliberately not retried in here: what calls this is a
+# consumer waiting for a release, so it is already a loop — a second attempt
+# inside would only make each of its polls slower, and hide a registry that is
+# down behind a longer silence.
 readonly MAX_TIME=15
 
 # The third answer. Every exit through here is non-zero and carries its reason
@@ -100,32 +102,27 @@ trap 'rm -f "$body" "$curl_err"' EXIT
 # un-`--fail`ed here for the same reason — a 404 is an *answer*, and --fail would
 # collapse it into the exit a dead network produces.
 fetch() {
-  local url="$1" attempt=1 status
-  while :; do
-    if status="$(curl --disable --silent --show-error --location \
-      --user-agent "$USER_AGENT" \
-      --connect-timeout 5 --max-time "$MAX_TIME" \
-      --output "$body" --write-out '%{http_code}' \
-      "$url" 2>"$curl_err")"; then
-      printf '%s' "$status"
-      return 0
-    fi
-    if [ "$attempt" -ge "$ATTEMPTS" ]; then
-      # llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs the
-      # registry to be unreachable while the probe runs, and the only way to
-      # arrange that is to put a fake curl or a fake registry in front of the
-      # script — at which point the fake is what is under test, and a fake is
-      # exactly what cannot tell you that crates.io moved. `release.yml` and
-      # `published-smoke.yml` carry the same exclusion for the same reason. What
-      # this branch is *for* — never letting a failure read as an empty answer —
-      # is proven end to end by npm/test/release-probe.test.mjs, over every route
-      # to it that does not require the registry to misbehave.
-      not_answered "could not reach $url: $(tr -d '\r\n' <"$curl_err")" \
-        "check network access to the registry, then re-run; this is NOT evidence that nothing is published"
-      # llmlint: ignore-end[changed_behavior_has_e2e]
-    fi
-    attempt=$((attempt + 1))
-  done
+  local url="$1" status
+  if status="$(curl --disable --silent --show-error --location \
+    --user-agent "$USER_AGENT" \
+    --connect-timeout 5 --max-time "$MAX_TIME" \
+    --output "$body" --write-out '%{http_code}' \
+    "$url" 2>"$curl_err")"; then
+    printf '%s' "$status"
+    return 0
+  fi
+  # llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs the
+  # registry to be unreachable while the probe runs, and the only way to arrange
+  # that is to put a fake curl or a fake registry in front of the script — at
+  # which point the fake is what is under test, and a fake is exactly what cannot
+  # tell you that crates.io moved. `release.yml` and `published-smoke.yml` carry
+  # the same exclusion for the same reason. What this branch is *for* — never
+  # letting a failure read as an empty answer — is proven end to end by
+  # npm/test/release-probe.test.mjs, over every route to it that does not require
+  # the registry to misbehave.
+  not_answered "could not reach $url: $(tr -d '\r\n' <"$curl_err")" \
+    "check network access to the registry, then re-run; this is NOT evidence that nothing is published"
+  # llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 # The value of a `"key": "value"` pair that occurs exactly once in `$2`.
@@ -170,8 +167,11 @@ status="$(fetch "$url")"
 case "$status" in
   200) ;;
   # The registry said, in as many words, that there is no such artifact. This is
-  # the only route to an empty answer.
-  404 | 410) exit 0 ;;
+  # the only route to an empty answer, and it is the one status all three
+  # registries answer an unpublished name with — nothing else is accepted as
+  # meaning "no release", because guessing which other statuses might mean it is
+  # how a released artifact ends up reading as unreleased.
+  404) exit 0 ;;
   *)
     # llmlint: ignore-block[changed_behavior_has_e2e] the same exclusion the retry
     # branch above carries: a status that is neither 200 nor 404 is a rate limit
