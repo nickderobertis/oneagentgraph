@@ -23,8 +23,14 @@ const PROBE = join(REPO_ROOT, "scripts", "release-probe.sh");
 /// On Windows the shebang is not honoured, so bash is named as the interpreter.
 /// Still an argv, never a command line for a shell to re-parse.
 export function probe(...args) {
+  return probeWithPath(process.env.PATH, ...args);
+}
+
+/// The same spawn, with a search path of the caller's choosing — for the one
+/// case whose subject *is* the search path: a machine with no transport on it.
+export function probeWithPath(path, ...args) {
   const windows = process.platform === "win32";
-  const env = { PATH: process.env.PATH };
+  const env = { PATH: path };
   if (windows) {
     // The home directory under the name this OS gives it, plus the one variable
     // curl on Windows cannot open its TLS backend without.

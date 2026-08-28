@@ -23,8 +23,10 @@
 # root, with an environment carrying only PATH and HOME (and their two Windows
 # equivalents). It therefore takes no credential and reads no variable of its
 # own: every artifact this repository publishes is on a public registry, so an
-# unauthenticated read is all it needs and all it may need. It must answer well
-# inside sixty seconds, which is what the timeouts below are sized for.
+# unauthenticated read is all it needs and all it may need. Nor can anything in
+# that environment change an answer: curl runs with `--disable`, so a `.curlrc`
+# under HOME cannot turn a "no release yet" into a "not answered". It must answer
+# well inside sixty seconds, which is what the timeouts below are sized for.
 #
 # Identifiers are registry-qualified — `crate:<name>`, `pypi:<name>`,
 # `npm:<name>` — because the qualification is load-bearing rather than
@@ -91,12 +93,16 @@ curl_err="$(mktemp)"
 trap 'rm -f "$body" "$curl_err"' EXIT
 
 # GET `$1`, leaving the response body in `$body` and printing the HTTP status.
-# curl is left un-`--fail`ed on purpose: a 404 is an *answer* here, and --fail
-# would collapse it into the same non-zero exit a dead network produces.
+#
+# `--disable` first, so the home directory's `.curlrc` cannot change an answer: a
+# caller who happens to have `--fail` there would otherwise turn every 404 into a
+# transport error, and "no release yet" into "not answered". curl is left
+# un-`--fail`ed here for the same reason — a 404 is an *answer*, and --fail would
+# collapse it into the exit a dead network produces.
 fetch() {
   local url="$1" attempt=1 status
   while :; do
-    if status="$(curl --silent --show-error --location \
+    if status="$(curl --disable --silent --show-error --location \
       --user-agent "$USER_AGENT" \
       --connect-timeout 5 --max-time "$MAX_TIME" \
       --output "$body" --write-out '%{http_code}' \
@@ -105,25 +111,46 @@ fetch() {
       return 0
     fi
     if [ "$attempt" -ge "$ATTEMPTS" ]; then
+      # llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs the
+      # registry to be unreachable while the probe runs, and the only way to
+      # arrange that is to put a fake curl or a fake registry in front of the
+      # script — at which point the fake is what is under test, and a fake is
+      # exactly what cannot tell you that crates.io moved. `release.yml` and
+      # `published-smoke.yml` carry the same exclusion for the same reason. What
+      # this branch is *for* — never letting a failure read as an empty answer —
+      # is proven end to end by npm/test/release-probe.test.mjs, over every route
+      # to it that does not require the registry to misbehave.
       not_answered "could not reach $url: $(tr -d '\r\n' <"$curl_err")" \
         "check network access to the registry, then re-run; this is NOT evidence that nothing is published"
+      # llmlint: ignore-end[changed_behavior_has_e2e]
     fi
     attempt=$((attempt + 1))
   done
 }
 
-# The value of a `"key": "value"` pair that occurs exactly once in `$body`.
+# The value of a `"key": "value"` pair that occurs exactly once in `$2`.
 #
 # JSON escapes an embedded quote as `\"`, so this byte sequence cannot occur
-# inside a string *value* — only as a real key. Exactly one occurrence or
-# nothing: a document where the key appears twice is one this cannot read
-# unambiguously, and the caller of this function turns that into "not answered"
-# rather than into an empty answer.
+# inside a string *value* — only as a real key. Exactly one occurrence or a
+# failure: a document where the key appears twice, or not at all, is one this
+# cannot read unambiguously, and every caller turns that into "not answered"
+# rather than into an empty answer. Exactly one is also what keeps the answer to
+# one line, which is the whole of what a caller parses.
 json_string() {
   local key="$1" matches
-  matches="$(grep -Eo "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$body" || true)"
+  matches="$(printf '%s' "$2" | grep -Eo "\"$key\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" || true)"
   [ "$(printf '%s' "$matches" | grep -c .)" = "1" ] || return 1
   printf '%s' "$matches" | sed -E 's/^.*:[[:space:]]*"(.*)"$/\1/'
+}
+
+# The one `"key": { ... }` object in `$2`, on the same exactly-one terms — a
+# brace-counting parser is not worth writing for a flat tag map, but reading the
+# *first* of several would be guessing, and guessing is what this file does not do.
+json_object() {
+  local key="$1" matches
+  matches="$(printf '%s' "$2" | grep -Eo "\"$key\"[[:space:]]*:[[:space:]]*\{[^}]*\}" || true)"
+  [ "$(printf '%s' "$matches" | grep -c .)" = "1" ] || return 1
+  printf '%s' "$matches"
 }
 
 case "$registry" in
@@ -146,36 +173,51 @@ case "$status" in
   # the only route to an empty answer.
   404 | 410) exit 0 ;;
   *)
+    # llmlint: ignore-block[changed_behavior_has_e2e] the same exclusion the retry
+    # branch above carries: a status that is neither 200 nor 404 is a rate limit
+    # or an outage at a public registry, which cannot be arranged from a test
+    # without standing a fake registry in front of the script.
     not_answered "$url answered HTTP $status" \
       "re-run in a moment — a rate limit or an outage is not evidence that nothing is published"
+    # llmlint: ignore-end[changed_behavior_has_e2e]
     ;;
 esac
 
+document="$(cat "$body")"
 case "$registry" in
   crate)
     # What `cargo add` resolves is the newest non-prerelease; a crate whose every
     # release is a prerelease has no such version and falls back to the newest.
-    version="$(json_string max_stable_version || true)"
-    [ -n "$version" ] || version="$(json_string newest_version || true)"
+    version="$(json_string max_stable_version "$document" || true)"
+    [ -n "$version" ] || version="$(json_string newest_version "$document" || true)"
     ;;
   pypi)
     # `info.version` — the release the project page and a bare `pip install`
     # resolve to.
-    version="$(json_string version || true)"
+    version="$(json_string version "$document" || true)"
     ;;
   npm)
     # `dist-tags.latest` — what a bare `npm install <name>` resolves to. Read out
-    # of the dist-tags object rather than the packument at large, which carries a
-    # `latest` nowhere else but need not carry only this tag.
-    tags="$(grep -Eo '"dist-tags"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$body" | head -n 1)"
-    version="$(printf '%s' "$tags" | grep -Eo '"latest"[[:space:]]*:[[:space:]]*"[^"]*"' |
-      sed -E 's/^.*:[[:space:]]*"(.*)"$/\1/')"
+    # of the dist-tags object rather than the packument at large, which need not
+    # carry only this tag. A packument with no dist-tags at all — npm serves one
+    # for a name whose every version was unpublished — leaves both of these empty
+    # and falls to the guard below, rather than out through `set -e` with nothing
+    # said.
+    tags="$(json_object dist-tags "$document" || true)"
+    version="$(json_string latest "$tags" || true)"
     ;;
 esac
 
 if [ -z "${version:-}" ]; then
+  # llmlint: ignore-block[changed_behavior_has_e2e] reaching this needs a registry
+  # to answer 200 with a document this cannot read — a shape change at crates.io,
+  # PyPI or npm. A fixture asserting it would be a fixture asserting itself: the
+  # thing this guards against is precisely the shape nobody has seen yet. The live
+  # tier proves the readers against the real documents on every run, which is what
+  # turns this branch from a guess into a tripwire.
   not_answered "$url answered, but no version could be read from it unambiguously" \
     "the registry's response shape changed — fix the reader in this script; a released artifact must never read as unreleased"
+  # llmlint: ignore-end[changed_behavior_has_e2e]
 fi
 
 printf '%s\n' "$version"

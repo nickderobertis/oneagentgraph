@@ -13,10 +13,20 @@
 // is published, so each case below asserts all three of: a non-zero exit, an
 // empty stdout, and a reason with a next action on stderr.
 
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { assertNotAnswered, probe } from "./support/release-probe.mjs";
+import { assertNotAnswered, probe, probeWithPath } from "./support/release-probe.mjs";
+
+/// Where a tool actually is, so a search path can be built that has some of them
+/// and not others.
+function which(tool) {
+  return execFileSync("bash", ["-c", `command -v ${tool}`], { encoding: "utf8" }).trim();
+}
 
 describe("the release probe's not-answered answer", () => {
   it("refuses anything but exactly one identifier", () => {
@@ -42,6 +52,30 @@ describe("the release probe's not-answered answer", () => {
   it("refuses a name it cannot build a URL for", () => {
     for (const identifier of ["npm:", "npm:@scope/pkg", "npm:one agent graph", "pypi:../etc"]) {
       assertNotAnswered(probe(identifier), `the name in '${identifier}'`);
+    }
+  });
+
+  it("refuses to answer at all when it has no transport", (t) => {
+    if (process.platform === "win32") {
+      // The search path this builds is a POSIX one, and the gate that runs this
+      // suite is Linux. Nothing about the branch is platform-specific.
+      t.skip("builds a POSIX search path");
+      return;
+    }
+    // A real machine with no curl on it, assembled rather than simulated: a
+    // search path carrying its interpreter and the one tool the probe reaches
+    // for before the transport check, and nothing else. Reaching a registry is
+    // the only thing this probe can do, so a machine that cannot must say so —
+    // an empty answer here would report every artifact in the world as
+    // unreleased.
+    const bin = mkdtempSync(join(tmpdir(), "release-probe-no-curl-"));
+    try {
+      for (const tool of ["bash", "grep"]) symlinkSync(which(tool), join(bin, tool));
+      const result = probeWithPath(bin, "crate:oneagentgraph");
+      assertNotAnswered(result, "a machine with no curl");
+      assert.match(result.stderr, /curl/);
+    } finally {
+      rmSync(bin, { recursive: true, force: true });
     }
   });
 
