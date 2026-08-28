@@ -17,6 +17,9 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",
+        "{workspaceRoot}/scripts/release-probe.sh",
+        "{workspaceRoot}/release-targets.json",
+        "{workspaceRoot}/pyproject.toml",
         "{workspaceRoot}/.github/workflows/release.yml",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",
