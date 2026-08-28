@@ -19,7 +19,7 @@ use oneagentgraph::persona::MEMBER_OWNED;
 
 use crate::support::{
     fake_harness, fake_provider, graph_with, labels, oneharness_bin, single_sided_graph,
-    two_party_graph, Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
+    two_party_graph, Run, Workspace, BASE, CHAIN, FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// The whole happy path: a two-party member completes, and the stream carries
@@ -1520,6 +1520,74 @@ fn a_member_that_never_completes_exits_one_and_the_stream_says_which() {
         serde_json::json!("incomplete")
     );
     assert_eq!(workspace.record()["exit_code"], serde_json::json!(1));
+}
+
+/// A base config's `settle_on_noop` reaches the loop this crate runs for the
+/// member, and decides how long that conversation is allowed to live.
+///
+/// The setting exists for an observer whose *contract* is to report nothing:
+/// answering with one fixed short sentence while it finds nothing is exactly the
+/// signature onejudge settles a stalled loop on, so a healthy monitor was ended a
+/// few turns in and its run went on unwatched. The loop is onejudge's and so is
+/// its coverage; what is proven here is the part this crate owns — that an
+/// operator who writes the key in the base config their `kind: onejudge` member
+/// names actually gets it, through the persona merge and the plan built from it,
+/// rather than having it dropped or defaulted over on the way through.
+///
+/// Read off the running loop rather than out of the file it came from: the same
+/// quiet conversation is driven twice, and the only thing separating the two runs
+/// is how many turns the agent side was allowed to take.
+#[test]
+fn a_base_configs_settle_on_noop_reaches_the_loop_the_member_runs() {
+    // Every leg of a no-op exchange, deliberately: the agent calls no tool, its
+    // reply and the supervisor's next instruction are each one short sentence, and
+    // that reply is the same one every turn.
+    //
+    // `fake:no-tool` rides the base's own `system_prompt` rather than the task,
+    // and that placement is load-bearing: onejudge continues the agent's session
+    // across turns, so from turn two the `-p` prompt is the supervisor's latest
+    // instruction alone and a sentinel written into the task steers only the first
+    // turn. The system prompt is re-sent every turn, so this steers all of them.
+    const QUIET: &str = concat!(
+        "provider:\n  kind: oneharness\n",
+        "system_prompt: |\n  Report, and touch nothing: fake:no-tool\n",
+        "user:\n  done_when: \"the watch is over\"\n  max_turns: 5\n",
+    );
+    const TASK: &str = "fake:should-fail: watch, and report nothing";
+
+    // Omitted, the key is onejudge's default `true`, and the second quiet repeated
+    // exchange settles the run — the loss this setting exists to stop.
+    let settling = Workspace::new();
+    settling.write("base.yaml", QUIET);
+    let settled = settling.run_task(TASK);
+    settled.expect_code(1);
+    assert_eq!(
+        agent_turns(&settled),
+        2,
+        "a quiet conversation with the key omitted settles on its no-op streak\n{}",
+        settled.stdout
+    );
+
+    // Supplied as `false`, the same conversation is driven on to its own cap.
+    let watching = Workspace::new();
+    watching.write("base.yaml", &format!("{QUIET}  settle_on_noop: false\n"));
+    let watched = watching.run_task(TASK);
+    watched.expect_code(1);
+    assert_eq!(
+        agent_turns(&watched),
+        5,
+        "the base config's `settle_on_noop: false` never reached the member's loop\n{}",
+        watched.stdout
+    );
+}
+
+/// How many turns the agent side of a member took, counted off the stream a
+/// consumer reads rather than off anything internal to the run.
+fn agent_turns(run: &Run) -> usize {
+    run.of_kind("turn-completed")
+        .iter()
+        .filter(|event| event["payload"]["role"] == "assistant")
+        .count()
 }
 
 /// Every event carries the member and persona it came from, and the run id every
