@@ -23,10 +23,12 @@
 // publish and it fails the other way.
 //
 // What that document may SAY is a separate question from whether it is true, and
-// it is answered separately: `npm/test/release-declaration.test.mjs` holds it to
-// the canonical schema. This reads it through that schema's own reader, so a
-// target here is one whose identifier, short name and prose have already been
-// validated, and everything below is about drift alone.
+// it is answered separately: `tests/release_declaration.rs` hands it to the
+// canonical schema's own reader — `onevcs`'s, the one implementation that defines
+// it — and this repository restates none of those rules. So the document read
+// below is one that has already been held to its schema, and everything here is
+// about drift alone. It is read the way a consumer with a standard TOML parser and
+// no knowledge of this repository reads it.
 //
 // A gate that only ever runs against a tree it passes proves nothing about what it
 // would catch, so the last two cases run these same checks over a checkout of this
@@ -66,7 +68,7 @@ import { fileURLToPath } from "node:url";
 
 import { parse, stringify } from "smol-toml";
 
-import { FILE, readDeclaration } from "../../scripts/check-release-declaration.mjs";
+import { FILE, readDeclaration } from "./support/declaration.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 
@@ -215,7 +217,7 @@ function coversEveryPublishedName(io) {
     // names rather than by the one its coverer is served from.
     const shipped = [
       key(target.registry, target.artifact),
-      ...target.covers.map((covered) => key(covered.registry, covered.name)),
+      ...target.covers.map((covered) => key(covered.registry, covered.artifact)),
     ];
     for (const id of shipped) {
       assert.equal(
@@ -250,8 +252,8 @@ function declaresNothingUnpublished(io) {
     );
     for (const covered of target.covers) {
       assert.ok(
-        publishedNames(io, covered.registry).includes(covered.name),
-        `${target.id} claims to cover ${covered.registry}:${covered.name}, which a release does not publish`,
+        publishedNames(io, covered.registry).includes(covered.artifact),
+        `${target.id} claims to cover ${covered.id}, which a release does not publish`,
       );
     }
   }

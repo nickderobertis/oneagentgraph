@@ -26,11 +26,13 @@
 # and crates.io, PyPI and npm are the documented install surfaces — so no
 # dependent can be waiting on one. Only the `publish-*` jobs reach a registry.
 #
-# Nothing here is transcribed and then left to rot. `scripts/check-release-declaration.mjs`
-# holds this document to the canonical schema, and `npm/test/release-targets.test.mjs`
-# derives the published set from the release configuration itself — the `publish-*`
-# jobs, the manifests, and `scripts/npm-build.mjs`'s target table — and fails on a
-# name that is neither declared nor covered here, in either direction.
+# Nothing here is transcribed and then left to rot. `tests/release_declaration.rs`
+# hands this document to `onevcs`'s own reader — the one implementation of the
+# canonical schema, never a copy of it kept here — and
+# `npm/test/release-targets.test.mjs` derives the published set from the release
+# configuration itself — the `publish-*` jobs, the manifests, and
+# `scripts/npm-build.mjs`'s target table — and fails on a name that is neither
+# declared nor covered here, in either direction.
 #
 # `scripts/release-probe.sh <id>` answers what a registry currently serves for one
 # of these ids.

@@ -43,6 +43,10 @@ include = [
   # Read the same way, by `tests/persona_format.rs`: the published persona
   # format drives the types it documents.
   "/docs/persona-format.md",
+  # And the same way again, by `tests/release_declaration.rs`: the release
+  # declaration is handed to onevcs's own reader, so a package without it is a
+  # crate whose own test cannot run.
+  "/release-targets.toml",
 ]
 
 [[bin]]
@@ -303,6 +307,22 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # auditor would compute rather than against the code under test. Already a normal
 # dependency, so this adds nothing to the graph.
 sha2 = "0.10"
+# The canonical release-target schema, as the one implementation that defines it.
+# `release-targets.toml` at this root is written against a schema six repositories
+# share, and `tests/release_declaration.rs` holds this repository's document to it
+# by calling `onevcs::validate_release_declaration` — the reader `onevcs`'s own
+# `docs/contract.md` documents beside the schema. A copy of those rules kept here
+# would be the defect the shared format exists to remove: a mirror drifts, and a
+# document that passes the mirror is still refused by the tool that reads it.
+#
+# 0.16.0 is the floor because it is the release that first exposes that reader;
+# below it neither `validate_release_declaration` nor `Declaration` exists. The
+# **library** rather than the `onevcs` binary, for the reason this crate drives
+# onejudge in-process: the reader answers a value a test can assert on, it is
+# pinned by `Cargo.lock` rather than by whatever is on a machine's `PATH`, and it
+# needs nothing installed for the gate to run offline on every platform leg.
+# Dev-only — nothing here reaches a consumer's build.
+onevcs = "0.16.0"
 
 [[test]]
 name = "e2e"

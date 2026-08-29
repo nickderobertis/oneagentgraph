@@ -35,6 +35,9 @@ fn the_package_carries_every_file_the_crate_is_built_from() {
     // that proves an old record still reads — is caught here too.
     needed.push("tests/golden/record.v1.json".into());
     needed.push("tests/golden/record.v2.json".into());
+    // The release declaration `tests/release_declaration.rs` hands to the reader
+    // that defines its schema, read the same way.
+    needed.push("release-targets.toml".into());
 
     for path in &needed {
         assert!(

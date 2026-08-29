@@ -22,7 +22,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
-import { FILE, readDeclaration } from "../../../scripts/check-release-declaration.mjs";
+import { FILE, readDeclaration } from "../support/declaration.mjs";
 import { probe } from "../support/release-probe.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");

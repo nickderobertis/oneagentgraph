@@ -76,12 +76,9 @@ the diff-scoped llmlint tier — and a change is not done until `gate` is green.
 `deps-check`, `msrv`, `lint-windows`, and `release-probe-check` sit outside both
 because each needs something a clean clone does not have — a network advisory
 database, a second toolchain, a cross compiler, the public registries; CI covers
-all four as jobs of their own. `release-declaration-check` sits outside them too,
-and is the one with no CI job: it hands `release-targets.toml` to `onevcs`'s own
-reader — the definition of that schema — and the release carrying that reader is
-not on crates.io, so nothing CI can install provides it. It is the drift gate over
-`scripts/check-release-declaration.mjs`, which mirrors those rules only until
-then; run it whenever the declaration or the mirror changes.
+all four as jobs of their own. Holding `release-targets.toml` to its schema is
+*not* one of them: `onevcs` is a dev-dependency, so its reader is linked into
+`tests/release_declaration.rs` and runs inside `check`, offline, on every leg.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
@@ -164,12 +161,15 @@ two are different answers and collapsing them is the worst thing this can get
 wrong, because a consumer holds forever on one and launches on the other.
 `npm/test/release-targets.test.mjs` derives the published set from the release
 configuration itself and fails on drift in either direction, over a checkout it
-drifts on purpose as well as over this one;
-`scripts/check-release-declaration.mjs` holds the document to that schema, and
-`npm/test/release-declaration.test.mjs` drives it against a refusal as well as a
-pass. Replace that checker with a call to `onevcs`'s own reader once the release
-carrying it is on crates.io — the schema is not this repository's to restate for
-longer than it has to be.
+drifts on purpose as well as over this one; and
+`tests/release_declaration.rs` hands the document to `onevcs`'s own reader — the
+one implementation of that schema — against a refusal as well as a pass. **The
+schema is never restated here.** A copy of those rules living in this repository
+is the duplication the shared format exists to remove: the copy drifts, and a
+document that passes it is still refused by the tool that reads it. Everything in
+this tree that *reads* the declaration reads it as a consumer does, with a
+standard TOML parser (`npm/test/support/declaration.mjs`) and no opinion about
+what it may say.
 
 **A release is checked from outside once it lands.** `published-smoke.yml` runs
 when `release.yml` *completes* — not on a schedule — and installs what the

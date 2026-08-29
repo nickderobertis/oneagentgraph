@@ -18,16 +18,18 @@ version has exactly one source — `Cargo.toml`, written by release-plz — and
 publish time. Never hand-edit a version here.
 
 `test/` also carries the checks that are about the release rather than about
-npm — the release-target declaration, in both halves (its schema, and its drift
-against what a release really publishes), and the release probe — because this is
-the packaging project and they read the same `release.yml` the matrix gate does.
+npm — the release-target declaration's drift against what a release really
+publishes, and the release probe — because this is the packaging project and they
+read the same `release.yml` the matrix gate does. Whether that declaration is a
+*shape* its schema allows is not asked here at all:
+`tests/release_declaration.rs` hands it to `onevcs`'s own reader, which is the one
+implementation of that schema, and `test/support/declaration.mjs` merely parses
+the document the way any consumer with a TOML parser does.
 
-Two tiers live under `test/live/`, outside the `npm/test/*.test.mjs` the `test`
+One tier lives under `test/live/`, outside the `npm/test/*.test.mjs` the `test`
 target runs, so `just check` stays offline: the probe's registry-served answers,
-which `just release-probe-check` runs, and the canonical reader's verdict on the
-declaration, which `just release-declaration-check` runs. Each needs something a
-clean clone does not have — the public registries, and an `onevcs` new enough to
-read a declaration.
+which `just release-probe-check` runs. It needs what a clean clone does not have —
+the public registries.
 
 Nothing in this directory is published from a developer's machine:
 `.github/workflows/release.yml` assembles, packs, and publishes it, and
