@@ -61,6 +61,7 @@
 //! | `FAKE_HARNESS_REFUSAL=quota` | a zero-work 429 the chain steps past |
 //! | `FAKE_HARNESS_REFUSAL=auth` | an unauthenticated refusal, on stderr alone |
 //! | `FAKE_HARNESS_REFUSAL=rate_limit` | the refusal a chain does **not** step past |
+//! | `FAKE_HARNESS_DECLARED_REJECTION=rate_limit` | a turn that ran, answered and was billed, declaring the provider's 429 in the same terminal record and exiting 0 — so its record reads `status: ok`, `exit_code: 0` *and* `failure_kind: rate_limit` |
 //! | `FAKE_HARNESS_CRASH=<code>` | exit that code having published nothing |
 //! | `FAKE_HARNESS_ATTEMPT_LOG=<path>` | append a line per launch, so a journey can count starts |
 //! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
@@ -143,6 +144,25 @@ enum Refusal {
     RateLimit,
 }
 
+/// A provider rejection the harness **declares in the terminal record of a turn
+/// it ran**, answered, and was billed for — and still exits `0` on.
+///
+/// Its own closed set rather than a [`Refusal`], because the turn was not refused:
+/// it happened, and somebody paid for it. oneharness reads a declared rejection
+/// out of a record that exited zero (`detect_provider_failure` exists for the
+/// harnesses that report an API rejection in an otherwise successful terminal
+/// record), so the result it writes is `status: ok`, `exit_code: 0`, billed usage
+/// — *and* a `failure_kind`. onejudge then surfaces that classification as the
+/// run's failure, leaving the classification and the record beside it saying
+/// opposite things. That pair is what a dispatch was destroyed over, and no
+/// refusal above can produce it: each of those leaves a record agreeing with the
+/// reason it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclaredRejection {
+    /// The provider's 429, declared on a turn that had already been billed.
+    RateLimit,
+}
+
 /// A validated request to fail `exec`-shaped launches after the first one.
 struct FailAfter {
     marker: std::path::PathBuf,
@@ -184,6 +204,19 @@ impl Refusal {
             "auth" => Some(Some(Refusal::Auth)),
             "quota" => Some(Some(Refusal::Quota)),
             "rate_limit" => Some(Some(Refusal::RateLimit)),
+            _ => None,
+        }
+    }
+}
+
+impl DeclaredRejection {
+    /// The rejection a value asks for, on the same terms [`Refusal::parse`] reads
+    /// its own: `Some(None)` for none at all, and `None` for a value this double
+    /// cannot read.
+    fn parse(requested: &str) -> Option<Option<Self>> {
+        match requested {
+            "" => Some(None),
+            "rate_limit" => Some(Some(DeclaredRejection::RateLimit)),
             _ => None,
         }
     }
@@ -357,6 +390,25 @@ fn main() -> std::process::ExitCode {
             return exit(REFUSAL_EXIT);
         }
         None => {}
+    }
+    let requested = std::env::var("FAKE_HARNESS_DECLARED_REJECTION").unwrap_or_default();
+    let Some(declared) = DeclaredRejection::parse(&requested) else {
+        eprintln!(
+            "fake-harness: FAKE_HARNESS_DECLARED_REJECTION must be rate_limit, got {requested:?}"
+        );
+        return exit(2);
+    };
+    // A turn that ran, answered, and was billed, declaring the provider's 429 in
+    // the same terminal record and exiting 0 — see [`DeclaredRejection`] for what
+    // oneharness then writes down, and why nothing above can produce it.
+    if declared == Some(DeclaredRejection::RateLimit) {
+        emit(&json!({
+            "type": "result", "subtype": "success", "is_error": false, "duration_ms": 5,
+            "num_turns": 1, "result": "the work is done", "api_error_status": 429,
+            "usage": {"input_tokens": 41233, "output_tokens": 9812},
+            "total_cost_usd": 12.11,
+        }));
+        return exit(0);
     }
 
     // Read once, before either kind of turn: the format oneharness selected is

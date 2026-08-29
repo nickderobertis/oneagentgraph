@@ -490,19 +490,174 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             // POSIX reports a signal while Windows job termination reports an
             // ordinary nonzero exit, and onejudge consequently classifies the
             // same operator action differently on the two platforms.
-            let cause = if cancellation_requested(scratch) {
-                Cause::Cancelled
-            } else {
-                provider_cause(&failure)
-            };
-            died(
-                emitter,
-                Rule::ProviderFailure,
-                cause,
-                &failure.error.to_string(),
-            )
+            if cancellation_requested(scratch) {
+                return died(
+                    emitter,
+                    Rule::ProviderFailure,
+                    Cause::Cancelled,
+                    &failure.error.to_string(),
+                );
+            }
+            // A producer's classification is read against the record oneharness
+            // wrote beside it before it becomes the cause of a death — see
+            // [`reconcile`].
+            let cause = provider_cause(&failure);
+            let detail = failure.error.to_string();
+            match reconcile(cause, turn_record(failure.telemetry.as_ref())) {
+                Reconciled::Completed(record) => carried(
+                    emitter,
+                    &format!(
+                        "the provider classified this turn {}, but {record}, so the turn it \
+                         describes is carried rather than published as a death — {detail}",
+                        cause.as_str()
+                    ),
+                    failure.telemetry.as_ref(),
+                    scratch,
+                ),
+                Reconciled::Disputed(record) => died(
+                    emitter,
+                    Rule::ProviderFailure,
+                    cause,
+                    &format!("{detail} — classified {}, while {record}", cause.as_str()),
+                ),
+                Reconciled::Unchallenged => died(emitter, Rule::ProviderFailure, cause, &detail),
+            }
         }
     }
+}
+
+/// How a producer's classification stands against the harness record beside it.
+///
+/// A `member-died` is the one event a supervisor destroys finished work on, and
+/// this crate publishes one on a *classification* — a single field a producer
+/// filled in. oneharness writes the whole record for that turn next to it, and a
+/// dispatch was lost to the two disagreeing: a node was killed on a
+/// `rate_limit` while the record for the same turn read `status: ok`,
+/// `exit_code: 0` and billed usage of twelve dollars. `crate::smoke` already
+/// refuses a candidate whose record does not back the reason it names; this is
+/// that same judgement, applied where it costs a node rather than a probe.
+enum Reconciled {
+    /// The record describes a turn that ran to completion and was billed, so
+    /// there is no death to publish whatever the classification says. Carries
+    /// the record's own words for the settle that replaces it.
+    Completed(String),
+    /// The record and the classification disagree some other way. The death is
+    /// published with its cause unchanged — swallowing one would be the opposite
+    /// mistake — and names the record too, so a reader sees the disagreement
+    /// rather than only the verdict.
+    Disputed(String),
+    /// Nothing in the record contradicts the classification: it names the same
+    /// failure, or there is no record to read. The death is published as it was
+    /// classified.
+    Unchallenged,
+}
+
+/// Judge one classification against the harness record for the same turn.
+fn reconcile(cause: Cause, record: Option<&onejudge::CandidateAttempt>) -> Reconciled {
+    let Some(record) = record else {
+        return Reconciled::Unchallenged;
+    };
+    // oneharness's own status token for a candidate that ran to completion, and
+    // the exit code of a process that did. Both, plus accounting that says the
+    // provider was charged, is a turn somebody paid for and got.
+    if record.status == "ok" && record.exit_code == Some(0) && billed(record) {
+        return Reconciled::Completed(describe(record));
+    }
+    let named = record
+        .failure_kind
+        .as_deref()
+        .map(onejudge::ProviderErrorKind::classify)
+        .map(Cause::from);
+    if named == Some(cause) {
+        return Reconciled::Unchallenged;
+    }
+    Reconciled::Disputed(describe(record))
+}
+
+/// The harness record for the invocation a failure was classified on.
+///
+/// The last attribution that names any candidate is the invocation that failed —
+/// telemetry is in invocation order — and within it the candidate that *ran* is
+/// the turn, falling back to the last one attempted when a chain reached none.
+fn turn_record(telemetry: Option<&onejudge::Telemetry>) -> Option<&onejudge::CandidateAttempt> {
+    let attribution = telemetry?
+        .attribution
+        .iter()
+        .rev()
+        .find(|attribution| !attribution.candidates.is_empty())?;
+    attribution
+        .candidates
+        .iter()
+        .find(|candidate| candidate.ran)
+        .or_else(|| attribution.candidates.last())
+}
+
+/// Whether this record's accounting says the provider billed real work.
+///
+/// Judged by oneharness's **own** predicate — the one its quota classifier and
+/// its fallback chain share, and the one `crate::smoke` holds a candidate to —
+/// rather than a second reading of it here. The mapping is spelled out field by
+/// field so a signal added upstream is a compile error rather than a figure
+/// silently dropped from the judgement.
+fn billed(record: &onejudge::CandidateAttempt) -> bool {
+    record.usage.as_ref().is_some_and(|usage| {
+        let onejudge::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost_usd,
+        } = *usage;
+        oneharness_core::domain::signals::Usage {
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+            cost_usd,
+        }
+        .reports_billed_work()
+    })
+}
+
+/// The record's own three facts, in the words a reader needs beside a
+/// classification: what oneharness called the attempt, what the process exited,
+/// and what it was billed.
+fn describe(record: &onejudge::CandidateAttempt) -> String {
+    let usage = record
+        .usage
+        .as_ref()
+        .and_then(|usage| serde_json::to_string(usage).ok())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "the harness's own record for that turn says status {}, exit code {}, usage {usage}",
+        record.status,
+        record
+            .exit_code
+            .map_or_else(|| "none".to_string(), |code| code.to_string()),
+    )
+}
+
+/// Carry a turn the harness record says completed, instead of killing the member
+/// over a classification that record contradicts.
+///
+/// A `member-settled` with `completed: false`, which `docs/contract.md` is
+/// explicit is how a member that failed its task is distinguished from one that
+/// died. The artifact is a real onejudge report, carrying the reconciliation in
+/// onejudge's own `settled_reason` — the field that already exists for a run that
+/// ended without a completion decision — and the telemetry the record was read
+/// from, so an operator can see the turn that was paid for.
+fn carried(
+    emitter: &Emitter,
+    why: &str,
+    telemetry: Option<&onejudge::Telemetry>,
+    scratch: &Path,
+) -> Outcome {
+    let mut report =
+        onejudge::Report::new(onejudge::Transcript::default(), Vec::new(), None, false);
+    report.settled_reason = Some(why.to_string());
+    report.telemetry = telemetry.cloned();
+    let document = serde_json::to_value(&report).unwrap_or(Value::Null);
+    settle_report(emitter, &document, false, scratch)
 }
 
 /// Whether this member's run or the member itself was explicitly stopped.
@@ -1547,6 +1702,197 @@ mod tests {
             processes: Vec::new(),
         };
         assert_eq!(provider_cause(&config), Cause::Unclassified);
+    }
+
+    /// One failed run, classified `kind`, carrying the harness record `candidate`
+    /// as the telemetry of its single invocation.
+    ///
+    /// Built from onejudge's own JSON so the shape a real dispatch carries is the
+    /// shape under test: telemetry reaches this crate as a deserialized
+    /// [`onejudge::Telemetry`], and a literal assembled field by field could
+    /// disagree with what the wire really holds.
+    fn failed_run(kind: onejudge::ProviderErrorKind, candidate: Value) -> Answer {
+        Err(Box::new(RunFailure {
+            error: onejudge::cli::CliError::Engine(onejudge::Error::provider_classified(
+                "respond",
+                "the provider said the call was rate limited",
+                kind,
+            )),
+            telemetry: serde_json::from_value(json!({
+                "wall_ms": 1, "orchestration_ms": 0, "agent": {}, "judge": {}, "sessions": [],
+                "attribution": [{"role": "agent", "turn_index": 1, "ran": "claude-code",
+                                 "fell_through": [], "candidates": [candidate]}],
+            }))
+            .expect("telemetry"),
+            processes: Vec::new(),
+        }))
+    }
+
+    /// The record oneharness writes for a turn that ran to completion and was
+    /// billed — the exact shape a dispatch was killed over.
+    fn a_completed_billed_turn() -> Value {
+        json!({
+            "harness": "claude-code", "harness_id": "claude-code", "status": "ok",
+            "available": true, "ran": true, "exit_code": 0, "duration_ms": 812_004,
+            "usage": {"input_tokens": 41_233, "output_tokens": 9_812, "cost_usd": 12.11},
+        })
+    }
+
+    /// A `rate_limit` classification is **not** published as a death when the
+    /// harness's own record for that turn says it completed and was billed.
+    ///
+    /// The loss this exists for: a node settled `failed (task-failed)` on a
+    /// `member-died` carrying `{"cause":"rate_limit"}` while the record beside it
+    /// read `status: ok`, `exit_code: 0` and $12.11 of billed usage. One field was
+    /// trusted over the whole record next to it, and two finished dispatches were
+    /// destroyed. Driven through the real `finish`, on the record's real shape.
+    #[test]
+    fn a_classification_the_harness_record_contradicts_is_not_published_as_a_death() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+
+        let outcome = finish(
+            failed_run(
+                onejudge::ProviderErrorKind::RateLimit,
+                a_completed_billed_turn(),
+            ),
+            &emitter,
+            dir.path(),
+        );
+
+        assert_eq!(
+            outcome,
+            Outcome::Incomplete,
+            "a turn the record says completed killed its member"
+        );
+        let kinds: Vec<_> = recorder
+            .events()
+            .into_iter()
+            .map(|event| event.kind)
+            .collect();
+        assert!(
+            !kinds.contains(&EventKind::MemberDied),
+            "a member died over a classification its own record contradicts: {kinds:?}"
+        );
+        assert!(kinds.contains(&EventKind::MemberSettled), "{kinds:?}");
+        // The turn the record describes is carried, and what it was carried over
+        // is on the artifact rather than left for nobody to find.
+        let stored = std::fs::read_to_string(dir.path().join(crate::member::REPORT_FILE))
+            .expect("the settle stored its report");
+        let report: Value = serde_json::from_str(&stored).expect("a report");
+        let settled = report["settled_reason"].as_str().expect("a settle reason");
+        assert!(settled.contains("rate_limit"), "{settled}");
+        assert!(settled.contains("status ok"), "{settled}");
+        assert!(settled.contains("exit code 0"), "{settled}");
+        assert!(settled.contains("12.11"), "{settled}");
+    }
+
+    /// A classification the record disagrees with some *other* way still kills
+    /// the member — swallowing it would be the opposite mistake — but what is
+    /// published names both, so a reader sees the disagreement rather than only
+    /// the verdict.
+    #[test]
+    fn a_disagreement_that_is_not_a_completed_turn_names_the_record_beside_the_cause() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+
+        let outcome = finish(
+            failed_run(
+                onejudge::ProviderErrorKind::RateLimit,
+                // Neither a completed billed turn nor a record that backs the
+                // reason: oneharness called it `auth`, having spent nothing.
+                json!({
+                    "harness": "claude-code", "harness_id": "claude-code", "status": "nonzero",
+                    "available": true, "ran": true, "exit_code": 2, "failure_kind": "auth",
+                }),
+            ),
+            &emitter,
+            dir.path(),
+        );
+
+        let Outcome::Died(death) = outcome else {
+            panic!("a disputed classification did not kill its member: {outcome:?}");
+        };
+        // The cause is the classification, unchanged.
+        assert_eq!(death.payload.cause, Cause::RateLimit);
+        let detail = &death.payload.detail;
+        assert!(detail.contains("rate_limit"), "{detail}");
+        assert!(detail.contains("status nonzero"), "{detail}");
+        assert!(detail.contains("exit code 2"), "{detail}");
+        assert!(detail.contains("usage none"), "{detail}");
+        assert_eq!(
+            recorder
+                .events()
+                .into_iter()
+                .filter(|event| event.kind == EventKind::MemberDied)
+                .count(),
+            1
+        );
+    }
+
+    /// A genuine provider death still publishes its cause and its own words
+    /// untouched: the reconciliation refuses a classification the record
+    /// contradicts, and swallows nothing else.
+    ///
+    /// The record here is the one `crate::smoke` refuses to excuse — a rate limit
+    /// *after* billed work, which is why it carries usage and still is not a
+    /// completed turn: `status: nonzero`, and the process exited 1.
+    #[test]
+    fn a_provider_death_its_record_backs_is_published_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+
+        let outcome = finish(
+            failed_run(
+                onejudge::ProviderErrorKind::RateLimit,
+                json!({
+                    "harness": "claude-code", "harness_id": "claude-code", "status": "nonzero",
+                    "available": true, "ran": true, "exit_code": 1,
+                    "failure_kind": "rate_limit", "failure_kind_source": "stderr",
+                    "usage": {"input_tokens": 900, "cost_usd": 0.42},
+                }),
+            ),
+            &emitter,
+            dir.path(),
+        );
+
+        let Outcome::Died(death) = outcome else {
+            panic!("a real provider death was swallowed: {outcome:?}");
+        };
+        assert_eq!(death.rule, Rule::ProviderFailure);
+        assert_eq!(death.payload.cause, Cause::RateLimit);
+        assert_eq!(
+            death.payload.detail,
+            "run failed: provider error (respond): the provider said the call was rate limited",
+            "a death its record backs was rewritten"
+        );
+        assert!(recorder
+            .events()
+            .into_iter()
+            .any(|event| event.kind == EventKind::MemberDied));
+    }
+
+    /// A failure with no harness record at all is published as it was classified:
+    /// there is nothing beside it to reconcile against, and inventing a doubt
+    /// would be the reconciliation deciding what it cannot see.
+    #[test]
+    fn a_failure_carrying_no_harness_record_is_published_as_classified() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, _recorder) = recorded();
+        let outcome = finish(
+            Err(Box::new(RunFailure {
+                error: onejudge::cli::CliError::Config("no task".into()),
+                telemetry: None,
+                processes: Vec::new(),
+            })),
+            &emitter,
+            dir.path(),
+        );
+        let Outcome::Died(death) = outcome else {
+            panic!("a recordless failure settled: {outcome:?}");
+        };
+        assert_eq!(death.payload.cause, Cause::Unclassified);
+        assert_eq!(death.payload.detail, "config error: no task");
     }
 
     /// A member whose engine thread **panics** fails that member and leaves the
