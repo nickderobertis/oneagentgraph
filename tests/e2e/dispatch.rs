@@ -3993,10 +3993,7 @@ fn a_classification_the_harness_record_contradicts_does_not_kill_the_member() {
     let workspace = Workspace::new();
     workspace.graph(&two_party_graph(
         &fake_harness(),
-        &[(
-            "FAKE_HARNESS_REFUSAL",
-            "billed_rate_limit_on_a_completed_turn",
-        )],
+        &[("FAKE_HARNESS_DECLARED_REJECTION", "rate_limit")],
     ));
 
     let run = workspace.run_task("reconcile the classification against the record");
@@ -4069,6 +4066,52 @@ fn a_provider_failure_its_record_backs_still_kills_the_member() {
         "a member that died also settled:\n{}",
         run.stdout
     );
+}
+
+/// A classification and a record that disagree some *other* way still kill the
+/// member, and the death names both.
+///
+/// The half of the reconciliation that must not swallow anything. A chain whose
+/// only identity has no binary reaches onejudge as a `spawn` classification, while
+/// oneharness's record for the same turn says the candidate was `skipped` and
+/// names no failure of its own — a disagreement that is not a completed turn. The
+/// member dies with its cause untouched, and the record's own three facts ride the
+/// detail so a supervisor reading the stream sees the disagreement rather than
+/// only the verdict.
+#[test]
+fn a_death_whose_record_disagrees_names_both_the_cause_and_the_record() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", crate::support::UNREACHABLE_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+        ),
+        &[(
+            crate::support::UNREACHABLE_HARNESS_KEY,
+            workspace.unreachable_harness(),
+        )],
+    ));
+
+    let run = workspace.run_task("a chain with no binary to reach");
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    // The cause is the classification, unchanged.
+    assert_eq!(died[0]["payload"]["cause"], Value::String("spawn".into()));
+    let detail = died[0]["payload"]["detail"]
+        .as_str()
+        .expect("a death says what it was");
+    assert!(detail.contains("classified spawn"), "{detail}");
+    assert!(detail.contains("status skipped"), "{detail}");
+    assert!(detail.contains("exit code none"), "{detail}");
+    assert!(detail.contains("usage none"), "{detail}");
 }
 
 /// The graph a terminal-blocker journey drives: the shipped `engineer` role's own
