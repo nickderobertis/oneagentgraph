@@ -25,13 +25,19 @@
 // still learns what a repository one release ahead publishes. At the version this
 // build knows, it is strict.
 //
-// Run it as a program to check this repository's own document:
+// Run it as a program to check one document — this repository's own, or one named
+// by an argument that is either a repository root or the declaration in it:
 //
 //     node scripts/check-release-declaration.mjs [path]
 //
-// Quiet but for one line on success; on a refusal, what is wrong and where in the
-// document it is, then a non-zero exit. `npm/test/release-declaration.test.mjs`
-// drives it both ways.
+// Two answers, and they are the whole of what a caller reads:
+//
+//   exit 0   a declaration this schema can read; one line on stdout naming every
+//            target and the short name it is waited on by
+//   exit 1   REFUSED — nothing on stdout, and on stderr what is wrong, where in the
+//            document it is, and a next action
+//
+// `npm/test/release-declaration.test.mjs` drives it both ways.
 
 import { readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -48,12 +54,27 @@ export const FILE = "release-targets.toml";
 /// The schema version this checker knows, and the oldest it reads.
 export const SCHEMA_VERSION = 1;
 
+/// The one non-zero exit: the document was refused. There is no second failure
+/// code because there is no second kind of failure — a caller either got the one
+/// line on stdout or got a reason on stderr.
+const REFUSED = 1;
+
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the one source
+// for this schema is `onevcs`'s `declaration` module, and the release carrying it is
+// not on crates.io yet — so there is nothing to call, and nothing offline to diff
+// against. A gate that fetched the upstream contract at check time is not available
+// either: `just check` is offline and credential-free by rule, which is why
+// `deps-check` and `release-probe-check` sit outside it. This restatement is
+// deliberate and temporary; the header says what replaces it, and the document it
+// checks is the same one every other repository in the stack writes against, so the
+// upstream reader is what settles any disagreement.
 /// The keys schema version 1 declares, by the table they belong to.
 const TOP_LEVEL_KEYS = ["schema_version", "probe", "target", "retired"];
 const TARGET_KEYS = ["id", "name", "what", "published_by", "manifest", "covers"];
 const RETIRED_KEYS = ["id", "why"];
 /// The fields every target must carry. The rest of `TARGET_KEYS` are optional.
 const REQUIRED_TARGET_KEYS = ["id", "name", "what", "published_by"];
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// How long each field may be. Prose is rendered on one line beside the entry it
 /// describes; the reasoning behind it belongs in a comment.
@@ -445,6 +466,17 @@ export function readDeclaration(path) {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 function main(argv) {
+  if (argv.length > 1) {
+    console.error(
+      `check-release-declaration: takes at most one argument, got ${argv.length}: ` +
+        `${argv.join(" ")}`,
+    );
+    console.error(
+      "ACTION: name one document — a repository root, or the release-targets.toml in " +
+        "it — or none at all, which is this repository's own",
+    );
+    return REFUSED;
+  }
   const path = argv[0] ?? join(REPO_ROOT, FILE);
   let declaration;
   try {
@@ -456,7 +488,7 @@ function main(argv) {
       "ACTION: fix what the refusal above names — the schema is the canonical release-target " +
         "declaration, in onevcs's docs/contract.md",
     );
-    return 1;
+    return REFUSED;
   }
   const named = declaration.targets.map((target) => `${target.name} (${target.id})`).join(", ");
   console.log(

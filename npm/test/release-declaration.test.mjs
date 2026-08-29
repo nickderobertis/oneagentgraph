@@ -13,6 +13,12 @@
 // and the assertions are its exit code and what it said. Each mutation is made by
 // parsing the real declaration and changing exactly one thing about it, so every
 // refusal below is a refusal of a document somebody could plausibly have written.
+//
+// Every refusal the checker can reach from a document has a row in REFUSALS. A
+// validator whose only exercised path is the one its own repository takes is a
+// validator nobody has checked: the paths that matter are the ones a document that
+// has gone wrong takes, and each of those is reached here through the same file the
+// gate reads, rendered as real TOML.
 
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -72,6 +78,253 @@ function assertRefused(result, because, reason) {
   assert.match(result.stderr, /ACTION:/, `${because}: gave no next action on stderr`);
 }
 
+/// Every refusal a declaration can walk into, one row each: what a document did,
+/// and the sentence the checker must answer it with. `mutate` receives the real
+/// declaration, parsed, and changes exactly one thing about it.
+const REFUSALS = [
+  {
+    because: "a target with no `what`",
+    mutate: (document) => {
+      delete document.target[0].what;
+    },
+    reason: /\[\[target\]\] 1 with no what/,
+  },
+  {
+    because: "an unqualified identifier",
+    mutate: (document) => {
+      document.target[0].id = "oneagentgraph";
+    },
+    reason: /'oneagentgraph', which names no registry/,
+  },
+  {
+    because: "an identifier with a space in its name",
+    mutate: (document) => {
+      document.target[0].id = "crate:one agentgraph";
+    },
+    reason: /is not one a registry serves/,
+  },
+  {
+    because: "an identifier that is not text at all",
+    mutate: (document) => {
+      document.target[0].id = 3;
+    },
+    reason: /id that is not a string/,
+  },
+  {
+    because: "an identifier no refusal could quote in a sentence",
+    mutate: (document) => {
+      document.target[0].id = `crate:${"a".repeat(200)}`;
+    },
+    reason: /longer than 128 characters/,
+  },
+  {
+    because: "a registry spelled in a way no URL is built from",
+    mutate: (document) => {
+      document.target[0].id = "Crates.io:oneagentgraph";
+    },
+    reason: /is not one word of lowercase letters, digits, and '-'/,
+  },
+  {
+    because: "a short name that is not text",
+    mutate: (document) => {
+      document.target[0].name = 7;
+    },
+    reason: /name that is not a string/,
+  },
+  {
+    because: "an empty short name",
+    mutate: (document) => {
+      document.target[0].name = "";
+    },
+    reason: /name that is empty/,
+  },
+  {
+    because: "a short name longer than a refusal can quote",
+    mutate: (document) => {
+      document.target[0].name = "a".repeat(65);
+    },
+    reason: /longer than 64 characters/,
+  },
+  {
+    because: "a short name spelled outside the alphabet a consumer types",
+    mutate: (document) => {
+      document.target[0].name = "crate/one";
+    },
+    reason: /must start with a letter or a digit and hold only/,
+  },
+  {
+    because: "a repeated short name",
+    mutate: (document) => {
+      document.target[1].name = document.target[0].name;
+    },
+    reason: /taking the short name '.+', which \[\[target\]\] 1 already takes/,
+  },
+  {
+    because: "a repeated identifier",
+    mutate: (document) => {
+      document.target[1].id = document.target[0].id;
+    },
+    reason: /declaring the identifier \[\[target\]\] 1 already declares/,
+  },
+  {
+    because: "a key from a shape this schema replaced",
+    mutate: (document) => {
+      document.target[0].name_from = "Cargo.toml [package] name";
+    },
+    reason: /names 'name_from' in \[\[target\]\] 1, which schema_version 1 does not declare/,
+  },
+  {
+    because: "prose that is not text",
+    mutate: (document) => {
+      document.target[0].what = 1;
+    },
+    reason: /what that is not a string/,
+  },
+  {
+    because: "a blank `what`",
+    mutate: (document) => {
+      document.target[0].what = "   ";
+    },
+    reason: /blank, and a reader learns nothing/,
+  },
+  {
+    because: "prose long enough to be the reasoning rather than the sentence",
+    mutate: (document) => {
+      document.target[0].what = "a".repeat(401);
+    },
+    reason: /longer than 400 characters/,
+  },
+  {
+    because: "a `what` carrying a newline",
+    mutate: (document) => {
+      document.target[0].what = "The library and the binary.\nAnd a line nobody will see.";
+    },
+    reason: /carrying a control character/,
+  },
+  {
+    because: "an absolute probe",
+    mutate: (document) => {
+      document.probe = "/usr/local/bin/release-probe.sh";
+    },
+    reason: /which is absolute/,
+  },
+  {
+    because: "an empty manifest path",
+    mutate: (document) => {
+      document.target[0].manifest = "";
+    },
+    reason: /manifest empty/,
+  },
+  {
+    because: "a manifest on the reader's own drive",
+    mutate: (document) => {
+      document.target[0].manifest = "C:\\Cargo.toml";
+    },
+    reason: /names a drive on the reader's own machine/,
+  },
+  {
+    because: "a manifest outside the repository, spelled the way Windows spells it",
+    mutate: (document) => {
+      document.target[0].manifest = "..\\elsewhere\\Cargo.toml";
+    },
+    reason: /which leaves the repository root/,
+  },
+  {
+    because: "a covered identifier that is also a target",
+    mutate: (document) => {
+      document.target[2].covers = [document.target[0].id];
+    },
+    reason: /declares as a target of its own/,
+  },
+  {
+    because: "an identifier two releases both claim to ship",
+    mutate: (document) => {
+      document.target[0].covers = [document.target[2].covers[0]];
+    },
+    reason: /which \[\[target\]\] 1 already covers/,
+  },
+  {
+    because: "a target covering its own identifier",
+    mutate: (document) => {
+      document.target[0].covers = [document.target[0].id];
+    },
+    reason: /covering its own identifier/,
+  },
+  {
+    because: "a covers that is not a list of identifiers",
+    mutate: (document) => {
+      document.target[2].covers = "npm:oneagentgraph-cli-linux-x64";
+    },
+    reason: /covers that is not a list of identifiers/,
+  },
+  {
+    because: "a target that is not a table",
+    mutate: (document) => {
+      document.target = ["crate:oneagentgraph"];
+    },
+    reason: /\[\[target\]\] 1, which is not a table/,
+  },
+  {
+    because: "a target key holding something other than tables",
+    mutate: (document) => {
+      document.target = "crate:oneagentgraph";
+    },
+    reason: /target that is not a list of \[\[target\]\] tables/,
+  },
+  {
+    because: "a retired key holding something other than tables",
+    mutate: (document) => {
+      document.retired = "pypi:gone";
+    },
+    reason: /retired that is not a list of \[\[retired\]\] tables/,
+  },
+  {
+    because: "a retired artifact with no reason given",
+    mutate: (document) => {
+      document.retired = [{ id: "pypi:oneagentgraph-legacy" }];
+    },
+    reason: /\[\[retired\]\] 1 with no why/,
+  },
+  {
+    because: "retiring something the same document publishes",
+    mutate: (document) => {
+      document.retired = [{ id: document.target[1].id, why: "Nothing publishes it now." }];
+    },
+    reason: /retiring what \[\[target\]\] 2 publishes/,
+  },
+  {
+    because: "one artifact retired twice",
+    mutate: (document) => {
+      document.retired = [
+        { id: "pypi:oneagentgraph-legacy", why: "Nothing publishes it now." },
+        { id: "pypi:oneagentgraph-legacy", why: "Said again." },
+      ];
+    },
+    reason: /repeating what \[\[retired\]\] 1 records/,
+  },
+  {
+    because: "a declaration that names nothing",
+    mutate: (document) => {
+      document.target = [];
+    },
+    reason: /declares no \[\[target\]\]/,
+  },
+  {
+    because: "an unversioned document",
+    mutate: (document) => {
+      delete document.schema_version;
+    },
+    reason: /declares no schema_version/,
+  },
+  {
+    because: "a schema this checker predates",
+    mutate: (document) => {
+      document.schema_version = 0;
+    },
+    reason: /declares schema_version 0; this checker reads schema_version 1 and newer/,
+  },
+];
+
 describe("the release-target declaration", () => {
   it("passes the schema check this repository ships", () => {
     const result = check();
@@ -84,134 +337,13 @@ describe("the release-target declaration", () => {
     }
   });
 
-  it("refuses a target missing a required field", () => {
-    const document = declared();
-    delete document.target[0].what;
-    assertRefused(
-      checkDocument(document),
-      "a target with no `what`",
-      /\[\[target\]\] 1 with no what/,
-    );
-  });
-
-  it("refuses an identifier that names no registry", () => {
-    const document = declared();
-    document.target[0].id = "oneagentgraph";
-    assertRefused(
-      checkDocument(document),
-      "an unqualified identifier",
-      /'oneagentgraph', which names no registry/,
-    );
-  });
-
-  it("refuses an identifier a registry could not serve", () => {
-    const document = declared();
-    document.target[0].id = "crate:one agentgraph";
-    assertRefused(
-      checkDocument(document),
-      "an identifier with a space in its name",
-      /is not one a registry serves/,
-    );
-  });
-
-  it("refuses two targets taking one short name", () => {
-    const document = declared();
-    document.target[1].name = document.target[0].name;
-    assertRefused(
-      checkDocument(document),
-      "a repeated short name",
-      /taking the short name '.+', which \[\[target\]\] 1 already takes/,
-    );
-  });
-
-  it("refuses two targets declaring one identifier", () => {
-    const document = declared();
-    document.target[1].id = document.target[0].id;
-    assertRefused(
-      checkDocument(document),
-      "a repeated identifier",
-      /declaring the identifier \[\[target\]\] 1 already declares/,
-    );
-  });
-
-  it("refuses a key the schema does not declare, by name", () => {
-    const document = declared();
-    document.target[0].name_from = "Cargo.toml [package] name";
-    assertRefused(
-      checkDocument(document),
-      "a key from a shape this schema replaced",
-      /names 'name_from' in \[\[target\]\] 1, which schema_version 1 does not declare/,
-    );
-  });
-
-  it("refuses covering something the same document declares as a target", () => {
-    const document = declared();
-    document.target[2].covers = [document.target[0].id];
-    assertRefused(
-      checkDocument(document),
-      "a covered identifier that is also a target",
-      /declares as a target of its own/,
-    );
-  });
-
-  it("refuses one identifier covered by two targets", () => {
-    const document = declared();
-    const covered = document.target[2].covers[0];
-    document.target[0].covers = [covered];
-    assertRefused(
-      checkDocument(document),
-      "an identifier two releases both claim to ship",
-      /which \[\[target\]\] 1 already covers/,
-    );
-  });
-
-  it("refuses a path that leaves the repository", () => {
-    const document = declared();
-    document.probe = "/usr/local/bin/release-probe.sh";
-    assertRefused(checkDocument(document), "an absolute probe", /which is absolute/);
-  });
-
-  it("refuses prose a reader would learn nothing from", () => {
-    const document = declared();
-    document.target[0].what = "   ";
-    assertRefused(checkDocument(document), "a blank `what`", /blank, and a reader learns nothing/);
-  });
-
-  it("refuses prose that would not render on the line it is printed on", () => {
-    const document = declared();
-    document.target[0].what = "The library and the binary.\nAnd a second line nobody will see.";
-    assertRefused(
-      checkDocument(document),
-      "a `what` carrying a newline",
-      /carrying a control character/,
-    );
-  });
-
-  it("refuses a declaration with no target at all", () => {
-    const document = declared();
-    document.target = [];
-    assertRefused(
-      checkDocument(document),
-      "a declaration that names nothing",
-      /declares no \[\[target\]\]/,
-    );
-  });
-
-  it("refuses a document with no schema_version", () => {
-    const document = declared();
-    delete document.schema_version;
-    assertRefused(checkDocument(document), "an unversioned document", /declares no schema_version/);
-  });
-
-  it("refuses a schema older than the one it reads", () => {
-    const document = declared();
-    document.schema_version = 0;
-    assertRefused(
-      checkDocument(document),
-      "a schema this checker predates",
-      /declares schema_version 0; this checker reads schema_version 1 and newer/,
-    );
-  });
+  for (const { because, mutate, reason } of REFUSALS) {
+    it(`refuses ${because}`, () => {
+      const document = declared();
+      mutate(document);
+      assertRefused(checkDocument(document), because, reason);
+    });
+  }
 
   it("refuses a document that is not TOML", () => {
     assertRefused(
@@ -231,6 +363,32 @@ describe("the release-target declaration", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("refuses more documents than it can answer about", () => {
+    // One answer per invocation: a caller reads the line on stdout as the answer
+    // about the document it named, so a second path would make that line ambiguous.
+    assertRefused(
+      check("release-targets.toml", "somewhere-else"),
+      "two paths in one invocation",
+      /takes at most one argument, got 2/,
+    );
+  });
+
+  it("accepts an artifact recorded as no longer published", () => {
+    // This repository has retired nothing, so the field is proven on a document
+    // that has: a consumer still naming a retired artifact has to be told it is
+    // gone rather than told nothing.
+    const document = declared();
+    document.retired = [
+      {
+        id: "pypi:oneagentgraph-legacy",
+        why: "Never published; recorded here to prove the field.",
+      },
+    ];
+    const result = checkDocument(document);
+    assert.equal(result.status, 0, `a retired artifact was refused:\n${result.stderr}`);
+    assert.match(result.stdout, /declares 3 targets against schema_version 1/);
   });
 
   it("reads a later schema leniently, so a consumer one release behind still learns what this publishes", () => {
