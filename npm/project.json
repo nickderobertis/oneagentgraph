@@ -21,6 +21,8 @@
         "{workspaceRoot}/release-targets.json",
         "{workspaceRoot}/pyproject.toml",
         "{workspaceRoot}/.github/workflows/release.yml",
+        "{workspaceRoot}/.github/workflows/published-smoke.yml",
+        "{workspaceRoot}/scripts/report-workflow-failure.sh",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/Cargo.lock",
