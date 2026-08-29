@@ -80,14 +80,28 @@ fn main() -> std::process::ExitCode {
     };
     let task = first_user_message(messages);
     let turns = assistant_turns(messages);
-    let response = match request.get("op").and_then(Value::as_str) {
+    let op = request.get("op").and_then(Value::as_str);
+    // The other half of the protocol this double reads, validated where `messages`
+    // is and for the same reason: the supervisor's release decision is taken from
+    // the persona it was handed, so a request carrying none — or carrying
+    // something that is not a persona — is one this double cannot answer. Reading
+    // an absent field as an empty persona would answer *something*: every blocker
+    // would read as terminal, and a journey would pass against a decision no
+    // persona made.
+    let persona = match (op, request.get("persona").and_then(Value::as_str)) {
+        (Some("supervisor"), None) => {
+            eprintln!(
+                "fake-provider: the supervisor request carries no `persona` string to judge a \
+                 reported blocker against"
+            );
+            return std::process::ExitCode::from(1);
+        }
+        (_, persona) => persona.unwrap_or_default(),
+    };
+    let response = match op {
         // The unified per-turn supervisor: it decides completion, or supplies the
         // next simulated-user message.
         Some("supervisor") => {
-            let persona = request
-                .get("persona")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
             match reported_blocker(messages) {
                 // The worker says it is blocked, and the persona this supervisor
                 // was handed decides what that means — see [`retryable`].
