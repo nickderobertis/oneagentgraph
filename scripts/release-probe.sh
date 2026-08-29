@@ -36,7 +36,7 @@
 #
 # The registry is what is recognised, not the name: this answers for any name a
 # registry serves, so a consumer never has to know which repository publishes
-# what. `release-targets.json` is where *this* repository declares which
+# what. `release-targets.toml` is where *this* repository declares which
 # identifiers are its own, and npm/test/release-targets.test.mjs holds that
 # declaration against the release configuration.
 #

@@ -142,9 +142,13 @@ them. **Nothing else writes a version:** maturin reads it from `Cargo.toml` via
 place.
 
 **What this repository releases is declared, so a consumer can wait on it.**
-`release-targets.json` names one registry-qualified identifier per *consumable*
-artifact — `crate:oneagentgraph`, `pypi:oneagentgraph-cli`,
-`npm:oneagentgraph-cli`. The crate and the command line are separate targets
+`release-targets.toml` at the root names one registry-qualified identifier per
+*consumable* artifact — `crate:oneagentgraph`, `pypi:oneagentgraph-cli`,
+`npm:oneagentgraph-cli`. It is written against the canonical release-target
+schema, which `onevcs`'s `docs/contract.md` defines and every repository in this
+stack writes against, so **no field in it is this repository's own**: a shape this
+repository needs and the schema cannot express is a proposal to that contract's
+owner, never a field invented here. The crate and the command line are separate targets
 because they have already been at separate versions: a host pinned the CLI
 release that added a producer and got an older linked crate that emitted nothing.
 The per-platform npm packages are *covered* by the launcher rather than declared —
@@ -154,7 +158,13 @@ served it, and with a non-zero exit when it could establish neither; those last
 two are different answers and collapsing them is the worst thing this can get
 wrong, because a consumer holds forever on one and launches on the other.
 `npm/test/release-targets.test.mjs` derives the published set from the release
-configuration itself and fails on drift in either direction.
+configuration itself and fails on drift in either direction, over a checkout it
+drifts on purpose as well as over this one;
+`scripts/check-release-declaration.mjs` holds the document to that schema, and
+`npm/test/release-declaration.test.mjs` drives it against a refusal as well as a
+pass. Replace that checker with a call to `onevcs`'s own reader once the release
+carrying it is on crates.io — the schema is not this repository's to restate for
+longer than it has to be.
 
 **A release is checked from outside once it lands.** `published-smoke.yml` runs
 when `release.yml` *completes* — not on a schedule — and installs what the
