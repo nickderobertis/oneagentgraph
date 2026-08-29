@@ -3972,3 +3972,98 @@ fn a_config_whose_paths_are_already_unambiguous_is_carried_through_as_written() 
         "an empty `history_dir` was turned into the config's own directory"
     );
 }
+
+/// A classification the harness's own record contradicts does not kill the
+/// member: the turn the record describes is carried instead.
+///
+/// The loss this is named for. A node settled `failed (task-failed)` on a
+/// `member-died` carrying `{"cause":"rate_limit"}` while oneharness's record for
+/// the same turn read `status: ok`, `exit_code: 0` and billed usage of $12.11 —
+/// two finished dispatches destroyed on one field read without the record beside
+/// it.
+///
+/// Driven through the whole real path rather than at the seam: the doubled
+/// harness answers a turn and declares the provider's 429 in the same terminal
+/// record while exiting 0, which is what real harnesses do (`oneharness`'s
+/// `detect_provider_failure` exists for it) — so real oneharness writes the
+/// contradicting record, real onejudge surfaces the classification as the run's
+/// failure, and this crate is what has to reconcile the two.
+#[test]
+fn a_classification_the_harness_record_contradicts_does_not_kill_the_member() {
+    let workspace = Workspace::new();
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[(
+            "FAKE_HARNESS_REFUSAL",
+            "billed_rate_limit_on_a_completed_turn",
+        )],
+    ));
+
+    let run = workspace.run_task("reconcile the classification against the record");
+    // Still a member that did not reach its bar, so still exit 1 — what changes
+    // is that it is a member that failed its task rather than one that died.
+    run.expect_code(1);
+
+    assert!(
+        run.of_kind("member-died").is_empty(),
+        "a turn oneharness recorded as completed and billed was published as a death:\n{}",
+        run.stdout
+    );
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    assert_eq!(settled[0]["payload"]["completed"], Value::Bool(false));
+
+    // The reconciliation is on the artifact rather than left for nobody to find:
+    // the classification, and the record's own three facts beside it.
+    let path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settle named no stored report: {}", settled[0]));
+    let report: Value = serde_json::from_str(&std::fs::read_to_string(path).expect("the report"))
+        .expect("the report is JSON");
+    let why = report["settled_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the carried turn said nothing about why: {report}"));
+    assert!(why.contains("rate_limit"), "{why}");
+    assert!(why.contains("status ok"), "{why}");
+    assert!(why.contains("exit code 0"), "{why}");
+    assert!(why.contains("12.11"), "{why}");
+
+    // And the run's own record names the outcome the same way.
+    assert_eq!(
+        workspace.record()["members"]["worker"],
+        Value::String("incomplete".into())
+    );
+}
+
+/// The other end of the same rule: a provider failure whose record backs the
+/// reason it names still kills the member, with its cause untouched.
+///
+/// `rate_limit` again, and deliberately the same classification — a rate limit
+/// *after* billed work, which oneharness records as `status: nonzero` and which a
+/// chain does not step past. The reconciliation refuses a classification the
+/// record contradicts and swallows nothing else, and only driving both halves on
+/// one cause shows that.
+#[test]
+fn a_provider_failure_its_record_backs_still_kills_the_member() {
+    let workspace = Workspace::new();
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[("FAKE_HARNESS_REFUSAL", "rate_limit")],
+    ));
+
+    let run = workspace.run_task("a rate limit after billed work is a real death");
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    assert_eq!(died[0]["payload"]["cause"], Value::String("rate_limit".into()));
+    assert_eq!(
+        died[0]["payload"]["rule"],
+        Value::String("provider-failure".into())
+    );
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "a member that died also settled:\n{}",
+        run.stdout
+    );
+}

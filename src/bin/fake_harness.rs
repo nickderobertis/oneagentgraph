@@ -61,6 +61,7 @@
 //! | `FAKE_HARNESS_REFUSAL=quota` | a zero-work 429 the chain steps past |
 //! | `FAKE_HARNESS_REFUSAL=auth` | an unauthenticated refusal, on stderr alone |
 //! | `FAKE_HARNESS_REFUSAL=rate_limit` | the refusal a chain does **not** step past |
+//! | `FAKE_HARNESS_REFUSAL=billed_rate_limit_on_a_completed_turn` | a turn that ran, answered and was billed, whose record carries a `rate_limit` classification beside `status: ok` and `exit_code: 0` |
 //! | `FAKE_HARNESS_CRASH=<code>` | exit that code having published nothing |
 //! | `FAKE_HARNESS_ATTEMPT_LOG=<path>` | append a line per launch, so a journey can count starts |
 //! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
@@ -141,6 +142,18 @@ enum Refusal {
     Quota,
     /// The same shape after billed work, which a chain does not step past.
     RateLimit,
+    /// A turn that **ran, answered and was billed**, whose terminal record also
+    /// declares the provider's 429 — and which exits `0`.
+    ///
+    /// Not a refusal of the turn at all, which is the point: oneharness reads the
+    /// declared rejection out of a record that exited zero (`detect_provider_failure`,
+    /// for the harnesses that report an API rejection in an otherwise successful
+    /// terminal record), so the result it writes is `status: ok`, `exit_code: 0`,
+    /// billed usage — *and* `failure_kind: rate_limit`. onejudge then surfaces the
+    /// classification as the run's failure. That pair is the record a dispatch was
+    /// destroyed over, and it is reachable no other way: every other refusal here
+    /// leaves a record that agrees with the reason it names.
+    BilledRateLimitOnACompletedTurn,
 }
 
 /// A validated request to fail `exec`-shaped launches after the first one.
@@ -184,6 +197,9 @@ impl Refusal {
             "auth" => Some(Some(Refusal::Auth)),
             "quota" => Some(Some(Refusal::Quota)),
             "rate_limit" => Some(Some(Refusal::RateLimit)),
+            "billed_rate_limit_on_a_completed_turn" => {
+                Some(Some(Refusal::BilledRateLimitOnACompletedTurn))
+            }
             _ => None,
         }
     }
@@ -318,8 +334,8 @@ fn main() -> std::process::ExitCode {
     let requested = std::env::var("FAKE_HARNESS_REFUSAL").unwrap_or_default();
     let Some(refusal) = Refusal::parse(&requested) else {
         eprintln!(
-            "fake-harness: FAKE_HARNESS_REFUSAL must be auth, quota, or rate_limit, got \
-             {requested:?}"
+            "fake-harness: FAKE_HARNESS_REFUSAL must be auth, quota, rate_limit, or \
+             billed_rate_limit_on_a_completed_turn, got {requested:?}"
         );
         return exit(2);
     };
@@ -355,6 +371,25 @@ fn main() -> std::process::ExitCode {
                 "usage": {"input_tokens": 900, "output_tokens": 120}, "total_cost_usd": 0.42,
             }));
             return exit(REFUSAL_EXIT);
+        }
+        // A turn that **ran, answered and was billed**, whose terminal record
+        // also declares the provider's 429 — and which exits `0`.
+        //
+        // oneharness reads a declared rejection out of a record that exited zero,
+        // so the result it writes is `status: ok`, `exit_code: 0`, billed usage,
+        // *and* `failure_kind: rate_limit`. Nothing else this double can do
+        // produces a record that disagrees with the reason beside it, and that
+        // disagreement is what a dispatch was destroyed over: the classification
+        // was published as a `member-died` while the record said the turn had
+        // completed and been charged for.
+        Some(Refusal::BilledRateLimitOnACompletedTurn) => {
+            emit(&json!({
+                "type": "result", "subtype": "success", "is_error": false, "duration_ms": 5,
+                "num_turns": 1, "result": "the work is done", "api_error_status": 429,
+                "usage": {"input_tokens": 41233, "output_tokens": 9812},
+                "total_cost_usd": 12.11,
+            }));
+            return exit(0);
         }
         None => {}
     }
