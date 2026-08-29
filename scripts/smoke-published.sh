@@ -9,9 +9,9 @@
 # what actually ships — assertions inlined in a workflow keep passing after the
 # surface around them changes.
 #
-# Deliberately toolchain-free: bash and the installed binary. The scheduled sweep
-# runs this every week on every OS, for both registries, and anything it had to
-# install first would be a second thing that can rot.
+# Deliberately toolchain-free: bash and the installed binary. The published smoke
+# runs this on every OS, for both registries, each time a release completes, and
+# anything it had to install first would be a second thing that can rot.
 #
 # What a published artifact is held to here is what it can prove *alone*: it
 # reports its version, prints the documented command list, refuses a graph it

@@ -156,6 +156,15 @@ wrong, because a consumer holds forever on one and launches on the other.
 `npm/test/release-targets.test.mjs` derives the published set from the release
 configuration itself and fails on drift in either direction.
 
+**A release is checked from outside once it lands.** `published-smoke.yml` runs
+when `release.yml` *completes* — not on a schedule — and installs what the
+registries serve the way the README tells users to. It has no pull request to
+turn red, so its `report` job opens one issue here and comments on it each
+further failure; that job checks the repository out because
+`scripts/report-workflow-failure.sh` lives in it, and both halves of its
+create-or-comment behaviour are driven in `just check` by
+`npm/test/report-workflow-failure.test.mjs`.
+
 Bump policy, **pre-1.0**: `feat` → minor, `feat!` / `BREAKING CHANGE` → minor (a
 breaking change pre-1.0 is not yet a major), `fix` / `perf` / `refactor` /
 `build` → patch, and `chore` / `docs` / `ci` / `test` / `style` → no release.
