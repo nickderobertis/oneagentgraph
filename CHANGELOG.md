@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.13](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.12...v0.3.13) - 2026-08-29
+
+### Changed
+
+- *(release)* declare release targets in the canonical release-targets.toml ([#87](https://github.com/nickderobertis/oneagentgraph/pull/87))
+
 ## [0.3.12](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.11...v0.3.12) - 2026-08-28
 
 ### Fixed
