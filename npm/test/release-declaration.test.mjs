@@ -167,6 +167,27 @@ const REFUSALS = [
     reason: /declaring the identifier \[\[target\]\] 1 already declares/,
   },
   {
+    because: "a key the schema does not declare beside `schema_version` itself",
+    mutate: (document) => {
+      document.probes = "scripts/release-probe.sh";
+    },
+    reason: /names 'probes' in the document, which schema_version 1 does not declare/,
+  },
+  {
+    because: "a blank `published_by`",
+    mutate: (document) => {
+      document.target[0].published_by = "";
+    },
+    reason: /published_by blank, and a reader learns nothing/,
+  },
+  {
+    because: "a retired artifact whose reason says nothing",
+    mutate: (document) => {
+      document.retired = [{ id: "pypi:oneagentgraph-legacy", why: "  " }];
+    },
+    reason: /why blank, and a reader learns nothing/,
+  },
+  {
     because: "a key from a shape this schema replaced",
     mutate: (document) => {
       document.target[0].name_from = "Cargo.toml [package] name";
@@ -351,6 +372,20 @@ describe("the release-target declaration", () => {
       "a document in another format",
       /is not TOML/,
     );
+  });
+
+  it("answers for a repository root as readily as for the document in it", () => {
+    // A consumer with a checkout and a consumer with a file both spell what they
+    // have, so the path this takes is either and the answer is the same.
+    const dir = mkdtempSync(join(tmpdir(), "release-declaration-"));
+    try {
+      writeFileSync(join(dir, "release-targets.toml"), readFileSync(DECLARATION, "utf8"));
+      const result = check(dir);
+      assert.equal(result.status, 0, `a repository root was refused:\n${result.stderr}`);
+      assert.match(result.stdout, /declares 3 targets against schema_version 1/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("refuses a repository that carries no declaration at all", () => {

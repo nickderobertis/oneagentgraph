@@ -209,17 +209,12 @@ release-probe-check:
     @command -v node >/dev/null || { echo "node not installed: this drives the probe from a node test — run 'just bootstrap'" >&2; exit 1; }
     @node --test npm/test/live/release-probe.test.mjs
 
-# The drift gate over `scripts/check-release-declaration.mjs`. That script mirrors
-# the canonical release-target schema because the onevcs release carrying the real
-# reader is not on crates.io yet; this recipe is what says whether the mirror still
-# agrees with the definition, by handing the document to the definition itself.
-#
 # Outside `check` on the same terms `deps-check` and `release-probe-check` are: it
-# needs a tool a clean clone does not have. It has no CI job yet for a reason
-# neither of those has — the reader it calls is unpublished, so nothing CI can
-# install provides it. When it ships, this becomes a job and the mirror becomes a
-# call.
-# Validate release-targets.toml with onevcs's own reader, the canonical one.
+# needs something a clean clone does not have. It is the one of the three with no
+# CI job — the reader it calls is unpublished, so nothing CI can install provides
+# it. When it ships, `scripts/check-release-declaration.mjs` goes away and this
+# becomes a job.
+# Hold release-targets.toml to onevcs's own reader — the schema's definition.
 release-declaration-check:
     @command -v onevcs >/dev/null || { echo "onevcs not installed: this hands release-targets.toml to onevcs's own reader, which is the schema's definition — install the onevcs release carrying 'release declaration'" >&2; exit 1; }
     @command -v node >/dev/null || { echo "node not installed: this drives the reader from a node test — run 'just bootstrap'" >&2; exit 1; }
