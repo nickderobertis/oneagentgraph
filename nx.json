@@ -16,6 +16,7 @@
       "{workspaceRoot}/tests/**/*",
       "{workspaceRoot}/docs/contract.md",
       "{workspaceRoot}/docs/persona-format.md",
+      "{workspaceRoot}/release-targets.toml",
       "{workspaceRoot}/scripts/**/*",
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/Cargo.toml",

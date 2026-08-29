@@ -1,0 +1,75 @@
+# What this repository releases, and the name each registry serves it under.
+#
+# A consumer that has to wait for a change to land here needs one thing only this
+# repository can say: the registry-qualified identifier of every artifact it
+# publishes. Every `id` below is `<registry>:<name>`, and `<name>` is exactly what
+# that registry serves.
+#
+# The qualification is load-bearing rather than decorative. `oneagentgraph-cli` is
+# a PyPI project AND an npm package, published from this one repository on two
+# cadences, so the bare name is two different artifacts and a consumer waiting on
+# it cannot say which one it got. Sibling repositories do the same.
+#
+# A target is a CONSUMABLE artifact — one a dependent names in order to depend on
+# it. The crate and the command line are separate targets for that reason and not
+# for tidiness: they have already been at separate versions, when a host pinned
+# the CLI release that added a producer and got an older linked crate that emitted
+# nothing. Comparing their version strings is evidence about neither.
+#
+# The per-platform `oneagentgraph-cli-<platform>-<arch>` packages are NOT targets
+# of their own. They exist only so `npm:oneagentgraph-cli` can resolve one of them
+# at its own exact version; nothing depends on one by name, so a consumer waits on
+# the launcher, and they are enumerated as what that launcher `covers`.
+#
+# A release also attaches per-platform archives to the GitHub Release, and those
+# are not targets either: nothing *depends* on one — they are for manual download,
+# and crates.io, PyPI and npm are the documented install surfaces — so no
+# dependent can be waiting on one. Only the `publish-*` jobs reach a registry.
+#
+# Nothing here is transcribed and then left to rot. `tests/release_declaration.rs`
+# hands this document to `onevcs`'s own reader — the one implementation of the
+# canonical schema, never a copy of it kept here — and
+# `npm/test/release-targets.test.mjs` derives the published set from the release
+# configuration itself — the `publish-*` jobs, the manifests, and
+# `scripts/npm-build.mjs`'s target table — and fails on a name that is neither
+# declared nor covered here, in either direction.
+#
+# `scripts/release-probe.sh <id>` answers what a registry currently serves for one
+# of these ids.
+
+schema_version = 1
+probe = "scripts/release-probe.sh"
+
+[[target]]
+id = "crate:oneagentgraph"
+name = "crate"
+what = "The library and the `oneagentgraph` binary, as a Rust dependent takes them."
+published_by = "The publish-crate job in .github/workflows/release.yml, under Cargo.toml's [package] name and version."
+manifest = "Cargo.toml"
+
+# maturin reads the version from Cargo.toml (`dynamic = ["version"]`), so the
+# manifest below is where the NAME comes from and the crate's is where the version
+# does. The distribution is `oneagentgraph-cli`; the console command it installs is
+# `oneagentgraph`, which is why the two names differ.
+[[target]]
+id = "pypi:oneagentgraph-cli"
+name = "pypi"
+what = "The per-platform wheels that put the `oneagentgraph` binary on PATH for `pip install`."
+published_by = "The publish-pypi job in .github/workflows/release.yml, under pyproject.toml's [project] name, at Cargo.toml's version."
+manifest = "pyproject.toml"
+
+# `covers` is the per-platform matrix, which `scripts/npm-build.mjs` builds and
+# `npm/test/platform-matrix.test.mjs` holds to this launcher's optionalDependencies.
+[[target]]
+id = "npm:oneagentgraph-cli"
+name = "npm"
+what = "The launcher that resolves and execs the prebuilt binary for `npm install -g`."
+published_by = "The publish-npm job in .github/workflows/release.yml, under npm/oneagentgraph-cli/package.json's name, at Cargo.toml's version."
+manifest = "npm/oneagentgraph-cli/package.json"
+covers = [
+  "npm:oneagentgraph-cli-linux-x64",
+  "npm:oneagentgraph-cli-linux-arm64",
+  "npm:oneagentgraph-cli-darwin-x64",
+  "npm:oneagentgraph-cli-darwin-arm64",
+  "npm:oneagentgraph-cli-win32-x64",
+]

@@ -76,7 +76,9 @@ the diff-scoped llmlint tier — and a change is not done until `gate` is green.
 `deps-check`, `msrv`, `lint-windows`, and `release-probe-check` sit outside both
 because each needs something a clean clone does not have — a network advisory
 database, a second toolchain, a cross compiler, the public registries; CI covers
-all four as jobs of their own.
+all four as jobs of their own. Holding `release-targets.toml` to its schema is
+*not* one of them: `onevcs` is a dev-dependency, so its reader is linked into
+`tests/release_declaration.rs` and runs inside `check`, offline, on every leg.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
@@ -142,9 +144,13 @@ them. **Nothing else writes a version:** maturin reads it from `Cargo.toml` via
 place.
 
 **What this repository releases is declared, so a consumer can wait on it.**
-`release-targets.json` names one registry-qualified identifier per *consumable*
-artifact — `crate:oneagentgraph`, `pypi:oneagentgraph-cli`,
-`npm:oneagentgraph-cli`. The crate and the command line are separate targets
+`release-targets.toml` at the root names one registry-qualified identifier per
+*consumable* artifact — `crate:oneagentgraph`, `pypi:oneagentgraph-cli`,
+`npm:oneagentgraph-cli`. It is written against the canonical release-target
+schema, which `onevcs`'s `docs/contract.md` defines and every repository in this
+stack writes against, so **no field in it is this repository's own**: a shape this
+repository needs and the schema cannot express is a proposal to that contract's
+owner, never a field invented here. The crate and the command line are separate targets
 because they have already been at separate versions: a host pinned the CLI
 release that added a producer and got an older linked crate that emitted nothing.
 The per-platform npm packages are *covered* by the launcher rather than declared —
@@ -154,7 +160,16 @@ served it, and with a non-zero exit when it could establish neither; those last
 two are different answers and collapsing them is the worst thing this can get
 wrong, because a consumer holds forever on one and launches on the other.
 `npm/test/release-targets.test.mjs` derives the published set from the release
-configuration itself and fails on drift in either direction.
+configuration itself and fails on drift in either direction, over a checkout it
+drifts on purpose as well as over this one; and
+`tests/release_declaration.rs` hands the document to `onevcs`'s own reader — the
+one implementation of that schema — against a refusal as well as a pass. **The
+schema is never restated here.** A copy of those rules living in this repository
+is the duplication the shared format exists to remove: the copy drifts, and a
+document that passes it is still refused by the tool that reads it. Everything in
+this tree that *reads* the declaration reads it as a consumer does, with a
+standard TOML parser (`npm/test/support/declaration.mjs`) and no opinion about
+what it may say.
 
 **A release is checked from outside once it lands.** `published-smoke.yml` runs
 when `release.yml` *completes* — not on a schedule — and installs what the

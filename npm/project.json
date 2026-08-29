@@ -18,7 +18,7 @@
         "{projectRoot}/**/*",
         "{workspaceRoot}/scripts/npm-build.mjs",
         "{workspaceRoot}/scripts/release-probe.sh",
-        "{workspaceRoot}/release-targets.json",
+        "{workspaceRoot}/release-targets.toml",
         "{workspaceRoot}/pyproject.toml",
         "{workspaceRoot}/.github/workflows/release.yml",
         "{workspaceRoot}/.github/workflows/published-smoke.yml",

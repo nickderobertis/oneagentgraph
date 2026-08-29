@@ -17,19 +17,19 @@
 //
 // The third answer is `npm/test/release-probe.test.mjs`, which needs no network.
 
-import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 
+import { FILE, readDeclaration } from "../support/declaration.mjs";
 import { probe } from "../support/release-probe.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 /// This repository's own targets, read from the declaration rather than listed
 /// here: a target added there is probed here without being transcribed.
-const DECLARED = JSON.parse(readFileSync(join(REPO_ROOT, "release-targets.json"), "utf8")).targets;
+const DECLARED = readDeclaration(join(REPO_ROOT, FILE)).targets;
 
 /// A name no registry has ever served, per registry. Deliberately derived from
 /// each declared identifier so it stays in this repository's own namespace: a
