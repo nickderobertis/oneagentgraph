@@ -21,7 +21,7 @@
 // gate reads, rendered as real TOML.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -88,6 +88,27 @@ const REFUSALS = [
       delete document.target[0].what;
     },
     reason: /\[\[target\]\] 1 with no what/,
+  },
+  {
+    because: "a target with no identifier to be asked about",
+    mutate: (document) => {
+      delete document.target[0].id;
+    },
+    reason: /\[\[target\]\] 1 with no id/,
+  },
+  {
+    because: "a target with no short name for a consumer to wait on it by",
+    mutate: (document) => {
+      delete document.target[0].name;
+    },
+    reason: /\[\[target\]\] 1 with no name/,
+  },
+  {
+    because: "a target that does not say what publishes it",
+    mutate: (document) => {
+      delete document.target[0].published_by;
+    },
+    reason: /\[\[target\]\] 1 with no published_by/,
   },
   {
     because: "an unqualified identifier",
@@ -300,6 +321,13 @@ const REFUSALS = [
     reason: /retired that is not a list of \[\[retired\]\] tables/,
   },
   {
+    because: "a retired entry that is not a table",
+    mutate: (document) => {
+      document.retired = ["pypi:oneagentgraph-legacy"];
+    },
+    reason: /\[\[retired\]\] 1, which is not a table/,
+  },
+  {
     because: "a retired artifact with no reason given",
     mutate: (document) => {
       document.retired = [{ id: "pypi:oneagentgraph-legacy" }];
@@ -383,6 +411,23 @@ describe("the release-target declaration", () => {
       const result = check(dir);
       assert.equal(result.status, 0, `a repository root was refused:\n${result.stderr}`);
       assert.match(result.stdout, /declares 3 targets against schema_version 1/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a declaration it cannot read, without reading it as an absent one", () => {
+    // Unreadable and absent are different answers: one is a checkout to fix, the
+    // other is a repository that has said nothing. Here the name is taken by a
+    // directory, which is the way to be unreadable that needs no permission bit.
+    const dir = mkdtempSync(join(tmpdir(), "release-declaration-"));
+    try {
+      mkdirSync(join(dir, "release-targets.toml"));
+      assertRefused(
+        check(dir),
+        "a declaration that is not a file",
+        /cannot read the release declaration at/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -214,11 +214,19 @@ release-probe-check:
 # CI job — the reader it calls is unpublished, so nothing CI can install provides
 # it. When it ships, `scripts/check-release-declaration.mjs` goes away and this
 # becomes a job.
+#
+# llmlint: ignore-block[changed_behavior_has_e2e] what this recipe *does* is
+# npm/test/live/release-declaration.test.mjs, which drives the canonical reader in
+# both directions and is the test for it. What is left here is a delegation and two
+# refusals to run at all, and a case for those would have to remove a tool the rest
+# of the suite needs. `msrv` and `lint-windows` carry this exclusion for the same
+# reason, and `release-probe-check` is the same shape.
 # Hold release-targets.toml to onevcs's own reader — the schema's definition.
 release-declaration-check:
     @command -v onevcs >/dev/null || { echo "onevcs not installed: this hands release-targets.toml to onevcs's own reader, which is the schema's definition — install the onevcs release carrying 'release declaration'" >&2; exit 1; }
     @command -v node >/dev/null || { echo "node not installed: this drives the reader from a node test — run 'just bootstrap'" >&2; exit 1; }
     @node --test npm/test/live/release-declaration.test.mjs
+# llmlint: ignore-end[changed_behavior_has_e2e]
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.
