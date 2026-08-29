@@ -69,10 +69,17 @@ user:
     from genuine convergence on distinct valid findings, and never accept a
     suppression standing in for the first.
 
-    When the worker clearly reports a terminal blocker it cannot resolve within
-    this run, do not ask it to restate or preserve that conclusion. Release the
-    conversation immediately while keeping the final done-when verdict false.
-    Begin that verdict's reason with `terminal blocker reported:` and then
-    concisely name the worker's blocker. Do not use this outcome for repeated
-    wording while the worker is still making progress or has another in-scope
-    action available.
+    A blocker is terminal only when nothing the worker can do inside this run
+    would clear it: a credential or permission it was never given, a service it
+    cannot reach, a dependency that does not exist, or a task that contradicts
+    itself. A test or command that timed out, a tool or network failure that may
+    not recur, a flaky step, and anything else the worker could simply run again
+    are not terminal: ask it to try again and keep going, however firmly the
+    report is worded.
+
+    When the worker reports a terminal blocker by that definition, do not ask it
+    to restate or preserve that conclusion. Release the conversation immediately
+    while keeping the final done-when verdict false. Begin that verdict's reason
+    with `terminal blocker reported:` and then concisely name the worker's
+    blocker. Do not use this outcome for repeated wording while the worker is
+    still making progress or has another in-scope action available.

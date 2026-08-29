@@ -10,6 +10,14 @@
 //! `split`-provider path — real onejudge, real oneharness on the agent side —
 //! with only the paid supervisor replaced.
 //!
+//! It answers each op from the request alone, with one exception worth knowing
+//! about: the supervisor's release decision is taken from the **persona it was
+//! handed**, not from anything written here. A worker whose turn reports
+//! `blocker: <condition>` ends the conversation only when the persona's own
+//! "not terminal" clause does not name that condition — see [`retryable`]. That
+//! is what keeps the journeys driving it about `personas/engineer.yaml` rather
+//! than about this file.
+//!
 //! # Why this is not onejudge's own `onejudge-echo-provider`
 //!
 //! onejudge does ship one — `src/bin/echo_provider.rs`, behind its `fake-provider`
@@ -76,17 +84,42 @@ fn main() -> std::process::ExitCode {
         // The unified per-turn supervisor: it decides completion, or supplies the
         // next simulated-user message.
         Some("supervisor") => {
-            let complete = !steers(&task, "should-fail") && turns >= 1;
-            if complete {
-                json!({"completion": true, "reason": "fake supervisor verified completion"})
-            } else {
-                json!({"completion": false, "message": "verify it before you call it done",
-                       "reason": "fake supervisor requires another turn"})
+            let persona = request
+                .get("persona")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match reported_blocker(messages) {
+                // The worker says it is blocked, and the persona this supervisor
+                // was handed decides what that means — see [`retryable`].
+                Some(blocker) if retryable(persona, &blocker) => json!({
+                    "completion": false,
+                    "message": format!("run it again and keep going: {blocker}"),
+                    "reason": "the blocker reported is one the worker could retry in this run",
+                }),
+                // Released: `completion: false` with no message at all, which is
+                // onejudge's own `NoInstruction` — the conversation ends on the
+                // work it has, with the done-when verdict still to come.
+                Some(blocker) => json!({
+                    "completion": false,
+                    "reason": format!("terminal blocker reported: {blocker}"),
+                }),
+                None if !steers(&task, "should-fail") && turns >= 1 => {
+                    json!({"completion": true, "reason": "fake supervisor verified completion"})
+                }
+                None => json!({"completion": false,
+                               "message": "verify it before you call it done",
+                               "reason": "fake supervisor requires another turn"}),
             }
         }
         Some("user") => json!({"message": "verify it before you call it done", "stop": false}),
+        // A worker that ended the conversation reporting a blocker did not finish
+        // the task, so the boolean bar is false — which is what keeps a released
+        // conversation from settling as a completed one.
         Some("judge") if request.get("kind").and_then(Value::as_str) == Some("boolean") => {
-            json!({"value": !steers(&task, "should-fail"), "reason": "fake judge verdict"})
+            json!({
+                "value": !steers(&task, "should-fail") && reported_blocker(messages).is_none(),
+                "reason": "fake judge verdict",
+            })
         }
         // A numeric verdict has to be a number, and `max` is the *request's* —
         // another process's JSON. Reflecting it unread would answer a string or a
@@ -108,6 +141,46 @@ fn main() -> std::process::ExitCode {
     };
     println!("{response}");
     std::process::ExitCode::SUCCESS
+}
+
+/// The marker a journey's worker states a blocker with, and the condition after
+/// it.
+///
+/// Read off the **last assistant turn** alone: the supervisor is asked after every
+/// turn, and what it decides on is what the worker just said.
+const BLOCKER: &str = "blocker:";
+
+/// The condition the worker's latest turn reports itself blocked on, when it
+/// reports one.
+fn reported_blocker(messages: &[Value]) -> Option<String> {
+    let last = messages
+        .iter()
+        .rev()
+        .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))?;
+    last.get("content")
+        .and_then(Value::as_str)?
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(BLOCKER))
+        .map(|condition| condition.trim().trim_end_matches('.').to_string())
+}
+
+/// Whether the supervisor's own persona says `blocker` is one the worker could
+/// retry inside this run — so the conversation goes on rather than being released.
+///
+/// This double is not a model and cannot weigh prose, so it does the one thing
+/// that keeps this journey about the **persona** rather than about the double: it
+/// asks the persona. The clause naming what is *not* terminal is located in the
+/// text the supervisor was actually handed, and the condition the worker reported
+/// is looked for inside it. A persona that stopped excluding a command that timed
+/// out stops answering this way, and the journey that drives it goes red.
+fn retryable(persona: &str, blocker: &str) -> bool {
+    // The persona arrives as a wrapped block scalar, so the clause is as likely to
+    // have a newline through the middle of it as a space.
+    let flowing = persona.split_whitespace().collect::<Vec<_>>().join(" ");
+    flowing
+        .split(". ")
+        .filter(|sentence| sentence.contains("not terminal"))
+        .any(|sentence| sentence.contains(blocker))
 }
 
 /// The task, which onejudge always sends as the first user message.

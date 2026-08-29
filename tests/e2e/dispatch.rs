@@ -4056,7 +4056,10 @@ fn a_provider_failure_its_record_backs_still_kills_the_member() {
 
     let died = run.of_kind("member-died");
     assert_eq!(died.len(), 1, "{:?}", run.kinds());
-    assert_eq!(died[0]["payload"]["cause"], Value::String("rate_limit".into()));
+    assert_eq!(
+        died[0]["payload"]["cause"],
+        Value::String("rate_limit".into())
+    );
     assert_eq!(
         died[0]["payload"]["rule"],
         Value::String("provider-failure".into())
@@ -4066,4 +4069,141 @@ fn a_provider_failure_its_record_backs_still_kills_the_member() {
         "a member that died also settled:\n{}",
         run.stdout
     );
+}
+
+/// The graph a terminal-blocker journey drives: the shipped `engineer` role's own
+/// simulated user, spelled as the contract's `judge: {command: [...]}`.
+///
+/// The supervisor is the deterministic provider rather than a paid model, and it
+/// is handed the **real merged persona** — so what decides whether the
+/// conversation is released is `personas/engineer.yaml`'s own wording, read at run
+/// time out of the request onejudge builds.
+fn a_supervised_worker() -> String {
+    graph_with(
+        concat!(
+            "version: 2\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      command: [the provider below]\n",
+            "    mode: bypass\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            ("members.worker.judge.command.0", fake_provider()),
+        ],
+    )
+}
+
+/// One run of [`a_supervised_worker`] whose worker reports `report` every turn.
+fn a_worker_reporting(workspace: &Workspace, report: &str) -> Run {
+    let answer = workspace.write("report.txt", report);
+    workspace.graph(&a_supervised_worker());
+    workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!("do the work. fake:answer-file={}", answer.display()),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ])
+}
+
+/// A blocker the worker could simply run again does **not** end the dispatch: the
+/// simulated user asks it to keep going.
+///
+/// The loss this is named for. A simulated user classified a 145-second test
+/// timeout as a terminal blocker and released the conversation over it, ending a
+/// dispatch on something the worker could have re-run — and the incident was
+/// written up as a rogue supervisor when the role had instructed exactly that.
+/// So the definition is what is driven here, through the real supervisor loop
+/// with the real merged persona in the request.
+#[test]
+fn a_blocker_the_worker_could_retry_does_not_release_the_conversation() {
+    let workspace = Workspace::new();
+    let run = a_worker_reporting(
+        &workspace,
+        "I ran the project's tests and one of them did not finish inside its\n\
+         145-second bound. Everything else passed.\n\
+         \n\
+         blocker: command that timed out\n",
+    );
+    // The conversation went on and the member reached its bar — which is exactly
+    // the outcome the escape destroyed: a dispatch ended over a command nobody
+    // had re-run.
+    run.expect_code(0);
+
+    assert!(
+        agent_turns(&run) > 1,
+        "a timed-out command ended the dispatch on the worker's first turn:\n{}",
+        run.stdout
+    );
+    let asked: Vec<String> = run
+        .of_kind("turn-message")
+        .into_iter()
+        .filter(|event| event["payload"]["role"] == Value::String("user".into()))
+        .filter_map(|event| event["payload"]["text"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        asked.iter().any(|text| text.contains("run it again")),
+        "the worker was never asked to continue: {asked:?}"
+    );
+
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    assert_eq!(settled[0]["payload"]["completed"], Value::Bool(true));
+    let report = report_of(&settled[0]);
+    assert_eq!(
+        report["settled_reason"],
+        Value::Null,
+        "the conversation was released over a blocker the worker could retry: {report}"
+    );
+}
+
+/// The other end of the same definition: a blocker nothing in the run can clear
+/// still releases the conversation, with the done-when verdict false.
+///
+/// Narrowing what counts as terminal is only correct if the outcome it exists for
+/// still fires, so both halves are driven against one persona.
+#[test]
+fn a_blocker_nothing_in_the_run_can_clear_still_releases_the_conversation() {
+    let workspace = Workspace::new();
+    let run = a_worker_reporting(
+        &workspace,
+        "The task needs an account nobody can hand me from in here, so there is\n\
+         no next action for me to take.\n\
+         \n\
+         blocker: a credential this run was never given\n",
+    );
+    run.expect_code(1);
+
+    assert_eq!(
+        agent_turns(&run),
+        1,
+        "a terminal blocker did not release the conversation:\n{}",
+        run.stdout
+    );
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    // Released, and the done-when verdict kept false.
+    assert_eq!(settled[0]["payload"]["completed"], Value::Bool(false));
+    let report = report_of(&settled[0]);
+    let why = report["settled_reason"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the conversation was not released: {report}"));
+    assert!(
+        why.contains("terminal blocker reported: a credential this run was never given"),
+        "{why}"
+    );
+}
+
+/// The report one `member-settled` stored, read back from where the payload says
+/// it went.
+fn report_of(settled: &Value) -> Value {
+    let path = settled["payload"]["report_path"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the settle named no stored report: {settled}"));
+    serde_json::from_str(&std::fs::read_to_string(path).expect("the stored report"))
+        .expect("the stored report is JSON")
 }
