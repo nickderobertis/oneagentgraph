@@ -20,6 +20,13 @@
 // is the thing to replace with a call to it — that reader is the definition, and
 // this is that definition enforced where the file is written.
 //
+// Until then the rules below are a MIRROR of that reader, and `just
+// release-declaration-check` is what holds the mirror honest: it hands this
+// repository's document to the reader itself, so a rule here that has drifted from
+// the definition is caught by the definition rather than trusted. It is outside
+// `just check` because the reader is not published yet — the same reason this file
+// exists at all.
+//
 // A declaration written against a LATER schema is read leniently — as this shape,
 // with whatever it names beyond it ignored — so a checkout one release behind
 // still learns what a repository one release ahead publishes. At the version this
@@ -61,20 +68,19 @@ const REFUSED = 1;
 
 // llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] the one source
 // for this schema is `onevcs`'s `declaration` module, and the release carrying it is
-// not on crates.io yet — so there is nothing to call, and nothing offline to diff
-// against. A gate that fetched the upstream contract at check time is not available
-// either: `just check` is offline and credential-free by rule, which is why
-// `deps-check` and `release-probe-check` sit outside it. This restatement is
-// deliberate and temporary; the header says what replaces it, and the document it
-// checks is the same one every other repository in the stack writes against, so the
-// upstream reader is what settles any disagreement.
+// not on crates.io yet — so there is nothing here to call, and `just check` is
+// offline and credential-free by rule, so there is nothing to fetch at check time
+// either. What gates this mirror instead is `just release-declaration-check`, which
+// hands the document to that reader out of gate, exactly as `release-probe-check`
+// holds the probe to the real registries. Everything from here to the end of the
+// validators is that mirror and nothing else; it is deleted, not extended, when the
+// reader ships.
 /// The keys schema version 1 declares, by the table they belong to.
 const TOP_LEVEL_KEYS = ["schema_version", "probe", "target", "retired"];
 const TARGET_KEYS = ["id", "name", "what", "published_by", "manifest", "covers"];
 const RETIRED_KEYS = ["id", "why"];
 /// The fields every target must carry. The rest of `TARGET_KEYS` are optional.
 const REQUIRED_TARGET_KEYS = ["id", "name", "what", "published_by"];
-// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// How long each field may be. Prose is rendered on one line beside the entry it
 /// describes; the reasoning behind it belongs in a comment.
@@ -202,6 +208,8 @@ function repositoryPath(value, origin, where) {
   }
   return value;
 }
+
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// Refuse a key this schema does not declare, naming it and the table it is in.
 function refuseUnknownKeys(document, origin) {

@@ -76,7 +76,12 @@ the diff-scoped llmlint tier — and a change is not done until `gate` is green.
 `deps-check`, `msrv`, `lint-windows`, and `release-probe-check` sit outside both
 because each needs something a clean clone does not have — a network advisory
 database, a second toolchain, a cross compiler, the public registries; CI covers
-all four as jobs of their own.
+all four as jobs of their own. `release-declaration-check` sits outside them too,
+and is the one with no CI job: it hands `release-targets.toml` to `onevcs`'s own
+reader — the definition of that schema — and the release carrying that reader is
+not on crates.io, so nothing CI can install provides it. It is the drift gate over
+`scripts/check-release-declaration.mjs`, which mirrors those rules only until
+then; run it whenever the declaration or the mirror changes.
 
 The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
