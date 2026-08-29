@@ -222,9 +222,8 @@ release-probe-check:
 # Validate release-targets.toml with onevcs's own reader, the canonical one.
 release-declaration-check:
     @command -v onevcs >/dev/null || { echo "onevcs not installed: this hands release-targets.toml to onevcs's own reader, which is the schema's definition — install the onevcs release carrying 'release declaration'" >&2; exit 1; }
-    @onevcs release declaration release-targets.toml >/dev/null \
-      || { echo "the canonical reader refused release-targets.toml — fix what it named above; if it did not recognise 'release declaration' at all, this onevcs predates the reader and there is nothing to check against yet" >&2; exit 1; }
-    @echo "release-declaration-check: the canonical reader accepts release-targets.toml"
+    @command -v node >/dev/null || { echo "node not installed: this drives the reader from a node test — run 'just bootstrap'" >&2; exit 1; }
+    @node --test npm/test/live/release-declaration.test.mjs
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.
