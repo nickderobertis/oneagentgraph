@@ -51,7 +51,7 @@ one NDJSON stream.
 - **Language(s):** rust (plus Bash provisioning, Node packaging scripts, and
   YAML/JSON/TOML config)
 - **References composed:** base.md, shapes/cli.md, languages/rust.md,
-  intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, monorepo.md
+  intersections/rust-cli.md, ci.md, llmlint.md, releasing.md, project-graph.md
 - **Cross-repo dependencies: every one is a published version, and there is no
   git ref anywhere in the graph.** `cargo deny`'s `unknown-git = "deny"` with no
   `allow-git` beside it is what holds that, so the tree resolves from crates.io
