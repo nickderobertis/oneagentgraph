@@ -296,11 +296,34 @@ pub enum Accepted {
     Queued,
     /// It was delivered into the live agent turn.
     Interrupted,
+    // llmlint: ignore-block[invalid_states_unrepresentable] nothing here
+    // constructs this arm yet, and deleting it is not this crate's call. The
+    // approved delivery-seam contract puts `Accepted` in a `note` module of
+    // **onejudge** and spells all three arms; this declaration is that shape
+    // mirrored arm for arm, so the day onejudge publishes the module the
+    // adoption is `pub use onejudge::note::Accepted` and a deletion rather than
+    // a reconciliation — the terms the drift-gate block above this type records,
+    // and the ones [`Note`]'s own two fields are already kept on. An arm dropped
+    // here would make that re-export *add* one back, breaking every consumer
+    // matching this enum exhaustively, and it would be this crate editing a
+    // shared surface unilaterally — the one thing the contract that produced it
+    // says never to do.
+    //
+    // What makes it unconstructible *today* is the gap this module's own
+    // documentation and `src/AGENTS.md` name: the supervisor's copy of a note
+    // reaches it through the effective task and completion criteria composed
+    // inside onejudge's engine loop, and the published onejudge exposes no seam
+    // to add to either mid-run. A note a judge then passed the work holding is
+    // therefore an answer only onejudge can give, and this arm becomes
+    // reachable with that seam rather than before it — which is why a
+    // supervisor-addressed note is refused by name in [`Router::route`] instead
+    // of being answered something this crate made up.
     /// The judge passed the work with the note in hand.
     JudgedWith {
         /// What the supervisor said when it passed the work.
         completion_reason: String,
     },
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// A note that was **not** delivered, and why.
