@@ -118,6 +118,11 @@ note — for the supervisor, until its re-taken decision returns — which would
 a judge invocation between two heartbeats. `Ending::end` records the terminal
 refusal so a later note is refused rather than spooled to nobody.
 
+**`judge`'s `hold_between_turns` is a fixture, not a second fake seam.** It
+pauses real code at the one conversation boundary nothing outside the process can
+hold — a harness runs inside a turn, so it cannot hold the gap between two — and
+is compiled only under `test-doubles`. Reach for it nowhere else.
+
 **The spool mirrors `Accepted`/`Undelivered`, which are not `Serialize`.** Map
 every variant in both directions so one added upstream fails this build instead
 of vanishing in transit. It is a wire format, not a second contract.

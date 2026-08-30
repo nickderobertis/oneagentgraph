@@ -204,6 +204,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             let mut sink = move |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
                 ingest(observation, &emitter);
+                #[cfg(feature = "test-doubles")]
+                hold_between_turns(observation);
                 if abort.load(Ordering::SeqCst) {
                     ControlFlow::Break(())
                 } else {
@@ -259,6 +261,63 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     supervise(
         &rx, &abort, emitter, bounds, scratch, started, &activity, ending,
     )
+}
+
+/// How long [`hold_between_turns`] waits before giving up on the journey that
+/// asked for it.
+///
+/// Bounded because a fixture that never returns wedges the suite rather than
+/// failing it: reaching this bound means the journey never released the gate,
+/// which its own assertions then report.
+#[cfg(feature = "test-doubles")]
+const FIXTURE_HOLD: Duration = Duration::from_secs(30);
+
+/// A test-only pause at the one conversation boundary a journey cannot otherwise
+/// hold: after a turn has closed and before the next one opens.
+///
+/// Behind the non-default `test-doubles` feature, which is where this crate
+/// already keeps what only the suite needs, so a consumer's build has no trace of
+/// it and no production path can reach it.
+///
+/// It exists because that boundary is real and unreachable from outside. onejudge
+/// answers [`crate::note::Accepted::Queued`] only for a note offered with **no
+/// turn live**, and no seam a journey has holds the conversation there: the one
+/// process this suite may fake is the harness, and a harness runs *inside* a
+/// turn, so it cannot hold the gap between two. The engine's own
+/// `NoteInbox::begin` runs before the first turn opens, and every later gap is
+/// closed by its `take_notes` a few statements later. This sink is the only code
+/// that runs in that window, because the engine publishes the closing turn
+/// through it before looking for notes again.
+///
+/// Held on the **supervisor's** close and no other: it is the gap before the next
+/// *worker* turn opens, which is the turn a queued note is delivered into. The
+/// agent's own close is followed immediately by a `take_notes` that would take
+/// the note as a live-turn delivery instead, which is a different journey.
+///
+/// `ONEAGENTGRAPH_FIXTURE_HOLD_BETWEEN_TURNS=<path>`: this writes `<path>.entered`
+/// as it reaches the boundary and waits for `<path>` to appear. Read from the
+/// environment of the process driving the run — a library caller's own — rather
+/// than from a graph's `env:`, which is exported to member processes and would
+/// never reach this thread.
+#[cfg(feature = "test-doubles")]
+fn hold_between_turns(observation: &Observation<'_>) {
+    let Observation::TurnClosed(closed) = observation else {
+        return;
+    };
+    if !matches!(closed.role, onejudge::Role::User) {
+        return;
+    }
+    let Ok(named) = std::env::var("ONEAGENTGRAPH_FIXTURE_HOLD_BETWEEN_TURNS") else {
+        return;
+    };
+    let gate = PathBuf::from(named);
+    let mut entered = gate.clone().into_os_string();
+    entered.push(".entered");
+    let _ = std::fs::write(PathBuf::from(entered), "entered");
+    let deadline = Instant::now() + FIXTURE_HOLD;
+    while !gate.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// Watch a member's engine to its end: the two watchdogs, and the answer.

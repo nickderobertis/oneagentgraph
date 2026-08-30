@@ -565,30 +565,10 @@ impl Courier {
             for (id, note) in self.spool.take() {
                 // Blocks: the conversation is what decides, and for a note that
                 // reaches the supervisor's live turn the decision *is* the answer.
-                //
-                // llmlint: ignore-block[changed_behavior_has_e2e] three of the four
-                // dispositions this call can return are driven by journeys in
-                // `tests/e2e/note.rs` — the two live-turn deliveries and the
-                // completion the judge passed the work with. The fourth,
-                // `Accepted::Queued`, has no journey and cannot have one: onejudge
-                // returns it only when `send` samples a channel with **no turn
-                // open**, and nothing outside the run can hold a conversation in
-                // that state. `NoteInbox::begin` runs at the top of
-                // `Engine::run` before the first turn opens, and every later gap is
-                // closed by the engine's own `take_notes` at the top of its loop
-                // and again immediately after each turn — while the levers this
-                // suite has (`fake:hold`, `fake:supervisor-hold`) hold a turn
-                // *open*, which is the one state that is not it. Widening a lever
-                // to hold the engine between turns would mean production code
-                // whose only caller is a test. What is driven instead is the same
-                // path against a real `onejudge::note::Notes` channel with no turn
-                // open, through the real `Spool` and the real `submit`:
-                // `tests::a_note_with_no_live_turn_is_held_for_the_next_one_and_one_too_late_is_refused`.
                 let delivery = match self.notes.send(note.clone()) {
                     Ok(accepted) => NoteDelivery::Accepted(accepted),
                     Err(undelivered) => NoteDelivery::Undelivered(undelivered),
                 };
-                // llmlint: ignore-end[changed_behavior_has_e2e]
                 publish(&self.emitter, &note, &delivery);
                 self.spool.settle(&id, &delivery);
             }

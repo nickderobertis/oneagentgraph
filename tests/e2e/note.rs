@@ -603,3 +603,73 @@ fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
         "{settled:?}"
     );
 }
+
+/// A note offered while **no turn is live** is held for the next turn to open,
+/// and arrives there carrying its role unchanged.
+///
+/// The third of the three states a conversation can be in when a note reaches
+/// it, and the only one no harness can hold: a harness runs *inside* a turn, so
+/// it cannot pause the gap between two. `judge`'s `hold_between_turns` fixture —
+/// behind the non-default `test-doubles` feature, with the rest of what only this
+/// suite needs — pauses the supervisor's turn boundary, which is the gap before
+/// the next worker turn opens. Everything else here is the same real run as its
+/// siblings: the note goes through the public `control::note`, the conversation
+/// decides, and what the worker was handed is read off the prompt it really got.
+#[cfg(unix)]
+#[test]
+fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_its_role() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    let agent_prompts = workspace.at("agent-prompts");
+    let between = workspace.at("between-turns");
+    let between_entered = workspace.at("between-turns.entered");
+    // Read by the sink on this run's own engine thread, which is a thread of this
+    // process — so it is set here rather than in the graph's `env:`, which is
+    // exported to member processes only. Safe to set for the whole process:
+    // nextest runs each test in one of its own.
+    std::env::set_var(
+        "ONEAGENTGRAPH_FIXTURE_HOLD_BETWEEN_TURNS",
+        between.display().to_string(),
+    );
+
+    // `should-fail` keeps the supervisor asking for another turn, so there *is* a
+    // next worker turn for the held note to be delivered into. The run then ends
+    // at the base config's turn cap.
+    let running = start(
+        &workspace,
+        &format!("fake:record-prompt={}", agent_prompts.display()),
+        "fake:should-fail",
+    );
+
+    // The supervisor's first turn has closed and the next worker turn has not
+    // opened: no turn is live, and the engine is held right there.
+    until("the conversation to reach a turn boundary", || {
+        between_entered.exists()
+    });
+
+    let text = "no turn was running when this was sent: take it on the next one";
+    let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
+    let endpoint = note_endpoint(&workspace, &running);
+    let offered = offering(&workspace, &running, note);
+    handed_over(&endpoint);
+    std::fs::write(&between, "go").expect("release the held turn boundary");
+
+    let delivery = offered.join().expect("the offering thread");
+    assert_eq!(
+        delivery,
+        NoteDelivery::Accepted(Accepted::Queued),
+        "a note offered with no turn live was not held for the next turn to open"
+    );
+
+    running.run.wait().expect("the member settles");
+
+    // And the next worker turn is where it arrived, with the role it was
+    // addressed to unchanged.
+    let handed = prompts(&agent_prompts);
+    assert!(
+        handed
+            .iter()
+            .any(|prompt| prompt.contains(text) && prompt.contains("delivered to YOU, the worker")),
+        "the held note never reached the next worker turn: {handed:#?}"
+    );
+}

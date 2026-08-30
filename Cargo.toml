@@ -81,10 +81,13 @@ name = "oneagentgraph"
 path = "src/lib.rs"
 
 [features]
-# The deterministic programs the e2e suite spawns: a paid-harness stand-in, a
-# onejudge `CommandProvider` backend, and a program a journey points a `pre_turn`
-# view at. Non-default, so none is ever in a consumer's build; `just check` and
-# the coverage run enable them.
+# What only the suite needs: the deterministic programs it spawns — a
+# paid-harness stand-in, a onejudge `CommandProvider` backend, and a program a
+# journey points a `pre_turn` view at — and `judge`'s `hold_between_turns`, the
+# one fixture that pauses real code rather than standing in for a process,
+# because the conversation boundary it holds is reachable from nowhere else.
+# Non-default, so none of it is ever in a consumer's build; `just check` and the
+# coverage run enable them.
 test-doubles = []
 
 [dependencies]
