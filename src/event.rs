@@ -1241,6 +1241,16 @@ impl Emitter {
         }
     }
 
+    /// The member this emitter speaks for, when it speaks for one.
+    ///
+    /// The graph's own emitter names none, and a payload that has to carry the
+    /// member — [`TurnInterrupted`] is the one that does — reads it here rather
+    /// than being handed the name a second time.
+    #[must_use]
+    pub fn member(&self) -> Option<&str> {
+        self.labels.member.as_deref()
+    }
+
     /// The same emitter, putting only what `filter` admits on the stream.
     ///
     /// Set once, at the run's own emitter, and inherited by every emitter

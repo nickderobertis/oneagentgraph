@@ -17,6 +17,7 @@ mod events;
 mod interrupt;
 mod library;
 mod liveness;
+mod note;
 mod origin;
 mod preturn;
 mod remote;

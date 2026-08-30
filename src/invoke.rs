@@ -202,6 +202,11 @@ pub struct JudgeLaunch {
     /// [`crate::control`].
     pub session: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The `oneharness` this member delivers a note through — the same binary
+    /// [`crate::control::interrupt`] takes, carried on the launch because a
+    /// member routes a note to its own live turn from a thread of this process,
+    /// where there is no verb's argument to read it off.
+    pub oneharness_bin: String,
 }
 
 /// One member, ready to start.
@@ -380,6 +385,7 @@ fn onejudge(
             worktree: member_dir(None, context),
             agent_config: agent_path,
             session: context.session.to_string(),
+            oneharness_bin: context.oneharness_bin.to_string(),
         })),
         persona: label,
         // Nothing: this member starts no child process of its own, so it has no

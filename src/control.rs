@@ -54,11 +54,17 @@ pub const CONTROL_FILE: &str = "control.json";
 /// from a run that may have started under an earlier version. A record from a
 /// *later* one is refused by number rather than parsed, because those were
 /// written by a build that knew something this one does not.
-pub const CONTROL_SCHEMA_VERSION: u32 = 1;
+pub const CONTROL_SCHEMA_VERSION: u32 = 2;
 
 /// The oldest shape this build can read, which is also the first this file ever
 /// had — there is no unversioned `control.json`, so anything below it is a value
 /// no build of this crate wrote.
+///
+/// Version `1` is still read, and that is what the note endpoint's optionality
+/// buys: a run that started under a build with no note seam recorded no
+/// [`Record::notes`], and an `interrupt` against it goes on working exactly as it
+/// did. A record naming version `2` and no endpoint says the same thing about a
+/// member of *this* build — a single-sided one binds none.
 const FIRST_CONTROL_SCHEMA_VERSION: u32 = 1;
 
 /// Where an `oneharness interrupt` process addresses a member's controllable
@@ -121,6 +127,16 @@ pub struct Record {
     pub schema_version: u32,
     /// What the run knew about the member's turn when it last wrote.
     pub turn: Turn,
+    /// Where the member's own thread receives role-addressed notes for the
+    /// conversation's life — [`crate::note::Spool`], a sibling of this file in
+    /// the same member scratch.
+    ///
+    /// Absent for a member that binds none: a single-sided `kind: oneharness`
+    /// member has no second party for a note to be addressed *away* from, so
+    /// [`note`] falls through to [`interrupt`] for it; and so does a record
+    /// written by a build that had no note seam at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<PathBuf>,
 }
 
 /// Write what this run knows about `member`'s turn control into its scratch.
@@ -129,9 +145,20 @@ pub struct Record {
 /// written is a member with no lever, which `interrupt` reports as the fact it is
 /// — losing the file is not a reason to fail a run that is otherwise fine.
 pub fn write(scratch: &Path, turn: &Turn) {
+    write_with_notes(scratch, turn, None);
+}
+
+/// [`write()`], additionally naming the note endpoint this member's own thread
+/// bound — see [`Record::notes`].
+///
+/// Best-effort on the same terms, and for the same reason: a member whose record
+/// could not be written is a member with no lever and no endpoint, which both
+/// verbs report as the fact it is.
+pub fn write_with_notes(scratch: &Path, turn: &Turn, notes: Option<&Path>) {
     let record = Record {
         schema_version: CONTROL_SCHEMA_VERSION,
         turn: turn.clone(),
+        notes: notes.map(Path::to_path_buf),
     };
     if let Ok(rendered) = serde_json::to_string(&record) {
         let _ = std::fs::write(path(scratch), rendered);
@@ -146,6 +173,16 @@ pub fn write(scratch: &Path, turn: &Turn) {
 /// The reason the record cannot be acted on, in the words `interrupt` reports:
 /// no member ever recorded one, or one written by a build this one cannot read.
 pub fn read(scratch: &Path) -> Result<Turn, String> {
+    record(scratch).map(|record| record.turn)
+}
+
+/// The whole record, for a caller that needs the note endpoint as well as the
+/// turn.
+///
+/// # Errors
+///
+/// As [`read`].
+pub fn record(scratch: &Path) -> Result<Record, String> {
     let path = path(scratch);
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return Err(
@@ -172,7 +209,7 @@ pub fn read(scratch: &Path) -> Result<Turn, String> {
             record.schema_version
         ));
     }
-    Ok(record.turn)
+    Ok(record)
 }
 
 /// One place both the run and the `interrupt` process compose the record's
@@ -259,6 +296,112 @@ pub fn interrupt(
         }
         Err(reason) => Delivery::NoTurn(reason),
     })
+}
+
+/// What [`note()`] takes and what it answers, reachable beside the verb that
+/// uses them rather than declared a second time.
+///
+/// [`crate::note`] is where they live, because the member's own end of the seam
+/// reads and writes the same shapes: one definition on both ends is what keeps a
+/// caller's reading of an outcome the member's own answer rather than a
+/// translation of it.
+pub use crate::note::{Accepted, Addressee, Note, NoteDelivery, Undelivered};
+
+/// Route one role-addressed note to whichever side of `member`'s conversation is
+/// live, and answer what became of it.
+///
+/// The sibling of [`interrupt`], not a replacement for it, and the difference is
+/// the whole point. `interrupt` aims one redirection at the **agent** side's
+/// socket, which is why a note delivered that way has only ever reached the
+/// worker: the judge has no socket, so a ruling reached the party doing the work
+/// and never the party judging it. This routes instead — the note is offered to
+/// the member itself, which is the only thing that knows which side of its
+/// conversation is taking a turn right now — and it carries the addressed role
+/// through unchanged, so the receiving party knows whose task the update belongs
+/// to.
+///
+/// The three answers a caller acts on:
+///
+/// * [`Accepted::Interrupted`] — it went into the live agent turn.
+/// * [`Accepted::Queued`] — the judge is mid-decision or nobody is taking a turn,
+///   so it goes into the next agent turn, arriving with the response that opens
+///   it.
+/// * [`NoteDelivery::Undelivered`] — it was **not** delivered, naming why. The
+///   member has settled, or its conversation reached completion. Never a silent
+///   acceptance: that is the failure this verb exists to remove.
+///
+/// A single-sided `kind: oneharness` member binds no note endpoint — it has no
+/// second party for a note to be addressed away from — so a note to one falls
+/// through to [`interrupt`], and a caller holding one API reaches both member
+/// kinds.
+///
+/// `oneharness_bin` is a parameter for [`interrupt`]'s reason, unchanged: there
+/// is no environment a library call may consult for it.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when there is no such run, or when `member` is not
+/// one of its members — the two cases that are a bad ask rather than an answer
+/// about the note.
+pub fn note(
+    state_dir: &Path,
+    run_id: &RunId,
+    member: &MemberName,
+    note: &Note,
+    oneharness_bin: &str,
+) -> Result<NoteDelivery, Error> {
+    let record = crate::history::show(state_dir, run_id.as_str())?;
+    record.require_member(member.as_str())?;
+    // Derived from the run's *id*, exactly as [`interrupt`] derives it and for
+    // the same reason.
+    let scratch = state_dir
+        .join(&record.run_id)
+        .join(MEMBERS_DIR)
+        .join(member.as_str());
+    // The run's own evidence first, and it beats every answer a member could
+    // give: a settled member is not servicing anything, and a note left in its
+    // spool would be an acceptance nobody reads.
+    if settled(&record, member.as_str()) {
+        return Ok(NoteDelivery::Undelivered(Undelivered::MemberSettled {
+            outcome: outcome(&record, member.as_str()),
+        }));
+    }
+    // The record is read for *whether* this member bound an endpoint, and the
+    // endpoint itself is derived from the scratch above — [`interrupt`]'s rule,
+    // for [`interrupt`]'s reason: following a path out of a file the run wrote
+    // would let a record point this call at any directory the process can reach.
+    let bound = self::record(&scratch).is_ok_and(|record| record.notes.is_some());
+    if !bound {
+        // No endpoint: a single-sided member, or a run from a build that had
+        // none. The lever that member *does* have is the one it always had.
+        return Ok(
+            match interrupt(
+                state_dir,
+                run_id,
+                member,
+                Some(&note.framed()),
+                oneharness_bin,
+            )? {
+                Delivery::Delivered => NoteDelivery::Accepted(Accepted::Interrupted),
+                Delivery::NoTurn(reason) | Delivery::Failed(reason) | Delivery::Invalid(reason) => {
+                    NoteDelivery::Undelivered(Undelivered::NoConversation { reason })
+                }
+            },
+        );
+    }
+    Ok(match crate::note::submit(&scratch, note) {
+        Ok(accepted) => NoteDelivery::Accepted(accepted),
+        Err(undelivered) => NoteDelivery::Undelivered(undelivered),
+    })
+}
+
+/// What the run recorded for a member it has already settled, in the words the
+/// refusal names.
+fn outcome(record: &crate::run::Record, member: &str) -> String {
+    record.members.get(member).map_or_else(
+        || "the run itself is over".to_string(),
+        |outcome| format!("the run recorded {outcome:?} for it"),
+    )
 }
 
 /// Whether the run already recorded an outcome for `member`.

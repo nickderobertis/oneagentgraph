@@ -1157,6 +1157,7 @@ mod tests {
 
         let judge = started_payload(&MemberStarted {
             runner: runner(&Launch::Judge(Box::new(crate::invoke::JudgeLaunch {
+                oneharness_bin: "oneharness".to_string(),
                 config: std::path::PathBuf::from("/scratch/onejudge.yaml"),
                 task: "do the thing".into(),
                 worktree: std::path::PathBuf::from("/work"),

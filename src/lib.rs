@@ -31,6 +31,7 @@ pub mod invoke;
 pub mod judge;
 pub mod liveness;
 pub mod member;
+pub mod note;
 pub mod persona;
 pub mod preturn;
 pub mod render;

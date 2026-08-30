@@ -145,25 +145,38 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // the report replaces it with oneharness's authoritative answer at
     // [`finish`], which is also where an ask that was refused becomes the reason
     // `interrupt` reports.
-    crate::control::write(
+    let address = crate::control::Address {
+        session: agent_session(&launch.session),
+        session_dir: None,
+        cwd: launch.worktree.clone(),
+    };
+    // The note endpoint is bound before the record names it, so a caller that
+    // reads the record and offers a note has somewhere to offer it into. Bound
+    // for the conversation's life and by this member alone, which is what lets
+    // the routing rest on which side is live rather than on a guess made from
+    // outside the run.
+    let spool = crate::note::Spool::bind(scratch);
+    crate::control::write_with_notes(
         scratch,
         &crate::control::Turn::Open {
-            address: crate::control::Address {
-                session: agent_session(&launch.session),
-                session_dir: None,
-                cwd: launch.worktree.clone(),
-            },
+            address: address.clone(),
         },
+        spool.as_ref().map(crate::note::Spool::path),
     );
 
     let activity = Arc::new(AtomicU64::new(0));
     let abort = Arc::new(AtomicBool::new(false));
+    let live = Arc::new(crate::note::LiveTurn::new());
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
 
     let engine = {
-        let (emitter, activity, abort) =
-            (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
+        let (emitter, activity, abort, live) = (
+            emitter.clone(),
+            Arc::clone(&activity),
+            Arc::clone(&abort),
+            Arc::clone(&live),
+        );
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
         // panicking — which would take the whole graph down over one member. A
@@ -173,6 +186,15 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         std::thread::Builder::new().spawn(move || {
             let mut sink = move |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
+                // Before the envelope, so a note routed the instant a turn opens
+                // is routed at the side that opened it: this is the conversation's
+                // own structure, read off the engine rather than inferred from
+                // what it published.
+                match observation {
+                    Observation::TurnOpened(opened) => live.opened(party(opened.role)),
+                    Observation::TurnClosed(_) => live.closed(),
+                    _ => {}
+                }
                 ingest(observation, &emitter);
                 if abort.load(Ordering::SeqCst) {
                     ControlFlow::Break(())
@@ -202,7 +224,11 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
-    supervise(&rx, &abort, emitter, bounds, scratch, started, &activity)
+    let router = spool
+        .map(|spool| crate::note::Router::new(spool, live, address, launch.oneharness_bin.clone()));
+    supervise(
+        &rx, &abort, emitter, bounds, scratch, started, &activity, router,
+    )
 }
 
 /// Watch a member's engine to its end: the two watchdogs, and the answer.
@@ -211,9 +237,9 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
 /// module's too: the panic containment both members rely on can only be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Seven values, none derivable from another: where the answer arrives, the lever
+// Eight values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
-// and the two halves of the activity clock.
+// the two halves of the activity clock, and the member's own note endpoint.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -223,6 +249,7 @@ fn supervise(
     scratch: &Path,
     started: Instant,
     activity: &Arc<AtomicU64>,
+    mut router: Option<crate::note::Router>,
 ) -> Outcome {
     let heartbeat_file = scratch.join("member.heartbeat");
     let mut last_heartbeat = Instant::now();
@@ -234,7 +261,16 @@ fn supervise(
     let mut stall = Stall::new(bounds.stall, started);
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
-            Ok(answer) => return finish(answer, emitter, scratch),
+            Ok(answer) => {
+                // Before the settle, because the settle is what makes the record
+                // say this member is over: a note already in the spool is
+                // answered by the conversation that could not take it rather than
+                // left for a caller to time out on.
+                if let Some(router) = router.as_mut() {
+                    router.complete(&completion(&answer), emitter);
+                }
+                return finish(answer, emitter, scratch);
+            }
             // A sender dropped without an answer means the engine thread
             // panicked: this member's failure, not the graph's.
             //
@@ -254,9 +290,21 @@ fn supervise(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        // On the supervision thread rather than the engine's, because handing a
+        // note to the live turn means running an `oneharness interrupt` process
+        // and the engine is what reports the turn it is being delivered into.
+        if let Some(router) = router.as_mut() {
+            router.service(emitter);
+        }
         let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
         let now = Instant::now();
         if now.duration_since(last_heartbeat) > bounds.heartbeat {
+            if let Some(router) = router.as_mut() {
+                router.complete(
+                    "the member was condemned by its heartbeat watchdog",
+                    emitter,
+                );
+            }
             return condemn(rx, abort, emitter, Rule::Heartbeat, scratch);
         }
         last_heartbeat = now;
@@ -265,6 +313,9 @@ fn supervise(
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
         if stall.condemns(activity.load(Ordering::SeqCst), scratch) {
+            if let Some(router) = router.as_mut() {
+                router.complete("the member was condemned by its activity watchdog", emitter);
+            }
             return condemn(rx, abort, emitter, Rule::Activity, scratch);
         }
     }
@@ -272,6 +323,41 @@ fn supervise(
 
 /// The answer the engine thread sends back.
 type Answer = Result<RunSummary, Box<RunFailure>>;
+
+/// What this member's conversation ended on, in the words a note that arrived
+/// too late reports.
+///
+/// The supervisor's own reason where it gave one — a `done_when` it re-judged,
+/// or the settled reason a loop that ended without a completion decision records
+/// — because that is what tells a caller whether to relaunch the member or to
+/// record the note as a follow-up.
+fn completion(answer: &Answer) -> String {
+    match answer {
+        Ok(summary) => summary
+            .done_when
+            .as_ref()
+            .map(|done| {
+                format!(
+                    "its supervisor judged {:?} {}",
+                    done.criterion,
+                    if done.satisfied {
+                        "satisfied"
+                    } else {
+                        "unsatisfied"
+                    }
+                )
+            })
+            .or_else(|| summary.report.settled_reason.clone())
+            .unwrap_or_else(|| {
+                if summary.completed {
+                    "its conversation completed".to_string()
+                } else {
+                    "its conversation ended without completing".to_string()
+                }
+            }),
+        Err(failure) => format!("its conversation failed: {}", failure.error),
+    }
+}
 
 /// Everything this crate has to do to a process onejudge is about to start:
 /// place it in this member's [`crate::scratch::Group`], and — for the agent side
@@ -1067,6 +1153,7 @@ mod tests {
         let config = dir.path().join(crate::invoke::ONEJUDGE_CONFIG_FILE);
         std::fs::write(&config, body).expect("config");
         let launch = JudgeLaunch {
+            oneharness_bin: "oneharness".to_string(),
             config,
             task: "do the thing".to_string(),
             worktree: dir.path().to_path_buf(),
@@ -1925,6 +2012,7 @@ mod tests {
             dir.path(),
             Instant::now(),
             &Arc::new(AtomicU64::new(0)),
+            None,
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");
