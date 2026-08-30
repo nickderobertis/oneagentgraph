@@ -288,6 +288,17 @@ const FIXTURE_HOLD: Duration = Duration::from_secs(30);
 const HOLD_BETWEEN_TURNS: &str = "oneagentgraph-fixture:hold-between-turns=";
 
 /// The gate `instruction` names, if it names one.
+///
+/// The path is taken as written, which it may be *because this is not a trust
+/// boundary*: `test-doubles` is not in a shipped build — it is off by default and
+/// no published artifact enables it — so the only instruction that can reach here
+/// is one this repository's own suite wrote, naming a path in its own temporary
+/// workspace. Validating it would be validating a journey against itself. The
+/// task text a *run* carries is external input and is validated where it crosses
+/// in: [`crate::config`] and [`crate::note`] both reject what they cannot read.
+// llmlint: ignore-block[boundary_inputs_validated] the reason above: this is
+// compiled only under the non-default `test-doubles` feature, so its one caller
+// is this repository's own e2e suite rather than any consumer.
 #[cfg(feature = "test-doubles")]
 fn fixture_gate(instruction: &str) -> Option<PathBuf> {
     let at = instruction.find(HOLD_BETWEEN_TURNS)? + HOLD_BETWEEN_TURNS.len();
@@ -295,6 +306,7 @@ fn fixture_gate(instruction: &str) -> Option<PathBuf> {
     let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
     Some(PathBuf::from(&rest[..end]))
 }
+// llmlint: ignore-end[boundary_inputs_validated]
 
 /// A test-only pause at the one conversation boundary a journey cannot otherwise
 /// hold: after a turn has closed and before the next one opens.
