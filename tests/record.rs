@@ -602,6 +602,19 @@ fn the_member_started_goldens_are_exactly_what_this_build_writes() {
 fn golden_controls() -> Vec<ControlRecord> {
     let session = "node-scope-1786171301679-1447994-worker-skill".to_string();
     let cwd = std::path::PathBuf::from("/state/node-scope-1786171301679-1447994/members/worker");
+    // Spelled with the separator the golden commits rather than joined: a
+    // committed golden is one file read on every platform, and `Path::join`
+    // writes the *host's* separator — so a `cwd.join(NOTES_DIR)` here renders
+    // `…\notes` on Windows against a golden that says `…/notes`, which is the
+    // suite disagreeing about a path neither the record nor a consumer has any
+    // opinion about. `cwd` above is already spelled this way for the same
+    // reason; only the directory's name comes from the code, so a rename of it
+    // still fails this test.
+    let notes = std::path::PathBuf::from(format!(
+        "{}/{}",
+        cwd.display(),
+        oneagentgraph::note::NOTES_DIR
+    ));
     vec![
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
@@ -612,7 +625,7 @@ fn golden_controls() -> Vec<ControlRecord> {
                     cwd: cwd.clone(),
                 },
             },
-            notes: Some(cwd.join("notes")),
+            notes: Some(notes),
         },
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
