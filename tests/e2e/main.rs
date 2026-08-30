@@ -17,15 +17,7 @@ mod events;
 mod interrupt;
 mod library;
 mod liveness;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this crate
-// has exactly one e2e target — `[[test]] name = "e2e"` in Cargo.toml, whose
-// journeys all drive the compiled binary and real subprocesses — and every
-// journey file below is a module of it. Moving one of them behind an edge of its
-// own would split that target, which is a change to how the whole suite is
-// scheduled rather than anything this module decides; the note journeys cost what
-// the ten beside them cost.
 mod note;
-// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod origin;
 mod preturn;
 mod remote;

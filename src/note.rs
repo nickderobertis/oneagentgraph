@@ -167,8 +167,20 @@ impl Addressee {
 pub struct Note {
     /// Who it is for. Required — see [`Addressee`].
     pub addressee: Addressee,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a `NoteText` newtype
+    // making a blank one unrepresentable is the right shape and is not this
+    // crate's to choose: the approved delivery-seam contract spells this field
+    // `pub text: String`, and this crate is the consuming half of that seam — a
+    // newtype here would refuse the very value the producing half hands over, and
+    // would stop the adoption being a re-export the day onejudge publishes the
+    // module. What holds the invariant instead is [`Note::check`], applied at
+    // every boundary a note crosses rather than once where an ideal value was
+    // built, because a `Note` arrives *deserialized* as often as it arrives from
+    // a constructor and a newtype's `Deserialize` would have to be written by
+    // hand to hold anything a bare `String`'s does not.
     /// The update itself, carried to the receiving party verbatim.
     pub text: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
     // llmlint: ignore-block[invalid_states_unrepresentable] the name, the type
     // and the default are the approved delivery-seam contract's own, spelled
     // `pub binds: bool` with `default false`, and this crate is the *consuming*

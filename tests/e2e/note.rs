@@ -21,6 +21,14 @@
 // the conversation, real `oneharness` opens the control socket and serves the
 // delivery over claude-code's own stdin control protocol.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] this crate has
+// exactly one e2e target — `[[test]] name = "e2e"` in Cargo.toml — and all eleven
+// journey files are modules of it. There is no narrower edge for these to sit
+// behind and no way to make one without splitting that target, which is a change
+// to how the whole suite is scheduled rather than anything this file decides.
+// These journeys also cost what their siblings cost: each drives one short run of
+// the same doubled harness, and the whole file finishes in seconds.
+
 // The routed delivery reaches a turn through a unix domain socket, so the
 // journeys that drive one are `cfg(unix)` exactly as the interrupt journeys are.
 // The fixtures below are still compiled on Windows — type-checked and linted —
