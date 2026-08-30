@@ -146,20 +146,8 @@ fn a_settled_member_publishes_a_pointer_that_opens_the_conversation_it_had() {
 /// This is the case the pointer exists for: a member that produced no report at
 /// all is exactly when an operator has nothing else to read, and the failed run's
 /// telemetry is the only place the record is named. The agent side runs and
-/// writes its history; the judge side runs its single candidate, which refuses,
-/// so the member dies — and both transcripts are still openable.
-///
-/// **Both sides publish here, and that is the shape of the refusal rather than
-/// a second success.** onejudge asks for a controlled turn on each party, and
-/// `oneharness run --control` drives *one* live turn, so it takes a chain of
-/// exactly one candidate. The judge's chain is that, so its candidate is spawned
-/// directly: it runs, answers `quota`, and oneharness writes the record of the
-/// invocation that refused. There is no fall-through to report, because a chain
-/// of one has nowhere to fall to. The rule that a side which reached no identity
-/// publishes nothing is the *other* journey's —
-/// [`a_member_whose_chain_ran_nothing_publishes_no_conversation_to_point_at`],
-/// whose two-candidate chain is refused turn control and so falls through
-/// instead.
+/// writes its history; the judge side's chain reaches no identity, so the member
+/// dies — and the agent's transcript is still openable.
 ///
 /// A POSIX shell stands in for the refusing identity, which is why this is
 /// unix-only: what the journey needs is one identity answering differently from
@@ -197,46 +185,32 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
     );
 
     let published = sessions(&run);
+    let agent: Vec<&Value> = published
+        .iter()
+        .filter(|event| event["payload"]["role"] == "agent")
+        .collect();
     assert!(
-        !published.is_empty(),
+        !agent.is_empty(),
         "a failed run named no conversation at all: {:?}",
         run.kinds()
     );
-    // Each side's own prompt, read back off the record its own pointer opens.
-    let mut prompts: Vec<(String, String)> = Vec::new();
-    for event in &published {
+    for event in agent {
         let payload = &event["payload"];
         let path = resolve(payload);
-        let prompt = read_record(&path, &event["artifacts"][0]["id"])["prompt"]
-            .as_str()
-            .filter(|it| !it.is_empty())
-            .unwrap_or_else(|| {
-                panic!("the record a failed run pointed at carries no conversation: {payload}")
-            })
-            .to_string();
-        prompts.push((
-            payload["role"]
+        assert!(
+            read_record(&path, &event["artifacts"][0]["id"])["prompt"]
                 .as_str()
-                .expect("a pointer names a side")
-                .to_string(),
-            prompt,
-        ));
+                .is_some_and(|it| !it.is_empty()),
+            "the record a failed run pointed at carries no conversation"
+        );
     }
-    let mut sides: Vec<&str> = prompts.iter().map(|(role, _)| role.as_str()).collect();
-    sides.sort_unstable();
-    assert_eq!(
-        sides,
-        ["agent", "judge"],
-        "a failed run named something other than one conversation per side: {published:?}"
-    );
-    // Two pointers at one file would satisfy everything above, and would be the
-    // failure worth catching: a side's pointer has to open *that side's*
-    // conversation. The two prompts differ because onejudge composes them
-    // differently — the agent is given the task, the judge the transcript — which
-    // this reads as a difference rather than by restating either one's wording.
-    assert_ne!(
-        prompts[0].1, prompts[1].1,
-        "both sides' pointers opened the same conversation"
+    // The judge side reached no identity, so it wrote nothing to point at — the
+    // same rule as the journey below, on the other side of one member.
+    assert!(
+        published
+            .iter()
+            .all(|event| event["payload"]["role"] == "agent"),
+        "a side that ran nothing published a conversation: {published:?}"
     );
     assert_session_labels(&run);
 }
