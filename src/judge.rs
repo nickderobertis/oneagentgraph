@@ -194,6 +194,10 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let engine = {
         let (emitter, activity, abort) =
             (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
+        // The gate this run's task asked for, if it asked for one — see
+        // [`hold_between_turns`], which is compiled only for the suite.
+        #[cfg(feature = "test-doubles")]
+        let mut gate: Option<PathBuf> = None;
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
         // panicking — which would take the whole graph down over one member. A
@@ -205,7 +209,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
                 ingest(observation, &emitter);
                 #[cfg(feature = "test-doubles")]
-                hold_between_turns(observation);
+                hold_between_turns(observation, &mut gate);
                 if abort.load(Ordering::SeqCst) {
                     ControlFlow::Break(())
                 } else {
@@ -272,6 +276,26 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
 #[cfg(feature = "test-doubles")]
 const FIXTURE_HOLD: Duration = Duration::from_secs(30);
 
+/// The marker a journey puts in its **task** to ask for that pause, naming the
+/// gate file it will release.
+///
+/// In the task rather than in this process's environment, so the lever is the one
+/// every other journey already uses: a conversation is steered by the prose it is
+/// given, and `tests/e2e/note.rs` holds a live turn open with the harness
+/// double's own `fake:` sentinels in exactly the same way. Its own prefix, so no
+/// sentinel of the double's can collide with it.
+#[cfg(feature = "test-doubles")]
+const HOLD_BETWEEN_TURNS: &str = "oneagentgraph-fixture:hold-between-turns=";
+
+/// The gate `instruction` names, if it names one.
+#[cfg(feature = "test-doubles")]
+fn fixture_gate(instruction: &str) -> Option<PathBuf> {
+    let at = instruction.find(HOLD_BETWEEN_TURNS)? + HOLD_BETWEEN_TURNS.len();
+    let rest = &instruction[at..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    Some(PathBuf::from(&rest[..end]))
+}
+
 /// A test-only pause at the one conversation boundary a journey cannot otherwise
 /// hold: after a turn has closed and before the next one opens.
 ///
@@ -294,29 +318,32 @@ const FIXTURE_HOLD: Duration = Duration::from_secs(30);
 /// agent's own close is followed immediately by a `take_notes` that would take
 /// the note as a live-turn delivery instead, which is a different journey.
 ///
-/// `ONEAGENTGRAPH_FIXTURE_HOLD_BETWEEN_TURNS=<path>`: this writes `<path>.entered`
-/// as it reaches the boundary and waits for `<path>` to appear. Read from the
-/// environment of the process driving the run — a library caller's own — rather
-/// than from a graph's `env:`, which is exported to member processes and would
-/// never reach this thread.
+/// Asked for by [`HOLD_BETWEEN_TURNS`] in the conversation's own task, which is
+/// read off the first turn's instruction and remembered in `gate`. On reaching
+/// the boundary this writes `<gate>.entered` and waits for `<gate>` to appear.
 #[cfg(feature = "test-doubles")]
-fn hold_between_turns(observation: &Observation<'_>) {
-    let Observation::TurnClosed(closed) = observation else {
-        return;
-    };
-    if !matches!(closed.role, onejudge::Role::User) {
-        return;
-    }
-    let Ok(named) = std::env::var("ONEAGENTGRAPH_FIXTURE_HOLD_BETWEEN_TURNS") else {
-        return;
-    };
-    let gate = PathBuf::from(named);
-    let mut entered = gate.clone().into_os_string();
-    entered.push(".entered");
-    let _ = std::fs::write(PathBuf::from(entered), "entered");
-    let deadline = Instant::now() + FIXTURE_HOLD;
-    while !gate.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
+fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<PathBuf>) {
+    match observation {
+        // The task is the first turn's instruction, so the marker arrives here
+        // rather than through anything this process was started with.
+        Observation::TurnOpened(opened) => {
+            if gate.is_none() {
+                *gate = fixture_gate(opened.instruction);
+            }
+        }
+        Observation::TurnClosed(closed) if matches!(closed.role, onejudge::Role::User) => {
+            let Some(gate) = gate.as_ref() else {
+                return;
+            };
+            let mut entered = gate.clone().into_os_string();
+            entered.push(".entered");
+            let _ = std::fs::write(PathBuf::from(entered), "entered");
+            let deadline = Instant::now() + FIXTURE_HOLD;
+            while !gate.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        _ => {}
     }
 }
 

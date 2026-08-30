@@ -577,9 +577,11 @@ fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
 /// rest of what only this suite needs, waits at the supervisor's turn boundary —
 /// the gap before the next worker turn opens. Nothing about the conversation is
 /// simulated: what the note meets is a real engine at a real boundary, reached by
-/// running the turns that lead to it. Everything else is the same real run as its
-/// siblings — the note goes through the public `control::note`, the conversation
-/// decides, and what the worker was handed is read off the prompt it really got.
+/// running the turns that lead to it, and the fixture is asked for in the task —
+/// the same surface the `fake:` sentinels above are given on. Everything else is
+/// the same real run as its siblings: the note goes through the public
+/// `control::note`, the conversation decides, and what the worker was handed is
+/// read off the prompt it really got.
 #[cfg(unix)]
 #[test]
 fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_its_role() {
@@ -588,22 +590,18 @@ fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_it
     let agent_prompts = workspace.at("agent-prompts");
     let between = workspace.at("between-turns");
     let between_entered = workspace.at("between-turns.entered");
-    // The gate the fixture waits at. Read by the sink on this run's own engine
-    // thread, which is a thread of *this* process — so it is set here rather than
-    // in the graph's `env:`, which is exported to member processes only. Safe to
-    // set process-wide: nextest runs each test in one of its own.
-    std::env::set_var(
-        "ONEAGENTGRAPH_FIXTURE_HOLD_BETWEEN_TURNS",
-        between.display().to_string(),
-    );
-
-    // `should-fail` keeps the supervisor asking for another turn, so there *is* a
-    // next worker turn for the held note to be delivered into. The run then ends
-    // at the base config's turn cap.
+    // The gate is asked for in the **task**, which is the same lever every journey
+    // above steers a conversation with — the harness double's `fake:` sentinels
+    // reach it the same way. `should-fail` keeps the supervisor asking for another
+    // turn, so there *is* a next worker turn for the held note to be delivered
+    // into; the run then ends at the base config's turn cap.
     let running = start(
         &workspace,
         &format!("fake:record-prompt={}", agent_prompts.display()),
-        "fake:should-fail",
+        &format!(
+            "fake:should-fail oneagentgraph-fixture:hold-between-turns={}",
+            between.display()
+        ),
     );
 
     // The supervisor's first turn has closed and the next worker turn has not

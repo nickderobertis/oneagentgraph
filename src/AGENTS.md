@@ -120,8 +120,9 @@ refusal so a later note is refused rather than spooled to nobody.
 
 **`judge`'s `hold_between_turns` is a fixture, not a second fake seam.** It
 pauses real code at the one conversation boundary nothing outside the process can
-hold — a harness runs inside a turn, so it cannot hold the gap between two — and
-is compiled only under `test-doubles`. Reach for it nowhere else.
+hold — a harness runs inside a turn, so it cannot hold the gap between two. Asked
+for in the task, like every other lever a journey steers a conversation with, and
+compiled only under `test-doubles`. Reach for it nowhere else.
 
 **The spool mirrors `Accepted`/`Undelivered`, which are not `Serialize`.** Map
 every variant in both directions so one added upstream fails this build instead
