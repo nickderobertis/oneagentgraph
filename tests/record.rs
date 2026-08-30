@@ -592,11 +592,13 @@ fn the_member_started_goldens_are_exactly_what_this_build_writes() {
 /// thread bound, an address whose store the report named, one that left
 /// oneharness's own default, and an ask that was refused.
 ///
-/// The last three carry no endpoint on purpose. A single-sided member binds
-/// none — it has no second party for a note to be addressed away from — and the
-/// record a *settled* member's report rewrites names none either, so a consumer
-/// reading `notes` gets "this member is receiving notes" rather than "this
-/// member once did".
+/// The last three carry no endpoint on purpose: a member that bound none. A
+/// single-sided member is one — it has no second party for a note to be
+/// addressed away from — and so is a two-party member on a host that refused it
+/// the endpoint. What a consumer reads in `notes` is therefore whether this
+/// member ever had one, which is what a note is offered into: a member whose
+/// conversation is over still names its endpoint, because the refusal it
+/// recorded there is only reachable through it.
 fn golden_controls() -> Vec<ControlRecord> {
     let session = "node-scope-1786171301679-1447994-worker-skill".to_string();
     let cwd = std::path::PathBuf::from("/state/node-scope-1786171301679-1447994/members/worker");
