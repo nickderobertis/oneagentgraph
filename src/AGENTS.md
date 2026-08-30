@@ -97,8 +97,8 @@ pair for the commands this crate does spawn. Never reach for a shim binary that
 re-spawns itself into the job, or a local copy of onejudge's `execute`.
 
 **A note is routed by the conversation, not here.** `control::interrupt`
-addresses the agent side and nothing else, which is why a ruling delivered that
-way reached the worker and never the judge. `control::note` hands the note to the
+addresses the agent side and nothing else, so a note sent that way reaches the
+worker and never the judge. `control::note` hands the note to the
 member, and `judge::run` gives the engine the inbox end of an
 `onejudge::note::Notes` channel through `Plan::with_notes`: only the engine knows
 which side is live. Do not re-derive that decision here. `interrupt` stays the
