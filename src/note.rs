@@ -57,7 +57,7 @@
 //! watchdogs behind a judge invocation.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -507,11 +507,30 @@ fn submit_within(scratch: &Path, note: &Note, deadline: Duration) -> Result<Acce
 }
 
 /// An id no two notes share, ordered by the instant it was minted.
+///
+/// Three segments, and each carries one of those two properties. The clock leads,
+/// so [`Spool::take`]'s lexicographic sort is offer order. The process id
+/// separates two *processes* offering at once, which is the ordinary case: a note
+/// arrives from outside the run.
+///
+/// The counter is what makes the first half of the sentence true rather than
+/// likely. Two threads of one process may read the same nanosecond — the API
+/// permits it, and `tests/e2e/note.rs` offers from a thread of its own — and two
+/// notes sharing an id would share a spool file, so one of them would vanish
+/// under the other with its caller waiting on an answer that never comes.
 fn mint() -> String {
+    /// Distinct per note within this process, whatever the clock's resolution.
+    static MINTED: AtomicU64 = AtomicU64::new(0);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| since.as_nanos());
-    format!("{now:039}-{}", std::process::id())
+    // Zero-padded to its full width, so the counter orders lexicographically for
+    // every value it can take rather than up to its first carry.
+    format!(
+        "{now:039}-{}-{:020}",
+        std::process::id(),
+        MINTED.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 /// What a member with **no conversation** is handed instead: the addressed role,
@@ -602,11 +621,7 @@ impl Ending {
     /// This member takes no more notes, and `refusal` is what every later one
     /// gets — the conversation's own reason, so a caller reads *completed* and
     /// *ended* apart rather than being told only that it was too late.
-    /// Where the member bound its endpoint — the path its control record names.
-    ///
-    /// Read when that record is rewritten at the end of the run: the endpoint
-    /// outlives the conversation on purpose, because the refusal `end` just
-    /// recorded is only reachable through it.
+    /// The directory this member bound, which is what its control record names.
     pub(crate) fn endpoint(&self) -> &Path {
         self.spool.path()
     }
