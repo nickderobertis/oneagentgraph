@@ -176,8 +176,13 @@ fn prompts(at: &std::path::Path) -> Vec<String> {
 /// a red journey rather than a green one that proved nothing.
 const REACHES_THE_CONVERSATION: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Give the offer above time to reach the party whose turn is being held.
-fn offered_into_the_held_turn() {
+/// Wait [`REACHES_THE_CONVERSATION`] out, and assert nothing.
+///
+/// Named for the wait rather than for what the wait is for: it establishes no
+/// state and reads nothing back, so a name claiming the offer *had* reached the
+/// held turn would be a claim no line of this body makes. What it reached is
+/// asserted afterwards, off the disposition the conversation gave it.
+fn wait_the_ordering_margin() {
     std::thread::sleep(REACHES_THE_CONVERSATION);
 }
 
@@ -239,7 +244,7 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_wi
     let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
     let events = running.run.started().events_path.clone();
     let offered = offering(&workspace, &running, note);
-    offered_into_the_held_turn();
+    wait_the_ordering_margin();
     std::fs::write(&release, "go").expect("release the worker's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -341,7 +346,7 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
         .binding("the migration is reversible")
         .expect("a criterion a judge can hold work to");
     let offered = offering(&workspace, &running, note);
-    offered_into_the_held_turn();
+    wait_the_ordering_margin();
     std::fs::write(&judging, "go").expect("release the judge's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -412,7 +417,7 @@ fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
     let text = "hold this to the amended bar: reversibility is now in scope";
     let note = Note::new(Addressee::Supervisor, text).expect("a note with text in it");
     let offered = offering(&workspace, &running, note);
-    offered_into_the_held_turn();
+    wait_the_ordering_margin();
     std::fs::write(&judging, "go").expect("release the judge's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -622,7 +627,7 @@ fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_it
     let text = "no turn was running when this was sent: take it on the next one";
     let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
     let offered = offering(&workspace, &running, note);
-    offered_into_the_held_turn();
+    wait_the_ordering_margin();
     std::fs::write(&between, "go").expect("release the held turn boundary");
 
     let delivery = offered.join().expect("the offering thread");

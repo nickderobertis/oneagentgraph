@@ -380,15 +380,25 @@ impl Spool {
                     .and_then(|name| name.strip_suffix(".note.json"))?
                     .to_string();
                 let raw = std::fs::read_to_string(&path).ok()?;
-                let _ = std::fs::remove_file(&path);
-                let spooled: Spooled = serde_json::from_str(&raw).ok()?;
-                // A document on disk is external input whatever wrote it. The
-                // *note* validates itself on the way out of `serde` — blank text
-                // and an unusable criterion are both refused by the conversions
+                // A document on disk is external input whatever wrote it, and
+                // every check on it happens before the file is touched: removing
+                // it *is* acting on it, so a boundary check that has already
+                // deleted its own input is not a check. The *note* validates
+                // itself on the way out of `serde` — blank text and an unusable
+                // criterion are both refused by the conversions
                 // `onejudge::note` deserializes through — so what is left to
-                // check here is the version, and a document this build cannot
-                // read is dropped rather than guessed at.
-                (spooled.schema_version == NOTE_SCHEMA_VERSION).then_some((id, spooled.note))
+                // check here is the version.
+                let spooled: Spooled = serde_json::from_str(&raw).ok()?;
+                if spooled.schema_version != NOTE_SCHEMA_VERSION {
+                    return None;
+                }
+                // Past every check, and the only place this directory is written
+                // by the taking side: one note is taken once however often the
+                // member services its spool, while a document this build cannot
+                // read is left exactly where it is — the skew that produced it
+                // survives for whoever comes to look.
+                let _ = std::fs::remove_file(&path);
+                Some((id, spooled.note))
             })
             .collect();
         // Deterministic, and in the order the ids were minted: an id carries the
@@ -823,6 +833,14 @@ mod tests {
             spool.take().is_empty(),
             "a note this build cannot read was acted on"
         );
+        // Left alone means left on disk: removing it would be acting on it, and
+        // would destroy the one record of the skew that wrote it.
+        for id in ["999-1", "998-1", "997-1"] {
+            assert!(
+                spool.request(id).exists(),
+                "a document this build cannot read was removed rather than left alone: {id}"
+            );
+        }
     }
 
     /// Every disposition the conversation can reach survives the wire the spool
