@@ -51,10 +51,19 @@
 use std::collections::BTreeMap;
 
 use oneagentgraph::config::ConfigRef;
-use oneagentgraph::control::{self, Accepted, Addressee, Note, NoteDelivery, Party, Undelivered};
+// What only a routed delivery names, and so only the `cfg(unix)` journeys below
+// use: the dispositions a live turn answers with, and the wait for one to be in
+// flight. Split off rather than left in the list beside it, the way
+// `tests/e2e/interrupt.rs` splits its own — on Windows these names are compiled
+// with nothing referring to them, and an unused import is `-D warnings`.
+use oneagentgraph::control::{self, Addressee, Note, NoteDelivery, Undelivered};
+#[cfg(unix)]
+use oneagentgraph::control::{Accepted, Party};
 use oneagentgraph::run::{self, MemberName, Request};
 
-use crate::support::{oneharness_bin, two_party_graph, until, Workspace, BASE};
+#[cfg(unix)]
+use crate::support::until;
+use crate::support::{oneharness_bin, two_party_graph, Workspace, BASE};
 
 /// Journeys here start real runs with real session stores; one at a time, as the
 /// library journeys next door are, so two runs never race for the same host.
