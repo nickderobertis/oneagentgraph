@@ -98,11 +98,11 @@ re-spawns itself into the job, or a local copy of onejudge's `execute`.
 
 **A note is routed by the conversation, not here.** `control::interrupt`
 addresses the agent side and nothing else, so a note sent that way reaches the
-worker and never the judge. `control::note` hands the note to the
-member, and `judge::run` gives the engine the inbox end of an
-`onejudge::note::Notes` channel through `Plan::with_notes`: only the engine knows
-which side is live. Do not re-derive that decision here. `interrupt` stays the
-lever for a member with no conversation at all.
+worker and never the judge. `control::note` hands the note to the member, and
+`judge::run` gives the engine the inbox end of an `onejudge::note::Notes`
+channel through `Plan::with_notes`: only the engine knows which side is live. Do
+not re-derive that decision here. `interrupt` stays the lever for a member with
+no conversation at all.
 
 **`crate::note` re-exports onejudge's shapes; it does not declare them.**
 `Addressee`, `Note`, `Accepted` and `Undelivered` live in `onejudge::note`, which
