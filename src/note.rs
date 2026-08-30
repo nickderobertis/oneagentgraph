@@ -618,14 +618,14 @@ pub(crate) struct Ending {
 }
 
 impl Ending {
-    /// This member takes no more notes, and `refusal` is what every later one
-    /// gets — the conversation's own reason, so a caller reads *completed* and
-    /// *ended* apart rather than being told only that it was too late.
     /// The directory this member bound, which is what its control record names.
     pub(crate) fn endpoint(&self) -> &Path {
         self.spool.path()
     }
 
+    /// This member takes no more notes, and `refusal` is what every later one
+    /// gets — the conversation's own reason, so a caller reads *completed* and
+    /// *ended* apart rather than being told only that it was too late.
     pub(crate) fn end(&self, refusal: &Undelivered) {
         self.spool.end(refusal);
         self.stop.store(true, Ordering::SeqCst);
