@@ -338,7 +338,7 @@ impl Spool {
         }
     }
 
-    /// The request file one note is offered in, and the answer file beside it.
+    /// The file note `id` is offered in.
     fn request(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.note.json"))
     }

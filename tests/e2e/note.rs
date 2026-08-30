@@ -176,12 +176,8 @@ fn prompts(at: &std::path::Path) -> Vec<String> {
 /// a red journey rather than a green one that proved nothing.
 const REACHES_THE_CONVERSATION: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Wait [`REACHES_THE_CONVERSATION`] out, and assert nothing.
-///
-/// Named for the wait rather than for what the wait is for: it establishes no
-/// state and reads nothing back, so a name claiming the offer *had* reached the
-/// held turn would be a claim no line of this body makes. What it reached is
-/// asserted afterwards, off the disposition the conversation gave it.
+/// Wait [`REACHES_THE_CONVERSATION`] out; that constant carries why, and why the
+/// name is the wait rather than what the wait is for.
 fn wait_the_ordering_margin() {
     std::thread::sleep(REACHES_THE_CONVERSATION);
 }
