@@ -473,7 +473,8 @@ impl Spool {
         self.dir.join(format!("{id}.answer.json"))
     }
 
-    /// Offer `note` to the member and return the id it is answered under.
+    /// Offer `note` to the member under `id`, which is what its answer will be
+    /// written beside.
     ///
     /// Written beside its final name and renamed onto it, so a member servicing
     /// the spool never reads half a document.

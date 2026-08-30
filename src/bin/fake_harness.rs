@@ -73,7 +73,7 @@
 //! the mirror reason: a journey about the **judge's** live turn needs one it can
 //! observe and release, and every other lever here is either the agent's or fires
 //! on both sides. Which side an invocation is comes from the prompt's own framing
-//! ([`supervising`]), because there is no flag that says so.
+//! ([`prompt_frames_the_supervisor`]), because there is no flag that says so.
 //!
 //! The three marked *controlled turn only* answer nowhere else, and that is
 //! load-bearing rather than tidy: a judge side's prompt embeds the **transcript**,
@@ -245,15 +245,36 @@ fn steers(prompt: &str, sentinel: &str) -> bool {
     prompt.contains(&format!("{MARK}{sentinel}"))
 }
 
-/// Whether this invocation is the **judge** side deciding whether to continue.
+/// The stable phrase onejudge opens its supervisor prompt with, and the only
+/// tell this double has for which side it is being asked as.
 ///
-/// onejudge renders a distinct framing per operation, so the prompt itself says
-/// which side is being asked — there is no flag that does. One definition, used
-/// by both the hold in [`turn`] and the answer in [`answer`], so a journey that
-/// holds the supervisor's turn is holding the same turn it then reads an answer
-/// off.
-fn supervising(prompt: &str) -> bool {
-    prompt.contains("completion supervisor")
+/// Its shape is the one `onejudge`'s own `SESSION_UNSUPPORTED_MARKER` and
+/// `CONTROL_REFUSED_MARKERS` have, for the same reason: an upstream message this
+/// process has to recognise and cannot be handed structurally. There is no flag
+/// — onejudge passes the agent side and the judge side the same argv shape and
+/// distinguishes them only by what it renders — so a rename upstream turns every
+/// judge-shaped answer below into an agent-shaped one. That is a loud failure
+/// rather than a quiet one: `tests/e2e/dispatch.rs` drives real two-party
+/// conversations that cannot complete if the judge side stops answering in the
+/// judge's shape.
+const SUPERVISOR_PROMPT_MARKER: &str = "completion supervisor";
+
+/// Whether this prompt carries the supervisor's framing — which is what the
+/// answers and the hold below branch on.
+///
+/// Named for what it reads rather than for what it concludes: it inspects prose,
+/// so a *task* quoting [`SUPERVISOR_PROMPT_MARKER`] would steer an agent-side
+/// turn down the judge's branch. That is a journey writing its own task badly
+/// rather than untrusted input — every prompt this double ever sees is composed
+/// by onejudge from a task the suite itself wrote — and it is why the phrase is
+/// distinctive prose rather than a bare word, on exactly the terms [`MARK`]
+/// records for the sentinels.
+///
+/// One definition, used by both the hold in [`turn`] and the answer in
+/// [`answer`], so a journey that holds the supervisor's turn is holding the same
+/// turn it then reads an answer off.
+fn prompt_frames_the_supervisor(prompt: &str) -> bool {
+    prompt.contains(SUPERVISOR_PROMPT_MARKER)
 }
 
 fn main() -> std::process::ExitCode {
@@ -663,7 +684,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // know it has begun — which is what the `.entered` sibling is, written before
     // the wait for `entered`'s reason.
     if let Some(path) = sentinel_path(prompt, "supervisor-hold") {
-        if supervising(prompt) {
+        if prompt_frames_the_supervisor(prompt) {
             let mut entered = path.clone().into_os_string();
             entered.push(".entered");
             let _ = std::fs::write(std::path::PathBuf::from(entered), "entered");
@@ -946,7 +967,7 @@ fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
 /// this cannot read it, which is a journey asserting against a turn it never
 /// configured. The caller refuses loudly rather than answering something else.
 fn answer(prompt: &str) -> Result<String, String> {
-    if supervising(prompt) {
+    if prompt_frames_the_supervisor(prompt) {
         // The two shapes are not symmetrical, and onejudge enforces that: a
         // completed response carries a `reason` and *no* `message`, because
         // there is no next turn for a message to be. A continuing one carries
