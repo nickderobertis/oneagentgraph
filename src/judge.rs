@@ -197,7 +197,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         // The gate this run's task asked for, if it asked for one — see
         // [`hold_between_turns`], which is compiled only for the suite.
         #[cfg(feature = "test-doubles")]
-        let mut gate: Option<PathBuf> = None;
+        let mut gate: Option<FixtureGate> = None;
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
         // panicking — which would take the whole graph down over one member. A
@@ -287,26 +287,76 @@ const FIXTURE_HOLD: Duration = Duration::from_secs(30);
 #[cfg(feature = "test-doubles")]
 const HOLD_BETWEEN_TURNS: &str = "oneagentgraph-fixture:hold-between-turns=";
 
-/// The gate `instruction` names, if it names one.
+/// Both files this fixture touches, checked before either is named.
 ///
-/// The path is taken as written, which it may be *because this is not a trust
-/// boundary*: `test-doubles` is not in a shipped build — it is off by default and
-/// no published artifact enables it — so the only instruction that can reach here
-/// is one this repository's own suite wrote, naming a path in its own temporary
-/// workspace. Validating it would be validating a journey against itself. The
-/// task text a *run* carries is external input and is validated where it crosses
-/// in: [`crate::config`] and [`crate::note`] both reject what they cannot read.
-// llmlint: ignore-block[boundary_inputs_validated] the reason above: this is
-// compiled only under the non-default `test-doubles` feature, so its one caller
-// is this repository's own e2e suite rather than any consumer.
+/// A type rather than a `PathBuf`, because [`Self::parse`] is the only way to
+/// hold one: a path cut out of task text is text until something checks it, and a
+/// newtype is what makes "checked" a property of the value instead of a habit of
+/// each caller. Both members are derived here for the same reason — the sibling
+/// this fixture writes used to be rebuilt at the point of use, which is a second
+/// place the checks would have to be remembered.
 #[cfg(feature = "test-doubles")]
-fn fixture_gate(instruction: &str) -> Option<PathBuf> {
-    let at = instruction.find(HOLD_BETWEEN_TURNS)? + HOLD_BETWEEN_TURNS.len();
-    let rest = &instruction[at..];
-    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-    Some(PathBuf::from(&rest[..end]))
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FixtureGate {
+    /// The file the journey creates to release the hold. Only ever read.
+    gate: PathBuf,
+    /// The sibling this fixture writes on reaching the boundary, so a journey
+    /// can wait for the hold rather than sleep at it.
+    entered: PathBuf,
 }
-// llmlint: ignore-end[boundary_inputs_validated]
+
+#[cfg(feature = "test-doubles")]
+impl FixtureGate {
+    /// The gate `instruction` names, if it names one this fixture will act on.
+    ///
+    /// `None` covers an instruction that names no gate *and* one whose path is
+    /// refused, which are one answer to the caller: the conversation runs with no
+    /// hold, exactly as it does for every task that never asked for one. A
+    /// fixture that refused louder than that would fail runs over prose.
+    fn parse(instruction: &str) -> Option<Self> {
+        let at = instruction.find(HOLD_BETWEEN_TURNS)? + HOLD_BETWEEN_TURNS.len();
+        let rest = &instruction[at..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        Self::at(Path::new(&rest[..end]))
+    }
+
+    /// The checks, over the path [`Self::parse`] cut out of the text.
+    ///
+    /// What is refused, and why each:
+    ///
+    /// * **a relative path**, because this runs on the member's thread of a
+    ///   process whose working directory is deliberately not the journey's — see
+    ///   [`crate::judge::MemberSpawn`], and the journey that pins it — so a
+    ///   relative gate resolves somewhere neither end named;
+    /// * **a `..` component**, which is the traversal a path assembled from text
+    ///   should never carry however it came to be assembled;
+    /// * **a gate with no file name**, which has no sibling to write beside it;
+    /// * **a parent directory that does not already exist**, because a journey
+    ///   names a file in a workspace it has already made, so an absent parent
+    ///   means the text was not the path anything meant. Nothing is created to
+    ///   make it exist: this writes one file beside the gate and no directory.
+    fn at(gate: &Path) -> Option<Self> {
+        if !gate.is_absolute()
+            || gate
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let name = gate.file_name()?;
+        if !gate.parent().is_some_and(Path::is_dir) {
+            return None;
+        }
+        let mut entered = name.to_os_string();
+        entered.push(".entered");
+        Some(Self {
+            // Named against the gate's own parent, which the checks above cleared,
+            // so the sibling cannot land anywhere the gate could not.
+            entered: gate.with_file_name(entered),
+            gate: gate.to_path_buf(),
+        })
+    }
+}
 
 /// A test-only pause at the one conversation boundary a journey cannot otherwise
 /// hold: after a turn has closed and before the next one opens.
@@ -331,27 +381,27 @@ fn fixture_gate(instruction: &str) -> Option<PathBuf> {
 /// the note as a live-turn delivery instead, which is a different journey.
 ///
 /// Asked for by [`HOLD_BETWEEN_TURNS`] in the conversation's own task, which is
-/// read off the first turn's instruction and remembered in `gate`. On reaching
-/// the boundary this writes `<gate>.entered` and waits for `<gate>` to appear.
+/// read off the first turn's instruction and remembered in `gate` as a checked
+/// [`FixtureGate`] — the text is turned into paths once, there, rather than at
+/// each use. On reaching the boundary this writes the gate's `.entered` sibling
+/// and waits for the gate itself to appear.
 #[cfg(feature = "test-doubles")]
-fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<PathBuf>) {
+fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<FixtureGate>) {
     match observation {
         // The task is the first turn's instruction, so the marker arrives here
         // rather than through anything this process was started with.
         Observation::TurnOpened(opened) => {
             if gate.is_none() {
-                *gate = fixture_gate(opened.instruction);
+                *gate = FixtureGate::parse(opened.instruction);
             }
         }
         Observation::TurnClosed(closed) if matches!(closed.role, onejudge::Role::User) => {
             let Some(gate) = gate.as_ref() else {
                 return;
             };
-            let mut entered = gate.clone().into_os_string();
-            entered.push(".entered");
-            let _ = std::fs::write(PathBuf::from(entered), "entered");
+            let _ = std::fs::write(&gate.entered, "entered");
             let deadline = Instant::now() + FIXTURE_HOLD;
-            while !gate.exists() && Instant::now() < deadline {
+            while !gate.gate.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
@@ -1274,6 +1324,96 @@ mod tests {
     use super::*;
     use crate::event::{Envelope, MAX_PAYLOAD_TEXT_BYTES};
     use onejudge::StreamEvent;
+
+    /// The instruction a journey writes to ask for the between-turns hold,
+    /// naming `gate`.
+    #[cfg(feature = "test-doubles")]
+    fn asking_for(gate: &Path) -> String {
+        format!(
+            "fake:should-fail {HOLD_BETWEEN_TURNS}{} do the work",
+            gate.display()
+        )
+    }
+
+    /// The gate a journey really names is accepted, and both paths the fixture
+    /// touches come back derived from it.
+    ///
+    /// The accepted shape is what every run of
+    /// `note::a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_its_role`
+    /// drives end to end: a file in the workspace that journey has already made.
+    /// What is pinned here is the pair, because the `.entered` sibling used to be
+    /// rebuilt where it was written and is now derived once, beside the gate.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn the_gate_a_journey_names_is_accepted_with_the_sibling_derived_beside_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gate = dir.path().join("between-turns");
+
+        let parsed = FixtureGate::parse(&asking_for(&gate)).expect("a gate a journey really names");
+
+        assert_eq!(parsed.gate, gate, "the gate is not the file the task named");
+        assert_eq!(
+            parsed.entered,
+            dir.path().join("between-turns.entered"),
+            "the sibling is not beside the gate"
+        );
+        // The marker is cut at whitespace, so the prose after it is not part of
+        // the path — the failure that would put " do the work" in a file name.
+        assert!(
+            !parsed.gate.to_string_lossy().contains(' '),
+            "the gate swallowed the prose after it: {parsed:?}"
+        );
+    }
+
+    /// A task naming no gate asks for no hold, which is every ordinary run.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn a_task_that_asks_for_no_hold_names_no_gate() {
+        assert_eq!(FixtureGate::parse("fake:complete-now: ordinary work"), None);
+    }
+
+    /// Each path this refuses, refused — and refused as *no hold* rather than as
+    /// a failure, because a fixture that failed runs over prose would break the
+    /// suite it exists to serve.
+    ///
+    /// A path assembled from text is text until something checks it, and every
+    /// case here is one this fixture would otherwise have written a file beside:
+    /// a relative gate resolves against the hosting process's directory rather
+    /// than the journey's workspace, and a `..` component walks out of it.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn a_gate_this_fixture_will_not_write_beside_is_refused_as_no_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir
+            .path()
+            .ancestors()
+            .last()
+            .expect("every path has a root")
+            .to_path_buf();
+
+        for (why, gate) in [
+            // Relative: this runs on a thread of a process whose directory is
+            // deliberately not the journey's, so it would resolve elsewhere.
+            ("a relative path", PathBuf::from("between-turns")),
+            (
+                "a parent-directory component",
+                dir.path().join("..").join("between-turns"),
+            ),
+            // A root has no file name, so there is no sibling to write beside it.
+            ("no file name", root),
+            (
+                "a parent that does not exist",
+                dir.path().join("absent").join("between-turns"),
+            ),
+        ] {
+            assert_eq!(
+                FixtureGate::parse(&asking_for(&gate)),
+                None,
+                "{why} was accepted as a gate: {}",
+                gate.display()
+            );
+        }
+    }
 
     /// A sink a test can read its own events back out of.
     #[derive(Clone, Default)]

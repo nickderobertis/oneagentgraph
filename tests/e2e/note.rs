@@ -757,3 +757,50 @@ fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_it
         "the held note never reached the next worker turn: {handed:#?}"
     );
 }
+
+/// A task naming a gate this fixture will not write beside runs **unheld**, and
+/// writes nothing.
+///
+/// The refusal beside the acceptance above, driven the same way: through a real
+/// conversation, with the gate asked for in the task. A relative name is the case
+/// that matters, because it is the one that resolves — just not where the journey
+/// meant. The fixture runs on a thread of the *hosting* process, whose directory
+/// is deliberately not the member's (`library::the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere`
+/// pins that), so an unchecked relative gate would have this suite writing a
+/// stray file into whatever directory the test runner happened to start in and
+/// then holding the conversation for the whole fixture bound waiting on it.
+///
+/// So the assertion is the two halves of that: the run settles on its own rather
+/// than at a hold nobody will release, and no `.entered` marker appears beside
+/// this process.
+#[cfg(unix)]
+#[test]
+fn a_gate_named_relatively_is_refused_and_the_conversation_runs_unheld() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    // Its own name, so what this asserts the absence of is this journey's alone.
+    let relative = "oneagentgraph-relative-gate-check";
+    let stray = std::env::current_dir()
+        .expect("the hosting process has a working directory")
+        .join(format!("{relative}.entered"));
+    assert!(
+        !stray.exists(),
+        "the marker this journey asserts the absence of was already there: {}",
+        stray.display()
+    );
+
+    let running = start(
+        &workspace,
+        "",
+        &format!("fake:should-fail oneagentgraph-fixture:hold-between-turns={relative}"),
+    );
+    // Settles at the base config's turn cap, exactly as the journey above does
+    // once its hold is released — here there was never a hold to release.
+    running.run.wait().expect("the member settles");
+
+    assert!(
+        !stray.exists(),
+        "a relative gate was written beside the hosting process: {}",
+        stray.display()
+    );
+}
