@@ -213,7 +213,7 @@ impl Note {
     /// constructor ran. So this is checked again at every boundary a note
     /// crosses rather than once where the ideal one was built:
     /// [`crate::control::note()`] before it routes anything, [`submit`] before it
-    /// offers one, and [`Spool::take`] on the way back off disk.
+    /// offers one, and the member's own spool on the way back off disk.
     ///
     /// # Errors
     ///
