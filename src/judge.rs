@@ -356,7 +356,7 @@ fn supervise(
                 // answered by the conversation that could not take it rather than
                 // left for a caller to time out on.
                 if let Some(ending) = ending.as_ref() {
-                    ending.end(&completion(&answer));
+                    ending.end(&terminal_refusal(&answer));
                 }
                 return finish(answer, emitter, scratch);
             }
@@ -420,14 +420,17 @@ fn supervise(
 /// The answer the engine thread sends back.
 type Answer = Result<RunSummary, Box<RunFailure>>;
 
-/// What this member's conversation ended on, in the words a note that arrived
-/// too late reports.
+/// The refusal every note that arrives after this member is over will get.
 ///
-/// The supervisor's own reason where it gave one — a `done_when` it re-judged,
-/// or the settled reason a loop that ended without a completion decision records
-/// — because that is what tells a caller whether to relaunch the member or to
-/// record the note as a follow-up.
-fn completion(answer: &Answer) -> crate::note::Undelivered {
+/// Named for what it answers rather than for the happy path through it: a
+/// conversation the supervisor *passed* is only one of the ways to get here, and
+/// a failed one and one that merely settled reach it too. Which of them it was is
+/// the part a caller acts on — a passed conversation needs no relaunch and the
+/// note is a follow-up, while one that ended may well be worth starting again —
+/// so the reason carried is the supervisor's own where it gave one: a `done_when`
+/// it re-judged, or the settled reason a loop that ended without a completion
+/// decision records.
+fn terminal_refusal(answer: &Answer) -> crate::note::Undelivered {
     let Ok(summary) = answer else {
         let Err(failure) = answer else {
             unreachable!("the arm above")

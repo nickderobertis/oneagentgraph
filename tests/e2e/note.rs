@@ -151,63 +151,25 @@ fn prompts(at: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Where this run's member receives notes, **as the run itself reports it**.
+/// How long a journey gives an offer to reach the conversation before it releases
+/// the turn it is holding open.
 ///
-/// `control::record` is the published way to ask a member where its note
-/// endpoint is, and `Record::notes` is the field that answers — the same pair a
-/// caller outside this process reads before offering a note. A journey asks
-/// rather than deriving, so what it watches is the endpoint the run named and not
-/// a path a test rebuilt from the run's directory layout.
-fn note_endpoint(workspace: &Workspace, running: &Running) -> std::path::PathBuf {
-    let scratch = workspace
-        .state()
-        .join(running.id.as_str())
-        .join("members")
-        .join(running.member.as_str());
-    control::record(&scratch)
-        .expect("the member recorded a controllable turn")
-        .notes
-        .expect("a two-party member records the note endpoint its own thread bound")
-}
+/// An **ordering** margin, not a wait for a result: the offer runs on a thread of
+/// its own and blocks until the conversation disposes of the note, and the
+/// conversation cannot move while a journey holds one of its turns. This is the
+/// window in which `control::note` writes the note down and the member picks it
+/// up — tens of milliseconds in practice, against a bound an order of magnitude
+/// past it, on journeys that finish in under a second.
+///
+/// Deliberately not a poll of the member's own files. What the note reached is
+/// asserted afterwards off the disposition the *conversation* gave it, so a
+/// margin that was ever too short shows up as the wrong party in that assertion —
+/// a red journey rather than a green one that proved nothing.
+const REACHES_THE_CONVERSATION: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Whether a note is still waiting at the endpoint for the member to take it.
-fn waiting(spool: &std::path::Path) -> bool {
-    std::fs::read_dir(spool)
-        .map(|entries| {
-            entries.flatten().any(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_some_and(|name| name.ends_with(".note.json"))
-            })
-        })
-        .unwrap_or(false)
-}
-
-/// Block until the member's courier has taken the note off its spool and handed
-/// it to the conversation.
-///
-/// This is what lets a journey hold a turn open, offer a note *into* it, and then
-/// release the turn knowing the note really arrived while that side was live —
-/// rather than racing the release against the courier and asserting on whichever
-/// won. Both waits are bounded and neither is the assertion: what the note
-/// reached is asserted afterwards, off the disposition the conversation gave it,
-/// so a bound that expired early shows up as the wrong disposition rather than as
-/// a journey that quietly proved nothing.
-///
-/// Two waits because the spool is empty both *before* the note is offered and
-/// *after* it is taken. The first watches for it to land, the second for it to
-/// go; and if the courier's take beat the first wait entirely, that wait spends
-/// its bound and the second returns at once — either way `Notes::send` has been
-/// called by the time this returns.
-fn handed_over(spool: &std::path::Path) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
-    while std::time::Instant::now() < deadline && !waiting(spool) {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    while std::time::Instant::now() < deadline && waiting(spool) {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+/// Give the offer above time to reach the party whose turn is being held.
+fn offered_into_the_held_turn() {
+    std::thread::sleep(REACHES_THE_CONVERSATION);
 }
 
 /// Offer one note to a live member through the library, from a thread of its own.
@@ -266,10 +228,9 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_wi
 
     let text = "fake:complete-now the release blocker is P0: fix it before anything else";
     let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
-    let endpoint = note_endpoint(&workspace, &running);
     let events = running.run.started().events_path.clone();
     let offered = offering(&workspace, &running, note);
-    handed_over(&endpoint);
+    offered_into_the_held_turn();
     std::fs::write(&release, "go").expect("release the worker's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -370,9 +331,8 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
         .expect("a note with text in it")
         .binding("the migration is reversible")
         .expect("a criterion a judge can hold work to");
-    let endpoint = note_endpoint(&workspace, &running);
     let offered = offering(&workspace, &running, note);
-    handed_over(&endpoint);
+    offered_into_the_held_turn();
     std::fs::write(&judging, "go").expect("release the judge's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -442,9 +402,8 @@ fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
 
     let text = "hold this to the amended bar: reversibility is now in scope";
     let note = Note::new(Addressee::Supervisor, text).expect("a note with text in it");
-    let endpoint = note_endpoint(&workspace, &running);
     let offered = offering(&workspace, &running, note);
-    handed_over(&endpoint);
+    offered_into_the_held_turn();
     std::fs::write(&judging, "go").expect("release the judge's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -607,13 +566,19 @@ fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
 /// A note offered while **no turn is live** is held for the next turn to open,
 /// and arrives there carrying its role unchanged.
 ///
-/// The third of the three states a conversation can be in when a note reaches
-/// it, and the only one no harness can hold: a harness runs *inside* a turn, so
-/// it cannot pause the gap between two. `judge`'s `hold_between_turns` fixture —
-/// behind the non-default `test-doubles` feature, with the rest of what only this
-/// suite needs — pauses the supervisor's turn boundary, which is the gap before
-/// the next worker turn opens. Everything else here is the same real run as its
-/// siblings: the note goes through the public `control::note`, the conversation
+/// The third of the three states a conversation can be in when a note reaches it.
+/// It is an ordinary state — every run passes through it between every pair of
+/// turns — and the only one no harness can *hold*, because a harness runs inside
+/// a turn and cannot pause the gap between two.
+///
+/// So the timing is held rather than the state invented, which is exactly what
+/// `fake:hold` does for a live turn in the journeys above: `judge`'s
+/// `hold_between_turns`, behind the non-default `test-doubles` feature with the
+/// rest of what only this suite needs, waits at the supervisor's turn boundary —
+/// the gap before the next worker turn opens. Nothing about the conversation is
+/// simulated: what the note meets is a real engine at a real boundary, reached by
+/// running the turns that lead to it. Everything else is the same real run as its
+/// siblings — the note goes through the public `control::note`, the conversation
 /// decides, and what the worker was handed is read off the prompt it really got.
 #[cfg(unix)]
 #[test]
@@ -623,10 +588,10 @@ fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_it
     let agent_prompts = workspace.at("agent-prompts");
     let between = workspace.at("between-turns");
     let between_entered = workspace.at("between-turns.entered");
-    // Read by the sink on this run's own engine thread, which is a thread of this
-    // process — so it is set here rather than in the graph's `env:`, which is
-    // exported to member processes only. Safe to set for the whole process:
-    // nextest runs each test in one of its own.
+    // The gate the fixture waits at. Read by the sink on this run's own engine
+    // thread, which is a thread of *this* process — so it is set here rather than
+    // in the graph's `env:`, which is exported to member processes only. Safe to
+    // set process-wide: nextest runs each test in one of its own.
     std::env::set_var(
         "ONEAGENTGRAPH_FIXTURE_HOLD_BETWEEN_TURNS",
         between.display().to_string(),
@@ -649,9 +614,8 @@ fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_it
 
     let text = "no turn was running when this was sent: take it on the next one";
     let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
-    let endpoint = note_endpoint(&workspace, &running);
     let offered = offering(&workspace, &running, note);
-    handed_over(&endpoint);
+    offered_into_the_held_turn();
     std::fs::write(&between, "go").expect("release the held turn boundary");
 
     let delivery = offered.join().expect("the offering thread");
