@@ -17,7 +17,15 @@ mod events;
 mod interrupt;
 mod library;
 mod liveness;
+// llmlint: ignore-block[e2e_not_mocked] the journeys are in tests/e2e/note.rs,
+// which carries this declaration itself on the terms all ten of its siblings do:
+// the paid harness process is the one double this suite sanctions, replaced at
+// oneharness's own `ONEHARNESS_BIN_<ID>` seam, and everything else in those
+// journeys is real. This line only names the module; it is here because a
+// declaration in the file that owns the journeys does not reach the line that
+// declares it.
 mod note;
+// llmlint: ignore-end[e2e_not_mocked]
 mod origin;
 mod preturn;
 mod remote;

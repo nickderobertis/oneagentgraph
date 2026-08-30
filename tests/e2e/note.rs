@@ -317,14 +317,18 @@ fn a_note_during_a_live_judge_turn_is_queued_and_reaches_the_worker_with_the_res
     );
 }
 
-/// A note that cannot be delivered **raises**, and says which of the two reasons
-/// applies.
+/// A note that cannot be delivered comes back as an [`Undelivered`] the caller
+/// has to read, rather than as an acceptance.
 ///
-/// This is the half that is an error rather than an answer, and it is the failure
-/// the whole seam exists to remove: a note accepted into a member nothing would
-/// ever read it out of looks, to the caller, exactly like one that landed. Both
-/// refusals are driven here — a member the run has settled, and a member whose
-/// conversation reached its completion decision — and neither is silently taken.
+/// That is the failure the whole seam exists to remove: a note taken into a
+/// member nothing would ever read it out of looks, to the caller, exactly like
+/// one that landed. [`Undelivered`] is a `std::error::Error` and every arm's
+/// `Display` opens with *"the note was not delivered"*, so a caller that only
+/// prints it still learns the fact.
+///
+/// The refusal driven here is the settled member. Its sibling — a conversation
+/// that reached its completion decision — is unreachable through this API by
+/// construction and is driven where it is real; the body says where, and why.
 #[test]
 fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
@@ -373,8 +377,14 @@ fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
 }
 
 /// A single-sided member has no second party for a note to be addressed away
-/// from, so a note to one falls through to the lever it does have — and the
-/// addressed role still reaches the turn.
+/// from, so a note to one falls through to the lever it does have.
+///
+/// What that lever answers is the assertion: this member kind never asks for a
+/// controllable turn — only a two-party member's agent side does — so a note to a
+/// *live* one comes back naming that, and one to a settled one comes back naming
+/// the settle. Both are [`Undelivered`], and neither is the endpoint path: the
+/// point is that one call answers for both member kinds rather than refusing to
+/// address half of them.
 #[cfg(unix)]
 #[test]
 fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {

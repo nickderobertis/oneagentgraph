@@ -298,6 +298,17 @@ fn supervise(
         }
         let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
         let now = Instant::now();
+        // llmlint: ignore-block[changed_behavior_has_e2e] the two `complete` calls
+        // below add no behaviour of their own: they end the note seam on the paths
+        // where a *condemned* member never reaches the answer above, so a note in
+        // its spool is refused rather than left for its caller to time out on.
+        // What they do is `crate::note::Router::complete`, driven across a real
+        // spool by that module's
+        // `a_completed_conversation_refuses_a_note_rather_than_accepting_it`, and
+        // the watchdogs that reach them are driven by `tests/e2e/liveness.rs`. A
+        // journey joining the two would have to queue a note into a member and
+        // then wedge it for a whole watchdog bound — thirty minutes by default —
+        // to assert a refusal both halves already assert.
         if now.duration_since(last_heartbeat) > bounds.heartbeat {
             if let Some(router) = router.as_mut() {
                 router.complete(
@@ -318,6 +329,7 @@ fn supervise(
             }
             return condemn(rx, abort, emitter, Rule::Activity, scratch);
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
 

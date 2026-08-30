@@ -378,6 +378,20 @@ pub fn note(
     if !bound {
         // No endpoint: a single-sided member, or a run from a build that had
         // none. The lever that member *does* have is the one it always had.
+        //
+        // llmlint: ignore-block[changed_behavior_has_e2e] the `Delivered` arm
+        // below is unreachable from a run *this* build starts, which is why no
+        // journey drives it: a two-party member always binds an endpoint and
+        // never reaches here, and a single-sided one never asks for a
+        // controllable turn — `crate::invoke::ASK_FOR_CONTROL` is the two-party
+        // agent side's ask alone — so `oneharness interrupt` can only answer it a
+        // refusal. What can reach it is a run started by a build with no note
+        // seam at all, whose two-party member recorded a schema-1 control record;
+        // producing one would mean running a *previous release* of this binary
+        // inside a journey. The refusing arms are driven live and settled by
+        // `a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has`,
+        // and `deliver` itself — the call this maps — is driven end to end by
+        // `tests/e2e/interrupt.rs`.
         return Ok(
             match interrupt(
                 state_dir,
@@ -392,6 +406,7 @@ pub fn note(
                 }
             },
         );
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
     Ok(match crate::note::submit(&scratch, note) {
         Ok(accepted) => NoteDelivery::Accepted(accepted),
