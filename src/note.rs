@@ -602,6 +602,15 @@ impl Ending {
     /// This member takes no more notes, and `refusal` is what every later one
     /// gets — the conversation's own reason, so a caller reads *completed* and
     /// *ended* apart rather than being told only that it was too late.
+    /// Where the member bound its endpoint — the path its control record names.
+    ///
+    /// Read when that record is rewritten at the end of the run: the endpoint
+    /// outlives the conversation on purpose, because the refusal `end` just
+    /// recorded is only reachable through it.
+    pub(crate) fn endpoint(&self) -> &Path {
+        self.spool.path()
+    }
+
     pub(crate) fn end(&self, refusal: &Undelivered) {
         self.spool.end(refusal);
         self.stop.store(true, Ordering::SeqCst);

@@ -385,7 +385,12 @@ fn supervise(
                 if let Some(ending) = ending.as_ref() {
                     ending.end(&terminal_refusal(&answer));
                 }
-                return finish(answer, emitter, scratch);
+                return finish(
+                    answer,
+                    emitter,
+                    scratch,
+                    ending.as_ref().map(crate::note::Ending::endpoint),
+                );
             }
             // A sender dropped without an answer means the engine thread
             // panicked: this member's failure, not the graph's.
@@ -694,7 +699,7 @@ fn usage(usage: &onejudge::Usage) -> crate::event::Usage {
 }
 
 /// Settle or condemn a member whose engine answered.
-fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
+fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, notes: Option<&Path>) -> Outcome {
     match answer {
         Ok(summary) => {
             // Published before the verdict, not conditionally on it: which
@@ -702,7 +707,7 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             // chain records every candidate it stepped past whether or not a
             // later one ran.
             publish_attribution(emitter, summary.report.telemetry.as_ref());
-            record_control(&summary.report, scratch);
+            record_control(&summary.report, scratch, notes);
             let completed = onejudge::cli::exit_code(&summary) == 0;
             let document = serde_json::to_value(&summary.report).unwrap_or(Value::Null);
             settle_report(emitter, &document, completed, scratch)
@@ -926,7 +931,7 @@ fn agent_session(member_session: &str) -> String {
 /// The address is taken *from the report* rather than kept, because that is the
 /// one that names oneharness's own store directory — and a `control: null` is the
 /// contract's exit-3 case, carrying the reason `control_unavailable` gave.
-fn record_control(report: &onejudge::Report, scratch: &Path) {
+fn record_control(report: &onejudge::Report, scratch: &Path, notes: Option<&Path>) {
     let turn = match &report.control {
         Some(address) => crate::control::Turn::Open {
             address: crate::control::Address {
@@ -942,7 +947,7 @@ fn record_control(report: &onejudge::Report, scratch: &Path) {
                 .unwrap_or_else(|| "this member's report named no controllable turn".to_string()),
         },
     };
-    crate::control::write(scratch, &turn);
+    crate::control::write_with_notes(scratch, &turn, notes);
 }
 
 /// The classified cause of a failed run.
@@ -1985,6 +1990,7 @@ mod tests {
             ),
             &emitter,
             dir.path(),
+            None,
         );
 
         assert_eq!(
@@ -2035,6 +2041,7 @@ mod tests {
             ),
             &emitter,
             dir.path(),
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -2081,6 +2088,7 @@ mod tests {
             ),
             &emitter,
             dir.path(),
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -2114,6 +2122,7 @@ mod tests {
             })),
             &emitter,
             dir.path(),
+            None,
         );
         let Outcome::Died(death) = outcome else {
             panic!("a recordless failure settled: {outcome:?}");

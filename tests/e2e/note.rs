@@ -457,10 +457,9 @@ fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
 ///
 /// The refusal driven here is the settled member, which is the one an operator
 /// actually meets. Its sibling — a conversation that reached its completion
-/// decision — is the same terminal record read a moment earlier, and is driven
-/// across the real spool and the real `submit` by
-/// `note::tests::a_member_that_stops_taking_notes_refuses_them_rather_than_accepting_one`,
-/// which drives both refusals through the code path this call ends in.
+/// decision — is driven through the same public call by
+/// [`a_note_after_the_conversation_completed_names_that_rather_than_the_member_settling`],
+/// which is the journey below.
 #[test]
 fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
@@ -498,6 +497,115 @@ fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
     let err = control::note(&workspace.state(), &id, &ghost, &note, &oneharness_bin())
         .expect_err("a member the run never had cannot be addressed");
     assert!(err.to_string().contains("has no member \"ghost\""), "{err}");
+}
+
+/// A note offered after the conversation **completed** is refused as
+/// [`Undelivered::ConversationCompleted`], naming the supervisor's own decision
+/// rather than a settle.
+///
+/// A caller acts on the difference: a conversation its supervisor *passed* needs
+/// no relaunch and the note is a follow-up, while a member the run merely settled
+/// may well be worth starting again. So the two are separate arms, and this
+/// drives the one the run's own record would otherwise answer over.
+///
+/// Reaching it needs a run that is **still going** once the conversation is over,
+/// because `control::note` reads the run's record first and a member that record
+/// has settled is answered from there without the member being asked. A second
+/// member holding its own turn open behind the two-party one is that window, and
+/// it is an ordinary graph rather than a fixture: `holder` declares `deps:
+/// [worker]`, so it only opens its turn once the conversation has completed and
+/// its terminal refusal is recorded, and it holds that turn while the note is
+/// offered.
+#[cfg(unix)]
+#[test]
+fn a_note_after_the_conversation_completed_names_that_rather_than_the_member_settling() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    let began = workspace.at("holder-began");
+    let release = workspace.at("holder-release");
+
+    workspace.graph(&crate::support::graph_with(
+        concat!(
+            "version: 3\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n",
+            "  holder:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    deps: [worker]\n",
+        ),
+        &[
+            (
+                crate::support::FAKE_HARNESS_KEY.to_string(),
+                crate::support::fake_harness(),
+            ),
+            (
+                "env.XDG_STATE_HOME".to_string(),
+                workspace.session_store().display().to_string(),
+            ),
+            (
+                "members.worker.task".to_string(),
+                "fake:complete-now: work the supervisor passes".to_string(),
+            ),
+            (
+                "members.holder.task".to_string(),
+                format!(
+                    "fake:complete-now fake:entered={} fake:hold={}",
+                    began.display(),
+                    release.display()
+                ),
+            ),
+        ],
+    ));
+    let mut env = BTreeMap::new();
+    env.insert(
+        "XDG_STATE_HOME".to_string(),
+        workspace.session_store().display().to_string(),
+    );
+    let request = Request {
+        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
+        task: None,
+        dir: workspace.dir(),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter: None,
+        state_dir: workspace.state(),
+        oneharness_bin: oneharness_bin(),
+    };
+    let run = run::start(&request, &env).expect("the graph starts");
+    let id = run.started().run_id.clone();
+    let member = MemberName::parse("worker").expect("a member name");
+
+    // The dependent member's turn is in flight, which is only reachable once the
+    // conversation before it completed: the run is still going, and the record
+    // has nothing to say about `worker` yet.
+    until("the dependent member's turn to be in flight", || {
+        began.exists()
+    });
+    let note = Note::new(Addressee::Worker, "one more thing").expect("a note with text in it");
+    let after = control::note(&workspace.state(), &id, &member, &note, &oneharness_bin())
+        .expect("the run and its member are addressable");
+    assert!(
+        matches!(
+            &after,
+            NoteDelivery::Undelivered(Undelivered::ConversationCompleted { completion_reason })
+                if !completion_reason.is_empty()
+        ),
+        "a note after the conversation completed was not refused as completed: {after:?}"
+    );
+    let NoteDelivery::Undelivered(undelivered) = &after else {
+        unreachable!("the match above")
+    };
+    assert!(
+        undelivered.to_string().contains("was not delivered"),
+        "the refusal did not say the note was not delivered: {undelivered}"
+    );
+
+    std::fs::write(&release, "go").expect("release the holder");
+    assert_eq!(run.wait().expect("the graph settles"), 0);
 }
 
 /// A single-sided member has no second party for a note to be addressed away
