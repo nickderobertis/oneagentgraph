@@ -133,58 +133,44 @@ fn base_with(system: &str) -> String {
     serde_norway::to_string(&document).expect("the base serializes")
 }
 
-/// The phrase onejudge opens every supervisor prompt with, which is how a journey
-/// tells the two sides' recorded prompts apart. The same literal the fake harness
-/// branches on — see its `SUPERVISOR_PROMPT_MARKER`.
-const SUPERVISOR_PROMPT: &str = "completion supervisor";
-
-/// Every prompt `fake:record-prompt` captured, one per element.
-///
-/// Journeys put that sentinel in **both** the standing system prompt and the
-/// task, and need to: the system prompt is on every *agent* turn and reaches the
-/// judge never, while the task is embedded in every *supervisor* prompt and
-/// reaches an agent turn only when that turn is the one the task opened. One
-/// without the other records half the conversation.
+/// Every prompt captured in `at`, one per element.
 ///
 /// The double writes one line per invocation with newlines escaped, so a prompt
-/// is a line and a journey can ask which *side* was handed what rather than
-/// searching one undifferentiated blob.
+/// is a line. Which *side* wrote a line is not decided here: journeys point
+/// `fake:record-prompt` and `fake:record-supervisor-prompt` at separate files,
+/// because the marker that tells the two sides apart is the double's and having
+/// a second copy of it here would be that marker with two sources.
+///
+/// Where each sentinel goes is not interchangeable either. The standing system
+/// prompt is on every *agent* turn and reaches the judge never; the task is
+/// embedded in every *supervisor* prompt and reaches an agent turn only when that
+/// turn is the one the task opened.
 fn prompts(at: &std::path::Path) -> Vec<String> {
     std::fs::read_to_string(at)
         .map(|raw| raw.lines().map(str::to_string).collect())
         .unwrap_or_default()
 }
 
-/// The prompts the **judge** side was handed.
-fn judge_prompts(at: &std::path::Path) -> Vec<String> {
-    prompts(at)
-        .into_iter()
-        .filter(|prompt| prompt.contains(SUPERVISOR_PROMPT))
-        .collect()
+/// Where this run's member receives notes, **as the run itself reports it**.
+///
+/// `control::record` is the published way to ask a member where its note
+/// endpoint is, and `Record::notes` is the field that answers — the same pair a
+/// caller outside this process reads before offering a note. A journey asks
+/// rather than deriving, so what it watches is the endpoint the run named and not
+/// a path a test rebuilt from the run's directory layout.
+fn note_endpoint(workspace: &Workspace, running: &Running) -> std::path::PathBuf {
+    let scratch = workspace
+        .state()
+        .join(running.id.as_str())
+        .join("members")
+        .join(running.member.as_str());
+    control::record(&scratch)
+        .expect("the member recorded a controllable turn")
+        .notes
+        .expect("a two-party member records the note endpoint its own thread bound")
 }
 
-/// The prompts the **worker** side was handed.
-fn worker_prompts(at: &std::path::Path) -> Vec<String> {
-    prompts(at)
-        .into_iter()
-        .filter(|prompt| !prompt.contains(SUPERVISOR_PROMPT))
-        .collect()
-}
-
-/// Where this run's member receives notes: the endpoint its own thread bound.
-fn spool_of(workspace: &Workspace, running: &Running) -> std::path::PathBuf {
-    oneagentgraph::note::Spool::at(
-        &workspace
-            .state()
-            .join(running.id.as_str())
-            .join("members")
-            .join(running.member.as_str()),
-    )
-    .path()
-    .to_path_buf()
-}
-
-/// Whether a note is still on disk waiting for the member's courier to take it.
+/// Whether a note is still waiting at the endpoint for the member to take it.
 fn waiting(spool: &std::path::Path) -> bool {
     std::fs::read_dir(spool)
         .map(|entries| {
@@ -261,15 +247,16 @@ fn offering(
 fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_with_the_response() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
     let workspace = Workspace::new();
-    let recorded = workspace.at("prompts");
+    let agent_prompts = workspace.at("agent-prompts");
+    let judge_prompts = workspace.at("judge-prompts");
     let began = workspace.at("worker-began");
     let release = workspace.at("worker-release");
     let running = start(
         &workspace,
-        &format!("fake:record-prompt={}", recorded.display()),
+        &format!("fake:record-prompt={}", agent_prompts.display()),
         &format!(
-            "fake:record-prompt={} fake:entered={} fake:hold={}",
-            recorded.display(),
+            "fake:record-supervisor-prompt={} fake:entered={} fake:hold={}",
+            judge_prompts.display(),
             began.display(),
             release.display()
         ),
@@ -279,10 +266,10 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_wi
 
     let text = "fake:complete-now the release blocker is P0: fix it before anything else";
     let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
-    let spool = spool_of(&workspace, &running);
+    let endpoint = note_endpoint(&workspace, &running);
     let events = running.run.started().events_path.clone();
     let offered = offering(&workspace, &running, note);
-    handed_over(&spool);
+    handed_over(&endpoint);
     std::fs::write(&release, "go").expect("release the worker's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -301,7 +288,7 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_wi
     );
 
     // The worker was handed the note, framed as its own task's update.
-    let handed = worker_prompts(&recorded);
+    let handed = prompts(&agent_prompts);
     assert!(
         handed
             .iter()
@@ -313,7 +300,7 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_wi
     // answer — the turn the note opened is the one that finished the work — so a
     // prompt carrying both is a judge that saw the update and the response to it
     // in the same breath, which is the whole point.
-    let judged = judge_prompts(&recorded);
+    let judged = prompts(&judge_prompts);
     assert!(
         judged.iter().any(|prompt| prompt.contains(text)
             && prompt.contains("delivered to the WORKER, addressed to it and not to you")
@@ -357,7 +344,8 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_wi
 fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_the_worker() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
     let workspace = Workspace::new();
-    let recorded = workspace.at("prompts");
+    let agent_prompts = workspace.at("agent-prompts");
+    let judge_prompts = workspace.at("judge-prompts");
     let judging = workspace.at("judge-gate");
     let judge_entered = workspace.at("judge-gate.entered");
     // `should-fail` keeps the supervisor asking for another turn, so the decision
@@ -365,10 +353,10 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
     // it to the worker. The run then ends at the base config's turn cap.
     let running = start(
         &workspace,
-        &format!("fake:record-prompt={}", recorded.display()),
+        &format!("fake:record-prompt={}", agent_prompts.display()),
         &format!(
-            "fake:record-prompt={} fake:should-fail fake:supervisor-hold={}",
-            recorded.display(),
+            "fake:record-supervisor-prompt={} fake:should-fail fake:supervisor-hold={}",
+            judge_prompts.display(),
             judging.display()
         ),
     );
@@ -382,9 +370,9 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
         .expect("a note with text in it")
         .binding("the migration is reversible")
         .expect("a criterion a judge can hold work to");
-    let spool = spool_of(&workspace, &running);
+    let endpoint = note_endpoint(&workspace, &running);
     let offered = offering(&workspace, &running, note);
-    handed_over(&spool);
+    handed_over(&endpoint);
     std::fs::write(&judging, "go").expect("release the judge's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -399,7 +387,7 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
     running.run.wait().expect("the member settles");
 
     // The judge's re-taken decision was taken with the note in hand.
-    let judged = judge_prompts(&recorded);
+    let judged = prompts(&judge_prompts);
     assert!(
         judged.iter().any(|prompt| prompt.contains(text)),
         "the judge decided without ever being shown the note: {judged:#?}"
@@ -408,7 +396,7 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
     // And the worker got it with that decision: the note's own text, the role it
     // is addressed to, the criterion it bound, and the supervisor's words, in one
     // turn.
-    let handed = worker_prompts(&recorded);
+    let handed = prompts(&agent_prompts);
     assert!(
         handed.iter().any(|prompt| prompt.contains(text)
             && prompt.contains("delivered to YOU, the worker")
@@ -435,15 +423,15 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
 fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
     let workspace = Workspace::new();
-    let recorded = workspace.at("prompts");
+    let judge_prompts = workspace.at("judge-prompts");
     let judging = workspace.at("judge-gate");
     let judge_entered = workspace.at("judge-gate.entered");
     let running = start(
         &workspace,
-        &format!("fake:record-prompt={}", recorded.display()),
+        "",
         &format!(
-            "fake:record-prompt={} fake:supervisor-hold={}",
-            recorded.display(),
+            "fake:record-supervisor-prompt={} fake:supervisor-hold={}",
+            judge_prompts.display(),
             judging.display()
         ),
     );
@@ -454,9 +442,9 @@ fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
 
     let text = "hold this to the amended bar: reversibility is now in scope";
     let note = Note::new(Addressee::Supervisor, text).expect("a note with text in it");
-    let spool = spool_of(&workspace, &running);
+    let endpoint = note_endpoint(&workspace, &running);
     let offered = offering(&workspace, &running, note);
-    handed_over(&spool);
+    handed_over(&endpoint);
     std::fs::write(&judging, "go").expect("release the judge's held turn");
 
     let delivery = offered.join().expect("the offering thread");
@@ -476,7 +464,7 @@ fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
     );
 
     // The judge really was shown it, addressed to itself by name.
-    let judged = judge_prompts(&recorded);
+    let judged = prompts(&judge_prompts);
     assert!(
         judged.iter().any(|prompt| prompt.contains(text)
             && prompt.contains("delivered to YOU, the supervisor")

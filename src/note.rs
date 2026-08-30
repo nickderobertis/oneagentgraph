@@ -644,59 +644,51 @@ mod tests {
         Note::new(addressee, "the migration has to be reversible").expect("a note")
     }
 
-    /// A note offered to a member's spool is carried into the conversation's own
-    /// inbox, and the conversation's own answer is what comes back to the caller.
+    /// A note offered with **no turn open** is held for the next turn, and a note
+    /// offered once the conversation can take no more is refused — both answered
+    /// by the conversation itself, through this crate's transport.
     ///
-    /// That round trip is the whole of what this crate owns here: the routing and
-    /// every disposition are onejudge's, and `tests/e2e/note.rs` drives those
-    /// against a real conversation. What is proven here is the transport between
-    /// the two — a note written into a member's spool by one process reaches
-    /// `Notes::send` unchanged, and the answer `send` gives is what the caller
-    /// reads, rather than anything this crate decided for itself.
+    /// That round trip is what this crate owns here. The routing is onejudge's,
+    /// and `tests/e2e/note.rs` drives the live-turn deliveries against a real
+    /// conversation; what is proven here is that a note written into a member's
+    /// spool by one process reaches `Notes::send` unchanged and that the answer
+    /// `send` gives is what the caller reads, rather than anything this crate
+    /// decided for itself.
     ///
-    /// The disposition driven is the one reachable from outside onejudge: an
-    /// inbox nothing ever ran, dropped, which answers every waiting sender. It is
-    /// the conversation's own refusal, in the conversation's own words, and it
-    /// arrives at the caller through this crate's spool.
+    /// Both dispositions are driven against a **real** `onejudge` channel rather
+    /// than a stand-in, in the two states a channel can be put into from outside
+    /// the engine: one no turn has opened on yet, which is exactly *no live turn*
+    /// — the note is accepted for the next turn to open — and one whose engine
+    /// end is gone, which is the refusal a caller must not read as a delivery.
     #[test]
-    fn a_spooled_note_is_carried_to_the_inbox_and_its_answer_comes_back() {
+    fn a_note_with_no_live_turn_is_held_for_the_next_one_and_one_too_late_is_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let spool = Spool::bind(dir.path()).expect("a spool");
         let (notes, inbox) = onejudge::note::Notes::channel();
         let (courier, _ending) = Courier::open(spool.clone(), notes, &emitter("worker"));
         std::thread::spawn(move || courier.serve());
 
-        // The caller blocks on the conversation, so it runs on a thread of its
-        // own while this one plays the engine that never came.
-        let scratch = dir.path().to_path_buf();
-        let sent = note(Addressee::Worker);
-        let caller = std::thread::spawn(move || submit(&scratch, &sent));
+        // No turn has opened, so there is nothing live to deliver into and the
+        // note is held for the next turn that opens.
+        assert_eq!(
+            submit(dir.path(), &note(Addressee::Worker)),
+            Ok(Accepted::Queued),
+            "a note offered with no live turn was not held for the next one"
+        );
 
-        // Wait until the courier has really taken it out of the spool, so what is
-        // asserted is a note that reached `send` rather than one still on disk.
-        let until = Instant::now() + Duration::from_secs(10);
-        while spool.request("").parent().is_some_and(|dir| {
-            std::fs::read_dir(dir)
-                .map(|entries| {
-                    entries.flatten().any(|entry| {
-                        entry
-                            .file_name()
-                            .to_str()
-                            .is_some_and(|name| name.ends_with(".note.json"))
-                    })
-                })
-                .unwrap_or(false)
-        }) && Instant::now() < until
-        {
-            std::thread::sleep(ANSWER_POLL);
-        }
+        // And once nothing will read the channel again, a note is refused rather
+        // than accepted into a member nobody will take it out of.
         drop(inbox);
-
-        let answer = caller.join().expect("the caller's thread");
+        let refused = submit(dir.path(), &note(Addressee::Worker))
+            .expect_err("a conversation nothing is running cannot take a note");
         assert!(
-            matches!(&answer, Err(Undelivered::NoConversation { reason })
+            matches!(&refused, Undelivered::NoConversation { reason }
                 if reason.contains("dropped before any turn opened")),
-            "the conversation's own answer did not reach the caller: {answer:?}"
+            "the conversation's own refusal did not reach the caller: {refused:?}"
+        );
+        assert!(
+            refused.to_string().contains("was not delivered"),
+            "the refusal did not say the note was not delivered: {refused}"
         );
     }
 

@@ -57,6 +57,7 @@
 //! | `fake:supervisor-hold=<path>` | *judge side only:* write `<path>.entered` as the supervisor's turn begins, then block until `<path>` exists |
 //! | `fake:next-turn=<path>` | *judge side only:* while `<path>` exists, continue the conversation with that file's contents as the next user turn, and consume it |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
+//! | `fake:record-supervisor-prompt=<path>` | *judge side only:* append the exact prompt the supervisor was given |
 //! | `fake:record-cwd=<path>` | append the directory this process was started in |
 //! | `fake:record-env=<path>` | append this process's selection-shaped environment |
 //! | `fake:record-argv=<path>` | append the argv this side was spawned with |
@@ -69,7 +70,7 @@
 //! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
 //! | `FAKE_HARNESS_IGNORE_TERM=1` | refuse `SIGTERM`, so only a `SIGKILL` stops this turn |
 //!
-//! The two marked *judge side only* are the mirror of that, and they exist for
+//! The three marked *judge side only* are the mirror of that, and they exist for
 //! the mirror reason: a journey about the **judge's** live turn needs one it can
 //! observe and release, and every other lever here is either the agent's or fires
 //! on both sides. Which side an invocation is comes from the prompt's own framing
@@ -517,6 +518,15 @@ fn main() -> std::process::ExitCode {
 /// harness on.
 fn recordings(prompt: &str, argv: &[String]) {
     record(prompt, "record-prompt", prompt);
+    // The judge's own recorder, and scoped to it for `supervisor-hold`'s reason:
+    // a judge side's prompt embeds the transcript, so a sentinel the operator's
+    // task carried reaches both sides and `record-prompt` alone cannot say which
+    // side wrote a line. A journey that needs the supervisor's own input reads
+    // this rather than keeping its own copy of [`SUPERVISOR_PROMPT_MARKER`] to
+    // sort one file by — which would be this marker with two sources.
+    if prompt_frames_the_supervisor(prompt) {
+        record(prompt, "record-supervisor-prompt", prompt);
+    }
     record(prompt, "record-env", &selection_environment());
     record(prompt, "record-argv", &argv.join(" "));
     // Where this process was *started*, which is the far end of `oneharness run
