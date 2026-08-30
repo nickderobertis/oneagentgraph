@@ -22,7 +22,7 @@ Rules that hold as this grows:
 | `invoke` | one member's launch, its generated configs, and the model pairing rule |
 | `member` | a single-sided member's child process: its stream, its watchdogs, its death |
 | `judge` | a two-party member, driven through onejudge's library in this process |
-| `control` / `note` | where an in-flight turn is addressed, and the routed role-addressed note beside it |
+| `control` / `note` | where an in-flight turn is addressed, and the transport that carries a role-addressed note into the conversation's own inbox |
 | `run` | dependency order, cron members, the merged stream, the exit code |
 | `scratch` | `owner.lock` ownership, proven descendant reaping |
 | `event` / `render` | the wire envelope, the shared filter over it (`docs/event-filter-notes.md`), and the text rendering of the same events |
@@ -96,33 +96,44 @@ after-the-process moments the two platforms need, and `Group::spawn` is the same
 pair for the commands this crate does spawn. Never reach for a shim binary that
 re-spawns itself into the job, or a local copy of onejudge's `execute`.
 
-**A note is routed to the side that is live; an interrupt is aimed at one
-socket.** `control::interrupt` addresses the agent side and nothing else, which
-is why a ruling delivered that way reached the worker and never the judge.
-`control::note` offers the note to the **member**, which is the only thing that
-knows which side of its conversation is taking a turn: `judge::run` writes the
-live side off onejudge's own `Observation` stream, and the router on the member's
-supervision thread — never its engine thread, because delivering means running an
-`oneharness interrupt` process — decides. A worker turn that is live is
-interrupted; anything else is queued and goes into the next worker turn, which is
-the one the judge's response opens. `interrupt` is untouched and stays the lever
-for a member with no conversation at all.
+**A note is routed by the conversation; an interrupt is aimed at one socket.**
+`control::interrupt` addresses the agent side and nothing else, which is why a
+ruling delivered that way reached the worker and never the judge. `control::note`
+offers the note to the **member**, and the routing is `onejudge`'s: only the
+engine driving a conversation knows which side of it is live, so `judge::run`
+hands that engine the inbox end of an `onejudge::note::Notes` channel through
+`Plan::with_notes` and lets it decide. A note arriving during the worker's turn
+reopens that turn carrying it *before* the supervisor is consulted — which is how
+the judge receives the note together with the worker's response — and one
+arriving while the supervisor is deciding re-takes that decision with the note in
+hand and rides the response to the worker. `interrupt` is untouched and stays the
+lever for a member with no conversation at all.
 
-**The supervisor's own copy of a note is onejudge's half of the seam, and it is
-not landed.** The approved contract puts it in the effective task, the `notes` a
-`SupervisorQuery` carries, and the completion criteria — all composed inside
-onejudge's engine loop from values a `Plan` is handed before the run starts. The
-published onejudge exposes no way to add to any of them mid-run: `Plan` carries
-`provider`, `settings`, `conversation`, `evals`, `done_when`, `assessment` and
-`spawn_hook`, `run_plan_observing_reporting_failure` builds the backend itself,
-and the observation sink is `&Observation`. So a note whose **only** addressee is
-the supervisor is answered `Undelivered::NoConversation` naming exactly that,
-rather than delivered to the worker under a frame addressed to somebody else.
-Do not route it through the worker's reply and call it delivered: whether the
-judge then sees it depends on an agent choosing to quote it. When onejudge ships
-the note inbox, `crate::note`'s `Addressee`/`Note`/`Accepted` become re-exports of
-its own — they are that contract's shapes field for field — and the refusal in
-`Router::route` is what turns into the handoff.
+**The shapes are onejudge's, and `crate::note` re-exports them.** `Addressee`,
+`Note`, `Accepted` and `Undelivered` are declared in `onejudge::note`, which is
+where the approved contract puts them. Do not redeclare one here to add a field
+or a method: a second declaration is a shape that drifts, and a note that
+satisfies the copy is still refused by the conversation it was written for. The
+`onejudge` floor in `Cargo.toml` is where it is *for* this — the seam does not
+exist below 0.7.0.
+
+**What this crate owns is the transport, and it is one thread.** A note is
+offered by a different process from the one running the member, so it arrives
+through a `Spool` in the member's scratch and a `Courier` carries it into
+`Notes::send`. On a thread of its own, and that is load-bearing:
+`send` blocks until the conversation has disposed of the note — for a
+supervisor-side delivery, until its re-taken decision comes back — so servicing
+the spool from the supervision loop would put a judge invocation between two
+heartbeats. `Ending::end` is the other half: it records the conversation's own
+terminal refusal so a note arriving afterwards is refused rather than spooled to
+nobody, and it answers anything the courier had not reached.
+
+**`onejudge::note::Accepted` and `Undelivered` are not `Serialize`, so the spool
+mirrors them.** That mirror is what onejudge's own documentation asks a transport
+for, and it is mapped exhaustively in both directions in `note.rs` — a variant
+added upstream fails this build rather than being dropped in transit. It is the
+one place a note shape is written out here, and it is a wire format rather than a
+second contract.
 
 **The endpoint is a spool directory, not a socket.** The approved contract says
 socket; a member of this crate runs on Windows too, where a unix domain socket is

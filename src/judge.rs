@@ -128,11 +128,37 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    // The note endpoint is bound before the plan is built, because the engine's
+    // end of the same channel goes *on* that plan. A member that could not bind
+    // one runs exactly as it did before notes existed: no inbox, and nothing able
+    // to send to it.
+    let spool = crate::note::Spool::bind(scratch);
+    let (notes, inbox) = match spool {
+        Some(_) => {
+            let (notes, inbox) = onejudge::note::Notes::channel();
+            (Some(notes), Some(inbox))
+        }
+        None => (None, None),
+    };
+
     let plan = match plan(launch) {
-        Ok(plan) => plan.with_spawn_hook(Arc::new(MemberSpawn {
-            group: Arc::clone(&group),
-            agent_config: launch.agent_config.clone(),
-        })),
+        Ok(plan) => {
+            let plan = plan.with_spawn_hook(Arc::new(MemberSpawn {
+                group: Arc::clone(&group),
+                agent_config: launch.agent_config.clone(),
+            }));
+            // Which side of this conversation is live is a fact only the engine
+            // driving it has, so the routing is onejudge's rather than this
+            // crate's: a note arriving during the worker's turn reopens that turn
+            // carrying it *before* the supervisor is consulted — which is how the
+            // judge receives it together with the worker's response — and one
+            // arriving while the supervisor is deciding re-takes that decision
+            // with the note in hand. See [`crate::note`].
+            match inbox {
+                Some(inbox) => plan.with_notes(inbox),
+                None => plan,
+            }
+        }
         Err(reason) => {
             emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
@@ -150,12 +176,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         session_dir: None,
         cwd: launch.worktree.clone(),
     };
-    // The note endpoint is bound before the record names it, so a caller that
-    // reads the record and offers a note has somewhere to offer it into. Bound
-    // for the conversation's life and by this member alone, which is what lets
-    // the routing rest on which side is live rather than on a guess made from
-    // outside the run.
-    let spool = crate::note::Spool::bind(scratch);
+    // The record names the endpoint bound above, so a caller that reads the
+    // record and offers a note has somewhere to offer it into.
     crate::control::write_with_notes(
         scratch,
         &crate::control::Turn::Open {
@@ -166,17 +188,12 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
 
     let activity = Arc::new(AtomicU64::new(0));
     let abort = Arc::new(AtomicBool::new(false));
-    let live = Arc::new(crate::note::LiveTurn::new());
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
 
     let engine = {
-        let (emitter, activity, abort, live) = (
-            emitter.clone(),
-            Arc::clone(&activity),
-            Arc::clone(&abort),
-            Arc::clone(&live),
-        );
+        let (emitter, activity, abort) =
+            (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
         // panicking — which would take the whole graph down over one member. A
@@ -186,15 +203,6 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         std::thread::Builder::new().spawn(move || {
             let mut sink = move |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
-                // Before the envelope, so a note routed the instant a turn opens
-                // is routed at the side that opened it: this is the conversation's
-                // own structure, read off the engine rather than inferred from
-                // what it published.
-                match observation {
-                    Observation::TurnOpened(opened) => live.opened(party(opened.role)),
-                    Observation::TurnClosed(_) => live.closed(),
-                    _ => {}
-                }
                 ingest(observation, &emitter);
                 if abort.load(Ordering::SeqCst) {
                     ControlFlow::Break(())
@@ -224,10 +232,32 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
-    let router = spool
-        .map(|spool| crate::note::Router::new(spool, live, address, launch.oneharness_bin.clone()));
+    // On a thread of its own, because `Notes::send` blocks until the conversation
+    // has disposed of the note — for a supervisor-side delivery, until its
+    // re-taken decision comes back. Servicing the spool from the supervision loop
+    // below would put a judge invocation between two heartbeats.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `None` arm is a host
+    // that refused this run one more thread, the same unreachable refusal the
+    // engine thread's own arm above records and for the same reason: no graph,
+    // task or config asks for it, and no seam this crate sanctions fakes
+    // `pthread_create`. What it decides is that the member runs on without a note
+    // courier rather than being killed over one, and every note offered to it is
+    // then answered by `submit`'s own deadline. The reachable half — a courier
+    // that carries notes into the conversation — is `tests/e2e/note.rs`.
+    let ending = match (spool, notes) {
+        (Some(spool), Some(notes)) => {
+            let (courier, ending) = crate::note::Courier::open(spool, notes, emitter);
+            match std::thread::Builder::new().spawn(move || courier.serve()) {
+                Ok(_) => Some(ending),
+                Err(_) => None,
+            }
+        }
+        _ => None,
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     supervise(
-        &rx, &abort, emitter, bounds, scratch, started, &activity, router,
+        &rx, &abort, emitter, bounds, scratch, started, &activity, ending,
     )
 }
 
@@ -239,7 +269,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
 // Eight values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
-// the two halves of the activity clock, and the member's own note endpoint.
+// the two halves of the activity clock, and how this member's note seam is closed.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -249,7 +279,7 @@ fn supervise(
     scratch: &Path,
     started: Instant,
     activity: &Arc<AtomicU64>,
-    mut router: Option<crate::note::Router>,
+    ending: Option<crate::note::Ending>,
 ) -> Outcome {
     let heartbeat_file = scratch.join("member.heartbeat");
     let mut last_heartbeat = Instant::now();
@@ -266,8 +296,8 @@ fn supervise(
                 // say this member is over: a note already in the spool is
                 // answered by the conversation that could not take it rather than
                 // left for a caller to time out on.
-                if let Some(router) = router.as_mut() {
-                    router.complete(&completion(&answer), emitter);
+                if let Some(ending) = ending.as_ref() {
+                    ending.end(&completion(&answer));
                 }
                 return finish(answer, emitter, scratch);
             }
@@ -290,31 +320,24 @@ fn supervise(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        // On the supervision thread rather than the engine's, because handing a
-        // note to the live turn means running an `oneharness interrupt` process
-        // and the engine is what reports the turn it is being delivered into.
-        if let Some(router) = router.as_mut() {
-            router.service(emitter);
-        }
         let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
         let now = Instant::now();
-        // llmlint: ignore-block[changed_behavior_has_e2e] the two `complete` calls
-        // below add no behaviour of their own: they end the note seam on the paths
+        // llmlint: ignore-block[changed_behavior_has_e2e] the two `end` calls below
+        // add no behaviour of their own: they close the note seam on the paths
         // where a *condemned* member never reaches the answer above, so a note in
         // its spool is refused rather than left for its caller to time out on.
-        // What they do is `crate::note::Router::complete`, driven across a real
-        // spool by that module's
-        // `a_completed_conversation_refuses_a_note_rather_than_accepting_it`, and
-        // the watchdogs that reach them are driven by `tests/e2e/liveness.rs`. A
-        // journey joining the two would have to queue a note into a member and
+        // What they do is `crate::note::Ending::end`, driven across a real spool
+        // by that module's
+        // `a_member_that_stops_taking_notes_refuses_them_rather_than_accepting_one`,
+        // and the watchdogs that reach them are driven by `tests/e2e/liveness.rs`.
+        // A journey joining the two would have to send a note into a member and
         // then wedge it for a whole watchdog bound — thirty minutes by default —
         // to assert a refusal both halves already assert.
         if now.duration_since(last_heartbeat) > bounds.heartbeat {
-            if let Some(router) = router.as_mut() {
-                router.complete(
-                    "the member was condemned by its heartbeat watchdog",
-                    emitter,
-                );
+            if let Some(ending) = ending.as_ref() {
+                ending.end(&crate::note::Undelivered::MemberSettled {
+                    outcome: "the member was condemned by its heartbeat watchdog".to_string(),
+                });
             }
             return condemn(rx, abort, emitter, Rule::Heartbeat, scratch);
         }
@@ -324,8 +347,10 @@ fn supervise(
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
         if stall.condemns(activity.load(Ordering::SeqCst), scratch) {
-            if let Some(router) = router.as_mut() {
-                router.complete("the member was condemned by its activity watchdog", emitter);
+            if let Some(ending) = ending.as_ref() {
+                ending.end(&crate::note::Undelivered::MemberSettled {
+                    outcome: "the member was condemned by its activity watchdog".to_string(),
+                });
             }
             return condemn(rx, abort, emitter, Rule::Activity, scratch);
         }
@@ -343,31 +368,46 @@ type Answer = Result<RunSummary, Box<RunFailure>>;
 /// or the settled reason a loop that ended without a completion decision records
 /// — because that is what tells a caller whether to relaunch the member or to
 /// record the note as a follow-up.
-fn completion(answer: &Answer) -> String {
-    match answer {
-        Ok(summary) => summary
-            .done_when
-            .as_ref()
-            .map(|done| {
-                format!(
-                    "its supervisor judged {:?} {}",
-                    done.criterion,
-                    if done.satisfied {
-                        "satisfied"
-                    } else {
-                        "unsatisfied"
-                    }
-                )
-            })
-            .or_else(|| summary.report.settled_reason.clone())
-            .unwrap_or_else(|| {
-                if summary.completed {
-                    "its conversation completed".to_string()
+fn completion(answer: &Answer) -> crate::note::Undelivered {
+    let Ok(summary) = answer else {
+        let Err(failure) = answer else {
+            unreachable!("the arm above")
+        };
+        return crate::note::Undelivered::MemberSettled {
+            outcome: format!("its conversation failed: {}", failure.error),
+        };
+    };
+    let why = summary
+        .done_when
+        .as_ref()
+        .map(|done| {
+            format!(
+                "its supervisor judged {:?} {}",
+                done.criterion,
+                if done.satisfied {
+                    "satisfied"
                 } else {
-                    "its conversation ended without completing".to_string()
+                    "unsatisfied"
                 }
-            }),
-        Err(failure) => format!("its conversation failed: {}", failure.error),
+            )
+        })
+        .or_else(|| summary.report.settled_reason.clone())
+        .unwrap_or_else(|| {
+            if summary.completed {
+                "its conversation completed".to_string()
+            } else {
+                "its conversation ended without completing".to_string()
+            }
+        });
+    // The two are not interchangeable to a caller: a conversation the supervisor
+    // *passed* needs no relaunch and a note against it is a follow-up, while one
+    // that merely ended may well be worth starting again.
+    if summary.completed {
+        crate::note::Undelivered::ConversationCompleted {
+            completion_reason: why,
+        }
+    } else {
+        crate::note::Undelivered::MemberSettled { outcome: why }
     }
 }
 
@@ -1165,7 +1205,6 @@ mod tests {
         let config = dir.path().join(crate::invoke::ONEJUDGE_CONFIG_FILE);
         std::fs::write(&config, body).expect("config");
         let launch = JudgeLaunch {
-            oneharness_bin: "oneharness".to_string(),
             config,
             task: "do the thing".to_string(),
             worktree: dir.path().to_path_buf(),

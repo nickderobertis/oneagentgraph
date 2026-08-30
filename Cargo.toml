@@ -208,10 +208,33 @@ test-doubles = []
 # conversation twice through the real member and reads the difference off the turns
 # it was allowed to take.
 #
-# 0.6.1 is what the lockfile resolves, and it carries nothing this crate compiles
-# against: it adds onejudge's own release-target declaration. It is taken because
-# it is the newest 0.6, not for anything it buys here.
-onejudge = { version = "0.6.1", features = ["cli"] }
+# 0.6.1 is what the lockfile resolved before 0.7.0, and it carried nothing this
+# crate compiled against: it adds onejudge's own release-target declaration. It
+# was taken because it was the newest 0.6, not for anything it bought here.
+#
+# 0.7.0 is the twelfth raise and a **compile floor**: it publishes `onejudge::note`,
+# which is the conversation half of the approved delivery-seam contract, and this
+# crate does not build below it. A note is a role-addressed update to one party's
+# task, and the delivery it needs is the one thing a graph cannot do from outside:
+# `oneharness interrupt` reaches the *agent* side's socket and nothing else, so a
+# manager's ruling reached the worker and never the judge — measured at 15:50:23Z
+# on one node, contradicted seven minutes later by that node's own judge, which was
+# reviewing against a task that never mentioned it.
+#
+# What 0.7.0 exposes is the whole seam rather than a lever this crate could have
+# built on: `Notes::channel` opens the two ends, `Plan::with_notes` hands the
+# engine's end to the run driver this module already uses, and `Notes::send`
+# answers `Accepted`/`Undelivered` for one note. The routing is the engine's,
+# because only the engine knows which side is live: a note that arrives during the
+# worker's turn reopens that turn carrying it *before* the supervisor is consulted,
+# so the judge receives the note together with the worker's response to it; one
+# that arrives while the supervisor is deciding re-takes that decision with the
+# note in hand and rides the supervisor's response to the worker. Nothing above
+# resolves against 0.6.x — `note`, `Plan::notes` and `Plan::with_notes` do not
+# exist there — and nothing this crate could add would substitute: the transcript
+# the judge is shown is composed inside the engine loop, and no 0.6 seam lets an
+# embedder put a word in it.
+onejudge = { version = "0.7.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #

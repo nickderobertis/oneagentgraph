@@ -6,8 +6,21 @@
 //! socket, so a manager's ruling reached the party doing the work and never the
 //! party judging it — and that judge went on reviewing against a task the ruling
 //! had changed. These journeys are the routed path beside it: the note is offered
-//! to the member itself, the member decides from the conversation it is actually
-//! having, and the addressed role reaches the receiving party unchanged.
+//! to the member itself, and the conversation it is actually having decides.
+//!
+//! The decision is `onejudge`'s, because only the engine driving a conversation
+//! knows which side of it is live. What these journeys drive is that seam
+//! end to end — a note offered through this crate's API reaches the party that is
+//! taking a turn, carrying the role it is addressed to, and **the other party
+//! reads it with that party's response**:
+//!
+//! * offered during the worker's live turn, it reopens that turn carrying the
+//!   note, and the judge's own prompt then holds the note beside the worker's
+//!   answer to it;
+//! * offered during the judge's live turn, the judge's decision is re-taken with
+//!   the note in hand, and the note rides that response to the worker;
+//! * and where that re-taken decision is completion, the work was passed with the
+//!   note in hand — [`Accepted::JudgedWith`], which is not a delivery failure.
 //!
 //! Every journey here is driven through the **library**, because that is what the
 //! seam is required on: a consumer of this crate calls
@@ -38,7 +51,7 @@
 use std::collections::BTreeMap;
 
 use oneagentgraph::config::ConfigRef;
-use oneagentgraph::control::{self, Accepted, Addressee, Note, NoteDelivery, Undelivered};
+use oneagentgraph::control::{self, Accepted, Addressee, Note, NoteDelivery, Party, Undelivered};
 use oneagentgraph::run::{self, MemberName, Request};
 
 use crate::support::{oneharness_bin, two_party_graph, until, Workspace, BASE};
@@ -120,96 +133,165 @@ fn base_with(system: &str) -> String {
     serde_norway::to_string(&document).expect("the base serializes")
 }
 
-/// Offer one note to a live member through the library.
-fn offer(workspace: &Workspace, running: &Running, note: &Note) -> NoteDelivery {
-    control::note(
-        &workspace.state(),
-        &running.id,
-        &running.member,
-        note,
-        &oneharness_bin(),
-    )
-    .expect("the run and its member are addressable")
+/// The phrase onejudge opens every supervisor prompt with, which is how a journey
+/// tells the two sides' recorded prompts apart. The same literal the fake harness
+/// branches on — see its `SUPERVISOR_PROMPT_MARKER`.
+const SUPERVISOR_PROMPT: &str = "completion supervisor";
+
+/// Every prompt `fake:record-prompt` captured, one per element.
+///
+/// Journeys put that sentinel in **both** the standing system prompt and the
+/// task, and need to: the system prompt is on every *agent* turn and reaches the
+/// judge never, while the task is embedded in every *supervisor* prompt and
+/// reaches an agent turn only when that turn is the one the task opened. One
+/// without the other records half the conversation.
+///
+/// The double writes one line per invocation with newlines escaped, so a prompt
+/// is a line and a journey can ask which *side* was handed what rather than
+/// searching one undifferentiated blob.
+fn prompts(at: &std::path::Path) -> Vec<String> {
+    std::fs::read_to_string(at)
+        .map(|raw| raw.lines().map(str::to_string).collect())
+        .unwrap_or_default()
 }
 
-/// A note delivered into the worker's **live** turn: it stops what that turn was
-/// doing and does the update instead, and the addressed role arrives with it.
+/// The prompts the **judge** side was handed.
+fn judge_prompts(at: &std::path::Path) -> Vec<String> {
+    prompts(at)
+        .into_iter()
+        .filter(|prompt| prompt.contains(SUPERVISOR_PROMPT))
+        .collect()
+}
+
+/// The prompts the **worker** side was handed.
+fn worker_prompts(at: &std::path::Path) -> Vec<String> {
+    prompts(at)
+        .into_iter()
+        .filter(|prompt| !prompt.contains(SUPERVISOR_PROMPT))
+        .collect()
+}
+
+/// Where this run's member receives notes: the endpoint its own thread bound.
+fn spool_of(workspace: &Workspace, running: &Running) -> std::path::PathBuf {
+    oneagentgraph::note::Spool::at(
+        &workspace
+            .state()
+            .join(running.id.as_str())
+            .join("members")
+            .join(running.member.as_str()),
+    )
+    .path()
+    .to_path_buf()
+}
+
+/// Whether a note is still on disk waiting for the member's courier to take it.
+fn waiting(spool: &std::path::Path) -> bool {
+    std::fs::read_dir(spool)
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .is_some_and(|name| name.ends_with(".note.json"))
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Block until the member's courier has taken the note off its spool and handed
+/// it to the conversation.
 ///
-/// The whole assertion is the two files. `did-original-work` is appended by a
-/// controlled turn once it is past its park and past any abort, so its absence
-/// proves the parked turn never got there; `did-work` is what the *redirected*
-/// turn appends, and it is that turn's own prompt — so what it contains is
-/// exactly what the worker was handed. The role is in it because a note is
-/// addressed: a party that cannot tell whose task an update belongs to reads
-/// every one of them as its own next instruction.
+/// This is what lets a journey hold a turn open, offer a note *into* it, and then
+/// release the turn knowing the note really arrived while that side was live —
+/// rather than racing the release against the courier and asserting on whichever
+/// won. Both waits are bounded and neither is the assertion: what the note
+/// reached is asserted afterwards, off the disposition the conversation gave it,
+/// so a bound that expired early shows up as the wrong disposition rather than as
+/// a journey that quietly proved nothing.
+///
+/// Two waits because the spool is empty both *before* the note is offered and
+/// *after* it is taken. The first watches for it to land, the second for it to
+/// go; and if the courier's take beat the first wait entirely, that wait spends
+/// its bound and the second returns at once — either way `Notes::send` has been
+/// called by the time this returns.
+fn handed_over(spool: &std::path::Path) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline && !waiting(spool) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    while std::time::Instant::now() < deadline && waiting(spool) {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Offer one note to a live member through the library, from a thread of its own.
+///
+/// Every offer in these journeys is backgrounded, because that is what the API
+/// does: the call blocks until the *conversation* has disposed of the note, and
+/// the conversation cannot move while a journey is holding one of its turns open.
+fn offering(
+    workspace: &Workspace,
+    running: &Running,
+    note: Note,
+) -> std::thread::JoinHandle<NoteDelivery> {
+    let (state, id, member) = (
+        workspace.state(),
+        running.id.clone(),
+        running.member.clone(),
+    );
+    std::thread::spawn(move || {
+        control::note(&state, &id, &member, &note, &oneharness_bin())
+            .expect("the run and its member are addressable")
+    })
+}
+
+/// A note offered during the worker's **live** turn reaches the worker carrying
+/// its role, and the judge then reads that note beside the worker's response
+/// to it.
+///
+/// This is the delivery the seam exists for, and both halves are asserted off the
+/// prompts the two sides were really handed. The worker's next turn is the note
+/// itself — reopened carrying it, so the note is what that turn answers. The
+/// judge's own prompt then holds the note *and* the reply the worker gave it,
+/// which is the failure this replaces: a ruling that reached the worker at
+/// 15:50:23Z and was contradicted seven minutes later by a judge reviewing
+/// against a task that never mentioned it.
 #[cfg(unix)]
 #[test]
-fn a_note_during_a_live_worker_turn_reaches_the_worker_carrying_its_role() {
+fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_with_the_response() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
     let workspace = Workspace::new();
-    let started = workspace.at("turn-started");
-    let original_work = workspace.at("did-original-work");
-    let redirected_work = workspace.at("did-redirected-work");
+    let recorded = workspace.at("prompts");
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
     let running = start(
         &workspace,
-        &format!("fake:did-work={}", redirected_work.display()),
+        &format!("fake:record-prompt={}", recorded.display()),
         &format!(
-            "fake:park fake:started={} fake:did-work={}",
-            started.display(),
-            original_work.display()
+            "fake:record-prompt={} fake:entered={} fake:hold={}",
+            recorded.display(),
+            began.display(),
+            release.display()
         ),
     );
 
-    // Only a *controlled* turn writes this, which makes the wait a check on the
-    // control ask as well as on the turn: a timeout here means oneharness refused
-    // `--control` and the turn ran with no lever at all.
-    until(
-        "the worker's turn to be in flight — only a controlled turn writes this",
-        || started.exists(),
-    );
-
-    // A note whose *only* addressee is the supervisor, first: the judge has no
-    // out-of-band lever and the conversation layer this build links composes its
-    // effective task before the run starts, so there is nothing to hand it to.
-    // Refused naming that, rather than delivered to the worker under a frame
-    // addressed to somebody else — which would be the note's addressee never
-    // seeing it and the wrong party acting on it.
-    let for_judge = Note::new(Addressee::Supervisor, "judge this against the amended bar")
-        .expect("a note with text in it");
-    let refused = offer(&workspace, &running, &for_judge);
-    assert!(
-        matches!(
-            &refused,
-            NoteDelivery::Undelivered(Undelivered::NoConversation { reason })
-                if reason.contains("supervisor")
-        ),
-        "a note only the supervisor was addressed by was not refused: {refused:?}"
-    );
-
-    // And a blank one is refused before anything is routed: an update with
-    // nothing in it is not one a party can act on.
-    let blank = Note {
-        addressee: Addressee::Worker,
-        text: "   ".to_string(),
-        binds: false,
-    };
-    let empty = control::note(
-        &workspace.state(),
-        &running.id,
-        &running.member,
-        &blank,
-        &oneharness_bin(),
-    )
-    .expect_err("a note with nothing in it cannot be routed");
-    assert!(empty.to_string().contains("a note needs text"), "{empty}");
+    until("the worker's turn to be in flight", || began.exists());
 
     let text = "fake:complete-now the release blocker is P0: fix it before anything else";
     let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
-    let delivery = offer(&workspace, &running, &note);
+    let spool = spool_of(&workspace, &running);
+    let events = running.run.started().events_path.clone();
+    let offered = offering(&workspace, &running, note);
+    handed_over(&spool);
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+
+    let delivery = offered.join().expect("the offering thread");
     assert_eq!(
         delivery,
-        NoteDelivery::Accepted(Accepted::Interrupted),
-        "a note offered while the worker's turn was live did not go into it"
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Worker
+        }),
+        "a note offered while the worker's turn was live did not reach the worker"
     );
 
     assert_eq!(
@@ -217,63 +299,77 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_carrying_its_role() {
         0,
         "the member did not settle after the note"
     );
+
+    // The worker was handed the note, framed as its own task's update.
+    let handed = worker_prompts(&recorded);
     assert!(
-        !original_work.exists(),
-        "the turn the note reached went on and did the work it was parked before — it was added \
-         to rather than redirected"
+        handed
+            .iter()
+            .any(|prompt| prompt.contains(text) && prompt.contains("delivered to YOU, the worker")),
+        "the worker never got a turn carrying the note as its own update: {handed:#?}"
     );
-    let handed = std::fs::read_to_string(&redirected_work)
-        .expect("the turn that ran after the note never recorded what it was handed");
+
+    // And the judge read it beside the worker's answer to it. `done` is that
+    // answer — the turn the note opened is the one that finished the work — so a
+    // prompt carrying both is a judge that saw the update and the response to it
+    // in the same breath, which is the whole point.
+    let judged = judge_prompts(&recorded);
     assert!(
-        handed.contains(text),
-        "the worker was not handed the note's own text: {handed:?}"
+        judged.iter().any(|prompt| prompt.contains(text)
+            && prompt.contains("delivered to the WORKER, addressed to it and not to you")
+            && prompt.contains("done")),
+        "the judge never read the note beside the worker's response to it: {judged:#?}"
     );
-    assert!(
-        handed.contains("addressed to: worker"),
-        "the note reached the worker without saying whose task it updates: {handed:?}"
+
+    // And the run said so on its own stream: a caller learns the disposition from
+    // its own call, and this is what an operator reading the journal sees.
+    let published = std::fs::read_to_string(&events).expect("the run's own stream");
+    let reported: Vec<serde_json::Value> = published
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["kind"] == "turn-interrupted")
+        .collect();
+    assert_eq!(
+        reported.len(),
+        1,
+        "the delivery was not reported once: {published}"
     );
+    assert_eq!(reported[0]["payload"]["delivered"], true);
+    assert_eq!(reported[0]["payload"]["member"], "worker");
+    assert_eq!(reported[0]["payload"]["reason"], serde_json::Value::Null);
 }
 
-/// A note offered while the **judge's** turn is live is queued rather than
-/// forced, and reaches the worker with the judge's own response.
+/// A note offered while the **judge's** turn is live reaches the judge, and rides
+/// its response to the worker.
 ///
-/// This is the case `interrupt` cannot express at all. onejudge opens a
+/// This is the case `interrupt` cannot express at all: onejudge opens a
 /// controllable turn for the agent side alone, so there is nothing to redirect
-/// while the supervisor is deciding — an `interrupt` here is refused as *between
-/// turns*, and a caller that wanted the update delivered has to sit and retry.
-/// The routed path reads the live side off the conversation instead: the note is
-/// held, and the very next worker turn — the one the judge's response opens — is
-/// where it lands.
+/// while the supervisor is deciding, and an `interrupt` here is refused as
+/// *between turns*. The routed path hands it to the party that is actually live —
+/// whose decision is then re-taken with the note in hand — and the worker
+/// receives it together with that decision, in one turn, so it cannot act on the
+/// response without the note that shaped it.
 ///
-/// The fixture is three of the double's own sentinels and nothing else: the
-/// supervisor's turn holds where a journey can see it and release it, the turn it
-/// then asks for is one this journey spelled out, and that turn waits — so what
-/// the note reaches is a worker turn that is really in flight rather than one it
-/// raced.
+/// The note **binds**, so this also drives the criterion it adds through to the
+/// worker's own framing.
 #[cfg(unix)]
 #[test]
-fn a_note_during_a_live_judge_turn_is_queued_and_reaches_the_worker_with_the_response() {
+fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_the_worker() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
     let workspace = Workspace::new();
+    let recorded = workspace.at("prompts");
     let judging = workspace.at("judge-gate");
     let judge_entered = workspace.at("judge-gate.entered");
-    let handed_over = workspace.at("handed-over");
-    // The instruction the supervisor asks for once, and which the worker's next
-    // turn parks on — so the only thing that ends it is the note's own delivery.
-    //
-    // `park` rather than `hold`, and that is not interchangeable here: a judge
-    // side's prompt embeds the transcript, so a `hold` this turn was given comes
-    // back to the supervisor on its *next* call and stalls the whole run on a
-    // gate the journey has no reason to open. `park` answers on a controlled turn
-    // alone, which the judge's never is.
-    let next = workspace.write("next-turn", "fake:park");
+    // `should-fail` keeps the supervisor asking for another turn, so the decision
+    // the note is delivered into is one that *continues* — which is what carries
+    // it to the worker. The run then ends at the base config's turn cap.
     let running = start(
         &workspace,
-        &format!("fake:did-work={}", handed_over.display()),
+        &format!("fake:record-prompt={}", recorded.display()),
         &format!(
-            "fake:supervisor-hold={} fake:next-turn={}",
-            judging.display(),
-            next.display()
+            "fake:record-prompt={} fake:should-fail fake:supervisor-hold={}",
+            recorded.display(),
+            judging.display()
         ),
     );
 
@@ -284,36 +380,108 @@ fn a_note_during_a_live_judge_turn_is_queued_and_reaches_the_worker_with_the_res
     let text = "the acceptance bar moved: the migration has to be reversible";
     let note = Note::new(Addressee::Worker, text)
         .expect("a note with text in it")
-        .binding();
-    let delivery = offer(&workspace, &running, &note);
+        .binding("the migration is reversible")
+        .expect("a criterion a judge can hold work to");
+    let spool = spool_of(&workspace, &running);
+    let offered = offering(&workspace, &running, note);
+    handed_over(&spool);
+    std::fs::write(&judging, "go").expect("release the judge's held turn");
+
+    let delivery = offered.join().expect("the offering thread");
     assert_eq!(
         delivery,
-        NoteDelivery::Accepted(Accepted::Queued),
-        "a note offered while the judge was deciding was not queued for the turn after it"
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Supervisor
+        }),
+        "a note offered while the judge was deciding did not reach the judge"
     );
 
-    // The judge answers, and the turn it asks for is the one the note is waiting
-    // for.
-    std::fs::write(&judging, "go").expect("release the judge");
+    running.run.wait().expect("the member settles");
+
+    // The judge's re-taken decision was taken with the note in hand.
+    let judged = judge_prompts(&recorded);
+    assert!(
+        judged.iter().any(|prompt| prompt.contains(text)),
+        "the judge decided without ever being shown the note: {judged:#?}"
+    );
+
+    // And the worker got it with that decision: the note's own text, the role it
+    // is addressed to, the criterion it bound, and the supervisor's words, in one
+    // turn.
+    let handed = worker_prompts(&recorded);
+    assert!(
+        handed.iter().any(|prompt| prompt.contains(text)
+            && prompt.contains("delivered to YOU, the worker")
+            && prompt.contains("the migration is reversible")
+            && prompt.contains("verify it before you call it done")),
+        "the note never rode the judge's response to the worker: {handed:#?}"
+    );
+}
+
+/// A note the judge passes the work with is accepted as exactly that, rather than
+/// reported undelivered.
+///
+/// The judge's live decision is re-taken with the note in hand, and when that
+/// re-taken decision is completion there is no next worker turn for the note to
+/// ride: the work was passed *with* it. That is [`Accepted::JudgedWith`], and it
+/// is an acceptance rather than a failure — a caller holding one knows the note
+/// changed nothing and the member needs no relaunch.
+///
+/// Addressed to the **supervisor**, which is the party it reaches: the judge is
+/// told the update is for it, by name, so it does not read the worker's amendment
+/// as its own next instruction.
+#[cfg(unix)]
+#[test]
+fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    let recorded = workspace.at("prompts");
+    let judging = workspace.at("judge-gate");
+    let judge_entered = workspace.at("judge-gate.entered");
+    let running = start(
+        &workspace,
+        &format!("fake:record-prompt={}", recorded.display()),
+        &format!(
+            "fake:record-prompt={} fake:supervisor-hold={}",
+            recorded.display(),
+            judging.display()
+        ),
+    );
+
+    until("the judge's own turn to be in flight", || {
+        judge_entered.exists()
+    });
+
+    let text = "hold this to the amended bar: reversibility is now in scope";
+    let note = Note::new(Addressee::Supervisor, text).expect("a note with text in it");
+    let spool = spool_of(&workspace, &running);
+    let offered = offering(&workspace, &running, note);
+    handed_over(&spool);
+    std::fs::write(&judging, "go").expect("release the judge's held turn");
+
+    let delivery = offered.join().expect("the offering thread");
+    assert!(
+        matches!(
+            &delivery,
+            NoteDelivery::Accepted(Accepted::JudgedWith { completion_reason })
+                if completion_reason.contains("fake supervisor verified completion")
+        ),
+        "a note the judge passed the work holding was not reported as judged with it: {delivery:?}"
+    );
 
     assert_eq!(
         running.run.wait().expect("the member settles"),
         0,
-        "the member did not settle after the queued note"
+        "the member did not settle after the note"
     );
-    let handed =
-        std::fs::read_to_string(&handed_over).expect("no worker turn recorded what it was handed");
+
+    // The judge really was shown it, addressed to itself by name.
+    let judged = judge_prompts(&recorded);
     assert!(
-        handed.contains(text),
-        "the queued note never reached the worker: {handed:?}"
-    );
-    assert!(
-        handed.contains("addressed to: worker"),
-        "the queued note reached the worker without saying whose task it updates: {handed:?}"
-    );
-    assert!(
-        handed.contains("judged against"),
-        "a note that amends the task did not say so to the party judged against it: {handed:?}"
+        judged.iter().any(|prompt| prompt.contains(text)
+            && prompt.contains("delivered to YOU, the supervisor")
+            && prompt.contains("(addressed to supervisor)")),
+        "the judge passed the work without being shown the note it was addressed by: {judged:#?}"
     );
 }
 
@@ -326,9 +494,12 @@ fn a_note_during_a_live_judge_turn_is_queued_and_reaches_the_worker_with_the_res
 /// `Display` opens with *"the note was not delivered"*, so a caller that only
 /// prints it still learns the fact.
 ///
-/// The refusal driven here is the settled member. Its sibling — a conversation
-/// that reached its completion decision — is unreachable through this API by
-/// construction and is driven where it is real; the body says where, and why.
+/// The refusal driven here is the settled member, which is the one an operator
+/// actually meets. Its sibling — a conversation that reached its completion
+/// decision — is the same terminal record read a moment earlier, and is driven
+/// across the real spool and the real `submit` by
+/// `note::tests::a_member_that_stops_taking_notes_refuses_them_rather_than_accepting_one`,
+/// which drives both refusals through the code path this call ends in.
 #[test]
 fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
     let _serial = NOTE_RUN.lock().expect("note journey lock");
@@ -359,14 +530,6 @@ fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
         undelivered.to_string().contains("was not delivered"),
         "the refusal did not say the note was not delivered: {undelivered}"
     );
-
-    // The other refusal — a conversation that reached its completion decision —
-    // is the member's own end of the same seam and is driven across the real
-    // `Router::complete` and the real `submit` by
-    // `note::tests::a_completed_conversation_refuses_a_note_rather_than_accepting_it`.
-    // It cannot be reached through this API from outside, and closing it is what
-    // made it unreachable: a member records its completion and then settles, and
-    // the call above answers a settled member before it ever asks the spool.
 
     // A member this run never had is refused rather than answered about: the
     // caller mistyped, which is not a fact about any note.
@@ -450,73 +613,5 @@ fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
             NoteDelivery::Undelivered(Undelivered::MemberSettled { .. })
         ),
         "{settled:?}"
-    );
-}
-
-/// A queued note the conversation completes past is reported on the run's own
-/// stream rather than quietly dropped.
-///
-/// `Accepted::Queued` promises the next worker turn, and a supervisor that ends
-/// the conversation instead means that turn never comes. The caller was told the
-/// note was taken, so the run has to say what became of it: one
-/// `turn-interrupted` naming that it was **not** delivered and that the
-/// conversation completed first. Without it a caller reads a queued note exactly
-/// as it reads a delivered one, which is the silence this whole seam replaces.
-#[cfg(unix)]
-#[test]
-fn a_queued_note_the_conversation_completes_past_is_reported_as_undelivered() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
-    let workspace = Workspace::new();
-    let judging = workspace.at("judge-gate");
-    let judge_entered = workspace.at("judge-gate.entered");
-    let running = start(
-        &workspace,
-        "",
-        &format!(
-            "fake:complete-now fake:supervisor-hold={}",
-            judging.display()
-        ),
-    );
-
-    until("the judge's own turn to be in flight", || {
-        judge_entered.exists()
-    });
-    let note = Note::new(Addressee::Worker, "one more thing before you finish")
-        .expect("a note with text in it");
-    assert_eq!(
-        offer(&workspace, &running, &note),
-        NoteDelivery::Accepted(Accepted::Queued),
-        "a note offered while the judge was deciding was not queued"
-    );
-
-    // The judge answers completion, so there is no next worker turn for the
-    // queued note to ride.
-    std::fs::write(&judging, "go").expect("release the judge");
-    let events = running.run.started().events_path.clone();
-    assert_eq!(
-        running.run.wait().expect("the member settles"),
-        0,
-        "the member did not settle"
-    );
-
-    let published = std::fs::read_to_string(&events).expect("the run's own stream");
-    let undelivered: Vec<serde_json::Value> = published
-        .lines()
-        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
-        .filter(|event| event["kind"] == "turn-interrupted")
-        .collect();
-    assert_eq!(
-        undelivered.len(),
-        1,
-        "the queued note was not reported once: {published}"
-    );
-    assert_eq!(undelivered[0]["payload"]["delivered"], false);
-    assert_eq!(undelivered[0]["payload"]["member"], "worker");
-    assert!(
-        undelivered[0]["payload"]["reason"]
-            .as_str()
-            .is_some_and(|reason| reason.contains("never delivered")),
-        "the report did not say the note was never delivered: {}",
-        undelivered[0]
     );
 }

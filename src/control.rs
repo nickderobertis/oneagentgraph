@@ -305,7 +305,10 @@ pub fn interrupt(
 /// reads and writes the same shapes: one definition on both ends is what keeps a
 /// caller's reading of an outcome the member's own answer rather than a
 /// translation of it.
-pub use crate::note::{Accepted, Addressee, Note, NoteDelivery, Undelivered};
+pub use crate::note::{
+    Accepted, Addressee, Criterion, DeliveredNote, Note, NoteDelivery, NoteRefused, NoteText,
+    Party, Undelivered,
+};
 
 /// Route one role-addressed note to whichever side of `member`'s conversation is
 /// live, and answer what became of it.
@@ -320,12 +323,19 @@ pub use crate::note::{Accepted, Addressee, Note, NoteDelivery, Undelivered};
 /// through unchanged, so the receiving party knows whose task the update belongs
 /// to.
 ///
-/// The three answers a caller acts on:
+/// The answers a caller acts on, and they are the conversation's own — see
+/// [`crate::note`] for which side of a member each one means:
 ///
-/// * [`Accepted::Interrupted`] — it went into the live agent turn.
-/// * [`Accepted::Queued`] — the judge is mid-decision or nobody is taking a turn,
-///   so it goes into the next agent turn, arriving with the response that opens
-///   it.
+/// * [`Accepted::Interrupted`] — it reached that party's live turn.
+///   [`Party::Worker`] means the worker's turn was reopened carrying it before
+///   the supervisor was consulted, so the judge reads it with the worker's
+///   response; [`Party::Supervisor`] means the judge's decision was re-taken with
+///   the note in hand and the note rides that response to the worker.
+/// * [`Accepted::JudgedWith`] — it reached the supervisor's live turn and that
+///   re-taken decision was completion: the work was passed with the note in hand,
+///   and there was no next worker turn to deliver it into.
+/// * [`Accepted::Queued`] — nobody was taking a turn, so the next turn to open
+///   took it.
 /// * [`NoteDelivery::Undelivered`] — it was **not** delivered, naming why. The
 ///   member has settled, or its conversation reached completion. Never a silent
 ///   acceptance: that is the failure this verb exists to remove.
@@ -340,12 +350,12 @@ pub use crate::note::{Accepted, Addressee, Note, NoteDelivery, Undelivered};
 ///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when there is no such run, when `member` is not one
-/// of its members, or when the note has no text — the three cases that are a bad
-/// ask rather than an answer about the note. The text is checked here as well as
-/// in [`crate::note::submit`] because [`Note`]'s fields are public and one
-/// arrives deserialized as often as it arrives from [`Note::new`]; see
-/// [`Note::check`].
+/// [`Error::InvalidConfig`] when there is no such run or when `member` is not one
+/// of its members — the two cases that are a bad ask rather than an answer about
+/// the note. A note with nothing in it is not among them: [`Note`] is
+/// `non_exhaustive` and carries a [`NoteText`], which refuses blank text in the
+/// constructors *and* in the conversion it deserializes through, so an unreadable
+/// note cannot reach this call to be refused by it.
 pub fn note(
     state_dir: &Path,
     run_id: &RunId,
@@ -353,7 +363,6 @@ pub fn note(
     note: &Note,
     oneharness_bin: &str,
 ) -> Result<NoteDelivery, Error> {
-    note.check()?;
     let record = crate::history::show(state_dir, run_id.as_str())?;
     record.require_member(member.as_str())?;
     // Derived from the run's *id*, exactly as [`interrupt`] derives it and for
@@ -397,10 +406,15 @@ pub fn note(
                 state_dir,
                 run_id,
                 member,
-                Some(&note.framed()),
+                Some(&crate::note::framed(note)),
                 oneharness_bin,
             )? {
-                Delivery::Delivered => NoteDelivery::Accepted(Accepted::Interrupted),
+                // A single-sided member has one party, and it is the one doing
+                // the work — there is no supervisor for a delivery to have
+                // reached instead.
+                Delivery::Delivered => NoteDelivery::Accepted(Accepted::Interrupted {
+                    party: Party::Worker,
+                }),
                 Delivery::NoTurn(reason) | Delivery::Failed(reason) | Delivery::Invalid(reason) => {
                     NoteDelivery::Undelivered(Undelivered::NoConversation { reason })
                 }

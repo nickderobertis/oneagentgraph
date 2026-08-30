@@ -44,10 +44,10 @@
 //! | `fake:silent-reply` | take the turn, do the work, and report **no text** — a completed turn that said nothing, whose stdout is still full of wire framing |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
-//! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
+//! | `fake:park` | *agent's controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:entered=<path>` | write `<path>` the moment any turn begins |
-//! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
-//! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
+//! | `fake:started=<path>` | *agent's controlled turn only:* write `<path>` the moment this turn begins |
+//! | `fake:did-work=<path>` | *agent's controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
 //! | `FAKE_HARNESS_FAIL_AFTER_MARKER` | let an `exec`-shaped provider run once, then crash later launches |
 //! | `FAKE_HARNESS_FAIL_ONCE_MARKER` | crash an `exec`-shaped provider once, then allow later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
@@ -75,12 +75,14 @@
 //! on both sides. Which side an invocation is comes from the prompt's own framing
 //! ([`prompt_frames_the_supervisor`]), because there is no flag that says so.
 //!
-//! The three marked *controlled turn only* answer nowhere else, and that is
-//! load-bearing rather than tidy: a judge side's prompt embeds the **transcript**,
-//! so every sentinel the operator's task carried arrives there a second time. A
-//! `fake:did-work` that fired on it would report work the agent never did, and a
-//! `fake:park` would stall the judge waiting for an interrupt only the agent side
-//! can be sent.
+//! The three marked *agent's controlled turn only* answer nowhere else, and that
+//! is load-bearing rather than tidy: a judge side's prompt embeds the
+//! **transcript**, so every sentinel the operator's task carried arrives there a
+//! second time. A `fake:did-work` that fired on it would report work the agent
+//! never did, and a `fake:park` would stall the judge waiting for an interrupt
+//! only the agent side can be sent. Both of those happened on the onejudge 0.7.0
+//! bump, which asks for a controlled turn on **both** parties — see
+//! [`agents_controlled_turn`], which is the one place that question is asked.
 //!
 //! Keep it deterministic and dependency-free beyond what the crate already
 //! carries: it is spawned as a subprocess, many times per journey.
@@ -275,6 +277,27 @@ const SUPERVISOR_PROMPT_MARKER: &str = "completion supervisor";
 /// turn it then reads an answer off.
 fn prompt_frames_the_supervisor(prompt: &str) -> bool {
     prompt.contains(SUPERVISOR_PROMPT_MARKER)
+}
+
+/// Whether this is the **agent's** controlled turn, which is what the three
+/// sentinels marked *agent's controlled turn only* answer on.
+///
+/// Having a control channel used to be the whole test, because `oneharness run
+/// --control` was asked for on the agent side alone. onejudge 0.7.0 asks for it
+/// on **both** parties — that is what lets a note reach a live supervisor turn —
+/// so a controlled turn is no longer by itself an agent turn, and the prompt's
+/// framing is what tells them apart.
+///
+/// Getting this wrong is not subtle, and it is the failure the table's note
+/// predicted before it happened: a judge side's prompt embeds the transcript, so
+/// every sentinel the operator's task carried arrives there a second time. On the
+/// 0.7.0 bump `fake:did-work` began firing on the judge side and reported work
+/// the agent never did, and `fake:park` stalled the judge for its whole
+/// [`PARK_FOR`] bound waiting for an interrupt only the agent side is ever sent.
+/// Two interrupt journeys failed that way, on an `interrupt` whose own behaviour
+/// had not changed at all.
+fn agents_controlled_turn(prompt: &str, interrupted: Option<&AtomicBool>) -> bool {
+    interrupted.is_some() && !prompt_frames_the_supervisor(prompt)
 }
 
 fn main() -> std::process::ExitCode {
@@ -671,7 +694,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // Unlike `entered`, `started` proves the turn has an out-of-band control
     // channel. Windows has no Unix-domain turn-control socket, so journeys that
     // only need an in-flight turn use `entered` on every platform.
-    if interrupted.is_some() {
+    if agents_controlled_turn(prompt, interrupted) {
         if let Some(path) = sentinel_path(prompt, "started") {
             let _ = std::fs::write(path, "started");
         }
@@ -702,7 +725,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // endless for the reason `hang`'s tick is: reaching the bound *is* a journey
     // failing, and a double left parked forever would outlive the suite that
     // failed to interrupt it.
-    if interrupted.is_some() && steers(prompt, "park") {
+    if agents_controlled_turn(prompt, interrupted) && steers(prompt, "park") {
         let deadline = std::time::Instant::now() + PARK_FOR;
         while std::time::Instant::now() < deadline && !stopped() {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -724,7 +747,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     }
     // Past the wait and past the abort, so this line is the proof that *this*
     // turn did its work — a turn an interrupt stopped never reaches it.
-    if interrupted.is_some() {
+    if agents_controlled_turn(prompt, interrupted) {
         record(prompt, "did-work", prompt);
     }
     // A tool transcript is a stream-json line and has nowhere to go in a single

@@ -1,73 +1,74 @@
-//! Role-addressed notes: an update to one party's task, handed to a live
-//! two-party conversation.
+//! Role-addressed notes: an update to one party's task, carried from outside a
+//! run into the two-party conversation that is having it.
 //!
-//! `interrupt` redirects the turn an operator addresses. That is the whole of
-//! what it can do, and it is why a note has only ever reached one of the two
-//! parties: [`crate::judge`] records a controllable turn for the **agent** side
-//! alone, because that is the only side onejudge asks oneharness to open one for.
-//! A ruling delivered that way reaches the worker and never the judge, and a
-//! judge reviewing against a task that never mentioned it contradicts the ruling
-//! it was never shown.
+//! `interrupt` redirects the turn an operator addresses, and that is the whole of
+//! what it can do. It is why a note has only ever reached one of the two parties:
+//! [`crate::judge`] records a controllable turn for the **agent** side alone,
+//! because that is the only side onejudge asks oneharness to open one for. A
+//! ruling delivered that way reaches the worker and never the judge, and a judge
+//! reviewing against a task that never mentioned it contradicts the ruling it was
+//! never shown.
 //!
-//! A note is the other shape of the same delivery, and three things distinguish
-//! it from an interrupt:
+//! # The shapes are onejudge's, not this crate's
 //!
-//! * It is **addressed to a role** ([`Addressee`]), so the party that receives it
-//!   knows whose task it updates rather than reading every update as its own
-//!   next instruction.
-//! * It is **routed to whichever side of the member is live**, read off the
-//!   member's own conversation as onejudge reports it, rather than aimed at one
-//!   fixed socket.
-//! * A note that **cannot** be delivered is an [`Undelivered`] error naming that
-//!   it was not delivered and why, rather than an acceptance nothing will read.
+//! [`Addressee`], [`Note`], [`Accepted`] and [`Undelivered`] are **re-exports** of
+//! [`onejudge::note`], which is where the approved delivery-seam contract puts
+//! them: onejudge owns the two-party conversation, so it owns the note that
+//! enters one. Nothing about them is declared here, and that is deliberate — a
+//! second declaration is a shape that drifts, and a note that satisfies the copy
+//! is still refused by the conversation it was written for.
 //!
-//! # Where this surface comes from
+//! # The routing is onejudge's too
 //!
-//! [`Addressee`], [`Note`], [`Accepted`] and [`Undelivered`] are the approved
-//! delivery-seam contract's own shapes, field for field. That contract puts the
-//! first three in a `note` module of **onejudge** — the crate that owns the
-//! two-party conversation — and mirrors [`Undelivered`] here. They are declared
-//! here as well because the published onejudge this crate links exposes no such
-//! module yet: a graph resolves from crates.io alone, so this crate builds
-//! against the onejudge surface that exists. Nothing about the shapes is this
-//! crate's own invention, which is what keeps the adoption a re-export rather
-//! than a translation.
+//! Which side of a member is live is a fact only the engine driving it has, so
+//! this crate does not decide it. The engine's own end of the channel
+//! ([`onejudge::note::NoteInbox`]) goes onto the [`onejudge::cli::Plan`]
+//! [`crate::judge`] drives, and what it does with a note is the contract's:
 //!
-//! # What this crate can hand a live conversation, and what it cannot
+//! * **The worker's turn is live** — that turn is reopened carrying the note,
+//!   *before* the supervisor is consulted, so the judge receives the note
+//!   together with the worker's response to it rather than ahead of one.
+//!   [`Accepted::Interrupted`] naming [`Party::Worker`].
+//! * **The supervisor's turn is live** — its decision is re-taken with the note in
+//!   hand, and the note rides that response to the worker.
+//!   [`Accepted::Interrupted`] naming [`Party::Supervisor`], or
+//!   [`Accepted::JudgedWith`] when the re-taken decision is completion: the work
+//!   was passed with the note in hand and there was no next worker turn to
+//!   deliver it into.
+//! * **Between turns** — the next turn to open takes it. [`Accepted::Queued`],
+//!   answered once it is really in that turn's transcript.
+//! * **The conversation is over** — [`Undelivered`], naming which. Never a silent
+//!   acceptance: a note taken into a member nothing will read it out of looks, to
+//!   the caller, exactly like one that landed.
 //!
-//! The one place text enters a running onejudge conversation from outside is the
-//! controllable turn the agent side opens. So a note this crate delivers reaches
-//! the conversation there:
+//! # What is this crate's: getting the note there
 //!
-//! * **The agent's turn is live** — the note goes into that turn, framed with its
-//!   addressee, through the same `oneharness interrupt` an
-//!   [`crate::control::interrupt`] uses. [`Accepted::Interrupted`].
-//! * **The judge's turn is live, or the member is between turns** — there is no
-//!   out-of-band lever on the judge side (onejudge opens one for the agent only),
-//!   so the note is held and delivered into the **next** agent turn: it arrives
-//!   with the instruction that turn answers, which is the judge's own response.
-//!   [`Accepted::Queued`].
-//! * **The conversation is over, or the member has settled** — [`Undelivered`],
-//!   naming which.
+//! A note is offered by a *different process* from the one running the member —
+//! `oneagentgraph`'s own API, against a run's state directory — and
+//! [`onejudge::note::Notes`] is an in-process handle. The transport between the
+//! two is this module's whole job: a [`Spool`] the member binds in its own
+//! scratch, and a `Courier` on a thread of the member's process that carries
+//! what lands there into [`onejudge::note::Notes::send`] and writes the
+//! conversation's own answer back.
 //!
-//! The half that is *not* here is the half the approved contract puts in
-//! onejudge: a note reaching the supervisor's own effective task, `notes` and
-//! completion criteria. That is composed inside onejudge's engine loop from
-//! values a plan hands it before the run starts, and no seam the published
-//! library exposes lets an embedder add to it mid-run. A supervisor-addressed
-//! note is therefore routed and framed here and answered
-//! [`Undelivered::NoConversation`] against a onejudge with no inbox to take it,
-//! rather than smuggled to the judge through the worker's reply — which would
-//! make delivery depend on an agent choosing to quote it.
+//! On a thread of its own, and that is load-bearing: `send` blocks until the
+//! note's disposition is known — for the supervisor, until its re-taken decision
+//! comes back — so servicing the spool from the supervision loop would stall the
+//! watchdogs behind a judge invocation.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::event::{Emitter, EventKind, Party, TurnInterrupted};
+use crate::event::{Emitter, EventKind, TurnInterrupted};
 use crate::member::as_payload;
+
+pub use onejudge::note::{
+    Accepted, Addressee, Criterion, DeliveredNote, Note, NoteRefused, NoteText, Party, Undelivered,
+};
 
 /// The directory a two-party member binds inside its own scratch to receive
 /// notes for the conversation's life — a sibling of
@@ -81,311 +82,29 @@ pub const NOTES_DIR: &str = "notes";
 /// same reason: a document from a build that knew more is not guessed at.
 pub const NOTE_SCHEMA_VERSION: u32 = 1;
 
-/// The file a member writes once its conversation is over, so a note arriving
-/// after it is refused rather than spooled to nobody.
-const COMPLETED_FILE: &str = "completed.json";
+/// The file a member writes once its conversation can take no more notes, so one
+/// arriving after that is refused rather than spooled to nobody.
+const ENDED_FILE: &str = "ended.json";
 
 /// How long [`submit`] waits for the member's own answer before reporting that
 /// the conversation never took the note.
 ///
-/// The member services its spool once per [`crate::member::HEARTBEAT_INTERVAL`]
-/// and answers every case on the tick it picks a note up — the one that spends
-/// longer is a live delivery, which waits on an `oneharness interrupt` process.
-/// Thirty seconds is far past both and still an answer rather than a hang.
+/// A live delivery is what spends the time here: the courier hands the note over
+/// and waits for the conversation to move, which for a supervisor-side delivery
+/// is a whole judge invocation. Thirty seconds is past that and still an answer
+/// rather than a hang.
 const ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 
-/// How often [`submit`] looks for the answer.
+/// How often [`submit`] looks for the answer, and how often a [`Courier`] with
+/// nothing to do looks for a note.
 const ANSWER_POLL: Duration = Duration::from_millis(50);
-
-// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] there is no
-// second source for these four shapes to drift from, and no way to build one:
-// the approved contract puts them in a `note` module of onejudge, and **no
-// published onejudge has that module** — 0.6.2 is the newest and its `lib.rs`
-// declares `cli`, `command`, `control`, `engine`, `error`, `oneharness`,
-// `provider`, `report`, `sdk_schema`, `skill`, `spawn`, `split`, `stream`,
-// `telemetry`, `transcript` and `usage`, and nothing else. A gate has to compare
-// against something that exists; a test asserting against a module that does not
-// compile is not a drift gate but a build failure, and a copy of the contract's
-// prose committed here to diff against would be the mirror this rule exists to
-// prevent — it drifts, and a shape that passes it is still not the one onejudge
-// ships. What holds the two together instead is the *adoption*: when that
-// release lands, these declarations become `pub use onejudge::note::{…}` and the
-// duplicate is deleted rather than reconciled, which is why every field here is
-// spelled exactly as the contract spells it. `control.json`, whose source **is**
-// this crate, is gated by `tests/record.rs` and its committed golden.
-/// Who a note is for.
-///
-/// No default, and stated per note: an update whose addressee had to be guessed
-/// is exactly the failure this type exists to remove — a judge that reads the
-/// worker's amendment as its own instruction takes on the worker's job.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Addressee {
-    /// The party doing the work.
-    Worker,
-    /// The party judging it.
-    Supervisor,
-    /// Both, which is what an amendment to the task is.
-    Both,
-}
-
-impl Addressee {
-    /// The token this addressee is written and read as, which is also the word
-    /// the receiving party is shown.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Worker => "worker",
-            Self::Supervisor => "supervisor",
-            Self::Both => "both",
-        }
-    }
-
-    /// Whether this note is addressed to the worker — the omitted value in a
-    /// caller that writes notes for one party only.
-    #[must_use]
-    pub fn is_worker(self) -> bool {
-        matches!(self, Self::Worker)
-    }
-
-    /// Whether the party doing the work is one of this note's addressees.
-    #[must_use]
-    pub fn reaches_worker(self) -> bool {
-        matches!(self, Self::Worker | Self::Both)
-    }
-
-    /// Whether the party judging the work is one of this note's addressees.
-    #[must_use]
-    pub fn reaches_supervisor(self) -> bool {
-        matches!(self, Self::Supervisor | Self::Both)
-    }
-}
-
-/// One update to a party's task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Note {
-    /// Who it is for. Required — see [`Addressee`].
-    pub addressee: Addressee,
-    // llmlint: ignore-block[invalid_states_unrepresentable] a `NoteText` newtype
-    // making a blank one unrepresentable is the right shape and is not this
-    // crate's to choose: the approved delivery-seam contract spells this field
-    // `pub text: String`, and this crate is the consuming half of that seam — a
-    // newtype here would refuse the very value the producing half hands over, and
-    // would stop the adoption being a re-export the day onejudge publishes the
-    // module. What holds the invariant instead is [`Note::check`], applied at
-    // every boundary a note crosses rather than once where an ideal value was
-    // built, because a `Note` arrives *deserialized* as often as it arrives from
-    // a constructor and a newtype's `Deserialize` would have to be written by
-    // hand to hold anything a bare `String`'s does not.
-    /// The update itself, carried to the receiving party verbatim.
-    pub text: String,
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-    // llmlint: ignore-block[invalid_states_unrepresentable] the name, the type
-    // and the default are the approved delivery-seam contract's own, spelled
-    // `pub binds: bool` with `default false`, and this crate is the *consuming*
-    // half of that seam. A two-variant enum here would read better and would be
-    // this crate deciding a shared surface unilaterally — the one thing the
-    // contract that produced this field says never to do — and it would stop the
-    // adoption being a re-export the day onejudge publishes the module. A third
-    // mode is a proposal to that contract's owner, and lands as a field there
-    // first.
-    /// Whether the update binds the task: an amendment the work is judged
-    /// against, rather than context for it. Carried through unchanged, because
-    /// what it binds — the supervisor's completion criteria — is composed inside
-    /// the conversation layer.
-    #[serde(default)]
-    pub binds: bool,
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-}
-
-impl Note {
-    /// A note addressed to `addressee`, carrying `text`.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::error::Error::InvalidConfig`] when `text` is blank: a note with
-    /// nothing in it is an update nobody can act on, and delivering one would
-    /// spend a turn on a redirection that says nothing.
-    pub fn new(addressee: Addressee, text: impl Into<String>) -> Result<Self, crate::error::Error> {
-        let note = Self {
-            addressee,
-            text: text.into(),
-            binds: false,
-        };
-        note.check()?;
-        Ok(note)
-    }
-
-    /// Whether this note is one a party could act on.
-    ///
-    /// A constructor is not enough to hold that: the fields are public because
-    /// the approved contract makes them so, and a `Note` also arrives
-    /// *deserialized* — off the spool, or out of a caller's own JSON — where no
-    /// constructor ran. So this is checked again at every boundary a note
-    /// crosses rather than once where the ideal one was built:
-    /// [`crate::control::note()`] before it routes anything, [`submit`] before it
-    /// offers one, and the member's own spool on the way back off disk.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::error::Error::InvalidConfig`] when the text is blank: an update
-    /// with nothing in it is not one a party can act on, and delivering it would
-    /// spend a turn on a redirection that says nothing.
-    pub fn check(&self) -> Result<(), crate::error::Error> {
-        if self.text.trim().is_empty() {
-            return Err(crate::error::Error::InvalidConfig(
-                "a note needs text: an update with nothing in it is not one a party can act on"
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    /// The same note, binding the task rather than adding context to it.
-    #[must_use]
-    pub fn binding(mut self) -> Self {
-        self.binds = true;
-        self
-    }
-
-    /// What the receiving party is handed: the addressed role, then the note's
-    /// own text, unchanged.
-    ///
-    /// The header is the whole point of a *role-addressed* note — a party that
-    /// cannot tell whose task an update belongs to reads every one of them as its
-    /// own next instruction — so it names the addressee in
-    /// [`Addressee::as_str`]'s own token and says, for a note the receiving party
-    /// is not the addressee of, that it is not an instruction to it.
-    #[must_use]
-    pub fn framed(&self) -> String {
-        let addressee = self.addressee.as_str();
-        let binding = if self.binds {
-            " It amends the task, so the work is judged against it."
-        } else {
-            ""
-        };
-        let closing = match self.addressee {
-            Addressee::Worker => {
-                "The following update was delivered to the worker's task; act on it.".to_string()
-            }
-            Addressee::Supervisor => "The following update was delivered to the worker's task; \
-                                      judge whether it was done. It is not an instruction to you."
-                .to_string(),
-            Addressee::Both => "The following update was delivered to the worker's task; act on \
-                                it, and it is judged against."
-                .to_string(),
-        };
-        format!(
-            "— run note (addressed to: {addressee}) —\n{closing}{binding}\n\n{}",
-            self.text
-        )
-    }
-}
-
-/// What became of a note the conversation took.
-///
-/// Three answers rather than a boolean, because a caller acts on the difference:
-/// a note that redirected the turn in flight has already changed what the member
-/// is doing, one that is queued will change the turn after this one, and one the
-/// supervisor already passed the work with changes nothing and needs no relaunch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Accepted {
-    /// It reaches the addressee at the next boundary.
-    Queued,
-    /// It was delivered into the live agent turn.
-    Interrupted,
-    // llmlint: ignore-block[invalid_states_unrepresentable] nothing here
-    // constructs this arm yet, and deleting it is not this crate's call. The
-    // approved delivery-seam contract puts `Accepted` in a `note` module of
-    // **onejudge** and spells all three arms; this declaration is that shape
-    // mirrored arm for arm, so the day onejudge publishes the module the
-    // adoption is `pub use onejudge::note::Accepted` and a deletion rather than
-    // a reconciliation — the terms the drift-gate block above this type records,
-    // and the ones [`Note`]'s own two fields are already kept on. An arm dropped
-    // here would make that re-export *add* one back, breaking every consumer
-    // matching this enum exhaustively, and it would be this crate editing a
-    // shared surface unilaterally — the one thing the contract that produced it
-    // says never to do.
-    //
-    // What makes it unconstructible *today* is the gap this module's own
-    // documentation and `src/AGENTS.md` name: the supervisor's copy of a note
-    // reaches it through the effective task and completion criteria composed
-    // inside onejudge's engine loop, and the published onejudge exposes no seam
-    // to add to either mid-run. A note a judge then passed the work holding is
-    // therefore an answer only onejudge can give, and this arm becomes
-    // reachable with that seam rather than before it — which is why a
-    // supervisor-addressed note is refused by name in [`Router::route`] instead
-    // of being answered something this crate made up.
-    /// The judge passed the work with the note in hand.
-    JudgedWith {
-        /// What the supervisor said when it passed the work.
-        completion_reason: String,
-    },
-    // llmlint: ignore-end[invalid_states_unrepresentable]
-}
-
-/// A note that was **not** delivered, and why.
-///
-/// An error rather than a deferral, and deliberately so: the failure this
-/// replaces is a note accepted into a member nothing would ever read it out of,
-/// which reads to the caller exactly like one that landed. A caller holding one
-/// of these chooses — relaunch the member, amend it for a later dispatch, or
-/// record it as a follow-up — and can only choose because it was told.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Undelivered {
-    /// The conversation reached its completion decision before the note did.
-    ConversationCompleted {
-        /// What the supervisor said when it ended the conversation.
-        completion_reason: String,
-    },
-    /// The member has settled: its turns are over.
-    MemberSettled {
-        /// What the run recorded for it.
-        outcome: String,
-    },
-    /// There was no conversation to hand the note to, and this is why.
-    NoConversation {
-        /// The reason, in the words the caller reports.
-        reason: String,
-    },
-}
-
-impl std::fmt::Display for Undelivered {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Every arm opens with the same four words, because that is the fact the
-        // caller acts on and it must not depend on which arm it read.
-        match self {
-            Self::ConversationCompleted { completion_reason } => write!(
-                f,
-                "the note was not delivered: the member's supervisor had already answered \
-                 completion ({completion_reason}), so nothing will read it"
-            ),
-            Self::MemberSettled { outcome } => write!(
-                f,
-                "the note was not delivered: the member has already settled ({outcome}), so its \
-                 turns are over"
-            ),
-            Self::NoConversation { reason } => {
-                write!(f, "the note was not delivered: {reason}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Undelivered {}
-
-// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
 
 /// What one [`submit`] answered: the conversation took the note, or it did not.
 ///
 /// The two are not interchangeable and neither is an exit code: a caller reads
 /// the [`Accepted`] to know *when* the addressee sees it, and the [`Undelivered`]
 /// to know it never will.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoteDelivery {
     /// The conversation took it.
     Accepted(Accepted),
@@ -394,6 +113,11 @@ pub enum NoteDelivery {
 }
 
 /// One note as it sits in a member's spool, waiting to be taken.
+///
+/// [`Note`] carries its own validation across `serde` — its text is a
+/// [`NoteText`] and its criterion a [`Criterion`], both checked in the conversion
+/// that deserializes them — so a hand-written document that would not have built
+/// a note does not read back as one either.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Spooled {
@@ -410,18 +134,147 @@ struct Answered {
     /// The shape this document was written under — see [`NOTE_SCHEMA_VERSION`].
     schema_version: u32,
     /// What became of the note.
-    delivery: NoteDelivery,
+    delivery: WireDelivery,
 }
 
-/// What a member wrote when its conversation ended.
+// The three types below are the wire mirror `onejudge::note::Undelivered`'s own
+// documentation calls for: *"this enum is mirrored one-to-one by the transports
+// that carry a note in from outside the process, and a variant renamed on one
+// side of that mapping is a variant silently dropped on the other."* This spool
+// is one of those transports, and onejudge's `Accepted` and `Undelivered` are not
+// `Serialize` — deliberately, since what crosses a process boundary is a
+// transport's decision rather than theirs. Mapped in both directions immediately
+// below, exhaustively, so a variant added upstream fails this build instead of
+// being dropped in transit.
+/// [`Accepted`] on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireAccepted {
+    /// [`Accepted::Queued`].
+    Queued,
+    /// [`Accepted::Interrupted`].
+    Interrupted {
+        /// The party whose turn it reached.
+        party: Party,
+    },
+    /// [`Accepted::JudgedWith`].
+    JudgedWith {
+        /// The supervisor's completion reason.
+        completion_reason: String,
+    },
+}
+
+/// [`Undelivered`] on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireUndelivered {
+    /// [`Undelivered::ConversationCompleted`].
+    ConversationCompleted {
+        /// The supervisor's completion reason.
+        completion_reason: String,
+    },
+    /// [`Undelivered::MemberSettled`].
+    MemberSettled {
+        /// How the conversation ended.
+        outcome: String,
+    },
+    /// [`Undelivered::NoConversation`].
+    NoConversation {
+        /// What became of the channel instead.
+        reason: String,
+    },
+}
+
+/// [`NoteDelivery`] on the wire.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WireDelivery {
+    /// [`NoteDelivery::Accepted`].
+    Accepted(WireAccepted),
+    /// [`NoteDelivery::Undelivered`].
+    Undelivered(WireUndelivered),
+}
+
+impl From<&Accepted> for WireAccepted {
+    fn from(accepted: &Accepted) -> Self {
+        match accepted {
+            Accepted::Queued => Self::Queued,
+            Accepted::Interrupted { party } => Self::Interrupted { party: *party },
+            Accepted::JudgedWith { completion_reason } => Self::JudgedWith {
+                completion_reason: completion_reason.clone(),
+            },
+        }
+    }
+}
+
+impl From<WireAccepted> for Accepted {
+    fn from(wire: WireAccepted) -> Self {
+        match wire {
+            WireAccepted::Queued => Self::Queued,
+            WireAccepted::Interrupted { party } => Self::Interrupted { party },
+            WireAccepted::JudgedWith { completion_reason } => {
+                Self::JudgedWith { completion_reason }
+            }
+        }
+    }
+}
+
+impl From<&Undelivered> for WireUndelivered {
+    fn from(undelivered: &Undelivered) -> Self {
+        match undelivered {
+            Undelivered::ConversationCompleted { completion_reason } => {
+                Self::ConversationCompleted {
+                    completion_reason: completion_reason.clone(),
+                }
+            }
+            Undelivered::MemberSettled { outcome } => Self::MemberSettled {
+                outcome: outcome.clone(),
+            },
+            Undelivered::NoConversation { reason } => Self::NoConversation {
+                reason: reason.clone(),
+            },
+        }
+    }
+}
+
+impl From<WireUndelivered> for Undelivered {
+    fn from(wire: WireUndelivered) -> Self {
+        match wire {
+            WireUndelivered::ConversationCompleted { completion_reason } => {
+                Self::ConversationCompleted { completion_reason }
+            }
+            WireUndelivered::MemberSettled { outcome } => Self::MemberSettled { outcome },
+            WireUndelivered::NoConversation { reason } => Self::NoConversation { reason },
+        }
+    }
+}
+
+impl From<&NoteDelivery> for WireDelivery {
+    fn from(delivery: &NoteDelivery) -> Self {
+        match delivery {
+            NoteDelivery::Accepted(accepted) => Self::Accepted(accepted.into()),
+            NoteDelivery::Undelivered(undelivered) => Self::Undelivered(undelivered.into()),
+        }
+    }
+}
+
+impl From<WireDelivery> for NoteDelivery {
+    fn from(wire: WireDelivery) -> Self {
+        match wire {
+            WireDelivery::Accepted(accepted) => Self::Accepted(accepted.into()),
+            WireDelivery::Undelivered(undelivered) => Self::Undelivered(undelivered.into()),
+        }
+    }
+}
+
+/// What a member wrote when it stopped taking notes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Completed {
+struct Ended {
     /// The shape this document was written under — see [`NOTE_SCHEMA_VERSION`].
     schema_version: u32,
-    /// What the conversation ended on, in the supervisor's own words where it
-    /// gave any.
-    completion_reason: String,
+    /// The refusal every later note gets, in the conversation's own words.
+    refusal: WireUndelivered,
 }
 
 /// Where one member receives notes: the directory its own thread binds for the
@@ -466,23 +319,22 @@ impl Spool {
         &self.dir
     }
 
-    /// The completion the member recorded, if its conversation is over.
-    #[must_use]
-    pub fn completion(&self) -> Option<String> {
-        let raw = std::fs::read_to_string(self.dir.join(COMPLETED_FILE)).ok()?;
-        let completed: Completed = serde_json::from_str(&raw).ok()?;
-        (completed.schema_version == NOTE_SCHEMA_VERSION).then_some(completed.completion_reason)
+    /// The refusal this member recorded, if it is no longer taking notes.
+    fn ended(&self) -> Option<Undelivered> {
+        let raw = std::fs::read_to_string(self.dir.join(ENDED_FILE)).ok()?;
+        let ended: Ended = serde_json::from_str(&raw).ok()?;
+        (ended.schema_version == NOTE_SCHEMA_VERSION).then(|| ended.refusal.into())
     }
 
-    /// Record that this member's conversation is over, so a note arriving after
-    /// it is refused rather than spooled to nobody.
-    fn complete(&self, completion_reason: &str) {
-        let document = Completed {
+    /// Record that this member takes no more notes, so one arriving after it is
+    /// refused rather than spooled to nobody.
+    fn end(&self, refusal: &Undelivered) {
+        let document = Ended {
             schema_version: NOTE_SCHEMA_VERSION,
-            completion_reason: completion_reason.to_string(),
+            refusal: refusal.into(),
         };
         if let Ok(rendered) = serde_json::to_string(&document) {
-            let _ = std::fs::write(self.dir.join(COMPLETED_FILE), rendered);
+            let _ = std::fs::write(self.dir.join(ENDED_FILE), rendered);
         }
     }
 
@@ -530,14 +382,13 @@ impl Spool {
                 let raw = std::fs::read_to_string(&path).ok()?;
                 let _ = std::fs::remove_file(&path);
                 let spooled: Spooled = serde_json::from_str(&raw).ok()?;
-                // The version *and* the note itself: a document on disk is
-                // external input whatever wrote it, and a hand-written one can
-                // carry a shape [`Note::new`] would have refused. Dropped rather
-                // than answered, exactly as a document this build cannot read is
-                // — [`submit`] refuses a blank note before it ever reaches the
-                // spool, so anything blank here was put there by something else.
-                (spooled.schema_version == NOTE_SCHEMA_VERSION && spooled.note.check().is_ok())
-                    .then_some((id, spooled.note))
+                // A document on disk is external input whatever wrote it. The
+                // *note* validates itself on the way out of `serde` — blank text
+                // and an unusable criterion are both refused by the conversions
+                // `onejudge::note` deserializes through — so what is left to
+                // check here is the version, and a document this build cannot
+                // read is dropped rather than guessed at.
+                (spooled.schema_version == NOTE_SCHEMA_VERSION).then_some((id, spooled.note))
             })
             .collect();
         // Deterministic, and in the order the ids were minted: an id carries the
@@ -551,7 +402,7 @@ impl Spool {
     fn settle(&self, id: &str, delivery: &NoteDelivery) {
         let document = Answered {
             schema_version: NOTE_SCHEMA_VERSION,
-            delivery: delivery.clone(),
+            delivery: delivery.into(),
         };
         if let Ok(rendered) = serde_json::to_string(&document) {
             let staging = self.dir.join(format!("{id}.answering"));
@@ -565,22 +416,21 @@ impl Spool {
     fn answered(&self, id: &str) -> Option<NoteDelivery> {
         let raw = std::fs::read_to_string(self.answer(id)).ok()?;
         let answered: Answered = serde_json::from_str(&raw).ok()?;
-        (answered.schema_version == NOTE_SCHEMA_VERSION).then_some(answered.delivery)
+        (answered.schema_version == NOTE_SCHEMA_VERSION).then(|| answered.delivery.into())
     }
 }
 
 /// Hand `note` to the conversation running in `scratch`, and answer what became
 /// of it.
 ///
-/// The caller's end of the seam: the note is offered in the member's own spool
-/// and the member — which is the only thing that knows which side of its
-/// conversation is live — decides. What comes back is the member's own answer,
-/// not a guess made from outside.
+/// The caller's end of the seam: the note is offered in the member's own spool,
+/// and the member's own courier thread hands it to the conversation's inbox. What
+/// comes back is the conversation's own answer, not a guess made from outside.
 ///
 /// # Errors
 ///
 /// [`Undelivered`], for a note the conversation did not take: it had already
-/// completed, or it never answered at all.
+/// completed, it had ended, or it never answered at all.
 pub fn submit(scratch: &Path, note: &Note) -> Result<Accepted, Undelivered> {
     submit_within(scratch, note, ANSWER_DEADLINE)
 }
@@ -596,28 +446,12 @@ fn submit_within(scratch: &Path, note: &Note, deadline: Duration) -> Result<Acce
                 .to_string(),
         });
     }
-    // Before anything is offered, because a `Note` reaching here need not have
-    // come from [`Note::new`] — see [`Note::check`].
-    if let Err(err) = note.check() {
-        return Err(Undelivered::NoConversation {
-            reason: err.to_string(),
-        });
-    }
     // Before anything is offered, because a conversation that is over will never
     // service its spool again and a note left in it would be an acceptance
     // nothing reads.
-    // llmlint: ignore-block[changed_behavior_has_e2e] this arm is the window the
-    // whole seam exists to close, and closing it is what makes it unreachable
-    // from outside: a member records its completion and then settles, and
-    // `crate::control::note` answers a settled member `MemberSettled` before it
-    // ever reaches here. The gap between the two is the member's own settle path
-    // — microseconds, and not something a journey can hold open without a second
-    // faked seam. `tests::a_completed_conversation_refuses_a_note_rather_than_accepting_it`
-    // drives the real `Router::complete` and the real `submit` across it.
-    if let Some(completion_reason) = spool.completion() {
-        return Err(Undelivered::ConversationCompleted { completion_reason });
+    if let Some(refusal) = spool.ended() {
+        return Err(refusal);
     }
-    // llmlint: ignore-end[changed_behavior_has_e2e]
     let id = mint();
     if let Err(err) = spool.offer(&id, note) {
         return Err(Undelivered::NoConversation {
@@ -670,208 +504,126 @@ fn mint() -> String {
     format!("{now:039}-{}", std::process::id())
 }
 
-/// Which side of a member's conversation is taking a turn right now.
+/// What a member with **no conversation** is handed instead: the addressed role,
+/// then the note's own text, unchanged.
 ///
-/// Written by the member's own engine thread as onejudge opens and closes each
-/// turn, read by the thread servicing its notes — so the routing rests on the
-/// conversation's own structure rather than on this crate's guess about it.
-#[derive(Debug)]
-pub(crate) struct LiveTurn {
-    /// `0` between turns; otherwise the party, one more than its discriminant.
-    side: AtomicU8,
+/// A single-sided `kind: oneharness` member has one party and one lever, so a
+/// note to it falls through to [`crate::control::interrupt`] — see
+/// [`crate::control::note`]. There is no conversation layer to frame it, so the
+/// frame is written here, and it says the one thing the two-party framing exists
+/// to say: whose task this update belongs to.
+#[must_use]
+pub(crate) fn framed(note: &Note) -> String {
+    format!(
+        "— run note (addressed to: {}) —\n{}\n\n{}",
+        note.addressee.as_str(),
+        "The following update was delivered to this member's task; act on it.",
+        note.text
+    )
 }
 
-/// [`LiveTurn::side`]'s value between turns.
-const BETWEEN_TURNS: u8 = 0;
-/// [`LiveTurn::side`]'s value while the party doing the work is taking a turn.
-const AGENT_LIVE: u8 = 1;
-/// [`LiveTurn::side`]'s value while any other party is.
-const OTHER_LIVE: u8 = 2;
-
-impl Default for LiveTurn {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LiveTurn {
-    /// A member that has not opened a turn yet.
-    #[must_use]
-    pub(crate) fn new() -> Self {
-        Self {
-            side: AtomicU8::new(BETWEEN_TURNS),
-        }
-    }
-
-    /// `party` opened a turn.
-    pub(crate) fn opened(&self, party: Party) {
-        let side = if matches!(party, Party::Assistant) {
-            AGENT_LIVE
-        } else {
-            OTHER_LIVE
-        };
-        self.side.store(side, Ordering::SeqCst);
-    }
-
-    /// The turn that was open closed.
-    pub(crate) fn closed(&self) {
-        self.side.store(BETWEEN_TURNS, Ordering::SeqCst);
-    }
-
-    /// Whether the party doing the work is taking a turn right now, which is the
-    /// one case a note can be delivered into.
-    #[must_use]
-    pub(crate) fn agent_is_live(&self) -> bool {
-        self.side.load(Ordering::SeqCst) == AGENT_LIVE
-    }
-}
-
-/// The member's end of the note seam: what it does with the notes its spool
-/// receives.
+/// The member's end of the note seam: the thread that carries what its spool
+/// receives into the conversation's own inbox, and writes the answer back.
 ///
-/// Lives on the member's supervision thread rather than its engine thread, for
-/// the reason every other delivery in this crate does: handing a note to the
-/// conversation means running an `oneharness interrupt` process, and doing that
-/// from the sink would stop the engine from reporting the turn it is delivering
-/// into.
-pub(crate) struct Router {
+/// On a thread of its own because [`onejudge::note::Notes::send`] blocks until
+/// the note's disposition is known — for a supervisor-side delivery, until that
+/// party's re-taken decision comes back. Servicing the spool from the supervision
+/// loop would put a judge invocation between two heartbeats.
+pub(crate) struct Courier {
     spool: Spool,
-    live: std::sync::Arc<LiveTurn>,
-    address: crate::control::Address,
-    oneharness_bin: String,
-    /// Notes answered [`Accepted::Queued`], waiting for the next agent turn.
-    held: Vec<Note>,
+    notes: onejudge::note::Notes,
+    stop: Arc<AtomicBool>,
+    emitter: Emitter,
 }
 
-impl Router {
-    /// The router for a member whose agent turns are addressed at `address`.
-    #[must_use]
-    pub(crate) fn new(
+impl Courier {
+    /// Open the courier for a member, and the [`Ending`] its supervisor closes it
+    /// with.
+    pub(crate) fn open(
         spool: Spool,
-        live: std::sync::Arc<LiveTurn>,
-        address: crate::control::Address,
-        oneharness_bin: String,
-    ) -> Self {
-        Self {
+        notes: onejudge::note::Notes,
+        emitter: &Emitter,
+    ) -> (Self, Ending) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let ending = Ending {
+            spool: spool.clone(),
+            stop: Arc::clone(&stop),
+            emitter: emitter.clone(),
+        };
+        let courier = Self {
             spool,
-            live,
-            address,
-            oneharness_bin,
-            held: Vec::new(),
-        }
+            notes,
+            stop,
+            emitter: emitter.clone(),
+        };
+        (courier, ending)
     }
 
-    /// One service tick: take what arrived, route each note to the side that is
-    /// live, and deliver whatever has been waiting for an agent turn.
-    pub(crate) fn service(&mut self, emitter: &Emitter) {
+    /// Carry notes until this member's conversation is over. The thread body.
+    pub(crate) fn serve(self) {
+        while !self.stop.load(Ordering::SeqCst) {
+            for (id, note) in self.spool.take() {
+                // Blocks: the conversation is what decides, and for a note that
+                // reaches the supervisor's live turn the decision *is* the answer.
+                let delivery = match self.notes.send(note.clone()) {
+                    Ok(accepted) => NoteDelivery::Accepted(accepted),
+                    Err(undelivered) => NoteDelivery::Undelivered(undelivered),
+                };
+                publish(&self.emitter, &note, &delivery);
+                self.spool.settle(&id, &delivery);
+            }
+            std::thread::sleep(ANSWER_POLL);
+        }
+    }
+}
+
+/// How a member's supervisor closes its note seam.
+///
+/// Both halves matter. The record is what refuses a note that arrives after this,
+/// and the answers are what keep a note already in the spool from being an
+/// acceptance nobody reads.
+pub(crate) struct Ending {
+    spool: Spool,
+    stop: Arc<AtomicBool>,
+    emitter: Emitter,
+}
+
+impl Ending {
+    /// This member takes no more notes, and `refusal` is what every later one
+    /// gets — the conversation's own reason, so a caller reads *completed* and
+    /// *ended* apart rather than being told only that it was too late.
+    pub(crate) fn end(&self, refusal: &Undelivered) {
+        self.spool.end(refusal);
+        self.stop.store(true, Ordering::SeqCst);
+        // Anything the courier had not reached is answered here rather than left
+        // for its caller to time out on.
         for (id, note) in self.spool.take() {
-            let delivery = self.route(&note, emitter);
+            let delivery = NoteDelivery::Undelivered(refusal.clone());
+            publish(&self.emitter, &note, &delivery);
             self.spool.settle(&id, &delivery);
         }
-        if self.live.agent_is_live() && !self.held.is_empty() {
-            for note in std::mem::take(&mut self.held) {
-                self.deliver(&note, emitter);
-            }
-        }
     }
+}
 
-    /// Where one arriving note goes.
-    fn route(&mut self, note: &Note, emitter: &Emitter) -> NoteDelivery {
-        if let Some(completion_reason) = self.spool.completion() {
-            return NoteDelivery::Undelivered(Undelivered::ConversationCompleted {
-                completion_reason,
-            });
-        }
-        if !note.addressee.reaches_worker() {
-            // The judge's own copy is the conversation layer's half of this seam:
-            // it reaches the supervisor through the effective task and the
-            // completion criteria the engine composes, and the published onejudge
-            // this crate links exposes no way to add to either mid-run. Refused
-            // rather than delivered to the worker under a supervisor's frame,
-            // which would be a note the addressee never sees and the wrong party
-            // acting on.
-            return NoteDelivery::Undelivered(Undelivered::NoConversation {
-                reason: format!(
-                    "a note addressed to the {} reaches it through the conversation's own \
-                     effective task and completion criteria, and the onejudge this build links \
-                     exposes no inbox for them: only the worker's side of a two-party member \
-                     opens a turn a note can be delivered into",
-                    note.addressee.as_str()
-                ),
-            });
-        }
-        if self.live.agent_is_live() {
-            return self.deliver(note, emitter);
-        }
-        // Held rather than delivered now: the judge is mid-decision, or nobody is
-        // taking a turn, and the next agent turn is opened by the response this
-        // note will arrive with.
-        self.held.push(note.clone());
-        NoteDelivery::Accepted(Accepted::Queued)
-    }
-
-    /// Hand one note to the live agent turn, and publish what happened.
-    fn deliver(&self, note: &Note, emitter: &Emitter) -> NoteDelivery {
-        let framed = note.framed();
-        let delivery = crate::control::deliver(&self.oneharness_bin, &self.address, Some(&framed));
-        let (answer, reason) = match delivery {
-            crate::control::Delivery::Delivered => {
-                (NoteDelivery::Accepted(Accepted::Interrupted), None)
-            }
-            crate::control::Delivery::NoTurn(reason)
-            | crate::control::Delivery::Failed(reason)
-            | crate::control::Delivery::Invalid(reason) => (
-                NoteDelivery::Undelivered(Undelivered::NoConversation {
-                    reason: reason.clone(),
-                }),
-                Some(reason),
-            ),
-        };
-        emitter.emit(
-            EventKind::TurnInterrupted,
-            as_payload(&TurnInterrupted {
-                member: emitter.member().unwrap_or_default().to_string(),
-                delivered: reason.is_none(),
-                input_bytes: framed.len() as u64,
-                reason,
-            }),
-        );
-        answer
-    }
-
-    /// The conversation is over: record it, and answer everything still waiting.
-    ///
-    /// Both halves matter. The record is what refuses a note that arrives after
-    /// this, and the answers are what keeps a note already in the spool from
-    /// being an acceptance nobody reads — including one this router answered
-    /// [`Accepted::Queued`] and never got an agent turn to deliver into, which is
-    /// published as the undelivered note it is.
-    pub(crate) fn complete(&mut self, completion_reason: &str, emitter: &Emitter) {
-        self.spool.complete(completion_reason);
-        for (id, _) in self.spool.take() {
-            self.spool.settle(
-                &id,
-                &NoteDelivery::Undelivered(Undelivered::ConversationCompleted {
-                    completion_reason: completion_reason.to_string(),
-                }),
-            );
-        }
-        for note in std::mem::take(&mut self.held) {
-            let reason = format!(
-                "the conversation completed ({completion_reason}) before the worker took another \
-                 turn, so the queued note was never delivered"
-            );
-            emitter.emit(
-                EventKind::TurnInterrupted,
-                as_payload(&TurnInterrupted {
-                    member: emitter.member().unwrap_or_default().to_string(),
-                    delivered: false,
-                    input_bytes: note.framed().len() as u64,
-                    reason: Some(reason),
-                }),
-            );
-        }
-    }
+/// Publish what became of one note on the run's own stream.
+///
+/// A caller learns the disposition from its own [`submit`]; this is the *run's*
+/// record of it, so an operator reading the journal sees a note arrive without
+/// having sent it.
+fn publish(emitter: &Emitter, note: &Note, delivery: &NoteDelivery) {
+    let reason = match delivery {
+        NoteDelivery::Accepted(_) => None,
+        NoteDelivery::Undelivered(undelivered) => Some(undelivered.to_string()),
+    };
+    emitter.emit(
+        EventKind::TurnInterrupted,
+        as_payload(&TurnInterrupted {
+            member: emitter.member().unwrap_or_default().to_string(),
+            delivered: reason.is_none(),
+            input_bytes: note.text.as_str().len() as u64,
+            reason,
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -879,7 +631,7 @@ mod tests {
     use super::*;
     use crate::event::Labels;
 
-    /// An emitter that writes nowhere, labelled for one member — what a router
+    /// An emitter that writes nowhere, labelled for one member — what a courier
     /// publishes its deliveries on.
     fn emitter(member: &str) -> Emitter {
         Emitter::new("stream", Box::new(std::io::sink())).with_labels(Labels {
@@ -892,236 +644,108 @@ mod tests {
         Note::new(addressee, "the migration has to be reversible").expect("a note")
     }
 
-    /// A router whose deliveries go to a binary that is not there, so the
-    /// *routing* is what the assertion is about rather than a socket.
-    fn router(spool: Spool, live: &std::sync::Arc<LiveTurn>) -> Router {
-        Router::new(
-            spool,
-            std::sync::Arc::clone(live),
-            crate::control::Address {
-                session: "node-scope-1-worker-skill".into(),
-                session_dir: None,
-                cwd: "/work/repo".into(),
+    /// A note offered to a member's spool is carried into the conversation's own
+    /// inbox, and the conversation's own answer is what comes back to the caller.
+    ///
+    /// That round trip is the whole of what this crate owns here: the routing and
+    /// every disposition are onejudge's, and `tests/e2e/note.rs` drives those
+    /// against a real conversation. What is proven here is the transport between
+    /// the two — a note written into a member's spool by one process reaches
+    /// `Notes::send` unchanged, and the answer `send` gives is what the caller
+    /// reads, rather than anything this crate decided for itself.
+    ///
+    /// The disposition driven is the one reachable from outside onejudge: an
+    /// inbox nothing ever ran, dropped, which answers every waiting sender. It is
+    /// the conversation's own refusal, in the conversation's own words, and it
+    /// arrives at the caller through this crate's spool.
+    #[test]
+    fn a_spooled_note_is_carried_to_the_inbox_and_its_answer_comes_back() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spool = Spool::bind(dir.path()).expect("a spool");
+        let (notes, inbox) = onejudge::note::Notes::channel();
+        let (courier, _ending) = Courier::open(spool.clone(), notes, &emitter("worker"));
+        std::thread::spawn(move || courier.serve());
+
+        // The caller blocks on the conversation, so it runs on a thread of its
+        // own while this one plays the engine that never came.
+        let scratch = dir.path().to_path_buf();
+        let sent = note(Addressee::Worker);
+        let caller = std::thread::spawn(move || submit(&scratch, &sent));
+
+        // Wait until the courier has really taken it out of the spool, so what is
+        // asserted is a note that reached `send` rather than one still on disk.
+        let until = Instant::now() + Duration::from_secs(10);
+        while spool.request("").parent().is_some_and(|dir| {
+            std::fs::read_dir(dir)
+                .map(|entries| {
+                    entries.flatten().any(|entry| {
+                        entry
+                            .file_name()
+                            .to_str()
+                            .is_some_and(|name| name.ends_with(".note.json"))
+                    })
+                })
+                .unwrap_or(false)
+        }) && Instant::now() < until
+        {
+            std::thread::sleep(ANSWER_POLL);
+        }
+        drop(inbox);
+
+        let answer = caller.join().expect("the caller's thread");
+        assert!(
+            matches!(&answer, Err(Undelivered::NoConversation { reason })
+                if reason.contains("dropped before any turn opened")),
+            "the conversation's own answer did not reach the caller: {answer:?}"
+        );
+    }
+
+    /// A member that takes no more notes refuses one rather than accepting it,
+    /// and says which of the two terminal facts it is.
+    ///
+    /// Both are driven, because a caller acts on the difference: a conversation
+    /// its supervisor *passed* needs no relaunch and the note is a follow-up,
+    /// while one that merely ended may be worth starting again. Every arm's
+    /// `Display` opens with the same words, so a caller that only prints it still
+    /// learns the note did not land.
+    #[test]
+    fn a_member_that_stops_taking_notes_refuses_them_rather_than_accepting_one() {
+        for refusal in [
+            Undelivered::ConversationCompleted {
+                completion_reason: "its supervisor judged the task complete".to_string(),
             },
-            "oneagentgraph-no-such-oneharness".to_string(),
-        )
-    }
+            Undelivered::MemberSettled {
+                outcome: "the member was condemned by its heartbeat watchdog".to_string(),
+            },
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let spool = Spool::bind(dir.path()).expect("a spool");
+            let ending = Ending {
+                spool: spool.clone(),
+                stop: Arc::new(AtomicBool::new(false)),
+                emitter: emitter("worker"),
+            };
 
-    /// The receiving party is told whose task the update belongs to, and the
-    /// note's own text arrives unchanged.
-    ///
-    /// The header is the whole of what makes a note *addressed*: without it a
-    /// judge handed an update to the worker's task reads it as its own next
-    /// instruction and takes on the worker's job.
-    #[test]
-    fn a_note_names_its_addressee_and_carries_its_text_unchanged() {
-        for addressee in [Addressee::Worker, Addressee::Supervisor, Addressee::Both] {
-            let framed = note(addressee).framed();
-            assert!(
-                framed.contains(&format!("addressed to: {}", addressee.as_str())),
-                "{addressee:?} did not name itself: {framed}"
+            // In the spool when the conversation ends, and answered by it rather
+            // than left for its caller to time out on.
+            spool.offer("a", &note(Addressee::Worker)).expect("offered");
+            ending.end(&refusal);
+            assert_eq!(
+                spool.answered("a"),
+                Some(NoteDelivery::Undelivered(refusal.clone())),
+                "a note already in the spool was not answered by the end of the conversation"
             );
+
+            // And offered afterwards: refused before it is spooled at all,
+            // because nothing will service it again.
+            let refused = submit(dir.path(), &note(Addressee::Worker))
+                .expect_err("a conversation that is over cannot take a note");
+            assert_eq!(refused, refusal, "the refusal did not name what happened");
             assert!(
-                framed.contains("the migration has to be reversible"),
-                "{addressee:?} did not carry the text: {framed}"
+                refused.to_string().contains("was not delivered"),
+                "the refusal did not say the note was not delivered: {refused}"
             );
         }
-        // The supervisor is told outright that the update is not an instruction
-        // to it — the failure this replaces is a judge acting on the worker's
-        // amendment rather than judging against it.
-        assert!(note(Addressee::Supervisor)
-            .framed()
-            .contains("not an instruction to you"));
-        // And a note that *binds* says so, because what it binds is what the
-        // work is judged against.
-        assert!(note(Addressee::Worker)
-            .binding()
-            .framed()
-            .contains("judged"));
-        assert!(!note(Addressee::Worker).framed().contains("judged"));
-
-        // A note with nothing in it is refused where it is made: delivering one
-        // spends a turn on a redirection that says nothing.
-        for blank in ["", "   \n\t"] {
-            assert!(Note::new(Addressee::Worker, blank).is_err(), "{blank:?}");
-        }
-    }
-
-    /// The live side is the conversation's own, and it is read back exactly as
-    /// the engine reported it.
-    #[test]
-    fn the_live_side_is_what_the_conversation_reported() {
-        let live = LiveTurn::new();
-        assert!(
-            !live.agent_is_live(),
-            "a member with no turn open read as working"
-        );
-
-        live.opened(Party::Assistant);
-        assert!(
-            live.agent_is_live(),
-            "the worker's turn did not read as the worker's"
-        );
-
-        live.opened(Party::User);
-        assert!(
-            !live.agent_is_live(),
-            "the judge's turn read as the worker's"
-        );
-
-        live.closed();
-        assert!(
-            !live.agent_is_live(),
-            "a turn that closed left the worker reading as live"
-        );
-    }
-
-    /// A note offered while no worker turn is open is queued for the next one,
-    /// and one offered while a worker turn is open is delivered into it.
-    ///
-    /// All three states of the conversation are driven, because the routing is a
-    /// decision about which one it is in: **between turns**, with neither party
-    /// taking one; the **judge** deciding; and the **worker** working. The first
-    /// two queue and the third delivers, and the delivery is asserted by where it
-    /// failed — against a binary that is not there, which is a delivery really
-    /// attempted rather than a note quietly held.
-    ///
-    /// `tests/e2e/note.rs` drives the two live ones against a real conversation
-    /// and a real control socket; this is where the between-turns state is
-    /// reachable at all, because a run reaches it only inside a turn boundary
-    /// nothing outside the member can observe.
-    #[test]
-    fn a_note_is_routed_by_which_side_of_the_conversation_is_live() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let spool = Spool::bind(dir.path()).expect("a spool");
-        let live = std::sync::Arc::new(LiveTurn::new());
-        let mut router = router(spool.clone(), &live);
-        let emitter = emitter("worker");
-
-        // Neither party is taking a turn: queued for the next one.
-        spool.offer("a", &note(Addressee::Worker)).expect("offered");
-        router.service(&emitter);
-        assert_eq!(
-            spool.answered("a"),
-            Some(NoteDelivery::Accepted(Accepted::Queued)),
-            "a note offered between turns was not queued for the next one"
-        );
-
-        // The judge is deciding: queued too, for the turn its response opens.
-        live.opened(Party::User);
-        spool.offer("b", &note(Addressee::Worker)).expect("offered");
-        router.service(&emitter);
-        assert_eq!(
-            spool.answered("b"),
-            Some(NoteDelivery::Accepted(Accepted::Queued)),
-            "a note offered while the judge was deciding was not queued"
-        );
-
-        // The worker's turn opens, and both held notes go into it.
-        live.opened(Party::Assistant);
-        router.service(&emitter);
-        assert!(router.held.is_empty(), "a queued note was never delivered");
-
-        // And one offered while the worker's turn is already open is delivered
-        // straight away rather than queued.
-        spool.offer("c", &note(Addressee::Worker)).expect("offered");
-        router.service(&emitter);
-        assert!(
-            matches!(
-                spool.answered("c"),
-                Some(NoteDelivery::Undelivered(Undelivered::NoConversation { reason }))
-                    if reason.contains("oneagentgraph-no-such-oneharness")
-            ),
-            "a note offered into a live worker turn was not delivered into it: {:?}",
-            spool.answered("c")
-        );
-    }
-
-    /// A note whose only addressee is the supervisor is refused, rather than
-    /// handed to the worker under a frame naming somebody else.
-    ///
-    /// The supervisor's own copy reaches it through the effective task and the
-    /// completion criteria the conversation layer composes, and the onejudge this
-    /// build links exposes no way to add to either mid-run. Delivering it to the
-    /// worker instead would be the note's addressee never seeing it and the wrong
-    /// party acting on it — so the caller is told, which is what lets it choose.
-    #[test]
-    fn a_note_only_the_supervisor_is_addressed_by_is_refused_rather_than_misrouted() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let spool = Spool::bind(dir.path()).expect("a spool");
-        let live = std::sync::Arc::new(LiveTurn::new());
-        live.opened(Party::Assistant);
-        let mut router = router(spool.clone(), &live);
-        router.service(&emitter("worker"));
-
-        spool
-            .offer("a", &note(Addressee::Supervisor))
-            .expect("offered");
-        router.service(&emitter("worker"));
-        assert!(
-            matches!(
-                spool.answered("a"),
-                Some(NoteDelivery::Undelivered(Undelivered::NoConversation { reason }))
-                    if reason.contains("supervisor")
-            ),
-            "{:?}",
-            spool.answered("a")
-        );
-
-        // A note the worker is *also* addressed by still reaches the worker: an
-        // amendment binds both parties, and refusing it because one half has no
-        // path would deliver nothing at all.
-        spool.offer("b", &note(Addressee::Both)).expect("offered");
-        router.service(&emitter("worker"));
-        assert!(
-            matches!(
-                spool.answered("b"),
-                Some(NoteDelivery::Undelivered(Undelivered::NoConversation { reason }))
-                    if reason.contains("oneagentgraph-no-such-oneharness")
-            ),
-            "{:?}",
-            spool.answered("b")
-        );
-    }
-
-    /// A conversation that is over refuses a note instead of taking one nothing
-    /// will read — and a note already in the spool when it ends is answered by
-    /// the same fact rather than left for its caller to time out on.
-    #[test]
-    fn a_completed_conversation_refuses_a_note_rather_than_accepting_it() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let spool = Spool::bind(dir.path()).expect("a spool");
-        let live = std::sync::Arc::new(LiveTurn::new());
-        let mut router = router(spool.clone(), &live);
-        let emitter = emitter("worker");
-
-        // In the spool when the conversation ends, and answered by it.
-        spool.offer("a", &note(Addressee::Worker)).expect("offered");
-        router.complete("its supervisor judged the task complete", &emitter);
-        assert!(
-            matches!(
-                spool.answered("a"),
-                Some(NoteDelivery::Undelivered(Undelivered::ConversationCompleted {
-                    completion_reason
-                })) if completion_reason.contains("judged the task complete")
-            ),
-            "{:?}",
-            spool.answered("a")
-        );
-
-        // And offered afterwards: refused before it is spooled at all, because a
-        // conversation that is over will never service its spool again.
-        let refused = submit(dir.path(), &note(Addressee::Worker))
-            .expect_err("a completed conversation cannot take a note");
-        assert!(
-            matches!(&refused, Undelivered::ConversationCompleted { completion_reason }
-                if completion_reason.contains("judged the task complete")),
-            "{refused:?}"
-        );
-        assert!(
-            refused.to_string().contains("was not delivered"),
-            "{refused}"
-        );
     }
 
     /// A member with no endpoint, and one that is not servicing the endpoint it
@@ -1191,10 +815,86 @@ mod tests {
             ),
         )
         .expect("write");
-        std::fs::write(spool.request("998-1"), "not a note").expect("write");
+        // And one whose *note* this build would not have built: `NoteText` refuses
+        // blank text in the conversion it deserializes through, so a hand-written
+        // document carrying one does not read back as a note at all.
+        std::fs::write(
+            spool.request("998-1"),
+            format!(
+                "{{\"schema_version\":{NOTE_SCHEMA_VERSION},\"note\":{{\"addressee\":\"worker\",\
+                 \"text\":\"   \"}}}}"
+            ),
+        )
+        .expect("write");
+        std::fs::write(spool.request("997-1"), "not a note").expect("write");
         assert!(
             spool.take().is_empty(),
             "a note this build cannot read was acted on"
         );
+    }
+
+    /// Every disposition the conversation can reach survives the wire the spool
+    /// carries it over, unchanged.
+    ///
+    /// The mirror is the thing most likely to rot: `onejudge::note::Accepted` and
+    /// `Undelivered` are not `Serialize`, so this crate maps them by hand, and a
+    /// variant that lost a field in transit would answer a caller something the
+    /// conversation never said. Round-tripped through the same `Spool::settle` /
+    /// `Spool::answered` pair a member and its caller really use.
+    #[test]
+    fn every_disposition_survives_the_spool_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let spool = Spool::bind(dir.path()).expect("a spool");
+        let dispositions = [
+            NoteDelivery::Accepted(Accepted::Queued),
+            NoteDelivery::Accepted(Accepted::Interrupted {
+                party: Party::Worker,
+            }),
+            NoteDelivery::Accepted(Accepted::Interrupted {
+                party: Party::Supervisor,
+            }),
+            NoteDelivery::Accepted(Accepted::JudgedWith {
+                completion_reason: "the supervisor passed it with the note in hand".to_string(),
+            }),
+            NoteDelivery::Undelivered(Undelivered::ConversationCompleted {
+                completion_reason: "already answered completion".to_string(),
+            }),
+            NoteDelivery::Undelivered(Undelivered::MemberSettled {
+                outcome: "condemned by its heartbeat watchdog".to_string(),
+            }),
+            NoteDelivery::Undelivered(Undelivered::NoConversation {
+                reason: "nothing ever read this channel".to_string(),
+            }),
+        ];
+        for (index, disposition) in dispositions.iter().enumerate() {
+            let id = format!("{index}");
+            spool.settle(&id, disposition);
+            assert_eq!(
+                spool.answered(&id).as_ref(),
+                Some(disposition),
+                "{disposition:?} did not survive the spool"
+            );
+        }
+    }
+
+    /// A member with no conversation is handed the addressed role too.
+    ///
+    /// A single-sided member has one party and one lever, so its note falls
+    /// through to `interrupt` — there is no conversation layer to frame it, and
+    /// the frame written here says the one thing the two-party framing exists to
+    /// say.
+    #[test]
+    fn a_note_to_a_member_with_no_conversation_still_names_its_addressee() {
+        for addressee in [Addressee::Worker, Addressee::Supervisor, Addressee::Both] {
+            let framed = framed(&note(addressee));
+            assert!(
+                framed.contains(&format!("addressed to: {}", addressee.as_str())),
+                "{addressee:?} did not name itself: {framed}"
+            );
+            assert!(
+                framed.contains("the migration has to be reversible"),
+                "{addressee:?} did not carry the text: {framed}"
+            );
+        }
     }
 }
