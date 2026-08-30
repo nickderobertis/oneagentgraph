@@ -81,10 +81,13 @@ name = "oneagentgraph"
 path = "src/lib.rs"
 
 [features]
-# The deterministic programs the e2e suite spawns: a paid-harness stand-in, a
-# onejudge `CommandProvider` backend, and a program a journey points a `pre_turn`
-# view at. Non-default, so none is ever in a consumer's build; `just check` and
-# the coverage run enable them.
+# What only the suite needs: the deterministic programs it spawns — a
+# paid-harness stand-in, a onejudge `CommandProvider` backend, and a program a
+# journey points a `pre_turn` view at — and `judge`'s `hold_between_turns`, the
+# one fixture that pauses real code rather than standing in for a process,
+# because the conversation boundary it holds is reachable from nowhere else.
+# Non-default, so none of it is ever in a consumer's build; `just check` and the
+# coverage run enable them.
 test-doubles = []
 
 [dependencies]
@@ -208,10 +211,18 @@ test-doubles = []
 # conversation twice through the real member and reads the difference off the turns
 # it was allowed to take.
 #
-# 0.6.1 is what the lockfile resolves, and it carries nothing this crate compiles
-# against: it adds onejudge's own release-target declaration. It is taken because
-# it is the newest 0.6, not for anything it buys here.
-onejudge = { version = "0.6.1", features = ["cli"] }
+# 0.6.1 carried nothing this crate compiled against; it was taken for being the
+# newest 0.6.
+#
+# 0.7.0 is the twelfth raise and a **compile floor**: it publishes
+# `onejudge::note` — the conversation half of the approved delivery-seam contract
+# — and nothing above resolves below it. `Notes::channel` opens the two ends,
+# `Plan::with_notes` hands the engine's end to the run driver `crate::judge`
+# already uses, and `Notes::send` answers one note. The routing has to be the
+# engine's because only it knows which side is live, and no 0.6 seam lets an
+# embedder put a word in the transcript the judge is shown. `crate::note` records
+# what each disposition means.
+onejudge = { version = "0.7.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #

@@ -128,11 +128,37 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    // The note endpoint is bound before the plan is built, because the engine's
+    // end of the same channel goes *on* that plan. A member that could not bind
+    // one runs exactly as it did before notes existed: no inbox, and nothing able
+    // to send to it.
+    let spool = crate::note::Spool::bind(scratch);
+    let (notes, inbox) = match spool {
+        Some(_) => {
+            let (notes, inbox) = onejudge::note::Notes::channel();
+            (Some(notes), Some(inbox))
+        }
+        None => (None, None),
+    };
+
     let plan = match plan(launch) {
-        Ok(plan) => plan.with_spawn_hook(Arc::new(MemberSpawn {
-            group: Arc::clone(&group),
-            agent_config: launch.agent_config.clone(),
-        })),
+        Ok(plan) => {
+            let plan = plan.with_spawn_hook(Arc::new(MemberSpawn {
+                group: Arc::clone(&group),
+                agent_config: launch.agent_config.clone(),
+            }));
+            // Which side of this conversation is live is a fact only the engine
+            // driving it has, so the routing is onejudge's rather than this
+            // crate's: a note arriving during the worker's turn reopens that turn
+            // carrying it *before* the supervisor is consulted — which is how the
+            // judge receives it together with the worker's response — and one
+            // arriving while the supervisor is deciding re-takes that decision
+            // with the note in hand. See [`crate::note`].
+            match inbox {
+                Some(inbox) => plan.with_notes(inbox),
+                None => plan,
+            }
+        }
         Err(reason) => {
             emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
@@ -145,15 +171,19 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // the report replaces it with oneharness's authoritative answer at
     // [`finish`], which is also where an ask that was refused becomes the reason
     // `interrupt` reports.
-    crate::control::write(
+    let address = crate::control::Address {
+        session: agent_session(&launch.session),
+        session_dir: None,
+        cwd: launch.worktree.clone(),
+    };
+    // The record names the endpoint bound above, so a caller that reads the
+    // record and offers a note has somewhere to offer it into.
+    crate::control::write_with_notes(
         scratch,
         &crate::control::Turn::Open {
-            address: crate::control::Address {
-                session: agent_session(&launch.session),
-                session_dir: None,
-                cwd: launch.worktree.clone(),
-            },
+            address: address.clone(),
         },
+        spool.as_ref().map(crate::note::Spool::path),
     );
 
     let activity = Arc::new(AtomicU64::new(0));
@@ -164,6 +194,10 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let engine = {
         let (emitter, activity, abort) =
             (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
+        // The gate this run's task asked for, if it asked for one — see
+        // [`hold_between_turns`], which is compiled only for the suite.
+        #[cfg(feature = "test-doubles")]
+        let mut gate: Option<FixtureGate> = None;
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
         // panicking — which would take the whole graph down over one member. A
@@ -174,6 +208,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             let mut sink = move |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
                 ingest(observation, &emitter);
+                #[cfg(feature = "test-doubles")]
+                hold_between_turns(observation, &mut gate);
                 if abort.load(Ordering::SeqCst) {
                     ControlFlow::Break(())
                 } else {
@@ -202,7 +238,175 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
-    supervise(&rx, &abort, emitter, bounds, scratch, started, &activity)
+    // On a thread of its own, because `Notes::send` blocks until the conversation
+    // has disposed of the note — for a supervisor-side delivery, until its
+    // re-taken decision comes back. Servicing the spool from the supervision loop
+    // below would put a judge invocation between two heartbeats.
+    //
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `None` arm is a host
+    // that refused this run one more thread, the same unreachable refusal the
+    // engine thread's own arm above records and for the same reason: no graph,
+    // task or config asks for it, and no seam this crate sanctions fakes
+    // `pthread_create`. What it decides is that the member runs on without a note
+    // courier rather than being killed over one, and every note offered to it is
+    // then answered by `submit`'s own deadline. The reachable half — a courier
+    // that carries notes into the conversation — is `tests/e2e/note.rs`.
+    let ending = match (spool, notes) {
+        (Some(spool), Some(notes)) => {
+            let (courier, ending) = crate::note::Courier::open(spool, notes, emitter);
+            match std::thread::Builder::new().spawn(move || courier.serve()) {
+                Ok(_) => Some(ending),
+                Err(_) => None,
+            }
+        }
+        _ => None,
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    supervise(
+        &rx, &abort, emitter, bounds, scratch, started, &activity, ending,
+    )
+}
+
+/// How long [`hold_between_turns`] waits before giving up on the journey that
+/// asked for it.
+///
+/// Bounded because a fixture that never returns wedges the suite rather than
+/// failing it: reaching this bound means the journey never released the gate,
+/// which its own assertions then report.
+#[cfg(feature = "test-doubles")]
+const FIXTURE_HOLD: Duration = Duration::from_secs(30);
+
+/// The marker a journey puts in its **task** to ask for that pause, naming the
+/// gate file it will release.
+///
+/// In the task rather than in this process's environment, so the lever is the one
+/// every other journey already uses: a conversation is steered by the prose it is
+/// given, and `tests/e2e/note.rs` holds a live turn open with the harness
+/// double's own `fake:` sentinels in exactly the same way. Its own prefix, so no
+/// sentinel of the double's can collide with it.
+#[cfg(feature = "test-doubles")]
+const HOLD_BETWEEN_TURNS: &str = "oneagentgraph-fixture:hold-between-turns=";
+
+/// Both files this fixture touches, checked before either is named.
+///
+/// A type rather than a `PathBuf`, because [`Self::parse`] is the only way to
+/// hold one: a path cut out of task text is text until something checks it, and a
+/// newtype is what makes "checked" a property of the value instead of a habit of
+/// each caller. Both members are derived here for the same reason — the sibling
+/// this fixture writes used to be rebuilt at the point of use, which is a second
+/// place the checks would have to be remembered.
+#[cfg(feature = "test-doubles")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FixtureGate {
+    /// The file the journey creates to release the hold. Only ever read.
+    gate: PathBuf,
+    /// The sibling this fixture writes on reaching the boundary, so a journey
+    /// can wait for the hold rather than sleep at it.
+    entered: PathBuf,
+}
+
+#[cfg(feature = "test-doubles")]
+impl FixtureGate {
+    /// The gate `instruction` names, if it names one this fixture will act on.
+    ///
+    /// `None` covers an instruction that names no gate *and* one whose path is
+    /// refused, which are one answer to the caller: the conversation runs with no
+    /// hold, exactly as it does for every task that never asked for one. A
+    /// fixture that refused louder than that would fail runs over prose.
+    fn parse(instruction: &str) -> Option<Self> {
+        let at = instruction.find(HOLD_BETWEEN_TURNS)? + HOLD_BETWEEN_TURNS.len();
+        let rest = &instruction[at..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        Self::at(Path::new(&rest[..end]))
+    }
+
+    /// The checks, over the path [`Self::parse`] cut out of the text.
+    ///
+    /// What is refused, and why each:
+    ///
+    /// * **a relative path**, because this runs on the member's thread of a
+    ///   process whose working directory is deliberately not the journey's — see
+    ///   [`crate::judge::MemberSpawn`], and the journey that pins it — so a
+    ///   relative gate resolves somewhere neither end named;
+    /// * **a `..` component**, which is the traversal a path assembled from text
+    ///   should never carry however it came to be assembled;
+    /// * **a gate with no file name**, which has no sibling to write beside it;
+    /// * **a parent directory that does not already exist**, because a journey
+    ///   names a file in a workspace it has already made, so an absent parent
+    ///   means the text was not the path anything meant. Nothing is created to
+    ///   make it exist: this writes one file beside the gate and no directory.
+    fn at(gate: &Path) -> Option<Self> {
+        if !gate.is_absolute()
+            || gate
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let name = gate.file_name()?;
+        if !gate.parent().is_some_and(Path::is_dir) {
+            return None;
+        }
+        let mut entered = name.to_os_string();
+        entered.push(".entered");
+        Some(Self {
+            // Named against the gate's own parent, which the checks above cleared,
+            // so the sibling cannot land anywhere the gate could not.
+            entered: gate.with_file_name(entered),
+            gate: gate.to_path_buf(),
+        })
+    }
+}
+
+/// A test-only pause at the one conversation boundary a journey cannot otherwise
+/// hold: after a turn has closed and before the next one opens.
+///
+/// Behind the non-default `test-doubles` feature, which is where this crate
+/// already keeps what only the suite needs, so a consumer's build has no trace of
+/// it and no production path can reach it.
+///
+/// It exists because that boundary is real and unreachable from outside. onejudge
+/// answers [`crate::note::Accepted::Queued`] only for a note offered with **no
+/// turn live**, and no seam a journey has holds the conversation there: the one
+/// process this suite may fake is the harness, and a harness runs *inside* a
+/// turn, so it cannot hold the gap between two. The engine's own
+/// `NoteInbox::begin` runs before the first turn opens, and every later gap is
+/// closed by its `take_notes` a few statements later. This sink is the only code
+/// that runs in that window, because the engine publishes the closing turn
+/// through it before looking for notes again.
+///
+/// Held on the **supervisor's** close and no other: it is the gap before the next
+/// *worker* turn opens, which is the turn a queued note is delivered into. The
+/// agent's own close is followed immediately by a `take_notes` that would take
+/// the note as a live-turn delivery instead, which is a different journey.
+///
+/// Asked for by [`HOLD_BETWEEN_TURNS`] in the conversation's own task, which is
+/// read off the first turn's instruction and remembered in `gate` as a checked
+/// [`FixtureGate`] — the text is turned into paths once, there, rather than at
+/// each use. On reaching the boundary this writes the gate's `.entered` sibling
+/// and waits for the gate itself to appear.
+#[cfg(feature = "test-doubles")]
+fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<FixtureGate>) {
+    match observation {
+        // The task is the first turn's instruction, so the marker arrives here
+        // rather than through anything this process was started with.
+        Observation::TurnOpened(opened) => {
+            if gate.is_none() {
+                *gate = FixtureGate::parse(opened.instruction);
+            }
+        }
+        Observation::TurnClosed(closed) if matches!(closed.role, onejudge::Role::User) => {
+            let Some(gate) = gate.as_ref() else {
+                return;
+            };
+            let _ = std::fs::write(&gate.entered, "entered");
+            let deadline = Instant::now() + FIXTURE_HOLD;
+            while !gate.gate.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Watch a member's engine to its end: the two watchdogs, and the answer.
@@ -211,9 +415,9 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
 /// module's too: the panic containment both members rely on can only be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Seven values, none derivable from another: where the answer arrives, the lever
+// Eight values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
-// and the two halves of the activity clock.
+// the two halves of the activity clock, and how this member's note seam is closed.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -223,6 +427,7 @@ fn supervise(
     scratch: &Path,
     started: Instant,
     activity: &Arc<AtomicU64>,
+    ending: Option<crate::note::Ending>,
 ) -> Outcome {
     let heartbeat_file = scratch.join("member.heartbeat");
     let mut last_heartbeat = Instant::now();
@@ -234,7 +439,21 @@ fn supervise(
     let mut stall = Stall::new(bounds.stall, started);
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
-            Ok(answer) => return finish(answer, emitter, scratch),
+            Ok(answer) => {
+                // Before the settle, because the settle is what makes the record
+                // say this member is over: a note already in the spool is
+                // answered by the conversation that could not take it rather than
+                // left for a caller to time out on.
+                if let Some(ending) = ending.as_ref() {
+                    ending.end(&terminal_refusal(&answer));
+                }
+                return finish(
+                    answer,
+                    emitter,
+                    scratch,
+                    ending.as_ref().map(crate::note::Ending::endpoint),
+                );
+            }
             // A sender dropped without an answer means the engine thread
             // panicked: this member's failure, not the graph's.
             //
@@ -256,7 +475,23 @@ fn supervise(
         }
         let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
         let now = Instant::now();
+        // llmlint: ignore-block[changed_behavior_has_e2e] the two `end` calls below
+        // add no behaviour of their own: they close the note seam on the paths
+        // where a *condemned* member never reaches the answer above, so a note in
+        // its spool is refused rather than left for its caller to time out on.
+        // What they do is `crate::note::Ending::end`, driven across a real spool
+        // by that module's
+        // `a_member_that_stops_taking_notes_refuses_them_rather_than_accepting_one`,
+        // and the watchdogs that reach them are driven by `tests/e2e/liveness.rs`.
+        // A journey joining the two would have to send a note into a member and
+        // then wedge it for a whole watchdog bound — thirty minutes by default —
+        // to assert a refusal both halves already assert.
         if now.duration_since(last_heartbeat) > bounds.heartbeat {
+            if let Some(ending) = ending.as_ref() {
+                ending.end(&crate::note::Undelivered::MemberSettled {
+                    outcome: "the member was condemned by its heartbeat watchdog".to_string(),
+                });
+            }
             return condemn(rx, abort, emitter, Rule::Heartbeat, scratch);
         }
         last_heartbeat = now;
@@ -265,13 +500,72 @@ fn supervise(
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
         }
         if stall.condemns(activity.load(Ordering::SeqCst), scratch) {
+            if let Some(ending) = ending.as_ref() {
+                ending.end(&crate::note::Undelivered::MemberSettled {
+                    outcome: "the member was condemned by its activity watchdog".to_string(),
+                });
+            }
             return condemn(rx, abort, emitter, Rule::Activity, scratch);
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
 
 /// The answer the engine thread sends back.
 type Answer = Result<RunSummary, Box<RunFailure>>;
+
+/// The refusal every note that arrives after this member is over will get.
+///
+/// Named for what it answers rather than for the happy path through it: a
+/// conversation the supervisor *passed* is only one of the ways to get here, and
+/// a failed one and one that merely settled reach it too. Which of them it was is
+/// the part a caller acts on — a passed conversation needs no relaunch and the
+/// note is a follow-up, while one that ended may well be worth starting again —
+/// so the reason carried is the supervisor's own where it gave one: a `done_when`
+/// it re-judged, or the settled reason a loop that ended without a completion
+/// decision records.
+fn terminal_refusal(answer: &Answer) -> crate::note::Undelivered {
+    let Ok(summary) = answer else {
+        let Err(failure) = answer else {
+            unreachable!("the arm above")
+        };
+        return crate::note::Undelivered::MemberSettled {
+            outcome: format!("its conversation failed: {}", failure.error),
+        };
+    };
+    let why = summary
+        .done_when
+        .as_ref()
+        .map(|done| {
+            format!(
+                "its supervisor judged {:?} {}",
+                done.criterion,
+                if done.satisfied {
+                    "satisfied"
+                } else {
+                    "unsatisfied"
+                }
+            )
+        })
+        .or_else(|| summary.report.settled_reason.clone())
+        .unwrap_or_else(|| {
+            if summary.completed {
+                "its conversation completed".to_string()
+            } else {
+                "its conversation ended without completing".to_string()
+            }
+        });
+    // The two are not interchangeable to a caller: a conversation the supervisor
+    // *passed* needs no relaunch and a note against it is a follow-up, while one
+    // that merely ended may well be worth starting again.
+    if summary.completed {
+        crate::note::Undelivered::ConversationCompleted {
+            completion_reason: why,
+        }
+    } else {
+        crate::note::Undelivered::MemberSettled { outcome: why }
+    }
+}
 
 /// Everything this crate has to do to a process onejudge is about to start:
 /// place it in this member's [`crate::scratch::Group`], and — for the agent side
@@ -467,7 +761,7 @@ fn usage(usage: &onejudge::Usage) -> crate::event::Usage {
 }
 
 /// Settle or condemn a member whose engine answered.
-fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
+fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, notes: Option<&Path>) -> Outcome {
     match answer {
         Ok(summary) => {
             // Published before the verdict, not conditionally on it: which
@@ -475,7 +769,7 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path) -> Outcome {
             // chain records every candidate it stepped past whether or not a
             // later one ran.
             publish_attribution(emitter, summary.report.telemetry.as_ref());
-            record_control(&summary.report, scratch);
+            record_control(&summary.report, scratch, notes);
             let completed = onejudge::cli::exit_code(&summary) == 0;
             let document = serde_json::to_value(&summary.report).unwrap_or(Value::Null);
             settle_report(emitter, &document, completed, scratch)
@@ -699,7 +993,7 @@ fn agent_session(member_session: &str) -> String {
 /// The address is taken *from the report* rather than kept, because that is the
 /// one that names oneharness's own store directory — and a `control: null` is the
 /// contract's exit-3 case, carrying the reason `control_unavailable` gave.
-fn record_control(report: &onejudge::Report, scratch: &Path) {
+fn record_control(report: &onejudge::Report, scratch: &Path, notes: Option<&Path>) {
     let turn = match &report.control {
         Some(address) => crate::control::Turn::Open {
             address: crate::control::Address {
@@ -715,7 +1009,7 @@ fn record_control(report: &onejudge::Report, scratch: &Path) {
                 .unwrap_or_else(|| "this member's report named no controllable turn".to_string()),
         },
     };
-    crate::control::write(scratch, &turn);
+    crate::control::write_with_notes(scratch, &turn, notes);
 }
 
 /// The classified cause of a failed run.
@@ -769,14 +1063,46 @@ fn publish_attribution(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry
     }
 }
 
+/// oneharness's status token for a candidate whose process ran the turn to a
+/// finish, which is the only one of the seven that carries a conversation *and*
+/// the one a declared rejection still reports.
+const RAN_TO_COMPLETION: &str = "ok";
+
+/// Whether this candidate is the one that had the side's conversation — which is
+/// not always the one oneharness attributed the invocation to.
+///
+/// oneharness reports a fallback chain and a single-candidate run in two shapes,
+/// and a refusal reads differently in each: under a chain it is a `fell_through`
+/// and the attribution names no runner at all, while with no chain there is one
+/// result, so the attribution names it — **including when that result is the
+/// refusal**. `oneharness run --control` takes a chain of exactly one candidate,
+/// so from onejudge 0.7.0, which asks for a controllable turn on the *judge* side
+/// too, a judge chain of one reports in the second shape and its refusal began to
+/// arrive here looking like a turn. A side that reached no identity published a
+/// pointer at the record of the invocation that refused, which
+/// `tests/e2e/session.rs`'s
+/// `a_failed_run_still_names_the_conversation_the_side_that_ran_had` is the
+/// account of.
+///
+/// So the refusal is read off the result rather than off the report's shape: a
+/// candidate oneharness classified a failure for, and which did not run to
+/// [`RAN_TO_COMPLETION`], is the same fall-through it would have been under a
+/// chain. A *declared* rejection is deliberately not that — a `failure_kind`
+/// beside `status: ok` is a turn that ran, answered and was billed, and its
+/// transcript is exactly what an operator is owed. Neither half alone separates
+/// the two, which is why both are read.
+fn conversed(candidate: &onejudge::CandidateAttempt) -> bool {
+    candidate.ran && !(candidate.failure_kind.is_some() && candidate.status != RAN_TO_COMPLETION)
+}
+
 /// Where one invocation's conversation was written down, and how much of it
 /// there is.
 ///
 /// [`None`] for an invocation that names no history record: history was off for
 /// that side, or no candidate ran at all, and a pointer at a file nobody wrote is
 /// worse than the silence an operator can act on. The id comes from the candidate
-/// that **ran** — the others' records are attempts, and the artifact id names the
-/// record a consumer opens.
+/// that [`conversed`] — the others' records are attempts, and the artifact id
+/// names the record a consumer opens.
 ///
 /// The path is decomposed rather than published whole because the reader takes
 /// its three parts: oneharness stores a session at
@@ -801,7 +1127,7 @@ fn session_pointer(
     let ran = attribution
         .candidates
         .iter()
-        .find(|candidate| candidate.ran)?;
+        .find(|candidate| conversed(candidate))?;
     let history_id = ran.history_id.clone()?;
     let session = OneharnessSession {
         role: Role::from(attribution.role),
@@ -1030,6 +1356,96 @@ mod tests {
     use super::*;
     use crate::event::{Envelope, MAX_PAYLOAD_TEXT_BYTES};
     use onejudge::StreamEvent;
+
+    /// The instruction a journey writes to ask for the between-turns hold,
+    /// naming `gate`.
+    #[cfg(feature = "test-doubles")]
+    fn asking_for(gate: &Path) -> String {
+        format!(
+            "fake:should-fail {HOLD_BETWEEN_TURNS}{} do the work",
+            gate.display()
+        )
+    }
+
+    /// The gate a journey really names is accepted, and both paths the fixture
+    /// touches come back derived from it.
+    ///
+    /// The accepted shape is what every run of
+    /// `note::a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_its_role`
+    /// drives end to end: a file in the workspace that journey has already made.
+    /// What is pinned here is the pair, because the `.entered` sibling used to be
+    /// rebuilt where it was written and is now derived once, beside the gate.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn the_gate_a_journey_names_is_accepted_with_the_sibling_derived_beside_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gate = dir.path().join("between-turns");
+
+        let parsed = FixtureGate::parse(&asking_for(&gate)).expect("a gate a journey really names");
+
+        assert_eq!(parsed.gate, gate, "the gate is not the file the task named");
+        assert_eq!(
+            parsed.entered,
+            dir.path().join("between-turns.entered"),
+            "the sibling is not beside the gate"
+        );
+        // The marker is cut at whitespace, so the prose after it is not part of
+        // the path — the failure that would put " do the work" in a file name.
+        assert!(
+            !parsed.gate.to_string_lossy().contains(' '),
+            "the gate swallowed the prose after it: {parsed:?}"
+        );
+    }
+
+    /// A task naming no gate asks for no hold, which is every ordinary run.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn a_task_that_asks_for_no_hold_names_no_gate() {
+        assert_eq!(FixtureGate::parse("fake:complete-now: ordinary work"), None);
+    }
+
+    /// Each path this refuses, refused — and refused as *no hold* rather than as
+    /// a failure, because a fixture that failed runs over prose would break the
+    /// suite it exists to serve.
+    ///
+    /// A path assembled from text is text until something checks it, and every
+    /// case here is one this fixture would otherwise have written a file beside:
+    /// a relative gate resolves against the hosting process's directory rather
+    /// than the journey's workspace, and a `..` component walks out of it.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn a_gate_this_fixture_will_not_write_beside_is_refused_as_no_hold() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir
+            .path()
+            .ancestors()
+            .last()
+            .expect("every path has a root")
+            .to_path_buf();
+
+        for (why, gate) in [
+            // Relative: this runs on a thread of a process whose directory is
+            // deliberately not the journey's, so it would resolve elsewhere.
+            ("a relative path", PathBuf::from("between-turns")),
+            (
+                "a parent-directory component",
+                dir.path().join("..").join("between-turns"),
+            ),
+            // A root has no file name, so there is no sibling to write beside it.
+            ("no file name", root),
+            (
+                "a parent that does not exist",
+                dir.path().join("absent").join("between-turns"),
+            ),
+        ] {
+            assert_eq!(
+                FixtureGate::parse(&asking_for(&gate)),
+                None,
+                "{why} was accepted as a gate: {}",
+                gate.display()
+            );
+        }
+    }
 
     /// A sink a test can read its own events back out of.
     #[derive(Clone, Default)]
@@ -1601,6 +2017,66 @@ mod tests {
         }
     }
 
+    /// A single-candidate invocation whose one result is a **refusal** publishes
+    /// no pointer: that side reached no identity, whichever shape the report says
+    /// so in.
+    ///
+    /// This is the shape a controllable turn produces — one candidate and no
+    /// fallback block — so the refusal arrives as the *attributed* candidate
+    /// rather than as a `fell_through`, which is how a judge side that ran nothing
+    /// began publishing a conversation. Each classification a chain steps past is
+    /// driven, because the rule is about having been classified at all rather than
+    /// about which token it was.
+    #[test]
+    fn a_single_candidate_that_refused_the_turn_publishes_no_pointer() {
+        for failure_kind in ["quota", "auth", "rate_limit", "model_not_found"] {
+            let telemetry = one_attribution(json!({
+                "role": "judge", "turn_index": 1, "ran": "codex", "fell_through": [],
+                "candidates": [{"harness": "codex", "harness_id": "codex",
+                                "status": "nonzero", "available": true, "ran": true,
+                                "failure_kind": failure_kind, "exit_code": 1,
+                                "history_id": "01a00d0f"}],
+                "history_file": "/state/oneharness/history/p/s.jsonl",
+            }));
+            let (emitter, recorder) = recorded();
+            publish_attribution(&emitter, Some(&telemetry));
+            assert!(
+                recorder.events().is_empty(),
+                "a side that only refused published a conversation ({failure_kind}): {:?}",
+                recorder.events()
+            );
+        }
+    }
+
+    /// A rejection the harness **declared** in the record of a turn it ran still
+    /// publishes, which is the other half of the arm above.
+    ///
+    /// `status: ok` beside a `failure_kind` is billed work with a transcript — see
+    /// the `fake_harness` double's `FAKE_HARNESS_DECLARED_REJECTION` for what
+    /// writes one — and it is exactly the run an operator has to read back. So
+    /// neither half of the pair separates a refusal from a turn on its own: a
+    /// classification alone would withhold this pointer, and a non-`ok` status
+    /// alone would withhold a crash's.
+    #[test]
+    fn a_declared_rejection_still_publishes_the_turn_it_was_billed_for() {
+        let telemetry = one_attribution(json!({
+            "role": "agent", "turn_index": 1, "ran": "claude-code", "fell_through": [],
+            "candidates": [{"harness": "claude-code", "harness_id": "claude-code",
+                            "status": "ok", "available": true, "ran": true,
+                            "failure_kind": "rate_limit", "exit_code": 0,
+                            "history_id": "01a00d0f"}],
+            "history_file": "/state/oneharness/history/p/s.jsonl",
+        }));
+
+        let (emitter, recorder) = recorded();
+        publish_attribution(&emitter, Some(&telemetry));
+
+        let events = recorder.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::OneharnessSession);
+        assert_eq!(events[0].payload["history_id"], json!("01a00d0f"));
+    }
+
     /// A `history_file` that is not a path inside oneharness's own store
     /// publishes nothing — refused rather than tidied into three fields.
     ///
@@ -1758,6 +2234,7 @@ mod tests {
             ),
             &emitter,
             dir.path(),
+            None,
         );
 
         assert_eq!(
@@ -1808,6 +2285,7 @@ mod tests {
             ),
             &emitter,
             dir.path(),
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -1854,6 +2332,7 @@ mod tests {
             ),
             &emitter,
             dir.path(),
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -1887,6 +2366,7 @@ mod tests {
             })),
             &emitter,
             dir.path(),
+            None,
         );
         let Outcome::Died(death) = outcome else {
             panic!("a recordless failure settled: {outcome:?}");
@@ -1925,6 +2405,7 @@ mod tests {
             dir.path(),
             Instant::now(),
             &Arc::new(AtomicU64::new(0)),
+            None,
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");

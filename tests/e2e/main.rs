@@ -17,6 +17,26 @@ mod events;
 mod interrupt;
 mod library;
 mod liveness;
+// llmlint: ignore-block[e2e_not_mocked] the journeys are in tests/e2e/note.rs,
+// which carries this declaration itself on the terms all ten of its siblings do:
+// the paid harness process is the one double this suite sanctions, replaced at
+// oneharness's own `ONEHARNESS_BIN_<ID>` seam, and everything else in those
+// journeys is real. This line only names the module; it is here because a
+// declaration in the file that owns the journeys does not reach the line that
+// declares it.
+//
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] and the same
+// again for the same reason: `tests/e2e/note.rs` carries that declaration too,
+// on the terms all eleven journey files share — this crate has exactly one e2e
+// target (`[[test]] name = "e2e"` in Cargo.toml), so there is no narrower edge
+// for these to sit behind and no way to make one without splitting that target,
+// which is a change to how the whole suite is scheduled rather than anything
+// this line decides. These journeys cost what their siblings cost: each drives
+// one short run of the same doubled harness, and the whole file finishes in
+// under a second.
+mod note;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[e2e_not_mocked]
 mod origin;
 mod preturn;
 mod remote;

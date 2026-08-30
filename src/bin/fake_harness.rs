@@ -44,17 +44,20 @@
 //! | `fake:silent-reply` | take the turn, do the work, and report **no text** — a completed turn that said nothing, whose stdout is still full of wire framing |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
-//! | `fake:park` | *controlled turn only:* do nothing until an interrupt arrives |
+//! | `fake:park` | *agent's controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:entered=<path>` | write `<path>` the moment any turn begins |
-//! | `fake:started=<path>` | *controlled turn only:* write `<path>` the moment this turn begins |
-//! | `fake:did-work=<path>` | *controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
+//! | `fake:started=<path>` | *agent's controlled turn only:* write `<path>` the moment this turn begins |
+//! | `fake:did-work=<path>` | *agent's controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
 //! | `FAKE_HARNESS_FAIL_AFTER_MARKER` | let an `exec`-shaped provider run once, then crash later launches |
 //! | `FAKE_HARNESS_FAIL_ONCE_MARKER` | crash an `exec`-shaped provider once, then allow later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:work=<path>` | publish nothing and *consume CPU* until `<path>` exists, then take the turn |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
+//! | `fake:supervisor-hold=<path>` | *judge side only:* write `<path>.entered` as the supervisor's turn begins, then block until `<path>` exists |
+//! | `fake:next-turn=<path>` | *judge side only:* while `<path>` exists, continue the conversation with that file's contents as the next user turn, and consume it |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
+//! | `fake:record-supervisor-prompt=<path>` | *judge side only:* append the exact prompt the supervisor was given |
 //! | `fake:record-cwd=<path>` | append the directory this process was started in |
 //! | `fake:record-env=<path>` | append this process's selection-shaped environment |
 //! | `fake:record-argv=<path>` | append the argv this side was spawned with |
@@ -67,12 +70,20 @@
 //! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
 //! | `FAKE_HARNESS_IGNORE_TERM=1` | refuse `SIGTERM`, so only a `SIGKILL` stops this turn |
 //!
-//! The three marked *controlled turn only* answer nowhere else, and that is
-//! load-bearing rather than tidy: a judge side's prompt embeds the **transcript**,
-//! so every sentinel the operator's task carried arrives there a second time. A
-//! `fake:did-work` that fired on it would report work the agent never did, and a
-//! `fake:park` would stall the judge waiting for an interrupt only the agent side
-//! can be sent.
+//! The three marked *judge side only* are the mirror of that, and they exist for
+//! the mirror reason: a journey about the **judge's** live turn needs one it can
+//! observe and release, and every other lever here is either the agent's or fires
+//! on both sides. Which side an invocation is comes from the prompt's own framing
+//! ([`prompt_frames_the_supervisor`]), because there is no flag that says so.
+//!
+//! The three marked *agent's controlled turn only* answer nowhere else, and that
+//! is load-bearing rather than tidy: a judge side's prompt embeds the
+//! **transcript**, so every sentinel the operator's task carried arrives there a
+//! second time. A `fake:did-work` that fired on it would report work the agent
+//! never did, and a `fake:park` would stall the judge waiting for an interrupt
+//! only the agent side can be sent. Both of those happened on the onejudge 0.7.0
+//! bump, which asks for a controlled turn on **both** parties — see
+//! [`agents_controlled_turn`], which is the one place that question is asked.
 //!
 //! Keep it deterministic and dependency-free beyond what the crate already
 //! carries: it is spawned as a subprocess, many times per journey.
@@ -235,6 +246,59 @@ const MARK: &str = "fake:";
 /// the way the two dispositions below once were.
 fn steers(prompt: &str, sentinel: &str) -> bool {
     prompt.contains(&format!("{MARK}{sentinel}"))
+}
+
+/// The stable phrase onejudge opens its supervisor prompt with, and the only
+/// tell this double has for which side it is being asked as.
+///
+/// Its shape is the one `onejudge`'s own `SESSION_UNSUPPORTED_MARKER` and
+/// `CONTROL_REFUSED_MARKERS` have, for the same reason: an upstream message this
+/// process has to recognise and cannot be handed structurally. There is no flag
+/// — onejudge passes the agent side and the judge side the same argv shape and
+/// distinguishes them only by what it renders — so a rename upstream turns every
+/// judge-shaped answer below into an agent-shaped one. That is a loud failure
+/// rather than a quiet one: `tests/e2e/dispatch.rs` drives real two-party
+/// conversations that cannot complete if the judge side stops answering in the
+/// judge's shape.
+const SUPERVISOR_PROMPT_MARKER: &str = "completion supervisor";
+
+/// Whether this prompt carries the supervisor's framing — which is what the
+/// answers and the hold below branch on.
+///
+/// Named for what it reads rather than for what it concludes: it inspects prose,
+/// so a *task* quoting [`SUPERVISOR_PROMPT_MARKER`] would steer an agent-side
+/// turn down the judge's branch. That is a journey writing its own task badly
+/// rather than untrusted input — every prompt this double ever sees is composed
+/// by onejudge from a task the suite itself wrote — and it is why the phrase is
+/// distinctive prose rather than a bare word, on exactly the terms [`MARK`]
+/// records for the sentinels.
+///
+/// One definition, used by both the hold in [`turn`] and the answer in
+/// [`answer`], so a journey that holds the supervisor's turn is holding the same
+/// turn it then reads an answer off.
+fn prompt_frames_the_supervisor(prompt: &str) -> bool {
+    prompt.contains(SUPERVISOR_PROMPT_MARKER)
+}
+
+/// Whether this is the **agent's** controlled turn, which is what the three
+/// sentinels marked *agent's controlled turn only* answer on.
+///
+/// Having a control channel used to be the whole test, because `oneharness run
+/// --control` was asked for on the agent side alone. onejudge 0.7.0 asks for it
+/// on **both** parties — that is what lets a note reach a live supervisor turn —
+/// so a controlled turn is no longer by itself an agent turn, and the prompt's
+/// framing is what tells them apart.
+///
+/// Getting this wrong is not subtle, and it is the failure the table's note
+/// predicted before it happened: a judge side's prompt embeds the transcript, so
+/// every sentinel the operator's task carried arrives there a second time. On the
+/// 0.7.0 bump `fake:did-work` began firing on the judge side and reported work
+/// the agent never did, and `fake:park` stalled the judge for its whole
+/// [`PARK_FOR`] bound waiting for an interrupt only the agent side is ever sent.
+/// Two interrupt journeys failed that way, on an `interrupt` whose own behaviour
+/// had not changed at all.
+fn agents_controlled_turn(prompt: &str, interrupted: Option<&AtomicBool>) -> bool {
+    interrupted.is_some() && !prompt_frames_the_supervisor(prompt)
 }
 
 fn main() -> std::process::ExitCode {
@@ -454,6 +518,15 @@ fn main() -> std::process::ExitCode {
 /// harness on.
 fn recordings(prompt: &str, argv: &[String]) {
     record(prompt, "record-prompt", prompt);
+    // The judge's own recorder, and scoped to it for `supervisor-hold`'s reason:
+    // a judge side's prompt embeds the transcript, so a sentinel the operator's
+    // task carried reaches both sides and `record-prompt` alone cannot say which
+    // side wrote a line. A journey that needs the supervisor's own input reads
+    // this rather than keeping its own copy of [`SUPERVISOR_PROMPT_MARKER`] to
+    // sort one file by — which would be this marker with two sources.
+    if prompt_frames_the_supervisor(prompt) {
+        record(prompt, "record-supervisor-prompt", prompt);
+    }
     record(prompt, "record-env", &selection_environment());
     record(prompt, "record-argv", &argv.join(" "));
     // Where this process was *started*, which is the far end of `oneharness run
@@ -631,12 +704,28 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // Unlike `entered`, `started` proves the turn has an out-of-band control
     // channel. Windows has no Unix-domain turn-control socket, so journeys that
     // only need an in-flight turn use `entered` on every platform.
-    if interrupted.is_some() {
+    if agents_controlled_turn(prompt, interrupted) {
         if let Some(path) = sentinel_path(prompt, "started") {
             let _ = std::fs::write(path, "started");
         }
     }
     let stopped = || interrupted.is_some_and(|flag| flag.load(Ordering::SeqCst));
+    // The judge's own `hold`, and scoped to it: `hold` above fires on whichever
+    // side reads the sentinel, and a judge side's prompt embeds the transcript,
+    // so the operator's task carries every sentinel to both. A journey about the
+    // supervisor's *live* turn needs one only the supervisor takes, and needs to
+    // know it has begun — which is what the `.entered` sibling is, written before
+    // the wait for `entered`'s reason.
+    if let Some(path) = sentinel_path(prompt, "supervisor-hold") {
+        if prompt_frames_the_supervisor(prompt) {
+            let mut entered = path.clone().into_os_string();
+            entered.push(".entered");
+            let _ = std::fs::write(std::path::PathBuf::from(entered), "entered");
+            while !path.exists() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
     if let Some(path) = sentinel_path(prompt, "hold") {
         while !path.exists() && !stopped() {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -646,7 +735,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // endless for the reason `hang`'s tick is: reaching the bound *is* a journey
     // failing, and a double left parked forever would outlive the suite that
     // failed to interrupt it.
-    if interrupted.is_some() && steers(prompt, "park") {
+    if agents_controlled_turn(prompt, interrupted) && steers(prompt, "park") {
         let deadline = std::time::Instant::now() + PARK_FOR;
         while std::time::Instant::now() < deadline && !stopped() {
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -668,7 +757,7 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     }
     // Past the wait and past the abort, so this line is the proof that *this*
     // turn did its work — a turn an interrupt stopped never reaches it.
-    if interrupted.is_some() {
+    if agents_controlled_turn(prompt, interrupted) {
         record(prompt, "did-work", prompt);
     }
     // A tool transcript is a stream-json line and has nowhere to go in a single
@@ -911,7 +1000,7 @@ fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
 /// this cannot read it, which is a journey asserting against a turn it never
 /// configured. The caller refuses loudly rather than answering something else.
 fn answer(prompt: &str) -> Result<String, String> {
-    if prompt.contains("completion supervisor") {
+    if prompt_frames_the_supervisor(prompt) {
         // The two shapes are not symmetrical, and onejudge enforces that: a
         // completed response carries a `reason` and *no* `message`, because
         // there is no next turn for a message to be. A continuing one carries
@@ -923,6 +1012,24 @@ fn answer(prompt: &str) -> Result<String, String> {
                 "reason": "fake supervisor requires another turn",
             })
             .to_string());
+        }
+        // A continuation a journey **spells out** and gets exactly once: the file
+        // is the request and consuming it is the answer, so the conversation goes
+        // on for one more agent turn on the journey's own instruction and then
+        // decides as it otherwise would. A `should-fail` cannot do this — it is in
+        // the transcript for the rest of the run, so it continues forever — and a
+        // journey about the turn *after* the supervisor's needs to steer that one
+        // turn's instruction.
+        if let Some(path) = sentinel_path(prompt, "next-turn") {
+            if let Ok(message) = std::fs::read_to_string(&path) {
+                let _ = std::fs::remove_file(&path);
+                return Ok(json!({
+                    "completion": false,
+                    "message": message.trim(),
+                    "reason": "fake supervisor asked for the turn this journey spelled out",
+                })
+                .to_string());
+            }
         }
         return Ok(
             json!({"completion": true, "reason": "fake supervisor verified completion"})

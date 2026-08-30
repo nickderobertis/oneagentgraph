@@ -14,6 +14,11 @@
 //! * `control.v1.json` — the three shapes of `control.json`, the turn-control
 //!   record a run writes into a member's scratch and a *separate*
 //!   `oneagentgraph interrupt` process reads back, possibly from a later build.
+//!   It must keep reading for the same reason `record.v1.json` must: a run in
+//!   flight was written by the build before this one, and an `interrupt` against
+//!   it is the case the version range exists for.
+//! * `control.v2.json` — what this build writes, byte for byte: the same three
+//!   shapes, plus the note endpoint a two-party member's own thread binds.
 //! * `member-died.json` — the two shapes of the one *event* payload that
 //!   changed when onejudge became a library. It is not in `record.json`, but it
 //!   is in the `events.jsonl` a record points at, which outlives the run exactly
@@ -582,13 +587,46 @@ fn the_member_started_goldens_are_exactly_what_this_build_writes() {
     assert_eq!(read, golden_starts(), "the golden did not round-trip");
 }
 
-/// The three turn-control records this build writes, in the order the golden
-/// commits them: an address whose store the report named, one that left
+/// The four turn-control records this build writes, in the order the golden
+/// commits them: a two-party member's address and the note endpoint its own
+/// thread bound, an address whose store the report named, one that left
 /// oneharness's own default, and an ask that was refused.
+///
+/// The last three carry no endpoint on purpose: a member that bound none. A
+/// single-sided member is one — it has no second party for a note to be
+/// addressed away from — and so is a two-party member on a host that refused it
+/// the endpoint. What a consumer reads in `notes` is therefore whether this
+/// member ever had one, which is what a note is offered into: a member whose
+/// conversation is over still names its endpoint, because the refusal it
+/// recorded there is only reachable through it.
 fn golden_controls() -> Vec<ControlRecord> {
     let session = "node-scope-1786171301679-1447994-worker-skill".to_string();
     let cwd = std::path::PathBuf::from("/state/node-scope-1786171301679-1447994/members/worker");
+    // Spelled with the separator the golden commits rather than joined: a
+    // committed golden is one file read on every platform, and `Path::join`
+    // writes the *host's* separator — so a `cwd.join(NOTES_DIR)` here renders
+    // `…\notes` on Windows against a golden that says `…/notes`, which is the
+    // suite disagreeing about a path neither the record nor a consumer has any
+    // opinion about. `cwd` above is already spelled this way for the same
+    // reason; only the directory's name comes from the code, so a rename of it
+    // still fails this test.
+    let notes = std::path::PathBuf::from(format!(
+        "{}/{}",
+        cwd.display(),
+        oneagentgraph::note::NOTES_DIR
+    ));
     vec![
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session: session.clone(),
+                    session_dir: None,
+                    cwd: cwd.clone(),
+                },
+            },
+            notes: Some(notes),
+        },
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
             turn: Turn::Open {
@@ -598,6 +636,7 @@ fn golden_controls() -> Vec<ControlRecord> {
                     cwd: cwd.clone(),
                 },
             },
+            notes: None,
         },
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
@@ -608,6 +647,7 @@ fn golden_controls() -> Vec<ControlRecord> {
                     cwd,
                 },
             },
+            notes: None,
         },
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
@@ -616,11 +656,12 @@ fn golden_controls() -> Vec<ControlRecord> {
                          honored"
                     .into(),
             },
+            notes: None,
         },
     ]
 }
 
-/// `control.json`'s three shapes are byte-for-byte the committed golden.
+/// `control.json`'s four shapes are byte-for-byte the committed golden.
 ///
 /// It is a persisted contract like the record beside it: a run writes it and a
 /// *different* process — `oneagentgraph interrupt`, minutes or hours later, and
@@ -630,7 +671,7 @@ fn golden_controls() -> Vec<ControlRecord> {
 /// the same store and a written `null` would claim otherwise.
 #[test]
 fn the_control_goldens_are_exactly_what_this_build_writes() {
-    let golden = include_str!("golden/control.v1.json");
+    let golden = include_str!("golden/control.v2.json");
     let written = format!(
         "{}\n",
         serde_json::to_string_pretty(&golden_controls()).expect("the records serialize")
@@ -638,12 +679,40 @@ fn the_control_goldens_are_exactly_what_this_build_writes() {
     assert_eq!(
         written, golden,
         "control.json's shape changed. If that was deliberate, bump \
-         CONTROL_SCHEMA_VERSION and commit a new golden *beside* control.v1.json — a run in \
+         CONTROL_SCHEMA_VERSION and commit a new golden *beside* control.v2.json — a run in \
          flight was written by the build before this one."
     );
 
     let read: Vec<ControlRecord> = serde_json::from_str(golden).expect("the golden reads");
     assert_eq!(read, golden_controls(), "the golden did not round-trip");
+}
+
+/// The shape written before the note endpoint existed still reads, exactly as it
+/// was written.
+///
+/// This is the half the version *range* is for. A run started under the build
+/// before this one has a `control.json` with no `notes` key at all, and an
+/// `interrupt` against it — minutes or hours later, from this build — has to keep
+/// working. What it must read back as is a member that binds no note endpoint,
+/// so a note to it falls through to the lever it does have rather than being
+/// offered into a directory nothing is servicing.
+#[test]
+fn the_shape_written_before_the_note_endpoint_still_reads_as_a_member_that_binds_none() {
+    let read: Vec<ControlRecord> =
+        serde_json::from_str(include_str!("golden/control.v1.json")).expect("the v1 golden reads");
+    assert_eq!(read.len(), 3, "the v1 golden lost a record");
+    for record in &read {
+        assert_eq!(record.schema_version, 1, "a v1 record changed version");
+        assert_eq!(
+            record.notes, None,
+            "a record written before the endpoint existed claimed one"
+        );
+    }
+    assert!(
+        matches!(&read[2].turn, Turn::Unavailable { reason } if reason.contains("qwen")),
+        "the v1 refusal did not survive the trip: {:?}",
+        read[2].turn
+    );
 }
 
 /// The three fields only a child process has are omitted when it had none, and

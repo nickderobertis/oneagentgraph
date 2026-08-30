@@ -22,6 +22,7 @@ Rules that hold as this grows:
 | `invoke` | one member's launch, its generated configs, and the model pairing rule |
 | `member` | a single-sided member's child process: its stream, its watchdogs, its death |
 | `judge` | a two-party member, driven through onejudge's library in this process |
+| `control` / `note` | where an in-flight turn is addressed, and the transport that carries a role-addressed note into the conversation's own inbox |
 | `run` | dependency order, cron members, the merged stream, the exit code |
 | `scratch` | `owner.lock` ownership, proven descendant reaping |
 | `event` / `render` | the wire envelope, the shared filter over it (`docs/event-filter-notes.md`), and the text rendering of the same events |
@@ -70,6 +71,15 @@ version lives at the top of the `justfile`. `onejudge` has no entry: it is a
 cargo dependency from crates.io, pinned by `Cargo.lock`, so there is nothing to
 install and nothing on `PATH` to shadow it.
 
+**A *newer* `oneharness` on `PATH` wins over that pin, and nothing says so.**
+`tests/e2e/support.rs` selects on capability — the first candidate that answers
+`interrupt --help` — which is the right rule for what it was written against, an
+*older* CLI shadowing the pinned install, and the wrong one for a newer CLI that
+carries the contract too: the journeys then drive an `oneharness` CI never runs,
+and a difference in what it reports reads as a green `check` against a red gate.
+`ONEAGENTGRAPH_TEST_ONEHARNESS` is the one input that overrides the search, so
+point it at `$CARGO_HOME/bin/oneharness` to reproduce a gate failure locally.
+
 **`scratch` is the one module a Linux `check` never compiles all of.** Its
 `cfg(windows)` half is the whole liveness layer again in job objects, and the
 first thing that reads a line of it is `cross (windows-latest)` — a required
@@ -94,6 +104,54 @@ harness and the judge's land in the same group. `Group::prepare` and
 after-the-process moments the two platforms need, and `Group::spawn` is the same
 pair for the commands this crate does spawn. Never reach for a shim binary that
 re-spawns itself into the job, or a local copy of onejudge's `execute`.
+
+**A note is routed by the conversation, not here.** `control::interrupt`
+addresses the agent side and nothing else, so a note sent that way reaches the
+worker and never the judge. `control::note` hands the note to the member, and
+`judge::run` gives the engine the inbox end of an `onejudge::note::Notes`
+channel through `Plan::with_notes`: only the engine knows which side is live. Do
+not re-derive that decision here. `interrupt` stays the lever for a member with
+no conversation at all.
+
+**`provider.control: true` asks for a controllable turn on *both* parties.** One
+flag, since onejudge 0.7.0 — and `oneharness run --control` takes a chain of
+exactly one candidate, so a one-candidate judge chain reports with no fallback
+block at all. A refusal there is then the candidate the invocation is
+*attributed to* rather than a `fell_through`, which is not a side that ran:
+`judge::conversed` is where the two are read back apart, and the fake harness's
+`agents_controlled_turn` is where the sentinels stop firing on the wrong side.
+
+**`crate::note` re-exports onejudge's shapes; it does not declare them.**
+`Addressee`, `Note`, `Accepted` and `Undelivered` live in `onejudge::note`, which
+is where the approved contract puts them. A second declaration drifts, and a note
+that satisfies the copy is still refused by the conversation it was written for.
+The `onejudge` floor in `Cargo.toml` is the compile floor for that module.
+
+**The transport is this crate's, and the courier gets its own thread.** A note is
+offered by a different process, so it arrives through a `Spool` in the member's
+scratch and a `Courier` carries it into `Notes::send`. Never service that spool
+from the supervision loop: `send` blocks until the conversation disposes of the
+note — for the supervisor, until its re-taken decision returns — which would put
+a judge invocation between two heartbeats. `Ending::end` records the terminal
+refusal so a later note is refused rather than spooled to nobody.
+
+**`judge`'s `hold_between_turns` is a fixture, not a second fake seam.** It
+pauses real code at the one conversation boundary nothing outside the process can
+hold — a harness runs inside a turn, so it cannot hold the gap between two. A
+journey asks for it with a marker in the *conversation's own task text*, which is
+the lever every other steer of a conversation already uses, and it is compiled
+only under `test-doubles`. Reach for it nowhere else.
+
+**The spool mirrors `Accepted`/`Undelivered`, which are not `Serialize`.** Map
+every variant in both directions so one added upstream fails this build instead
+of vanishing in transit. It is a wire format, not a second contract.
+
+**The endpoint is a spool directory, not a socket.** The approved contract says
+socket; a member of this crate runs on Windows too, where a unix domain socket is
+already why `control` reports *no controllable turn*, and a note seam that existed
+on one platform only would be a delivery an operator could not rely on. What a
+consumer sees is unchanged — `control.json` names the endpoint by path, and the
+two ends meet nowhere else.
 
 ## Two things that bite
 
