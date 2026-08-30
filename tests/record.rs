@@ -646,7 +646,7 @@ fn golden_controls() -> Vec<ControlRecord> {
     ]
 }
 
-/// `control.json`'s three shapes are byte-for-byte the committed golden.
+/// `control.json`'s four shapes are byte-for-byte the committed golden.
 ///
 /// It is a persisted contract like the record beside it: a run writes it and a
 /// *different* process — `oneagentgraph interrupt`, minutes or hours later, and
