@@ -340,9 +340,12 @@ pub use crate::note::{Accepted, Addressee, Note, NoteDelivery, Undelivered};
 ///
 /// # Errors
 ///
-/// [`Error::InvalidConfig`] when there is no such run, or when `member` is not
-/// one of its members — the two cases that are a bad ask rather than an answer
-/// about the note.
+/// [`Error::InvalidConfig`] when there is no such run, when `member` is not one
+/// of its members, or when the note has no text — the three cases that are a bad
+/// ask rather than an answer about the note. The text is checked here as well as
+/// in [`crate::note::submit`] because [`Note`]'s fields are public and one
+/// arrives deserialized as often as it arrives from [`Note::new`]; see
+/// [`Note::check`].
 pub fn note(
     state_dir: &Path,
     run_id: &RunId,
@@ -350,6 +353,7 @@ pub fn note(
     note: &Note,
     oneharness_bin: &str,
 ) -> Result<NoteDelivery, Error> {
+    note.check()?;
     let record = crate::history::show(state_dir, run_id.as_str())?;
     record.require_member(member.as_str())?;
     // Derived from the run's *id*, exactly as [`interrupt`] derives it and for

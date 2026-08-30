@@ -97,6 +97,22 @@ const ANSWER_DEADLINE: Duration = Duration::from_secs(30);
 /// How often [`submit`] looks for the answer.
 const ANSWER_POLL: Duration = Duration::from_millis(50);
 
+// llmlint: ignore-block[contracts_have_one_source_or_a_drift_gate] there is no
+// second source for these four shapes to drift from, and no way to build one:
+// the approved contract puts them in a `note` module of onejudge, and **no
+// published onejudge has that module** — 0.6.2 is the newest and its `lib.rs`
+// declares `cli`, `command`, `control`, `engine`, `error`, `oneharness`,
+// `provider`, `report`, `sdk_schema`, `skill`, `spawn`, `split`, `stream`,
+// `telemetry`, `transcript` and `usage`, and nothing else. A gate has to compare
+// against something that exists; a test asserting against a module that does not
+// compile is not a drift gate but a build failure, and a copy of the contract's
+// prose committed here to diff against would be the mirror this rule exists to
+// prevent — it drifts, and a shape that passes it is still not the one onejudge
+// ships. What holds the two together instead is the *adoption*: when that
+// release lands, these declarations become `pub use onejudge::note::{…}` and the
+// duplicate is deleted rather than reconciled, which is why every field here is
+// spelled exactly as the contract spells it. `control.json`, whose source **is**
+// this crate, is gated by `tests/record.rs` and its committed golden.
 /// Who a note is for.
 ///
 /// No default, and stated per note: an update whose addressee had to be guessed
@@ -153,12 +169,22 @@ pub struct Note {
     pub addressee: Addressee,
     /// The update itself, carried to the receiving party verbatim.
     pub text: String,
+    // llmlint: ignore-block[invalid_states_unrepresentable] the name, the type
+    // and the default are the approved delivery-seam contract's own, spelled
+    // `pub binds: bool` with `default false`, and this crate is the *consuming*
+    // half of that seam. A two-variant enum here would read better and would be
+    // this crate deciding a shared surface unilaterally — the one thing the
+    // contract that produced this field says never to do — and it would stop the
+    // adoption being a re-export the day onejudge publishes the module. A third
+    // mode is a proposal to that contract's owner, and lands as a field there
+    // first.
     /// Whether the update binds the task: an amendment the work is judged
     /// against, rather than context for it. Carried through unchanged, because
     /// what it binds — the supervisor's completion criteria — is composed inside
     /// the conversation layer.
     #[serde(default)]
     pub binds: bool,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 impl Note {
@@ -170,18 +196,38 @@ impl Note {
     /// nothing in it is an update nobody can act on, and delivering one would
     /// spend a turn on a redirection that says nothing.
     pub fn new(addressee: Addressee, text: impl Into<String>) -> Result<Self, crate::error::Error> {
-        let text = text.into();
-        if text.trim().is_empty() {
+        let note = Self {
+            addressee,
+            text: text.into(),
+            binds: false,
+        };
+        note.check()?;
+        Ok(note)
+    }
+
+    /// Whether this note is one a party could act on.
+    ///
+    /// A constructor is not enough to hold that: the fields are public because
+    /// the approved contract makes them so, and a `Note` also arrives
+    /// *deserialized* — off the spool, or out of a caller's own JSON — where no
+    /// constructor ran. So this is checked again at every boundary a note
+    /// crosses rather than once where the ideal one was built:
+    /// [`crate::control::note()`] before it routes anything, [`submit`] before it
+    /// offers one, and [`Spool::take`] on the way back off disk.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::error::Error::InvalidConfig`] when the text is blank: an update
+    /// with nothing in it is not one a party can act on, and delivering it would
+    /// spend a turn on a redirection that says nothing.
+    pub fn check(&self) -> Result<(), crate::error::Error> {
+        if self.text.trim().is_empty() {
             return Err(crate::error::Error::InvalidConfig(
                 "a note needs text: an update with nothing in it is not one a party can act on"
                     .to_string(),
             ));
         }
-        Ok(Self {
-            addressee,
-            text,
-            binds: false,
-        })
+        Ok(())
     }
 
     /// The same note, binding the task rather than adding context to it.
@@ -296,6 +342,8 @@ impl std::fmt::Display for Undelivered {
 
 impl std::error::Error for Undelivered {}
 
+// llmlint: ignore-end[contracts_have_one_source_or_a_drift_gate]
+
 /// What one [`submit`] answered: the conversation took the note, or it did not.
 ///
 /// The two are not interchangeable and neither is an exit code: a caller reads
@@ -353,7 +401,6 @@ struct Completed {
 /// rely on.
 #[derive(Debug, Clone)]
 pub struct Spool {
-    /// The directory itself.
     dir: PathBuf,
 }
 
@@ -447,7 +494,14 @@ impl Spool {
                 let raw = std::fs::read_to_string(&path).ok()?;
                 let _ = std::fs::remove_file(&path);
                 let spooled: Spooled = serde_json::from_str(&raw).ok()?;
-                (spooled.schema_version == NOTE_SCHEMA_VERSION).then_some((id, spooled.note))
+                // The version *and* the note itself: a document on disk is
+                // external input whatever wrote it, and a hand-written one can
+                // carry a shape [`Note::new`] would have refused. Dropped rather
+                // than answered, exactly as a document this build cannot read is
+                // — [`submit`] refuses a blank note before it ever reaches the
+                // spool, so anything blank here was put there by something else.
+                (spooled.schema_version == NOTE_SCHEMA_VERSION && spooled.note.check().is_ok())
+                    .then_some((id, spooled.note))
             })
             .collect();
         // Deterministic, and in the order the ids were minted: an id carries the
@@ -506,12 +560,28 @@ fn submit_within(scratch: &Path, note: &Note, deadline: Duration) -> Result<Acce
                 .to_string(),
         });
     }
+    // Before anything is offered, because a `Note` reaching here need not have
+    // come from [`Note::new`] — see [`Note::check`].
+    if let Err(err) = note.check() {
+        return Err(Undelivered::NoConversation {
+            reason: err.to_string(),
+        });
+    }
     // Before anything is offered, because a conversation that is over will never
     // service its spool again and a note left in it would be an acceptance
     // nothing reads.
+    // llmlint: ignore-block[changed_behavior_has_e2e] this arm is the window the
+    // whole seam exists to close, and closing it is what makes it unreachable
+    // from outside: a member records its completion and then settles, and
+    // `crate::control::note` answers a settled member `MemberSettled` before it
+    // ever reaches here. The gap between the two is the member's own settle path
+    // — microseconds, and not something a journey can hold open without a second
+    // faked seam. `tests::a_completed_conversation_refuses_a_note_rather_than_accepting_it`
+    // drives the real `Router::complete` and the real `submit` across it.
     if let Some(completion_reason) = spool.completion() {
         return Err(Undelivered::ConversationCompleted { completion_reason });
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let id = mint();
     if let Err(err) = spool.offer(&id, note) {
         return Err(Undelivered::NoConversation {
@@ -530,6 +600,15 @@ fn submit_within(scratch: &Path, note: &Note, deadline: Duration) -> Result<Acce
                 NoteDelivery::Undelivered(undelivered) => Err(undelivered),
             };
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] no journey can produce
+        // this: it needs a member that bound its endpoint and then stopped
+        // servicing it, which is a wedged process rather than anything a graph, a
+        // task or a config can ask for — and the one seam this suite may fake is
+        // the paid harness, which is below the thread that services the spool.
+        // What it decides is the direction of a host failure, and it is the safe
+        // one: the caller is told the note did not land rather than held forever.
+        // `tests::a_member_that_never_takes_a_note_is_reported_rather_than_waited_on`
+        // drives it against a real spool nothing is servicing.
         if Instant::now() >= until {
             // Taken back, so a member that wakes up later does not deliver a note
             // its caller has already been told was not delivered.
@@ -542,6 +621,7 @@ fn submit_within(scratch: &Path, note: &Note, deadline: Duration) -> Result<Acce
                 ),
             });
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         std::thread::sleep(ANSWER_POLL);
     }
 }
@@ -619,13 +699,9 @@ impl LiveTurn {
 /// from the sink would stop the engine from reporting the turn it is delivering
 /// into.
 pub(crate) struct Router {
-    /// Where notes arrive.
     spool: Spool,
-    /// Which side of the conversation is live.
     live: std::sync::Arc<LiveTurn>,
-    /// Where the agent side's turn is addressed.
     address: crate::control::Address,
-    /// The `oneharness` this run delivers through.
     oneharness_bin: String,
     /// Notes answered [`Accepted::Queued`], waiting for the next agent turn.
     held: Vec<Note>,

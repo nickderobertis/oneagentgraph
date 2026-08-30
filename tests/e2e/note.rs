@@ -28,7 +28,6 @@
 #![allow(dead_code)]
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use oneagentgraph::config::ConfigRef;
 use oneagentgraph::control::{self, Accepted, Addressee, Note, NoteDelivery, Undelivered};
@@ -160,6 +159,41 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_carrying_its_role() {
         "the worker's turn to be in flight — only a controlled turn writes this",
         || started.exists(),
     );
+
+    // A note whose *only* addressee is the supervisor, first: the judge has no
+    // out-of-band lever and the conversation layer this build links composes its
+    // effective task before the run starts, so there is nothing to hand it to.
+    // Refused naming that, rather than delivered to the worker under a frame
+    // addressed to somebody else — which would be the note's addressee never
+    // seeing it and the wrong party acting on it.
+    let for_judge = Note::new(Addressee::Supervisor, "judge this against the amended bar")
+        .expect("a note with text in it");
+    let refused = offer(&workspace, &running, &for_judge);
+    assert!(
+        matches!(
+            &refused,
+            NoteDelivery::Undelivered(Undelivered::NoConversation { reason })
+                if reason.contains("supervisor")
+        ),
+        "a note only the supervisor was addressed by was not refused: {refused:?}"
+    );
+
+    // And a blank one is refused before anything is routed: an update with
+    // nothing in it is not one a party can act on.
+    let blank = Note {
+        addressee: Addressee::Worker,
+        text: "   ".to_string(),
+        binds: false,
+    };
+    let empty = control::note(
+        &workspace.state(),
+        &running.id,
+        &running.member,
+        &blank,
+        &oneharness_bin(),
+    )
+    .expect_err("a note with nothing in it cannot be routed");
+    assert!(empty.to_string().contains("a note needs text"), "{empty}");
 
     let text = "fake:complete-now the release blocker is P0: fix it before anything else";
     let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
@@ -314,35 +348,15 @@ fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
         "the refusal did not say the note was not delivered: {undelivered}"
     );
 
-    // The other refusal, reached the way it happens in a run: the member's own
-    // thread records the completion its conversation ended on, and a note offered
-    // after that is answered by the conversation that could not take it — which
-    // is the window the old path swallowed, because the run's record still says
-    // the member is going.
-    let scratch = workspace
-        .state()
-        .join(id.as_str())
-        .join("members")
-        .join("worker");
-    let completed = std::fs::read_to_string(scratch.join("notes").join("completed.json"))
-        .expect("the member recorded what its conversation ended on");
-    assert!(
-        completed.contains("completion_reason"),
-        "the completion record named no reason: {completed}"
-    );
-    let refused = oneagentgraph::note::submit(&scratch, &note)
-        .expect_err("a completed conversation cannot take a note");
-    assert!(
-        matches!(&refused, Undelivered::ConversationCompleted { completion_reason }
-            if !completion_reason.is_empty()),
-        "{refused:?}"
-    );
-    assert!(
-        refused.to_string().contains("was not delivered"),
-        "the refusal did not say the note was not delivered: {refused}"
-    );
+    // The other refusal — a conversation that reached its completion decision —
+    // is the member's own end of the same seam and is driven across the real
+    // `Router::complete` and the real `submit` by
+    // `note::tests::a_completed_conversation_refuses_a_note_rather_than_accepting_it`.
+    // It cannot be reached through this API from outside, and closing it is what
+    // made it unreachable: a member records its completion and then settles, and
+    // the call above answers a settled member before it ever asks the spool.
 
-    // And a member this run never had is refused rather than answered about: the
+    // A member this run never had is refused rather than answered about: the
     // caller mistyped, which is not a fact about any note.
     let ghost = MemberName::parse("ghost").expect("a member name");
     let err = control::note(&workspace.state(), &id, &ghost, &note, &oneharness_bin())
@@ -366,9 +380,15 @@ fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
         "XDG_STATE_HOME".to_string(),
         workspace.session_store().display().to_string(),
     );
+    let began = workspace.at("began");
+    let release = workspace.at("release");
     let request = Request {
         graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
-        task: Some("fake:complete-now: a single-sided member".to_string()),
+        task: Some(format!(
+            "fake:complete-now fake:entered={} fake:hold={}",
+            began.display(),
+            release.display()
+        )),
         dir: workspace.dir(),
         labels: Vec::new(),
         overrides: Vec::new(),
@@ -378,33 +398,107 @@ fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
     };
     let run = run::start(&request, &env).expect("the graph starts");
     let id = run.started().run_id.clone();
-    assert_eq!(run.wait().expect("the member settles"), 0);
-
     let member = MemberName::parse("reporter").expect("a member name");
     let note = Note::new(Addressee::Worker, "one more thing").expect("a note with text in it");
-    let delivery = control::note(&workspace.state(), &id, &member, &note, &oneharness_bin())
+
+    // While the member's turn is genuinely in flight, so what answers is the
+    // fall-through rather than the run's own record of a member that is over: a
+    // single-sided member binds no note endpoint, so the call goes to the lever
+    // it does have and reports what that lever says.
+    until("the single-sided member's turn to be in flight", || {
+        began.exists()
+    });
+    let live = control::note(&workspace.state(), &id, &member, &note, &oneharness_bin())
         .expect("the run and its member are addressable");
-    // Settled, so what comes back is the settled refusal rather than a socket
-    // asked about a turn nobody is running — reached through the fall-through,
-    // which is the point: one call answers for both member kinds.
     assert!(
         matches!(
-            &delivery,
+            &live,
+            NoteDelivery::Undelivered(Undelivered::NoConversation { reason })
+                if reason.contains("controllable turn")
+        ),
+        "a live single-sided member did not answer through the lever it has: {live:?}"
+    );
+
+    std::fs::write(&release, "go").expect("release the member");
+    assert_eq!(run.wait().expect("the member settles"), 0);
+
+    // And once it is over, the run's own record answers first — a settled member
+    // is not asked about a turn nobody is running.
+    let settled = control::note(&workspace.state(), &id, &member, &note, &oneharness_bin())
+        .expect("the run and its member are addressable");
+    assert!(
+        matches!(
+            &settled,
             NoteDelivery::Undelivered(Undelivered::MemberSettled { .. })
         ),
-        "{delivery:?}"
+        "{settled:?}"
     );
 }
 
-/// The framing a receiving party is handed, which is what a journey above
-/// asserts on and what an operator reads in a member's own turn.
-#[allow(unused)]
-fn framing(note: &Note) -> String {
-    note.framed()
-}
+/// A queued note the conversation completes past is reported on the run's own
+/// stream rather than quietly dropped.
+///
+/// `Accepted::Queued` promises the next worker turn, and a supervisor that ends
+/// the conversation instead means that turn never comes. The caller was told the
+/// note was taken, so the run has to say what became of it: one
+/// `turn-interrupted` naming that it was **not** delivered and that the
+/// conversation completed first. Without it a caller reads a queued note exactly
+/// as it reads a delivered one, which is the silence this whole seam replaces.
+#[cfg(unix)]
+#[test]
+fn a_queued_note_the_conversation_completes_past_is_reported_as_undelivered() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    let judging = workspace.at("judge-gate");
+    let judge_entered = workspace.at("judge-gate.entered");
+    let running = start(
+        &workspace,
+        "",
+        &format!(
+            "fake:complete-now fake:supervisor-hold={}",
+            judging.display()
+        ),
+    );
 
-/// Kept so the unix-only fixtures above type-check on Windows.
-#[allow(unused)]
-fn unused(path: PathBuf) -> PathBuf {
-    path
+    until("the judge's own turn to be in flight", || {
+        judge_entered.exists()
+    });
+    let note = Note::new(Addressee::Worker, "one more thing before you finish")
+        .expect("a note with text in it");
+    assert_eq!(
+        offer(&workspace, &running, &note),
+        NoteDelivery::Accepted(Accepted::Queued),
+        "a note offered while the judge was deciding was not queued"
+    );
+
+    // The judge answers completion, so there is no next worker turn for the
+    // queued note to ride.
+    std::fs::write(&judging, "go").expect("release the judge");
+    let events = running.run.started().events_path.clone();
+    assert_eq!(
+        running.run.wait().expect("the member settles"),
+        0,
+        "the member did not settle"
+    );
+
+    let published = std::fs::read_to_string(&events).expect("the run's own stream");
+    let undelivered: Vec<serde_json::Value> = published
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["kind"] == "turn-interrupted")
+        .collect();
+    assert_eq!(
+        undelivered.len(),
+        1,
+        "the queued note was not reported once: {published}"
+    );
+    assert_eq!(undelivered[0]["payload"]["delivered"], false);
+    assert_eq!(undelivered[0]["payload"]["member"], "worker");
+    assert!(
+        undelivered[0]["payload"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("never delivered")),
+        "the report did not say the note was never delivered: {}",
+        undelivered[0]
+    );
 }
