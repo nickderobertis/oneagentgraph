@@ -71,6 +71,15 @@ version lives at the top of the `justfile`. `onejudge` has no entry: it is a
 cargo dependency from crates.io, pinned by `Cargo.lock`, so there is nothing to
 install and nothing on `PATH` to shadow it.
 
+**A *newer* `oneharness` on `PATH` wins over that pin, and nothing says so.**
+`tests/e2e/support.rs` selects on capability — the first candidate that answers
+`interrupt --help` — which is the right rule for what it was written against, an
+*older* CLI shadowing the pinned install, and the wrong one for a newer CLI that
+carries the contract too: the journeys then drive an `oneharness` CI never runs,
+and a difference in what it reports reads as a green `check` against a red gate.
+`ONEAGENTGRAPH_TEST_ONEHARNESS` is the one input that overrides the search, so
+point it at `$CARGO_HOME/bin/oneharness` to reproduce a gate failure locally.
+
 **`scratch` is the one module a Linux `check` never compiles all of.** Its
 `cfg(windows)` half is the whole liveness layer again in job objects, and the
 first thing that reads a line of it is `cross (windows-latest)` — a required
@@ -103,6 +112,14 @@ worker and never the judge. `control::note` hands the note to the member, and
 channel through `Plan::with_notes`: only the engine knows which side is live. Do
 not re-derive that decision here. `interrupt` stays the lever for a member with
 no conversation at all.
+
+**`provider.control: true` asks for a controllable turn on *both* parties.** One
+flag, since onejudge 0.7.0 — and `oneharness run --control` takes a chain of
+exactly one candidate, so a one-candidate judge chain reports with no fallback
+block at all. A refusal there is then the candidate the invocation is
+*attributed to* rather than a `fell_through`, which is not a side that ran:
+`judge::conversed` is where the two are read back apart, and the fake harness's
+`agents_controlled_turn` is where the sentinels stop firing on the wrong side.
 
 **`crate::note` re-exports onejudge's shapes; it does not declare them.**
 `Addressee`, `Note`, `Accepted` and `Undelivered` live in `onejudge::note`, which

@@ -1063,14 +1063,46 @@ fn publish_attribution(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry
     }
 }
 
+/// oneharness's status token for a candidate whose process ran the turn to a
+/// finish, which is the only one of the seven that carries a conversation *and*
+/// the one a declared rejection still reports.
+const RAN_TO_COMPLETION: &str = "ok";
+
+/// Whether this candidate is the one that had the side's conversation — which is
+/// not always the one oneharness attributed the invocation to.
+///
+/// oneharness reports a fallback chain and a single-candidate run in two shapes,
+/// and a refusal reads differently in each: under a chain it is a `fell_through`
+/// and the attribution names no runner at all, while with no chain there is one
+/// result, so the attribution names it — **including when that result is the
+/// refusal**. `oneharness run --control` takes a chain of exactly one candidate,
+/// so from onejudge 0.7.0, which asks for a controllable turn on the *judge* side
+/// too, a judge chain of one reports in the second shape and its refusal began to
+/// arrive here looking like a turn. A side that reached no identity published a
+/// pointer at the record of the invocation that refused, which
+/// `tests/e2e/session.rs`'s
+/// `a_failed_run_still_names_the_conversation_the_side_that_ran_had` is the
+/// account of.
+///
+/// So the refusal is read off the result rather than off the report's shape: a
+/// candidate oneharness classified a failure for, and which did not run to
+/// [`RAN_TO_COMPLETION`], is the same fall-through it would have been under a
+/// chain. A *declared* rejection is deliberately not that — a `failure_kind`
+/// beside `status: ok` is a turn that ran, answered and was billed, and its
+/// transcript is exactly what an operator is owed. Neither half alone separates
+/// the two, which is why both are read.
+fn conversed(candidate: &onejudge::CandidateAttempt) -> bool {
+    candidate.ran && !(candidate.failure_kind.is_some() && candidate.status != RAN_TO_COMPLETION)
+}
+
 /// Where one invocation's conversation was written down, and how much of it
 /// there is.
 ///
 /// [`None`] for an invocation that names no history record: history was off for
 /// that side, or no candidate ran at all, and a pointer at a file nobody wrote is
 /// worse than the silence an operator can act on. The id comes from the candidate
-/// that **ran** — the others' records are attempts, and the artifact id names the
-/// record a consumer opens.
+/// that [`conversed`] — the others' records are attempts, and the artifact id
+/// names the record a consumer opens.
 ///
 /// The path is decomposed rather than published whole because the reader takes
 /// its three parts: oneharness stores a session at
@@ -1095,7 +1127,7 @@ fn session_pointer(
     let ran = attribution
         .candidates
         .iter()
-        .find(|candidate| candidate.ran)?;
+        .find(|candidate| conversed(candidate))?;
     let history_id = ran.history_id.clone()?;
     let session = OneharnessSession {
         role: Role::from(attribution.role),
@@ -1983,6 +2015,66 @@ mod tests {
                 recorder.events()
             );
         }
+    }
+
+    /// A single-candidate invocation whose one result is a **refusal** publishes
+    /// no pointer: that side reached no identity, whichever shape the report says
+    /// so in.
+    ///
+    /// This is the shape a controllable turn produces — one candidate and no
+    /// fallback block — so the refusal arrives as the *attributed* candidate
+    /// rather than as a `fell_through`, which is how a judge side that ran nothing
+    /// began publishing a conversation. Each classification a chain steps past is
+    /// driven, because the rule is about having been classified at all rather than
+    /// about which token it was.
+    #[test]
+    fn a_single_candidate_that_refused_the_turn_publishes_no_pointer() {
+        for failure_kind in ["quota", "auth", "rate_limit", "model_not_found"] {
+            let telemetry = one_attribution(json!({
+                "role": "judge", "turn_index": 1, "ran": "codex", "fell_through": [],
+                "candidates": [{"harness": "codex", "harness_id": "codex",
+                                "status": "nonzero", "available": true, "ran": true,
+                                "failure_kind": failure_kind, "exit_code": 1,
+                                "history_id": "01a00d0f"}],
+                "history_file": "/state/oneharness/history/p/s.jsonl",
+            }));
+            let (emitter, recorder) = recorded();
+            publish_attribution(&emitter, Some(&telemetry));
+            assert!(
+                recorder.events().is_empty(),
+                "a side that only refused published a conversation ({failure_kind}): {:?}",
+                recorder.events()
+            );
+        }
+    }
+
+    /// A rejection the harness **declared** in the record of a turn it ran still
+    /// publishes, which is the other half of the arm above.
+    ///
+    /// `status: ok` beside a `failure_kind` is billed work with a transcript — see
+    /// the `fake_harness` double's `FAKE_HARNESS_DECLARED_REJECTION` for what
+    /// writes one — and it is exactly the run an operator has to read back. So
+    /// neither half of the pair separates a refusal from a turn on its own: a
+    /// classification alone would withhold this pointer, and a non-`ok` status
+    /// alone would withhold a crash's.
+    #[test]
+    fn a_declared_rejection_still_publishes_the_turn_it_was_billed_for() {
+        let telemetry = one_attribution(json!({
+            "role": "agent", "turn_index": 1, "ran": "claude-code", "fell_through": [],
+            "candidates": [{"harness": "claude-code", "harness_id": "claude-code",
+                            "status": "ok", "available": true, "ran": true,
+                            "failure_kind": "rate_limit", "exit_code": 0,
+                            "history_id": "01a00d0f"}],
+            "history_file": "/state/oneharness/history/p/s.jsonl",
+        }));
+
+        let (emitter, recorder) = recorded();
+        publish_attribution(&emitter, Some(&telemetry));
+
+        let events = recorder.events();
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0].kind, EventKind::OneharnessSession);
+        assert_eq!(events[0].payload["history_id"], json!("01a00d0f"));
     }
 
     /// A `history_file` that is not a path inside oneharness's own store
