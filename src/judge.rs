@@ -191,15 +191,14 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
 
-    // Shared with the courier below: what a caller hands this graph to deliver is
-    // written down there and recognised here, so the turn that receives it is
-    // published as a delivery rather than as the supervising side's own words.
-    let handed = crate::note::Handed::default();
-
     let engine = {
         let (emitter, activity, abort) =
             (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
-        let handed = handed.clone();
+        // The conversation's own delivery record, read as each turn is
+        // announced, so the turn that received a caller's note is published as
+        // a delivery rather than as the supervising side's own words — see
+        // [`crate::note::Deliveries`].
+        let mut deliveries = crate::note::Deliveries::of(notes.as_ref());
         // The gate this run's task asked for, if it asked for one — see
         // [`hold_between_turns`], which is compiled only for the suite.
         #[cfg(feature = "test-doubles")]
@@ -213,7 +212,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         std::thread::Builder::new().spawn(move || {
             let mut sink = move |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
-                ingest(observation, &emitter, &handed);
+                ingest(observation, &emitter, &mut deliveries);
                 #[cfg(feature = "test-doubles")]
                 hold_between_turns(observation, &mut gate);
                 if abort.load(Ordering::SeqCst) {
@@ -259,7 +258,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // that carries notes into the conversation — is `tests/e2e/note.rs`.
     let ending = match (spool, notes) {
         (Some(spool), Some(notes)) => {
-            let (courier, ending) = crate::note::Courier::open(spool, notes, emitter, &handed);
+            let (courier, ending) = crate::note::Courier::open(spool, notes, emitter);
             match std::thread::Builder::new().spawn(move || courier.serve()) {
                 Ok(_) => Some(ending),
                 Err(_) => None,
@@ -659,7 +658,11 @@ fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
 /// inferred from an event that moved past it — the engine opens and closes each
 /// turn itself, so what a consumer reads is the conversation's own structure
 /// rather than this crate's reconstruction of it.
-fn ingest(observation: &Observation<'_>, emitter: &Emitter, handed: &crate::note::Handed) {
+fn ingest(
+    observation: &Observation<'_>,
+    emitter: &Emitter,
+    deliveries: &mut crate::note::Deliveries,
+) {
     match observation {
         Observation::TurnOpened(opened) => {
             // Head-bounded: `bound_text` keeps a tail, so a field that keeps
@@ -679,10 +682,7 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter, handed: &crate::note
                     instruction,
                     instruction_truncated,
                     started_at: opened.started_at.clone(),
-                    // Over the *whole* instruction rather than the bounded copy
-                    // above: a delivery is no less a delivery for landing past
-                    // the payload's 4096 bytes.
-                    origin: opening_origin(opened, handed),
+                    origin: opening_origin(opened, deliveries),
                 }),
             );
         }
@@ -753,19 +753,22 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter, handed: &crate::note
 /// supervisor's own words — so a turn that carries one would otherwise read as
 /// the task or as the supervisor's, which is exactly the confusion this field
 /// exists to end. Only then is the opening turn the composed task and every later
-/// one the supervisor's last instruction.
+/// one the supervisor's last instruction. Whether a delivery rides this turn is
+/// the conversation's own record, never the instruction's text — see
+/// [`crate::note::Deliveries`] for why the text is no evidence.
 ///
 /// A **supervisor** turn opens on the worker's own last reply, which is none of
 /// the three, so it is left absent rather than attributed: a consumer reads that
-/// as unknown, and unknown is true.
+/// as unknown, and unknown is true. The record is consulted for worker turns
+/// only, because those are the turns a delivery is handed into.
 fn opening_origin(
     opened: &onejudge::TurnOpened<'_>,
-    handed: &crate::note::Handed,
+    deliveries: &mut crate::note::Deliveries,
 ) -> Option<Origin> {
     if !matches!(party(opened.role), Party::Assistant) {
         return None;
     }
-    if handed.carried_by(opened.instruction) {
+    if deliveries.carried_by_this_turn() {
         return Some(Origin::Delivered);
     }
     if opened.turn <= 1 {
@@ -1697,7 +1700,11 @@ mod tests {
                 finished_at: "2026-08-21T09:16:11.002Z".into(),
             }),
         ] {
-            ingest(&observation, &emitter, &crate::note::Handed::default());
+            ingest(
+                &observation,
+                &emitter,
+                &mut crate::note::Deliveries::of(None),
+            );
         }
 
         let events = recorder.events();
@@ -1768,7 +1775,7 @@ mod tests {
                 finished_at: "2026-08-21T09:16:12.500Z".into(),
             }),
             &emitter,
-            &crate::note::Handed::default(),
+            &mut crate::note::Deliveries::of(None),
         );
         let events = recorder.events();
         assert_eq!(events[0].payload["role"], json!("user"));
@@ -1795,7 +1802,7 @@ mod tests {
                 event: &result,
             }),
             &emitter,
-            &crate::note::Handed::default(),
+            &mut crate::note::Deliveries::of(None),
         );
         let events = recorder.events();
         assert_eq!(events.len(), 1, "the observation was discarded: {events:?}");
@@ -1843,7 +1850,7 @@ mod tests {
                 started_at: "2026-08-21T09:15:02.847Z".into(),
             }),
             &emitter,
-            &crate::note::Handed::default(),
+            &mut crate::note::Deliveries::of(None),
         );
         ingest(
             &Observation::Message(onejudge::TurnMessage {
@@ -1852,7 +1859,7 @@ mod tests {
                 text: &long,
             }),
             &emitter,
-            &crate::note::Handed::default(),
+            &mut crate::note::Deliveries::of(None),
         );
         ingest(
             &Observation::Tool(StreamEvent {
@@ -1860,7 +1867,7 @@ mod tests {
                 event: &result,
             }),
             &emitter,
-            &crate::note::Handed::default(),
+            &mut crate::note::Deliveries::of(None),
         );
 
         let events = recorder.events();
@@ -1906,7 +1913,7 @@ mod tests {
                 text: &exact,
             }),
             &emitter,
-            &crate::note::Handed::default(),
+            &mut crate::note::Deliveries::of(None),
         );
 
         let events = recorder.events();
