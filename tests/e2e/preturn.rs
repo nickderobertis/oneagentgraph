@@ -295,6 +295,17 @@ fn a_declared_view_reaches_the_turn_it_was_prepared_for() {
         "the turn opened claiming an instruction it was not given: {}",
         opened[0]
     );
+
+    // And it says whose words those are. This is the *composed* task in the
+    // fullest sense — two views this graph ran, in front of prose this graph was
+    // handed — and nothing else can have authored it: a single-sided member has
+    // no supervising side, and no caller delivered anything into this run.
+    let announced = run.of_kind("turn-started");
+    assert_eq!(
+        announced[0]["payload"]["origin"], "task",
+        "the composed turn did not say the composed task opened it: {}",
+        announced[0]
+    );
 }
 
 /// A view that fails, and one that cannot be started at all, leave the turn

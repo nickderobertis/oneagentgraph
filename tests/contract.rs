@@ -24,7 +24,7 @@ use oneagentgraph::error::{
 };
 use oneagentgraph::event::{
     session_label, Artifact, Cause, Disposition, Envelope, EventFilter, EventKind,
-    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Party,
+    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Origin, Party,
     PreTurnContext, PreTurnOutcome, Role, Runner, Source, TurnActivity, TurnCompleted,
     TurnInterrupted, TurnMessage, TurnStarted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS,
     MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS, ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
@@ -478,6 +478,7 @@ fn a_turn_started_payload_names_the_turn_and_what_it_answers() {
         instruction: "verify it before you call it done".to_string(),
         instruction_truncated: false,
         started_at: "2026-08-21T09:15:02.847Z".to_string(),
+        origin: None,
     };
     assert_eq!(
         serde_json::to_value(&started).expect("serializes"),
@@ -488,13 +489,82 @@ fn a_turn_started_payload_names_the_turn_and_what_it_answers() {
     );
     let cut = TurnStarted {
         instruction_truncated: true,
-        ..started
+        ..started.clone()
     };
     let serialized = serde_json::to_value(&cut).expect("serializes");
     assert_eq!(serialized["instruction_truncated"], json!(true));
     assert_eq!(
         serde_json::from_value::<TurnStarted>(serialized).expect("parses"),
         cut
+    );
+
+    // The whole of what a stamped instruction adds, and the whole of what an
+    // unstamped one keeps.
+    let stamped = TurnStarted {
+        origin: Some(Origin::Delivered),
+        ..started.clone()
+    };
+    assert_eq!(
+        serde_json::to_value(&stamped).expect("serializes")["origin"],
+        json!("delivered")
+    );
+    assert_eq!(
+        serde_json::from_value::<TurnStarted>(serde_json::to_value(&stamped).expect("serializes"))
+            .expect("parses"),
+        stamped
+    );
+    assert_unstamped::<TurnStarted>(&started);
+}
+
+/// Every value the field takes, in the one spelling a consumer reads it by.
+///
+/// Held against [`Origin::as_str`], which is the only thing that mints one, so a
+/// value renamed here is a compile-and-test failure rather than a spelling nobody
+/// notices.
+#[test]
+fn an_origin_names_the_three_authors_a_turn_can_have_and_no_fourth() {
+    for (origin, wire) in [
+        (Origin::Task, "task"),
+        (Origin::Supervisor, "supervisor"),
+        (Origin::Delivered, "delivered"),
+    ] {
+        assert_eq!(origin.as_str(), wire);
+        assert_eq!(
+            serde_json::to_value(origin).expect("serializes"),
+            json!(wire)
+        );
+        assert_eq!(
+            serde_json::from_value::<Origin>(json!(wire)).expect("parses"),
+            origin
+        );
+    }
+    // Absent is not a fourth value, so nothing else parses into one: a consumer
+    // meeting a spelling this build has not heard of has no origin, never a
+    // defaulted one.
+    assert!(serde_json::from_value::<Origin>(json!("operator")).is_err());
+}
+
+/// A payload whose `origin` is absent writes no key for it and reads back with
+/// none — the two halves of what keeps this addition non-breaking.
+///
+/// The serialized side is what makes an envelope from a producer that never sets
+/// the field byte-identical to one written before it existed; the parsed side is
+/// what makes an older producer's envelope readable by a newer consumer, which
+/// `deny_unknown_fields` would otherwise be the whole story about.
+fn assert_unstamped<T>(unstamped: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+{
+    let serialized = serde_json::to_value(unstamped).expect("serializes");
+    assert_eq!(
+        serialized.as_object().expect("an object").get("origin"),
+        None,
+        "an unstamped payload wrote an origin key: {serialized}"
+    );
+    assert_eq!(
+        &serde_json::from_value::<T>(serialized).expect("parses"),
+        unstamped,
+        "a payload with no origin did not round-trip"
     );
 }
 
@@ -515,6 +585,7 @@ fn a_turn_message_payload_carries_one_partys_own_words() {
         role: "assistant".to_string(),
         text: "done".to_string(),
         truncated: false,
+        origin: None,
     };
     assert_eq!(
         serde_json::to_value(&message).expect("serializes"),
@@ -523,7 +594,7 @@ fn a_turn_message_payload_carries_one_partys_own_words() {
     let cut = TurnMessage {
         text: "x".repeat(MAX_PAYLOAD_TEXT_BYTES),
         truncated: true,
-        ..message
+        ..message.clone()
     };
     let serialized = serde_json::to_value(&cut).expect("serializes");
     assert_eq!(serialized["truncated"], json!(true));
@@ -531,6 +602,21 @@ fn a_turn_message_payload_carries_one_partys_own_words() {
         serde_json::from_value::<TurnMessage>(serialized).expect("parses"),
         cut
     );
+
+    let stamped = TurnMessage {
+        origin: Some(Origin::Supervisor),
+        ..message.clone()
+    };
+    assert_eq!(
+        serde_json::to_value(&stamped).expect("serializes")["origin"],
+        json!("supervisor")
+    );
+    assert_eq!(
+        serde_json::from_value::<TurnMessage>(serde_json::to_value(&stamped).expect("serializes"))
+            .expect("parses"),
+        stamped
+    );
+    assert_unstamped::<TurnMessage>(&message);
 }
 
 #[test]

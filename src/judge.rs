@@ -76,7 +76,7 @@ use serde_json::Value;
 
 use crate::event::{
     bound_text, Artifact, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
-    OneharnessSession, Party, Role, TurnCompleted, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
+    OneharnessSession, Origin, Party, Role, TurnCompleted, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
     ONEHARNESS_SESSION_ARTIFACT,
 };
 use crate::invoke::JudgeLaunch;
@@ -191,9 +191,15 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
 
+    // Shared with the courier below: what a caller hands this graph to deliver is
+    // written down there and recognised here, so the turn that receives it is
+    // published as a delivery rather than as the supervising side's own words.
+    let handed = crate::note::Handed::default();
+
     let engine = {
         let (emitter, activity, abort) =
             (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
+        let handed = handed.clone();
         // The gate this run's task asked for, if it asked for one — see
         // [`hold_between_turns`], which is compiled only for the suite.
         #[cfg(feature = "test-doubles")]
@@ -207,7 +213,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         std::thread::Builder::new().spawn(move || {
             let mut sink = move |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
-                ingest(observation, &emitter);
+                ingest(observation, &emitter, &handed);
                 #[cfg(feature = "test-doubles")]
                 hold_between_turns(observation, &mut gate);
                 if abort.load(Ordering::SeqCst) {
@@ -253,7 +259,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // that carries notes into the conversation — is `tests/e2e/note.rs`.
     let ending = match (spool, notes) {
         (Some(spool), Some(notes)) => {
-            let (courier, ending) = crate::note::Courier::open(spool, notes, emitter);
+            let (courier, ending) = crate::note::Courier::open(spool, notes, emitter, &handed);
             match std::thread::Builder::new().spawn(move || courier.serve()) {
                 Ok(_) => Some(ending),
                 Err(_) => None,
@@ -653,7 +659,7 @@ fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
 /// inferred from an event that moved past it — the engine opens and closes each
 /// turn itself, so what a consumer reads is the conversation's own structure
 /// rather than this crate's reconstruction of it.
-fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
+fn ingest(observation: &Observation<'_>, emitter: &Emitter, handed: &crate::note::Handed) {
     match observation {
         Observation::TurnOpened(opened) => {
             // Head-bounded: `bound_text` keeps a tail, so a field that keeps
@@ -673,6 +679,10 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
                     instruction,
                     instruction_truncated,
                     started_at: opened.started_at.clone(),
+                    // Over the *whole* instruction rather than the bounded copy
+                    // above: a delivery is no less a delivery for landing past
+                    // the payload's 4096 bytes.
+                    origin: opening_origin(opened, handed),
                 }),
             );
         }
@@ -707,6 +717,11 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
                     role: party(message.role).as_str().to_string(),
                     text,
                     truncated,
+                    // The supervising side's own words are the one thing this
+                    // event carries that this graph generated; the agent's are
+                    // the agent's, and none of the three values names them.
+                    origin: matches!(party(message.role), Party::User)
+                        .then_some(Origin::Supervisor),
                 }),
             );
         }
@@ -723,6 +738,40 @@ fn ingest(observation: &Observation<'_>, emitter: &Emitter) {
             );
         }
     }
+}
+
+/// Who authored the message a turn is opening on.
+///
+/// The three answers this graph can give, and it is the only party that can give
+/// any of them: it composed the task, it runs the supervising side, and it owns
+/// the delivery path a caller hands text to. A consumer reading the published
+/// envelope has none of that.
+///
+/// The order is what makes it right. A delivery is checked first, because the
+/// engine hands a note to the worker by *pushing it onto the transcript* — as the
+/// first turn's opening message, as the next turn's, or in front of the
+/// supervisor's own words — so a turn that carries one would otherwise read as
+/// the task or as the supervisor's, which is exactly the confusion this field
+/// exists to end. Only then is the opening turn the composed task and every later
+/// one the supervisor's last instruction.
+///
+/// A **supervisor** turn opens on the worker's own last reply, which is none of
+/// the three, so it is left absent rather than attributed: a consumer reads that
+/// as unknown, and unknown is true.
+fn opening_origin(
+    opened: &onejudge::TurnOpened<'_>,
+    handed: &crate::note::Handed,
+) -> Option<Origin> {
+    if !matches!(party(opened.role), Party::Assistant) {
+        return None;
+    }
+    if handed.carried_by(opened.instruction) {
+        return Some(Origin::Delivered);
+    }
+    if opened.turn <= 1 {
+        return Some(Origin::Task);
+    }
+    Some(Origin::Supervisor)
 }
 
 /// One party of the conversation, as this crate's own closed set.
@@ -1648,7 +1697,7 @@ mod tests {
                 finished_at: "2026-08-21T09:16:11.002Z".into(),
             }),
         ] {
-            ingest(&observation, &emitter);
+            ingest(&observation, &emitter, &crate::note::Handed::default());
         }
 
         let events = recorder.events();
@@ -1719,6 +1768,7 @@ mod tests {
                 finished_at: "2026-08-21T09:16:12.500Z".into(),
             }),
             &emitter,
+            &crate::note::Handed::default(),
         );
         let events = recorder.events();
         assert_eq!(events[0].payload["role"], json!("user"));
@@ -1745,6 +1795,7 @@ mod tests {
                 event: &result,
             }),
             &emitter,
+            &crate::note::Handed::default(),
         );
         let events = recorder.events();
         assert_eq!(events.len(), 1, "the observation was discarded: {events:?}");
@@ -1792,6 +1843,7 @@ mod tests {
                 started_at: "2026-08-21T09:15:02.847Z".into(),
             }),
             &emitter,
+            &crate::note::Handed::default(),
         );
         ingest(
             &Observation::Message(onejudge::TurnMessage {
@@ -1800,6 +1852,7 @@ mod tests {
                 text: &long,
             }),
             &emitter,
+            &crate::note::Handed::default(),
         );
         ingest(
             &Observation::Tool(StreamEvent {
@@ -1807,6 +1860,7 @@ mod tests {
                 event: &result,
             }),
             &emitter,
+            &crate::note::Handed::default(),
         );
 
         let events = recorder.events();
@@ -1852,6 +1906,7 @@ mod tests {
                 text: &exact,
             }),
             &emitter,
+            &crate::note::Handed::default(),
         );
 
         let events = recorder.events();

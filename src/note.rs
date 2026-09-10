@@ -551,6 +551,57 @@ pub(crate) fn framed(note: &Note) -> String {
     )
 }
 
+/// The text of every note this graph has handed a member's conversation and not
+/// yet seen reach a turn — what lets [`crate::judge`] stamp
+/// [`crate::event::Origin::Delivered`] on the turn that received one.
+///
+/// Which turn a note lands in is the engine's own decision — the worker's live
+/// turn reopened carrying it, the next turn to open, or riding the supervisor's
+/// response — so this crate cannot predict it, and counting deliveries would race
+/// the engine thread that publishes the turn. What it can do is recognise its own
+/// text: a caller's words are in a member's transcript only because this graph
+/// put them there, so the first turn whose instruction carries one is the turn
+/// that received it. Recorded *before* the note is offered, which is what makes
+/// that race-free — no turn can carry the text before the offer that delivers it.
+///
+/// An entry nothing ever matches is a note the conversation completed on rather
+/// than passed to a further turn; it is a string held until the member ends.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Handed {
+    texts: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl Handed {
+    /// Write one note's text down, before it is offered to the conversation.
+    ///
+    /// A [`NoteText`] rather than a `&str`, because that newtype is what
+    /// guarantees the prose is something: a blank entry here would be carried by
+    /// every instruction there is, and the type is what makes that
+    /// unrepresentable instead of a check somebody has to remember.
+    fn record(&self, text: &NoteText) {
+        self.texts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(text.as_str().to_string());
+    }
+
+    /// Whether `instruction` carries a note this graph handed over, consuming
+    /// every one it carries.
+    ///
+    /// Consuming, so a supervisor that later quotes a note it was shown does not
+    /// make its own instruction read as the operator's: the turn that first
+    /// carried the text is the delivery, and there is exactly one of those.
+    pub(crate) fn carried_by(&self, instruction: &str) -> bool {
+        let mut texts = self
+            .texts
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before = texts.len();
+        texts.retain(|text| !instruction.contains(text.as_str()));
+        texts.len() < before
+    }
+}
+
 /// The member's end of the note seam: the thread that carries what its spool
 /// receives into the conversation's own inbox, and writes the answer back.
 ///
@@ -563,6 +614,7 @@ pub(crate) struct Courier {
     notes: onejudge::note::Notes,
     stop: Arc<AtomicBool>,
     emitter: Emitter,
+    handed: Handed,
 }
 
 impl Courier {
@@ -572,6 +624,7 @@ impl Courier {
         spool: Spool,
         notes: onejudge::note::Notes,
         emitter: &Emitter,
+        handed: &Handed,
     ) -> (Self, Ending) {
         let stop = Arc::new(AtomicBool::new(false));
         let ending = Ending {
@@ -584,6 +637,7 @@ impl Courier {
             notes,
             stop,
             emitter: emitter.clone(),
+            handed: handed.clone(),
         };
         (courier, ending)
     }
@@ -592,6 +646,11 @@ impl Courier {
     pub(crate) fn serve(self) {
         while !self.stop.load(Ordering::SeqCst) {
             for (id, note) in self.spool.take() {
+                // Written down before the offer, so the turn that receives this
+                // text is stamped as a delivery rather than as the supervisor's
+                // own words — see [`Handed`], which carries why it is the text
+                // and not a count.
+                self.handed.record(&note.text);
                 // Blocks: the conversation is what decides, and for a note that
                 // reaches the supervisor's live turn the decision *is* the answer.
                 let delivery = match self.notes.send(note.clone()) {
@@ -699,7 +758,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let spool = Spool::bind(dir.path()).expect("a spool");
         let (notes, inbox) = onejudge::note::Notes::channel();
-        let (courier, _ending) = Courier::open(spool.clone(), notes, &emitter("worker"));
+        let (courier, _ending) =
+            Courier::open(spool.clone(), notes, &emitter("worker"), &Handed::default());
         std::thread::spawn(move || courier.serve());
 
         // No turn has opened, so there is nothing live to deliver into and the

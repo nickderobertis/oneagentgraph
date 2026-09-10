@@ -24,8 +24,8 @@ use oneharness_core::io::runner::ProcessSupervisor;
 use serde_json::Value;
 
 use crate::event::{
-    bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, Party, TurnCompleted,
-    TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
+    bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, Origin, Party,
+    TurnCompleted, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
 };
 use crate::invoke::HarnessLaunch;
 use crate::member::{
@@ -391,6 +391,12 @@ impl TheTurn {
                 instruction: self.instruction.clone(),
                 instruction_truncated: self.instruction_truncated,
                 started_at: self.started_at.clone(),
+                // A single-sided member's one turn is opened on the composed
+                // task and on nothing else: it has no supervising side to
+                // generate an instruction, and the lever a caller has against it
+                // — `interrupt` — redirects the turn already open rather than
+                // announcing a new one.
+                origin: Some(Origin::Task),
             }),
         );
     }

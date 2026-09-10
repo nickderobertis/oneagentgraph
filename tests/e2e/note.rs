@@ -800,3 +800,181 @@ fn a_gate_named_relatively_is_refused_and_the_conversation_runs_unheld() {
         stray.display()
     );
 }
+
+/// Every turn a conversation publishes names who authored what it carries: the
+/// composed task, the supervising side's own words, or text a caller handed this
+/// graph to deliver.
+///
+/// The three reach a consumer as the same envelope otherwise — one naming a role
+/// and nothing else — so a consumer deciding anything on the strength of the
+/// distinction has to guess, and one such guess cancelled a live dispatch on a
+/// stop order no operator had given. This graph is the only party that can say:
+/// it composed the task, it runs the supervising side, and this file's own seam
+/// is the delivery path.
+///
+/// One run carries all four facts. The worker's first turn opens on the task and
+/// is held; a note is offered into that live turn, so the turn the engine reopens
+/// carries the caller's words; `should-fail` then keeps the supervisor asking for
+/// another turn, which is what puts its own words on the stream and opens a
+/// worker turn on them. The fourth is what is **not** stamped — an agent's own
+/// reply, and a supervisor turn opening on it, are none of the three, and an
+/// absent field is what a consumer reads as unknown.
+#[cfg(unix)]
+#[test]
+fn every_turn_of_a_conversation_names_who_authored_what_it_carries() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let task = format!(
+        "fake:should-fail fake:entered={} fake:hold={}",
+        began.display(),
+        release.display()
+    );
+    let running = start(&workspace, "", &task);
+
+    until("the worker's turn to be in flight", || began.exists());
+
+    let text = "the release blocker is P0: fix it before anything else";
+    let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
+    let events = running.run.started().events_path.clone();
+    let offered = offering(&workspace, &running, note);
+    wait_the_ordering_margin();
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+
+    assert_eq!(
+        offered.join().expect("the offering thread"),
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Worker
+        }),
+        "the note never reached the worker's live turn"
+    );
+    running.run.wait().expect("the member settles");
+
+    let published = std::fs::read_to_string(&events).expect("the run's own stream");
+    let envelopes: Vec<serde_json::Value> = published
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let of_kind = |kind: &str| -> Vec<serde_json::Value> {
+        envelopes
+            .iter()
+            .filter(|event| event["kind"] == kind)
+            .cloned()
+            .collect()
+    };
+    // Read as a string, so a payload that wrote `null` for it reads as no origin
+    // here and is caught by the absent-key assertions at the bottom rather than
+    // silently satisfying one of the stamps.
+    let origin = |event: &serde_json::Value| -> Option<String> {
+        event["payload"]["origin"].as_str().map(str::to_string)
+    };
+
+    let opened = of_kind("turn-started");
+    assert!(!opened.is_empty(), "the run announced no turn: {published}");
+
+    // The turn the member was opened on is the composed task.
+    let first = opened
+        .iter()
+        .find(|event| event["payload"]["role"] == "assistant")
+        .expect("the worker took a turn");
+    assert_eq!(
+        origin(first).as_deref(),
+        Some("task"),
+        "the opening turn was not stamped as the composed task: {first}"
+    );
+    assert!(
+        first["payload"]["instruction"]
+            .as_str()
+            .is_some_and(|it| it.contains("fake:should-fail")),
+        "the opening turn answered something other than the task: {first}"
+    );
+
+    // The turn that carries what the caller handed this graph is stamped as a
+    // delivery — and it is the only one, so nothing else is attributed to an
+    // operator who said it once.
+    let delivered: Vec<&serde_json::Value> = opened
+        .iter()
+        .filter(|event| {
+            event["payload"]["instruction"]
+                .as_str()
+                .is_some_and(|it| it.contains(text))
+        })
+        .collect();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "the note reached no turn, or more than one: {opened:#?}"
+    );
+    assert_eq!(
+        origin(delivered[0]).as_deref(),
+        Some("delivered"),
+        "the turn carrying the caller's own words was not stamped as a delivery: {}",
+        delivered[0]
+    );
+    assert_eq!(
+        opened
+            .iter()
+            .filter(|event| origin(event).as_deref() == Some("delivered"))
+            .count(),
+        1,
+        "a turn nobody delivered into read as a delivery: {opened:#?}"
+    );
+
+    // The supervising side's own words, on the turn carrying them and on the
+    // worker turn opened to answer them.
+    let messages = of_kind("turn-message");
+    let supervised: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|event| event["payload"]["role"] == "user")
+        .collect();
+    assert!(
+        !supervised.is_empty(),
+        "the supervisor never spoke: {messages:#?}"
+    );
+    for event in &supervised {
+        assert_eq!(
+            origin(event).as_deref(),
+            Some("supervisor"),
+            "the supervising side's own words were not stamped as its own: {event}"
+        );
+    }
+    assert!(
+        opened.iter().any(|event| {
+            origin(event).as_deref() == Some("supervisor")
+                && event["payload"]["instruction"]
+                    .as_str()
+                    .is_some_and(|it| it.contains("verify it before you call it done"))
+        }),
+        "no worker turn opened on the supervisor's instruction was stamped as its own: {opened:#?}"
+    );
+
+    // And what this graph cannot attribute it does not: an agent's own reply, and
+    // the supervisor turn that opens on it, carry no origin key at all — which a
+    // consumer reads as unknown rather than as any of the three.
+    for event in messages
+        .iter()
+        .filter(|event| event["payload"]["role"] == "assistant")
+    {
+        assert_eq!(
+            event["payload"].get("origin"),
+            None,
+            "the agent's own words were attributed to somebody: {event}"
+        );
+    }
+    let supervisor_turns: Vec<&serde_json::Value> = opened
+        .iter()
+        .filter(|event| event["payload"]["role"] == "user")
+        .collect();
+    assert!(
+        !supervisor_turns.is_empty(),
+        "the supervisor took no turn: {opened:#?}"
+    );
+    for event in supervisor_turns {
+        assert_eq!(
+            event["payload"].get("origin"),
+            None,
+            "a supervisor turn opening on the worker's own reply was attributed: {event}"
+        );
+    }
+}
