@@ -47,6 +47,9 @@ include = [
   # declaration is handed to onevcs's own reader, so a package without it is a
   # crate whose own test cannot run.
   "/release-targets.toml",
+  # And once more, by `tests/e2e/support.rs`: the `oneharness` release the e2e
+  # suite drives is the one this file pins, read from it rather than copied.
+  "/justfile",
 ]
 
 [[bin]]
@@ -222,7 +225,23 @@ test-doubles = []
 # engine's because only it knows which side is live, and no 0.6 seam lets an
 # embedder put a word in the transcript the judge is shown. `crate::note` records
 # what each disposition means.
-onejudge = { version = "0.7.0", features = ["cli"] }
+#
+# 0.8.1 is the thirteenth raise, and like 0.5.3 it is taken for what it links
+# rather than for a call — every call above still resolves against 0.7.0. Its
+# published requirement is `oneharness-core` `^0.13.0`, the release that runs a
+# controlled codex turn under its candidate's model and refuses one the server
+# would run elsewhere (see the `oneharness-core` block below). The core release
+# is a pre-1.0 minor, so the `^0.12.1` that used to sit here excluded it and a
+# lock refresh alone could not take it: the two requirements are edited together
+# because a graph asking for 0.12 on one side and 0.13 on the other resolves both
+# — the two-copies state `tests/inventory.rs` exists to refuse. 0.8.0, carried
+# along with it, is onejudge's own: a supervisor answer that does not parse is
+# re-asked instead of ending the member, and an evaluator verifies the finished
+# tree read-only. Re-read on 2026-09-11 in the published sources: the engine
+# still publishes `Observation::Message` after `respond_streaming` returns and
+# still forwards each `ActionEvent` through the live callback, so neither
+# `src/member.rs`'s stall rule nor `src/judge.rs`'s relay needed to move.
+onejudge = { version = "0.8.1", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
@@ -230,22 +249,35 @@ onejudge = { version = "0.7.0", features = ["cli"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.12.1; that was re-measured for this bump rather than assumed, and
+# 0.13.0; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.12.1 is what is linked, and it is linked exactly once.** This crate used to
-# ask for 0.10 while onejudge asked for 0.8, so the graph carried two copies and
-# every oneharness fix released into 0.9-0.12 reached only the half onejudge does
-# not drive — a fix nobody had, on the side that needed it. onejudge 0.6.1 asks
-# for `^0.12.0`, which the 0.12.1 here satisfies out of that one copy, which is
-# why the two requirements move together and why neither may be bumped past what
-# the other admits: split them again and the second copy comes
-# back — which `tests/inventory.rs` asserts against the committed lockfile, since
-# nothing else here can see a copy that is not this crate's own requirement.
-# The rule that went with the split is retired with it, because there is no
-# longer a second set of types to confuse this one with; what remains true is the
-# ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.12.1"
+# **0.13.0 is what is linked, and it is linked exactly once.** It is the release
+# that runs a controlled codex turn under its candidate's model: the app-server
+# names the model a thread will run under on its `thread/start` / `thread/resume`
+# response, before any token is spent, and 0.13.0 reads it — `RunResult` and
+# `HistoryRunRecord` carry it as `observed_model`, `null` on every path that
+# reports none — and refuses the turn when it differs from the one requested.
+# That refusal is the ninth `FailureKind`, `model_mismatch`, and the chain steps
+# past it as `model-mismatch`, a precondition fall-through like
+# `untrusted_directory` and `input_too_large`. Below it a config that names one
+# model spends another, and the chain never notices; this crate's
+# `fallback-advanced` already publishes every stepped-past reason off
+# `FallbackReport` as the type it is, so the new reason reaches the stream
+# without an edit — `tests/e2e/selection.rs` drives a chain through it.
+#
+# This crate used to ask for 0.10 while onejudge asked for 0.8, so the graph
+# carried two copies and every oneharness fix released into 0.9-0.12 reached only
+# the half onejudge does not drive — a fix nobody had, on the side that needed
+# it. onejudge 0.8.1 asks for `^0.13.0`, which the 0.13.0 here satisfies out of
+# that one copy, which is why the two requirements move together and why neither
+# may be bumped past what the other admits: split them again and the second copy
+# comes back — which `tests/inventory.rs` asserts against the committed lockfile,
+# since nothing else here can see a copy that is not this crate's own
+# requirement. The rule that went with the split is retired with it, because
+# there is no longer a second set of types to confuse this one with; what remains
+# true is the ordinary one — a value onejudge hands back is onejudge's own type.
+oneharness-core = "0.13.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

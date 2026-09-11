@@ -71,14 +71,19 @@ version lives at the top of the `justfile`. `onejudge` has no entry: it is a
 cargo dependency from crates.io, pinned by `Cargo.lock`, so there is nothing to
 install and nothing on `PATH` to shadow it.
 
-**A *newer* `oneharness` on `PATH` wins over that pin, and nothing says so.**
-`tests/e2e/support.rs` selects on capability — the first candidate that answers
-`interrupt --help` — which is the right rule for what it was written against, an
-*older* CLI shadowing the pinned install, and the wrong one for a newer CLI that
-carries the contract too: the journeys then drive an `oneharness` CI never runs,
-and a difference in what it reports reads as a green `check` against a red gate.
-`ONEAGENTGRAPH_TEST_ONEHARNESS` is the one input that overrides the search, so
-point it at `$CARGO_HOME/bin/oneharness` to reproduce a gate failure locally.
+**The e2e suite drives the pinned `oneharness` and refuses every other.**
+`tests/e2e/support.rs` reads the pin out of the `justfile` and takes the first
+candidate — `PATH`, then `$CARGO_HOME/bin` — whose `--version` is exactly it. It
+used to select on capability (the first candidate answering `interrupt --help`),
+which let a *newer* CLI on `PATH` win over the pin and drive an `oneharness` CI
+never runs, so a green `check` here could sit against a red gate. The version
+matters because a two-party member's turns run through this CLI, so the
+`oneharness-core` *it* links is the one those journeys prove — the pin is the
+first release linking the core `Cargo.toml` takes, and the model-mismatch
+journeys in `tests/e2e/selection.rs` exist only there. A host whose `PATH` and
+cargo bin both hold another version is refused by name with the instruction
+(`just bootstrap`); `ONEAGENTGRAPH_TEST_ONEHARNESS` names an install outright,
+and is held to the same pin.
 
 **`scratch` is the one module a Linux `check` never compiles all of.** Its
 `cfg(windows)` half is the whole liveness layer again in job objects, and the

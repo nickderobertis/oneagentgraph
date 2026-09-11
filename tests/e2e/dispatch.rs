@@ -1386,7 +1386,7 @@ fn a_single_sided_member_that_crashes_dies_with_a_cause_and_no_process_facts() {
     let payload = &died[0]["payload"];
     assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
     // `unclassified`, not a category invented from an exit code: oneharness owns
-    // classification, and the four kinds it has that `cause` cannot spell are a
+    // classification, and the five kinds it has that `cause` cannot spell are a
     // contract change rather than a partial map — see
     // `docs/oneharness-library.md`.
     assert_eq!(payload["cause"], serde_json::json!("unclassified"));
@@ -3984,10 +3984,21 @@ fn a_config_whose_paths_are_already_unambiguous_is_carried_through_as_written() 
 ///
 /// Driven through the whole real path rather than at the seam: the doubled
 /// harness answers a turn and declares the provider's 429 in the same terminal
-/// record while exiting 0, which is what real harnesses do (`oneharness`'s
-/// `detect_provider_failure` exists for it) — so real oneharness writes the
-/// contradicting record, real onejudge surfaces the classification as the run's
-/// failure, and this crate is what has to reconcile the two.
+/// record while exiting 0, which is what real harnesses do — so real oneharness
+/// writes the record of a turn that completed and was billed, real onejudge
+/// surfaces a classification as the run's failure, and this crate is what has to
+/// reconcile the two.
+///
+/// Which classification moved with the CLI this suite drives. oneharness used to
+/// read the declared 429 as `rate_limit` — the very reading that destroyed the
+/// dispatches above — and stopped, in `oneharness-core` 0.12.2 (#1277), so at
+/// the release the justfile pins that record carries no `failure_kind` at all.
+/// What contradicts it now is the judge: the same double answers the judge's
+/// verdict prompt with the declared rejection's prose, which is not the JSON
+/// the judge asked for, and onejudge classifies that `protocol`. The rule under
+/// test is unchanged and indifferent to the name: a classification beside a
+/// record that says the turn completed and was billed is carried, whatever the
+/// classification says.
 #[test]
 fn a_classification_the_harness_record_contradicts_does_not_kill_the_member() {
     let workspace = Workspace::new();
@@ -4020,7 +4031,7 @@ fn a_classification_the_harness_record_contradicts_does_not_kill_the_member() {
     let why = report["settled_reason"]
         .as_str()
         .unwrap_or_else(|| panic!("the carried turn said nothing about why: {report}"));
-    assert!(why.contains("rate_limit"), "{why}");
+    assert!(why.contains("classified this turn protocol"), "{why}");
     assert!(why.contains("status ok"), "{why}");
     assert!(why.contains("exit code 0"), "{why}");
     assert!(why.contains("12.11"), "{why}");

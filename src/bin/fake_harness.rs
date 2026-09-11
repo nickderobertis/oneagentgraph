@@ -64,11 +64,27 @@
 //! | `FAKE_HARNESS_REFUSAL=quota` | a zero-work 429 the chain steps past |
 //! | `FAKE_HARNESS_REFUSAL=auth` | an unauthenticated refusal, on stderr alone |
 //! | `FAKE_HARNESS_REFUSAL=rate_limit` | the refusal a chain does **not** step past |
-//! | `FAKE_HARNESS_DECLARED_REJECTION=rate_limit` | a turn that ran, answered and was billed, declaring the provider's 429 in the same terminal record and exiting 0 — so its record reads `status: ok`, `exit_code: 0` *and* `failure_kind: rate_limit` |
+//! | `FAKE_HARNESS_DECLARED_REJECTION=rate_limit` | a turn that ran, answered and was billed, declaring the provider's 429 in the same terminal record and exiting 0 — so its record reads `status: ok`, `exit_code: 0`, billed usage |
 //! | `FAKE_HARNESS_CRASH=<code>` | exit that code having published nothing |
+//! | `FAKE_HARNESS_SERVED_MODEL=<model>` | *codex `app-server` only:* name that model as the one the thread runs under, whatever `thread/start` asked for — the refusal oneharness answers before a token is spent |
 //! | `FAKE_HARNESS_ATTEMPT_LOG=<path>` | append a line per launch, so a journey can count starts |
 //! | `FAKE_HARNESS_UNAVAILABLE_ATTEMPTS=<n>` | the first `n` launches fail before the turn, the rest run |
 //! | `FAKE_HARNESS_IGNORE_TERM=1` | refuse `SIGTERM`, so only a `SIGKILL` stops this turn |
+//!
+//! The one marked *codex `app-server` only* answers on a third wire shape. A
+//! controlled codex turn is not `codex exec` at all: oneharness spawns
+//! `<bin> app-server` and drives the thread over its JSON-RPC stdio protocol —
+//! `initialize`, `thread/start`, `turn/start` — so a chain whose codex candidate
+//! is reached on a controlled turn reaches this process with `app-server` as its
+//! whole argv. [`app_server`] answers that handshake, and its `thread/start`
+//! response names the model the thread runs under: the one requested unless
+//! `FAKE_HARNESS_SERVED_MODEL` names another, which is codex 0.153 moving its
+//! default from under a `[harness.codex].model` pin — the defect oneharness-core
+//! 0.13.0 refuses as `model_mismatch` and a chain steps past as
+//! `model-mismatch`. It takes no turn: a `turn/start` is answered with a JSON-RPC
+//! error naming this limit, so a journey that lands a codex candidate here with
+//! a matching model fails at that request rather than wedging on a turn nobody
+//! will complete.
 //!
 //! The three marked *judge side only* are the mirror of that, and they exist for
 //! the mirror reason: a journey about the **judge's** live turn needs one it can
@@ -159,15 +175,17 @@ enum Refusal {
 /// it ran**, answered, and was billed for — and still exits `0` on.
 ///
 /// Its own closed set rather than a [`Refusal`], because the turn was not refused:
-/// it happened, and somebody paid for it. oneharness reads a declared rejection
-/// out of a record that exited zero (`detect_provider_failure` exists for the
-/// harnesses that report an API rejection in an otherwise successful terminal
-/// record), so the result it writes is `status: ok`, `exit_code: 0`, billed usage
-/// — *and* a `failure_kind`. onejudge then surfaces that classification as the
-/// run's failure, leaving the classification and the record beside it saying
-/// opposite things. That pair is what a dispatch was destroyed over, and no
-/// refusal above can produce it: each of those leaves a record agreeing with the
-/// reason it names.
+/// it happened, and somebody paid for it. oneharness used to read a declared
+/// rejection out of a record that exited zero and write `status: ok`,
+/// `exit_code: 0`, billed usage — *and* a `failure_kind`, which onejudge then
+/// surfaced as the run's failure, leaving the classification and the record
+/// beside it saying opposite things. That pair is what a dispatch was destroyed
+/// over. `oneharness-core` 0.12.2 stopped classifying a completed billed turn as
+/// a failure, so at the release the justfile pins the record this produces
+/// carries no `failure_kind`: what it is now is the record of a turn that
+/// completed and was billed, answered with prose — which, asked for a verdict,
+/// is not the JSON the judge wanted. No refusal above can produce that record:
+/// each of those leaves one agreeing with the reason it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeclaredRejection {
     /// The provider's 429, declared on a turn that had already been billed.
@@ -475,6 +493,12 @@ fn main() -> std::process::ExitCode {
         return exit(0);
     }
 
+    // A controlled codex turn is a JSON-RPC server rather than a run, and it
+    // carries no output format to read below: the protocol is the shape.
+    if argv.first().map(String::as_str) == Some("app-server") {
+        return app_server();
+    }
+
     // Read once, before either kind of turn: the format oneharness selected is
     // what it will parse this process's stdout under, so a value this double
     // cannot answer in is refused here rather than answered in the wrong shape.
@@ -550,6 +574,74 @@ fn recordings(prompt: &str, argv: &[String]) {
 /// one.
 fn controlled(argv: &[String]) -> bool {
     flag(argv, "--input-format").as_deref() == Some("stream-json")
+}
+
+/// Stand in for `codex app-server` for as long as oneharness's dialogue needs to
+/// decide whether a turn may start.
+///
+/// The frames are the ones oneharness-core's `Dialogue` writes for
+/// `ControlShape::CodexAppServer`, answered in the shape codex's own
+/// `ThreadStartResponse` has: `initialize` gets an empty result, the
+/// `initialized` notification nothing, and `thread/start` a `thread.id` beside
+/// the `model` the thread runs under. That `model` is the whole point of the
+/// mode. It is the requested one unless `FAKE_HARNESS_SERVED_MODEL` names
+/// another, and a difference is what oneharness refuses **here**, before
+/// `turn/start`, at zero cost — the chain then steps past this candidate with
+/// reason `model-mismatch`, which is what `tests/e2e/selection.rs` reads off the
+/// stream. A `thread/start` that asked for no model is answered with none, which
+/// is a claim of nothing and is not refused.
+///
+/// A `turn/start` is answered with a JSON-RPC error rather than a turn, and
+/// exits: this double's turns are claude-code's stream-json ones, and a codex
+/// turn driven over this protocol is a second conversation model nothing here
+/// needs yet. The error is on the active request, which the dialogue treats as
+/// the turn ending — loud and immediate, where an unanswered request would sit
+/// until the activity watchdog condemned the member.
+///
+/// Ends when stdin closes: oneharness tears the server down once the dialogue
+/// is done, and that is how this process learns the run is over.
+fn app_server() -> std::process::ExitCode {
+    let served = std::env::var("FAKE_HARNESS_SERVED_MODEL").ok();
+    for line in std::io::stdin().lock().lines().map_while(Result::ok) {
+        let Ok(frame) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let id = frame.get("id").cloned();
+        match (frame.get("method").and_then(Value::as_str), id) {
+            (Some("initialize"), Some(id)) => {
+                emit(&json!({"id": id, "result": {}}));
+            }
+            (Some("thread/start"), Some(id)) => {
+                let requested = frame
+                    .pointer("/params/model")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                // Named only when the thread has a model to name: a server
+                // asked for none states none, which is the arm oneharness
+                // tolerates rather than refuses.
+                let model = served.clone().or(requested);
+                emit(&json!({
+                    "id": id,
+                    "result": {"thread": {"id": "fake-thread"}, "model": model},
+                }));
+            }
+            (Some(method), Some(id)) => {
+                emit(&json!({
+                    "id": id,
+                    "error": {
+                        "code": -32601,
+                        "message": format!(
+                            "fake-harness: this double answers no codex {method}; its turns \
+                             are claude-code's"
+                        ),
+                    },
+                }));
+                return exit(2);
+            }
+            _ => {}
+        }
+    }
+    exit(0)
 }
 
 /// Serve turns off stdin until it closes, aborting the one in flight whenever a

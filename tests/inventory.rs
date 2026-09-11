@@ -194,6 +194,7 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
         field!(RunReport, results),
         field!(FallbackReport, ran),
         field!(RunResult, usage),
+        field!(RunResult, observed_model),
     ]
     .into_iter()
     // `RunControls<'_>` stringifies with its lifetime; the document writes the
@@ -357,7 +358,7 @@ fn mapped_request_fields() -> BTreeSet<&'static str> {
         .collect()
 }
 
-/// Every `Type::field` the document names, for the four upstream types it argues
+/// Every `Type::field` the document names, for the five upstream types it argues
 /// from.
 ///
 /// A span may go on past the field — `RunRequest::stream: Some(true)` names the
@@ -370,6 +371,7 @@ fn qualified_fields_named_in(text: &'static str) -> BTreeSet<String> {
                 "RunControls::",
                 "RunOutcome::",
                 "RunReport::",
+                "RunResult::",
             ]
             .iter()
             .any(|prefix| span.starts_with(prefix))
