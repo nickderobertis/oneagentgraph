@@ -483,47 +483,71 @@ pub fn fake_view() -> String {
 /// onejudge engine, so there is nothing on `PATH` for that half of the chain to
 /// be shadowed by — the version it runs is the one `Cargo.lock` pins.
 ///
-/// Probed for the `interrupt` verb rather than for merely running, because that
-/// is the newest contract these journeys depend on: the turn-control pair
-/// (`run --control` / `interrupt`) is what `interrupt.rs` drives, and a CLI
-/// without it answers `--version` perfectly well before failing one layer down
-/// as a bare `expected exit 0`. Everything else they need, they reach through
-/// oneharness's own long-standing `ONEHARNESS_BIN_<ID>` override. `just`'s
-/// `oneharness-version` pin governs what provisioning *installs*; asserting it
-/// here too would be a second copy of that number, free to drift from the one
-/// that matters.
+/// Probed for the release `just bootstrap` installs, because that is the
+/// contract these journeys depend on and it is no longer one a `--help` can
+/// show. A two-party member's turns run through this CLI, so the
+/// `oneharness-core` *it* links is the one those journeys prove — and the
+/// model-mismatch journeys in `selection.rs` exist only where that core refuses
+/// a controlled codex turn the server would run under another model. A CLI
+/// short of the pin runs every flag they pass and answers `--version` perfectly
+/// well before failing one layer down: the refused candidate simply runs, and
+/// the journey reads a stream with no step past on it. The number is read out of
+/// the justfile rather than copied here, so there is one pin and `_ensure-oneharness`
+/// and this probe hold a candidate to the same one.
 pub fn oneharness_bin() -> String {
     required(
         "ONEAGENTGRAPH_TEST_ONEHARNESS",
         "oneharness",
-        "the `interrupt` verb these journeys drive",
+        "the release the justfile pins — the one whose linked oneharness-core these journeys prove",
         |program| {
             Command::new(program)
-                .args(["interrupt", "--help"])
+                .arg("--version")
                 .output()
-                .is_ok_and(|output| output.status.success())
+                .is_ok_and(|output| {
+                    output.status.success()
+                        && String::from_utf8_lossy(&output.stdout).trim()
+                            == format!("oneharness {}", pinned_oneharness_version())
+                })
         },
     )
 }
 
-/// One required external CLI: the pin, else the first candidate that carries the
-/// contract this suite drives.
+/// The justfile, whose `oneharness-version` is the one pin provisioning installs.
+const JUSTFILE: &str = include_str!("../../justfile");
+
+/// The `oneharness` release the justfile pins, as `_ensure-oneharness` spells it.
+fn pinned_oneharness_version() -> &'static str {
+    let (_, rest) = JUSTFILE
+        .split_once("\noneharness-version := \"")
+        .expect("the justfile still pins `oneharness-version`");
+    let (pinned, _) = rest.split_once('"').expect("the pin is quoted");
+    pinned
+}
+
+/// One required external CLI: the install the environment names, else the first
+/// candidate — `PATH`, then the cargo bin directory — that is the release this
+/// suite drives.
 ///
-/// Resolution selects on *capability*, not on the name alone, because the name
-/// alone is what the failure this guards against already satisfies. An older CLI
-/// earlier on `PATH` than the one `just bootstrap` installs runs fine and
-/// answers `--version` — it just rejects the flags every journey depends on, so
-/// a name-only check hands the suite a binary that fails one layer down as a
-/// bare `expected exit 0`. `docs/onejudge-integration.md` in ai-orchestrator
-/// records this same shadowing as a live-dispatch outage; here it is a diagnosis
-/// the suite makes for you, naming the missing contract and how to get it.
+/// Resolution selects on *release*, not on the name alone, because the name
+/// alone is what the failure this guards against already satisfies: a CLI of
+/// another version earlier on `PATH` than the one `just bootstrap` installs runs
+/// every flag the journeys pass and answers `--version` perfectly well, and then
+/// behaves as *its* linked `oneharness-core` does — so a journey written against
+/// the pinned core fails one layer down, as a bare `expected exit 0` or a stream
+/// missing the event it was written to read. Older and newer are refused alike:
+/// the older one lacks what the pinned core does, and the newer one would have
+/// the suite proving a CLI CI never runs, so a green here could sit against a
+/// red gate. `docs/onejudge-integration.md` in ai-orchestrator records the older
+/// case as a live-dispatch outage; here both are a diagnosis the suite makes for
+/// you, naming the release it wants and how to get it. `carries` is the release
+/// check itself, and the same one holds an install named through `variable`.
 fn required(variable: &str, program: &str, contract: &str, carries: fn(&str) -> bool) -> String {
     if let Ok(pinned) = std::env::var(variable) {
         assert!(
             carries(&pinned),
-            "{variable} points at `{pinned}`, which does not carry {contract}. The e2e suite \
-             drives the real CLI as a subprocess — point it at an install that does, or unset it \
-             and run `just bootstrap`."
+            "{variable} points at `{pinned}`, which is not {contract}. The e2e suite drives the \
+             real CLI as a subprocess and holds a named install to the same release — point it \
+             at one, or unset it and run `just bootstrap`."
         );
         return pinned;
     }
@@ -533,10 +557,11 @@ fn required(variable: &str, program: &str, contract: &str, carries: fn(&str) -> 
         }
     }
     panic!(
-        "no `{program}` carrying {contract} was found on PATH or in the cargo bin directory. The \
+        "no `{program}` that is {contract} was found on PATH or in the cargo bin directory. The \
          e2e suite drives the real CLI as a subprocess — run `just bootstrap`, or set {variable} \
-         to an install that carries it. A `{program}` that merely runs is not enough: an older \
-         one earlier on PATH shadows the pinned install `just bootstrap` writes."
+         to an install at that release. A `{program}` that merely runs is not enough, whether \
+         older or newer: one of another version earlier on PATH shadows the pinned install \
+         `just bootstrap` writes, and the journeys would prove its core rather than the pinned one."
     );
 }
 

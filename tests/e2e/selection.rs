@@ -421,3 +421,144 @@ fn a_two_party_member_reports_which_side_stepped_past_which_identity() {
         "the artifact's size is not the size of what was stored"
     );
 }
+
+/// A candidate the chain stepped past because the harness would have run it
+/// under the wrong model reaches the stream as `fallback-advanced` with reason
+/// `model-mismatch` — the reason as oneharness classified it, not one this
+/// crate re-derived.
+///
+/// This is the user's own words made into a journey: a config that says Sol
+/// silently spends Astra, and the chain never notices. oneharness-core 0.13.0
+/// reads the model codex's app-server names on its `thread/start` response and
+/// refuses the turn before a token is spent; onejudge 0.8.1 links that core; and
+/// this crate publishes every stepped-past candidate's reason off
+/// `FallbackReport` as the type it already is. So nothing here was edited for
+/// the new reason, and that is precisely the claim: the payload is proven to
+/// carry it rather than assumed to.
+///
+/// A controlled codex turn is driven over `codex app-server`, which is why the
+/// chain has to be a two-party member's — a single-sided member asks for no
+/// control and would reach codex over `exec`, where no model is ever observed.
+/// Only the **agent** side carries the mispinned codex: the judge side's
+/// evaluator turn runs with no session and so no control, which would reach
+/// codex over `exec` — a shape the double does not speak — and fail the member
+/// for a reason that is not the one under test. The wrapper stands in for a
+/// codex whose default moved from under the pin, on the same terms every other
+/// refusing wrapper here does.
+#[cfg(unix)]
+#[test]
+fn a_candidate_that_would_run_under_the_wrong_model_is_stepped_past_as_model_mismatch() {
+    let workspace = Workspace::new();
+    // Codex first with a model pinned, claude-code to fall to. The pin is the
+    // config's own, `[harness.codex].model`, which is the shape the defect was
+    // reported against: a per-harness pin that never reached the wire.
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\n",
+        ),
+    );
+    let serving_another = workspace.write(
+        "astra.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_SERVED_MODEL=gpt-6-astra exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&serving_another);
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[(
+            "ONEHARNESS_BIN_CODEX",
+            serving_another.display().to_string(),
+        )],
+    ));
+    let run = workspace.run_task("fake:complete-now: fall through to the model that was asked for");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    let payload = &advanced[0]["payload"];
+    assert_eq!(payload["identity"], serde_json::json!("codex"));
+    assert_eq!(
+        payload["reason"],
+        serde_json::json!("model-mismatch"),
+        "{payload}"
+    );
+    assert_eq!(payload["role"], serde_json::json!("agent"));
+    assert_eq!(payload["turn"], serde_json::json!(1));
+    // And the member still settled, on the candidate that honours the model.
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    assert_eq!(settled[0]["payload"]["completed"], serde_json::json!(true));
+}
+
+/// The same refusal on a chain with nowhere to fall to ends the member, and both
+/// the step past and the death carry the reason oneharness classified.
+///
+/// The recovery path above is what the fix is for; this is the failure path it
+/// leaves behind when there is no second candidate, and it is what an operator
+/// reads when the config pins a model no identity honours. The refused
+/// candidate is still published as `fallback-advanced` — a chain names every
+/// candidate it stepped past whether or not a later one ran, because which
+/// subscription to restore is what a member that reached nothing owes its
+/// operator. The cause is `other` rather than a kind of its own: onejudge maps
+/// every precondition refusal to its `ProviderErrorKind::Other`, and widening
+/// `cause` is the contract proposal `docs/oneharness-library.md` records.
+#[cfg(unix)]
+#[test]
+fn a_chain_of_one_candidate_serving_the_wrong_model_dies_naming_the_refusal() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\n",
+        ),
+    );
+    let serving_another = workspace.write(
+        "astra.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_SERVED_MODEL=gpt-6-astra exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&serving_another);
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[(
+            "ONEHARNESS_BIN_CODEX",
+            serving_another.display().to_string(),
+        )],
+    ));
+    let run = workspace.run_task("fake:complete-now: nowhere to fall to");
+    run.expect_code(1);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        advanced[0]["payload"]["identity"],
+        serde_json::json!("codex")
+    );
+    assert_eq!(
+        advanced[0]["payload"]["reason"],
+        serde_json::json!("model-mismatch"),
+        "{advanced:?}"
+    );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let payload = &died[0]["payload"];
+    assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
+    assert_eq!(payload["cause"], serde_json::json!("other"), "{payload}");
+    let detail = payload["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("codex [model-mismatch]"),
+        "the death does not name the refusal: {detail}"
+    );
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "{:?}",
+        run.kinds()
+    );
+}

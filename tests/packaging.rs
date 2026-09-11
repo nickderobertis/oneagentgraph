@@ -38,6 +38,9 @@ fn the_package_carries_every_file_the_crate_is_built_from() {
     // The release declaration `tests/release_declaration.rs` hands to the reader
     // that defines its schema, read the same way.
     needed.push("release-targets.toml".into());
+    // The justfile, whose `oneharness-version` pin `tests/e2e/support.rs` reads
+    // the same way to hold the CLI it drives to the release provisioning installs.
+    needed.push("justfile".into());
 
     for path in &needed {
         assert!(
