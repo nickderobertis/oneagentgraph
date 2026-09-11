@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.16](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.15...v0.3.16) - 2026-09-11
+
+### Added
+
+- *(event)* say who authored each turn a member publishes ([#95](https://github.com/nickderobertis/oneagentgraph/pull/95))
+
 ## [0.3.15](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.14...v0.3.15) - 2026-08-30
 
 ### Added
