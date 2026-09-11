@@ -800,3 +800,332 @@ fn a_gate_named_relatively_is_refused_and_the_conversation_runs_unheld() {
         stray.display()
     );
 }
+
+/// Every envelope of one `kind` on a run's own stream, in the order written.
+fn published_of_kind(published: &str, kind: &str) -> Vec<serde_json::Value> {
+    published
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|event| event["kind"] == kind)
+        .collect()
+}
+
+/// The `origin` a turn payload was stamped with, if it was stamped.
+///
+/// Read as a string, so a payload that wrote `null` for it reads as no origin
+/// here and is caught by an absent-key assertion rather than silently
+/// satisfying one of the stamps.
+fn origin(event: &serde_json::Value) -> Option<String> {
+    event["payload"]["origin"].as_str().map(str::to_string)
+}
+
+/// Every turn a conversation publishes names who authored what it carries: the
+/// composed task, the supervising side's own words, or text a caller handed this
+/// graph to deliver.
+///
+/// The three reach a consumer as the same envelope otherwise — one naming a role
+/// and nothing else — so a consumer deciding anything on the strength of the
+/// distinction has to guess, and one such guess cancelled a live dispatch on a
+/// stop order no operator had given. This graph is the only party that can say:
+/// it composed the task, it runs the supervising side, and this file's own seam
+/// is the delivery path.
+///
+/// One run carries all four facts. The worker's first turn opens on the task and
+/// is held; a note is offered into that live turn, so the turn the engine reopens
+/// carries the caller's words; `should-fail` then keeps the supervisor asking for
+/// another turn, which is what puts its own words on the stream and opens a
+/// worker turn on them. The fourth is what is **not** stamped — an agent's own
+/// reply, and a supervisor turn opening on it, are none of the three, and an
+/// absent field is what a consumer reads as unknown.
+#[cfg(unix)]
+#[test]
+fn every_turn_of_a_conversation_names_who_authored_what_it_carries() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let task = format!(
+        "fake:should-fail fake:entered={} fake:hold={}",
+        began.display(),
+        release.display()
+    );
+    let running = start(&workspace, "", &task);
+
+    until("the worker's turn to be in flight", || began.exists());
+
+    let text = "the release blocker is P0: fix it before anything else";
+    let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
+    let events = running.run.started().events_path.clone();
+    let offered = offering(&workspace, &running, note);
+    wait_the_ordering_margin();
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+
+    assert_eq!(
+        offered.join().expect("the offering thread"),
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Worker
+        }),
+        "the note never reached the worker's live turn"
+    );
+    running.run.wait().expect("the member settles");
+
+    let published = std::fs::read_to_string(&events).expect("the run's own stream");
+    let of_kind = |kind: &str| published_of_kind(&published, kind);
+
+    let opened = of_kind("turn-started");
+    assert!(!opened.is_empty(), "the run announced no turn: {published}");
+
+    // The turn the member was opened on is the composed task.
+    let first = opened
+        .iter()
+        .find(|event| event["payload"]["role"] == "assistant")
+        .expect("the worker took a turn");
+    assert_eq!(
+        origin(first).as_deref(),
+        Some("task"),
+        "the opening turn was not stamped as the composed task: {first}"
+    );
+    assert!(
+        first["payload"]["instruction"]
+            .as_str()
+            .is_some_and(|it| it.contains("fake:should-fail")),
+        "the opening turn answered something other than the task: {first}"
+    );
+
+    // The turn that carries what the caller handed this graph is stamped as a
+    // delivery — and it is the only one, so nothing else is attributed to an
+    // operator who said it once.
+    let delivered: Vec<&serde_json::Value> = opened
+        .iter()
+        .filter(|event| {
+            event["payload"]["instruction"]
+                .as_str()
+                .is_some_and(|it| it.contains(text))
+        })
+        .collect();
+    assert_eq!(
+        delivered.len(),
+        1,
+        "the note reached no turn, or more than one: {opened:#?}"
+    );
+    assert_eq!(
+        origin(delivered[0]).as_deref(),
+        Some("delivered"),
+        "the turn carrying the caller's own words was not stamped as a delivery: {}",
+        delivered[0]
+    );
+    assert_eq!(
+        opened
+            .iter()
+            .filter(|event| origin(event).as_deref() == Some("delivered"))
+            .count(),
+        1,
+        "a turn nobody delivered into read as a delivery: {opened:#?}"
+    );
+
+    // The supervising side's own words, on the turn carrying them and on the
+    // worker turn opened to answer them.
+    let messages = of_kind("turn-message");
+    let supervised: Vec<&serde_json::Value> = messages
+        .iter()
+        .filter(|event| event["payload"]["role"] == "user")
+        .collect();
+    assert!(
+        !supervised.is_empty(),
+        "the supervisor never spoke: {messages:#?}"
+    );
+    for event in &supervised {
+        assert_eq!(
+            origin(event).as_deref(),
+            Some("supervisor"),
+            "the supervising side's own words were not stamped as its own: {event}"
+        );
+    }
+    assert!(
+        opened.iter().any(|event| {
+            origin(event).as_deref() == Some("supervisor")
+                && event["payload"]["instruction"]
+                    .as_str()
+                    .is_some_and(|it| it.contains("verify it before you call it done"))
+        }),
+        "no worker turn opened on the supervisor's instruction was stamped as its own: {opened:#?}"
+    );
+
+    // And what this graph cannot attribute it does not: an agent's own reply, and
+    // the supervisor turn that opens on it, carry no origin key at all — which a
+    // consumer reads as unknown rather than as any of the three.
+    for event in messages
+        .iter()
+        .filter(|event| event["payload"]["role"] == "assistant")
+    {
+        assert_eq!(
+            event["payload"].get("origin"),
+            None,
+            "the agent's own words were attributed to somebody: {event}"
+        );
+    }
+    let supervisor_turns: Vec<&serde_json::Value> = opened
+        .iter()
+        .filter(|event| event["payload"]["role"] == "user")
+        .collect();
+    assert!(
+        !supervisor_turns.is_empty(),
+        "the supervisor took no turn: {opened:#?}"
+    );
+    for event in supervisor_turns {
+        assert_eq!(
+            event["payload"].get("origin"),
+            None,
+            "a supervisor turn opening on the worker's own reply was attributed: {event}"
+        );
+    }
+}
+
+/// A turn is stamped as a delivery on the conversation's own record of having
+/// handed it a note — never on the note's words turning up in an instruction.
+///
+/// The words are no evidence. A short, valid note can already occur in the task
+/// the member opened on, and the supervisor's standing instruction is exactly
+/// the kind of phrase an operator would send as a note; an implementation that
+/// read the text as the delivery would stamp the task, or every later supervisor
+/// turn, as the operator's — which is the misattribution this field exists to
+/// end, in the other direction. So the note here **is** the supervisor's every
+/// instruction, word for word, and it is in the task as well. Exactly one turn
+/// is the delivery: the one the engine reopened carrying it.
+///
+/// The unsuccessful half: a note the conversation refuses is never in its
+/// record, so it can attribute nothing. The engine refuses a note only once the
+/// conversation is over — there is no earlier refusal in its contract — so what
+/// this drives is that a refused offer is reported as one on the stream and
+/// leaves the set of delivery-stamped turns exactly as it was.
+#[cfg(unix)]
+#[test]
+fn a_delivery_is_attributed_by_the_conversations_record_and_never_by_its_text() {
+    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let workspace = Workspace::new();
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    // The phrase the fake supervisor answers every continuing turn with, and the
+    // note's whole text — and part of the task, so the opening turn carries it
+    // before any note exists.
+    let text = "verify it before you call it done";
+    let running = start(
+        &workspace,
+        "",
+        &format!(
+            "fake:should-fail fake:entered={} fake:hold={} {text}",
+            began.display(),
+            release.display()
+        ),
+    );
+
+    until("the worker's turn to be in flight", || began.exists());
+
+    let note = Note::new(Addressee::Worker, text).expect("a note with text in it");
+    let events = running.run.started().events_path.clone();
+    let offered = offering(&workspace, &running, note.clone());
+    wait_the_ordering_margin();
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+    assert_eq!(
+        offered.join().expect("the offering thread"),
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Worker
+        }),
+        "the note never reached the worker's live turn"
+    );
+    running.run.wait().expect("the member settles");
+
+    // A second offer, into a conversation that is over: refused to the caller,
+    // and so never in the conversation's record.
+    let refused = control::note(
+        &workspace.state(),
+        &running.id,
+        &running.member,
+        &note,
+        &oneharness_bin(),
+    )
+    .expect("the run and its member are addressable");
+    assert!(
+        matches!(refused, NoteDelivery::Undelivered(_)),
+        "a note into a settled conversation was not refused: {refused:?}"
+    );
+
+    let published = std::fs::read_to_string(&events).expect("the run's own stream");
+    let opened = published_of_kind(&published, "turn-started");
+    let worker_turns: Vec<&serde_json::Value> = opened
+        .iter()
+        .filter(|event| event["payload"]["role"] == "assistant")
+        .collect();
+    assert!(
+        worker_turns.len() >= 3,
+        "the run took too few worker turns to tell the three apart: {opened:#?}"
+    );
+    let instruction = |event: &serde_json::Value| -> String {
+        event["payload"]["instruction"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    // Every worker turn's instruction carries the note's words — the task, the
+    // delivery, and the supervisor's own instruction alike — so the text alone
+    // cannot tell them apart, which is the point.
+    for event in &worker_turns {
+        assert!(
+            instruction(event).contains(text),
+            "a worker turn opened without the phrase, so this journey proves nothing: {event}"
+        );
+    }
+
+    // The opening turn carried the phrase before any note existed: the task.
+    assert_eq!(
+        origin(worker_turns[0]).as_deref(),
+        Some("task"),
+        "the task was attributed to a note that did not yet exist: {}",
+        worker_turns[0]
+    );
+    // The turn the engine reopened carrying the note is the delivery — the one
+    // the conversation's record names, and the only one.
+    assert_eq!(
+        origin(worker_turns[1]).as_deref(),
+        Some("delivered"),
+        "the turn that received the note was not stamped as a delivery: {}",
+        worker_turns[1]
+    );
+    assert!(
+        instruction(worker_turns[1]).contains("delivered to YOU, the worker"),
+        "the delivery stamp landed on a turn that was not handed the note: {}",
+        worker_turns[1]
+    );
+    // And every turn after it opens on the supervisor's own words, which happen
+    // to be the note's — and are stamped as the supervisor's.
+    for event in &worker_turns[2..] {
+        assert_eq!(
+            origin(event).as_deref(),
+            Some("supervisor"),
+            "a supervisor instruction that merely reads like the note was attributed to the \
+             operator: {event}"
+        );
+    }
+    assert_eq!(
+        opened
+            .iter()
+            .filter(|event| origin(event).as_deref() == Some("delivered"))
+            .count(),
+        1,
+        "more than one turn claimed the one delivery: {opened:#?}"
+    );
+
+    // The stream reports the one delivery the conversation took, and nothing
+    // for the refused offer: a settled member's stream is closed, and that
+    // refusal was answered from the run's own record to the caller alone.
+    let reported = published_of_kind(&published, "turn-interrupted");
+    let delivered: Vec<bool> = reported
+        .iter()
+        .map(|event| event["payload"]["delivered"] == true)
+        .collect();
+    assert_eq!(
+        delivered,
+        vec![true],
+        "the stream did not report exactly the one delivery: {reported:#?}"
+    );
+}

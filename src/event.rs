@@ -692,6 +692,54 @@ impl Party {
     }
 }
 
+/// Who authored the text a turn payload carries.
+///
+/// The one authoritative statement of this field, its values and its default:
+/// nothing else in this tree names them, and a consumer reconciles against this
+/// type rather than against a copy of it. Three values and no more —
+///
+/// * [`Task`](Self::Task): the composed task this graph opened the member on;
+/// * [`Supervisor`](Self::Supervisor): words the member's own supervising side
+///   generated;
+/// * [`Delivered`](Self::Delivered): text a caller handed this graph to deliver
+///   into a live conversation.
+///
+/// **Absent is not a fourth value.** The field defaults to absent and is
+/// serialized only when present, so an envelope from a producer that never sets
+/// it is byte-identical to one written before the field existed — and a consumer
+/// meeting an absent one reads *the producer said nothing*, never any of the
+/// three. That is the whole of what keeps this addition non-breaking.
+///
+/// It exists because a member's own simulated supervisor and an operator handing
+/// this graph a note reach a consumer as the same thing otherwise: an envelope
+/// naming a role. A consumer that has to tell internal supervision from an
+/// instruction its operator really sent then guesses, and one such guess
+/// cancelled a live dispatch on a stop order nobody had given. This graph is the
+/// only party that knows — it composes the task, it runs the supervising side,
+/// and it owns the delivery path — so it is the only party that can say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Origin {
+    /// The composed task this graph opened the member on.
+    Task,
+    /// Words the member's own supervising side generated.
+    Supervisor,
+    /// Text a caller handed this graph to deliver into a live conversation.
+    Delivered,
+}
+
+impl Origin {
+    /// This origin's spelling on the wire.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::Task => "task",
+            Origin::Supervisor => "supervisor",
+            Origin::Delivered => "delivered",
+        }
+    }
+}
+
 // llmlint: ignore-block[boundary_inputs_validated] on exactly the terms the block
 // below states for the four payloads after it: this pair is what this crate
 // *writes*, minted correct at the one site that builds it (`crate::preturn`,
@@ -776,9 +824,9 @@ impl PreTurnOutcome {
 // llmlint: ignore-block[boundary_inputs_validated] the four payloads below are
 // what this crate *writes*, and every value in them is made correct where it is
 // minted rather than re-checked where it is read: `role` comes only from
-// [`Party`], the instants only from [`crate::clock::now_rfc3339`], and the bounds
-// only from [`bound_text`] and the head-trim its own doc directs a caller to
-// make. `Deserialize` is here so the
+// [`Party`], `origin` only from [`Origin`], the instants only from
+// [`crate::clock::now_rfc3339`], and the bounds only from [`bound_text`] and the
+// head-trim its own doc directs a caller to make. `Deserialize` is here so the
 // contract test can round-trip them and a consumer can read them back — the
 // trust boundary an envelope really crosses is `deny_unknown_fields`, which every
 // one of them carries, exactly as `MemberDied` and `TurnInterrupted` have since
@@ -807,6 +855,11 @@ pub struct TurnStarted {
     pub instruction_truncated: bool,
     /// When the turn began: RFC 3339, millisecond precision, UTC.
     pub started_at: String,
+    /// Who authored [`instruction`](Self::instruction) — see [`Origin`], which
+    /// is where this field's values and its default are stated. Absent means
+    /// this producer said nothing about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
 }
 
 /// The payload of an [`EventKind::TurnMessage`] event: one party's own words for
@@ -825,6 +878,11 @@ pub struct TurnMessage {
     /// carries the whole of it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
+    /// Who authored [`text`](Self::text) — see [`Origin`], which is where this
+    /// field's values and its default are stated. Absent means this producer
+    /// said nothing about it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
 }
 
 /// The payload of an [`EventKind::TurnActivity`] event: one tool call, or the

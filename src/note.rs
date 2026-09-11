@@ -551,6 +551,58 @@ pub(crate) fn framed(note: &Note) -> String {
     )
 }
 
+/// The conversation's own record of what it has handed a party, read at each
+/// turn this graph announces — what lets [`crate::judge`] stamp
+/// [`crate::event::Origin::Delivered`] on exactly the turn that received a note.
+///
+/// Authoritative rather than inferred. The engine records a delivery
+/// ([`onejudge::note::Notes::delivered`]) on its own thread *before* it pushes
+/// the note onto the transcript and announces the turn that opens on it — as the
+/// first turn's opening message, as the next turn's, or in front of the
+/// supervisor's own words — so at the moment a worker turn is announced, the
+/// record already names every note that turn carries and none it does not. A
+/// note the conversation refused is never in it. Nothing about the *text* is
+/// consulted: a note's words can legitimately occur in the task or in a
+/// supervisor's prose, and reading their presence as a delivery would stamp an
+/// unrelated turn as the operator's.
+///
+/// One per member, owned by the sink that announces its turns; a member with no
+/// note seam holds no channel and attributes nothing.
+pub(crate) struct Deliveries {
+    notes: Option<onejudge::note::Notes>,
+    /// How many of the record's entries a turn has already been stamped for.
+    attributed: usize,
+}
+
+impl Deliveries {
+    /// The record behind `notes` — the caller's end of the channel whose engine
+    /// end is on the member's plan. `None` is a member with no note channel,
+    /// for which nothing is ever delivered.
+    pub(crate) fn of(notes: Option<&onejudge::note::Notes>) -> Self {
+        Self {
+            notes: notes.cloned(),
+            attributed: 0,
+        }
+    }
+
+    /// Whether the worker turn being announced now carries a note delivered since
+    /// the last one this was asked about.
+    ///
+    /// Asked once per worker turn, in the order the engine announces them, which
+    /// is what makes the answer exact: every entry the record has gained since
+    /// the last turn rides this one, and is counted as attributed so the next
+    /// turn is judged on its own deliveries alone.
+    pub(crate) fn carried_by_this_turn(&mut self) -> bool {
+        let Some(notes) = &self.notes else {
+            return false;
+        };
+        let delivered = notes.delivered().len();
+        let fresh = delivered > self.attributed;
+        self.attributed = delivered;
+        fresh
+    }
+}
+
 /// The member's end of the note seam: the thread that carries what its spool
 /// receives into the conversation's own inbox, and writes the answer back.
 ///

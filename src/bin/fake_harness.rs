@@ -492,7 +492,7 @@ fn main() -> std::process::ExitCode {
 
     if steers(&prompt, "hang") {
         // Never answer. The heartbeat and activity watchdogs are what ends this.
-        return hang(sentinel_path(&prompt, "tick").as_deref());
+        hang(sentinel_path(&prompt, "tick").as_deref());
     }
     // A turn that is *working* rather than wedged: nothing is published for as
     // long as the barrier holds, and the process is charged CPU throughout. The
@@ -695,6 +695,17 @@ impl Shape {
 /// result having done none of its work, and the flag is cleared so the redirected
 /// turn that follows is not aborted by the same request.
 fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answered {
+    // The controlled turn's half of `main`'s own check, which a controlled launch
+    // never reaches: its task arrives on stdin, so this is the first place the
+    // sentinel can be read. Without it the agent side *answered* a task that
+    // told it to hang, and the member's tree was three short-lived launches —
+    // agent, supervisor, and the supervisor's verdict — before anything parked,
+    // which is a cancel journey watching a tree that comes and goes rather than
+    // one that stays. Before `entered`, as in `main`: a turn that never answers
+    // never began, on either path.
+    if steers(prompt, "hang") {
+        hang(sentinel_path(prompt, "tick").as_deref());
+    }
     let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
     // Written before any wait, so a journey can wait for a turn that is really
     // in flight rather than for a process that has merely started.
@@ -961,7 +972,11 @@ fn spawn_ticker(path: &std::path::Path) {
 /// is that descendant, and asking the platform which processes are still alive
 /// is asking the very facility under test — so the descendant answers for
 /// itself. The file grows while it lives and stops the instant it does not.
-fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
+///
+/// Never returns: a controlled turn reaches this from the thread that serves it,
+/// where there is no exit code to hand back, so the one path that ends — the
+/// tick's bound — ends the process from here.
+fn hang(tick: Option<&std::path::Path>) -> ! {
     let Some(tick) = tick else {
         loop {
             std::thread::sleep(std::time::Duration::from_secs(3600));
@@ -987,7 +1002,7 @@ fn hang(tick: Option<&std::path::Path>) -> std::process::ExitCode {
     // suite that leaked it — and it was observed doing exactly that on the
     // throwaway branch that compiled the Windows layer out.
     eprintln!("fake-harness: a ticking turn outlived its bound, so nothing ever reaped it");
-    exit(1)
+    std::process::exit(1)
     // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
