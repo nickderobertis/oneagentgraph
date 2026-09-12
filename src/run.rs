@@ -862,6 +862,65 @@ pub fn apply_overrides(document: &mut Value, overrides: &[Override]) -> Result<(
     Ok(())
 }
 
+/// Apply what [`BACKGROUND_ENV`](crate::liveness::BACKGROUND_ENV) in `env` says
+/// to a parsed graph document, as the `--set members.<name>.background=true`
+/// overrides it stands for.
+///
+/// One mechanism rather than two: the variable is the operator's way of saying
+/// what a `--set` says without retyping a command line, so it becomes those
+/// overrides and goes through [`apply_overrides`] — *before* the request's own,
+/// which is what lets a `--set` on the same member win. Everything else the field
+/// is held to — the schema version it requires, what it means — is then
+/// [`crate::config::validate`]'s, exactly as it is for the field in the document.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] naming the variable and the member when the graph
+/// has no member by that name, before anything is launched; and, naming the
+/// variable, whatever [`apply_overrides`] refuses.
+pub fn apply_background_env(
+    document: &mut Value,
+    env: &BTreeMap<String, String>,
+) -> Result<(), Error> {
+    let overrides = background_overrides(env, document)?;
+    apply_overrides(document, &overrides)
+        .map_err(|err| Error::InvalidConfig(format!("{}: {err}", crate::liveness::BACKGROUND_ENV)))
+}
+
+/// The overrides [`apply_background_env`] applies, checked against `document`'s
+/// members.
+///
+/// The list is read the way an operator types one: entries are trimmed, and an
+/// empty one — a trailing comma, two in a row — names nothing rather than a
+/// member called `""`.
+fn background_overrides(
+    env: &BTreeMap<String, String>,
+    document: &Value,
+) -> Result<Vec<Override>, Error> {
+    let Some(named) = env.get(crate::liveness::BACKGROUND_ENV) else {
+        return Ok(Vec::new());
+    };
+    let members = document.get("members").and_then(Value::as_object);
+    let mut overrides = Vec::new();
+    for name in named
+        .split(',')
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        if !members.is_some_and(|members| members.contains_key(name)) {
+            return Err(Error::InvalidConfig(format!(
+                "{} names {name:?}, which this graph has no member called",
+                crate::liveness::BACKGROUND_ENV
+            )));
+        }
+        overrides.push(Override {
+            path: format!("members.{name}.background"),
+            value: "true".to_string(),
+        });
+    }
+    Ok(overrides)
+}
+
 fn graph_from_value(document: &Value) -> Result<GraphConfig, serde_norway::Error> {
     serde_norway::from_value(serde_norway::to_value(document)?)
 }
@@ -890,10 +949,7 @@ fn insert_leaf(document: &mut Value, parents: &[&str], last: &str, value: Value)
 pub fn ready_order(graph: &GraphConfig) -> Result<Vec<Vec<String>>, Error> {
     let mut pending: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
     for (name, member) in &graph.members {
-        let deps: &[String] = match member {
-            Member::Oneharness(member) => &member.deps,
-            Member::Onejudge(member) => &member.deps,
-        };
+        let deps = member.deps();
         for dep in deps {
             if !graph.members.contains_key(dep) {
                 return Err(Error::InvalidConfig(format!(
@@ -931,25 +987,33 @@ pub fn ready_order(graph: &GraphConfig) -> Result<Vec<Vec<String>>, Error> {
 
 /// Refuse a member whose deferred first turn could never come due.
 ///
-/// A graph of nothing but cron members has no live work by
-/// [`solely_cron_descended`]'s reckoning, so its clocks stop on their first tick
-/// and a turn deferred past that tick never happens — the run exits 0 without the
+/// A graph that nothing holds open — no member both foreground and either
+/// scheduled or able to take a turn in the initial waves — settles as soon as
+/// those waves are done, so its background clocks stop on their first tick and a
+/// turn deferred past that tick never happens: the run exits 0 without the
 /// member ever having run. Per deferred member rather than per graph: a sibling
-/// firing at t=0 is not live work either, so that graph half-runs.
+/// firing at t=0 is not what holds the run open either, so that graph half-runs.
+/// A member whose dependency (transitively) defers its own first turn takes none
+/// in those waves — it is skipped there and reached only by that dependency's
+/// chain — so it holds nothing open however it is declared.
 ///
 /// Refused rather than held open, because a run kept alive for a pacemaker
 /// outlives the work it paces, and firing one into a finished run is a paid turn
-/// with nothing to report.
+/// with nothing to report. Under a schema before
+/// [`crate::config::FIRST_BACKGROUND_VERSION`] this is exactly the refusal those
+/// documents have always met — every member scheduled or descended from
+/// schedules, and one of them deferred — in the words it has always used; from
+/// that version the words name the declaration that answers it.
 ///
 /// At the *end* of [`ready_order`], so `run` and `validate` share it and the
 /// descent below walks a graph already proven acyclic and complete.
 fn refuse_a_turn_that_never_comes_due(graph: &GraphConfig) -> Result<(), Error> {
     let mut memo = BTreeMap::new();
-    if !graph
-        .members
-        .keys()
-        .all(|name| solely_cron_descended(name, graph, &mut memo))
-    {
+    let held_open = graph.members.iter().any(|(name, member)| {
+        !graph.is_background(name)
+            && (member.schedule().is_some() || takes_an_initial_turn(name, graph, &mut memo))
+    });
+    if held_open {
         return Ok(());
     }
     let deferred: Vec<&str> = graph
@@ -961,12 +1025,42 @@ fn refuse_a_turn_that_never_comes_due(graph: &GraphConfig) -> Result<(), Error> 
     if deferred.is_empty() {
         return Ok(());
     }
+    let deferred = deferred.join(", ");
+    if graph.version >= crate::config::FIRST_BACKGROUND_VERSION {
+        return Err(Error::InvalidConfig(format!(
+            "nothing holds this run open — no member is foreground and either scheduled or able \
+             to take a turn in the initial waves — so it settles as soon as those waves are done \
+             and a deferred first turn ({deferred}) never comes due; declare `background: false` \
+             on one of them, give each of them `start_after: 0`, or add a foreground member for \
+             them to pace"
+        )));
+    }
     Err(Error::InvalidConfig(format!(
         "every member of this graph is scheduled or descends from one, so the run quiesces as \
-         soon as its clocks tick and a deferred first turn ({}) never comes due; give each of \
-         them `start_after: 0`, or a member outside the schedules for them to pace",
-        deferred.join(", ")
+         soon as its clocks tick and a deferred first turn ({deferred}) never comes due; give \
+         each of them `start_after: 0`, or a member outside the schedules for them to pace"
     )))
+}
+
+/// Whether `name` takes a turn in the initial waves: it does not defer its own
+/// first turn, and neither does anything it depends on, because a member whose
+/// dependency has no outcome when its wave is reached is skipped there.
+fn takes_an_initial_turn(
+    name: &str,
+    graph: &GraphConfig,
+    memo: &mut BTreeMap<String, bool>,
+) -> bool {
+    if let Some(answer) = memo.get(name) {
+        return *answer;
+    }
+    let member = &graph.members[name];
+    let answer = !defers_first_turn(member, graph.version)
+        && member
+            .deps()
+            .iter()
+            .all(|dep| takes_an_initial_turn(dep, graph, memo));
+    memo.insert(name.to_string(), answer);
+    answer
 }
 
 /// Run a graph to its end, writing envelopes to `sink`.
@@ -1002,6 +1096,9 @@ fn run_announcing(
     let graph_document = resolver.resolve(&request.graph, None)?.clone();
     let mut parsed: Value = serde_norway::from_str(&graph_document.content)
         .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?;
+    // The environment's say first, so the request's own `--set` — which is the
+    // operator's, typed for this run — wins over it.
+    apply_background_env(&mut parsed, env)?;
     apply_overrides(&mut parsed, &request.overrides)?;
     let graph: GraphConfig = serde_norway::from_value(
         serde_norway::to_value(&parsed)
@@ -1127,11 +1224,15 @@ fn run_announcing(
         .collect::<Map<String, Value>>(),
     );
 
-    let non_cron_live = Arc::new(AtomicUsize::new(
+    // How many foreground members are unfinished. A run stays open while this is
+    // above zero, and every background clock stops — and no chain starts — once
+    // it reaches zero. An unscheduled member finishes at its initial outcome; a
+    // scheduled one when its clock stops, which is the clock thread's to count.
+    let foreground_live = Arc::new(AtomicUsize::new(
         graph
             .members
             .keys()
-            .filter(|name| !solely_cron_descended(name, &graph, &mut BTreeMap::new()))
+            .filter(|name| !graph.is_background(name))
             .count(),
     ));
     let (cron_tx, cron_rx) = mpsc::channel();
@@ -1142,7 +1243,8 @@ fn run_announcing(
         let mut runnable = Vec::new();
         let mut deferred = Vec::new();
         for name in wave {
-            let unsuccessful: Vec<String> = deps(&graph.members[&name])
+            let unsuccessful: Vec<String> = graph.members[&name]
+                .deps()
                 .iter()
                 .filter(|dep| record.members.get(*dep) != Some(&MemberOutcome::Settled))
                 .cloned()
@@ -1163,8 +1265,10 @@ fn run_announcing(
                             .expect("eligibility found validated graph dependencies"),
                     ),
                 );
-                if !solely_cron_descended(&name, &graph, &mut BTreeMap::new()) {
-                    non_cron_live.fetch_sub(1, Ordering::SeqCst);
+                // Skipped is finished, whatever its kind: a skipped schedule
+                // never gets a clock, so nothing else will count it down.
+                if !graph.is_background(&name) {
+                    foreground_live.fetch_sub(1, Ordering::SeqCst);
                 }
             }
         }
@@ -1173,7 +1277,9 @@ fn run_announcing(
         // pace is exactly the one that takes the whole run.
         for name in deferred {
             let (invocation, _) = &invocations[&name];
-            let schedule = schedule(&graph.members[&name]).expect("a deferred member is scheduled");
+            let schedule = graph.members[&name]
+                .schedule()
+                .expect("a deferred member is scheduled");
             // The same `member-started` a turn of its own would publish, plus
             // the delay before that turn: the member is up, and this names what
             // it will run when its clock comes due.
@@ -1199,7 +1305,7 @@ fn run_announcing(
                 emitter.clone(),
                 bounds,
                 root.to_path_buf(),
-                Arc::clone(&non_cron_live),
+                Arc::clone(&foreground_live),
                 cron_tx.clone(),
                 Arc::clone(&successful_members),
             ));
@@ -1214,14 +1320,16 @@ fn run_announcing(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(name.clone());
             }
-            if !solely_cron_descended(name, &graph, &mut BTreeMap::new()) {
-                non_cron_live.fetch_sub(1, Ordering::SeqCst);
+            // A scheduled member's initial turn is not its finish — its clock
+            // is, and the clock counts itself down when it stops.
+            if !graph.is_background(name) && graph.members[name].schedule().is_none() {
+                foreground_live.fetch_sub(1, Ordering::SeqCst);
             }
         }
         // A schedule that took its turn at t=0 hands its clock over here, once
         // that turn has settled — the deferred ones already started theirs above.
         for (name, _) in outcomes {
-            if let Some(schedule) = schedule(&graph.members[&name]) {
+            if let Some(schedule) = graph.members[&name].schedule() {
                 cron_threads.push(spawn_cron(
                     schedule,
                     first_span(&schedule, graph.version),
@@ -1231,7 +1339,7 @@ fn run_announcing(
                     emitter.clone(),
                     bounds,
                     root.to_path_buf(),
-                    Arc::clone(&non_cron_live),
+                    Arc::clone(&foreground_live),
                     cron_tx.clone(),
                     Arc::clone(&successful_members),
                 ));
@@ -1354,45 +1462,15 @@ pub fn start(request: &Request, env: &BTreeMap<String, String>) -> Result<Runnin
     }
 }
 
-fn deps(member: &Member) -> &[String] {
-    match member {
-        Member::Oneharness(member) => &member.deps,
-        Member::Onejudge(member) => &member.deps,
-    }
-}
-
-fn schedule(member: &Member) -> Option<crate::config::Schedule> {
-    match member {
-        Member::Oneharness(member) => member.schedule,
-        Member::Onejudge(_) => None,
-    }
-}
-
 /// Whether this member's first turn waits, rather than happening in the wave that
 /// starts the member.
 ///
 /// Named for the turn because the turn is all that waits: such a member is built,
 /// refused if it cannot be, and announced exactly where it always was.
 fn defers_first_turn(member: &Member, schema: u32) -> bool {
-    schedule(member).is_some_and(|schedule| schedule.first_turn_after(schema) > 0)
-}
-
-fn solely_cron_descended(
-    name: &str,
-    graph: &GraphConfig,
-    memo: &mut BTreeMap<String, bool>,
-) -> bool {
-    if let Some(answer) = memo.get(name) {
-        return *answer;
-    }
-    let member = &graph.members[name];
-    let answer = schedule(member).is_some()
-        || (!deps(member).is_empty()
-            && deps(member)
-                .iter()
-                .all(|dep| solely_cron_descended(dep, graph, memo)));
-    memo.insert(name.to_string(), answer);
-    answer
+    member
+        .schedule()
+        .is_some_and(|schedule| schedule.first_turn_after(schema) > 0)
 }
 
 // These are the immutable run resources a detached clock and its chain need;
@@ -1442,9 +1520,18 @@ fn spawn_cron(
                     bounds,
                     &outcomes,
                     &successful,
+                    &live,
                 );
             },
         );
+        // A scheduled member finishes when its clock stops — by the run's `stop`
+        // or its own `cancel` — and a foreground one held the run open until
+        // then. Counted down here, after the last turn this clock ran has been
+        // recorded, so a foreground schedule is never "finished" with a turn
+        // still in flight.
+        if !graph.is_background(&name) {
+            live.fetch_sub(1, Ordering::SeqCst);
+        }
         if let Some(outcome) = outcome {
             let _ = outcomes.send((name, outcome));
         }
@@ -1460,7 +1547,8 @@ fn descendants_of(root: &str, graph: &GraphConfig) -> BTreeSet<String> {
             .filter(|(name, member)| {
                 *name != root
                     && !found.contains(*name)
-                    && deps(member)
+                    && member
+                        .deps()
                         .iter()
                         .any(|dep| dep == root || found.contains(dep))
             })
@@ -1484,6 +1572,7 @@ fn run_cron_chain(
     bounds: Bounds,
     outcomes: &mpsc::Sender<(String, Outcome)>,
     settled_successes: &Mutex<BTreeSet<String>>,
+    live: &AtomicUsize,
 ) {
     let Ok(waves) = ready_order(graph) else {
         return;
@@ -1494,11 +1583,18 @@ fn run_cron_chain(
         .clone();
     successful.retain(|name| !descendants.contains(name));
     for wave in waves {
+        // Once the last foreground member has finished, no member starts a new
+        // turn — not from a clock, and not from here. The wave in flight when
+        // that happened runs to its end and is recorded; the next never starts.
+        if live.load(Ordering::SeqCst) == 0 {
+            return;
+        }
         let runnable: Vec<String> = wave
             .into_iter()
             .filter(|name| descendants.contains(name))
             .filter(|name| {
-                deps(&graph.members[name])
+                graph.members[name]
+                    .deps()
                     .iter()
                     .all(|dep| successful.contains(dep))
             })
@@ -1914,6 +2010,132 @@ mod tests {
             !err.to_string().contains("pacemaker"),
             "the refusal blamed a schedule that does come due: {err}"
         );
+    }
+
+    /// From the schema that has `background`, the refusal is decided by the
+    /// declaration rather than by the graph's shape: a foreground member that is
+    /// scheduled, or that takes a turn in the initial waves, holds the run open
+    /// for a deferred sibling, and nothing else does.
+    #[test]
+    fn under_version_eight_the_refusal_is_decided_by_the_declaration() {
+        const ALL_SCHEDULED: &str = concat!(
+            "version: 8\nname: g\nmembers:\n",
+            "  ticker:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+            "    schedule: {every: 1800}\n",
+            "  pacemaker:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+            "    schedule: {every: 60, start_after: 0}\n",
+        );
+        // Every member scheduled and stating nothing is every member background,
+        // and the deferred one is refused with the declaration named as an answer.
+        let err = ready_order(&graph(ALL_SCHEDULED)).unwrap_err();
+        assert!(err.to_string().contains("ticker"), "{err}");
+        assert!(!err.to_string().contains("pacemaker"), "{err}");
+        assert!(err.to_string().contains("background: false"), "{err}");
+        assert!(err.to_string().contains("start_after: 0"), "{err}");
+
+        // A scheduled member declared foreground holds the run open — whether
+        // it is the deferred one itself or its sibling.
+        for held in ["ticker", "pacemaker"] {
+            let declared = ALL_SCHEDULED.replace(
+                &format!("  {held}:\n    kind: oneharness\n"),
+                &format!("  {held}:\n    kind: oneharness\n    background: false\n"),
+            );
+            assert_ne!(declared, ALL_SCHEDULED);
+            ready_order(&graph(&declared)).unwrap_or_else(|err| panic!("{held}: {err}"));
+        }
+
+        // An unscheduled member that takes a turn in the initial waves holds
+        // it open by default — and not once it is declared background, or once
+        // it can take no initial turn because what it depends on defers its own.
+        let worker = format!(
+            "{ALL_SCHEDULED}  worker:\n    kind: oneharness\n    oneharness_config: ./a.toml\n"
+        );
+        assert!(ready_order(&graph(&worker)).is_ok());
+        let err = ready_order(&graph(&format!("{worker}    background: true\n"))).unwrap_err();
+        assert!(err.to_string().contains("ticker"), "{err}");
+        let err = ready_order(&graph(&format!("{worker}    deps: [ticker]\n"))).unwrap_err();
+        assert!(err.to_string().contains("ticker"), "{err}");
+        assert!(ready_order(&graph(&format!("{worker}    deps: [pacemaker]\n"))).is_ok());
+        // Two members behind the same deferred schedule: neither takes an
+        // initial turn, and the second is answered from the first's descent.
+        let err = ready_order(&graph(&format!(
+            "{worker}    deps: [ticker]\n  second:\n    kind: oneharness\n    \
+             oneharness_config: ./a.toml\n    deps: [ticker, worker]\n"
+        )))
+        .unwrap_err();
+        assert!(err.to_string().contains("ticker"), "{err}");
+
+        // And the words a version 7 document meets are the ones it always has.
+        let older = ALL_SCHEDULED.replace("version: 8", "version: 7");
+        let err = ready_order(&graph(&older)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("every member of this graph is scheduled or descends from one"),
+            "{err}"
+        );
+        assert!(!err.to_string().contains("background"), "{err}");
+    }
+
+    /// `ONEAGENTGRAPH_BACKGROUND` is read the way an operator types it, becomes
+    /// the overrides it stands for, and refuses a name the graph does not have
+    /// with the variable and the name.
+    #[test]
+    fn the_background_variable_names_members_and_refuses_one_the_graph_lacks() {
+        let document: Value = serde_json::json!({
+            "version": 8,
+            "name": "g",
+            "members": {
+                "a": {"kind": "oneharness", "oneharness_config": "a.toml"},
+                "b": {"kind": "oneharness", "oneharness_config": "a.toml"},
+            }
+        });
+        let env = |value: &str| {
+            BTreeMap::from([(
+                crate::liveness::BACKGROUND_ENV.to_string(),
+                value.to_string(),
+            )])
+        };
+        assert!(background_overrides(&BTreeMap::new(), &document)
+            .expect("unset is nothing")
+            .is_empty());
+        let paths = |value: &str| -> Vec<String> {
+            background_overrides(&env(value), &document)
+                .unwrap_or_else(|err| panic!("{value:?}: {err}"))
+                .into_iter()
+                .map(|Override { path, value }| {
+                    assert_eq!(value, "true");
+                    path
+                })
+                .collect()
+        };
+        assert_eq!(paths("a"), vec!["members.a.background"]);
+        assert_eq!(
+            paths(" a, b,"),
+            vec!["members.a.background", "members.b.background"]
+        );
+        assert!(paths("").is_empty());
+        assert!(paths(" , ").is_empty());
+
+        let err = background_overrides(&env("a,ghost"), &document).unwrap_err();
+        assert!(
+            err.to_string().contains(crate::liveness::BACKGROUND_ENV),
+            "{err}"
+        );
+        assert!(err.to_string().contains("\"ghost\""), "{err}");
+        assert!(err.to_string().contains("no member called"), "{err}");
+
+        // Applied through `--set`'s own mechanism, so the leaf lands as the
+        // boolean the schema reads — and an explicit `--set` after it wins.
+        let mut applied = document.clone();
+        apply_background_env(&mut applied, &env("b")).expect("applies");
+        assert_eq!(applied["members"]["b"]["background"], Value::from(true));
+        assert_eq!(applied["members"]["a"].get("background"), None);
+        apply_overrides(
+            &mut applied,
+            &[parse_set("members.b.background=false").expect("parses")],
+        )
+        .expect("applies");
+        assert_eq!(applied["members"]["b"]["background"], Value::from(false));
     }
 
     /// `--set` reaches the field it names, keeping the field's own type, and a

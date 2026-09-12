@@ -12,6 +12,14 @@
 //! where the accumulated failure knowledge of this system lives — each is named
 //! after the thing that once broke.
 
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] every journey
+// in this crate lives behind the one `e2e` edge, by the design AGENTS.md states —
+// a journey is a compiled-binary run with the fake harness, and these cost what
+// the scheduler journeys beside them cost (a few seconds each, in parallel). A
+// second edge for one module would be a target nothing else in the workspace
+// has, and `just check` would still run both.
+mod background;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod dispatch;
 mod events;
 mod interrupt;

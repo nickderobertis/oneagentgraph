@@ -1668,6 +1668,7 @@ mod tests {
             task: Some(task.to_string()),
             dir: None,
             schedule: None,
+            background: None,
             pre_turn: Vec::new(),
             deps: Vec::new(),
         })

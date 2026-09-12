@@ -47,5 +47,14 @@ pub const STALL_TIMEOUT_ENV: &str = "ONEAGENTGRAPH_STALL_TIMEOUT";
 pub const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(1800);
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
+/// Names members a run treats as background, whatever their document says.
+///
+/// A comma-separated list of member names, read from the environment the run is
+/// given — never from a graph's own `env:` block, which is exported *to* members
+/// rather than read about them. Additive: each named member is `background:
+/// true`, on the terms [`crate::config::GraphConfig::is_background`] reads that
+/// declaration under, and beaten only by a `--set` naming the same field.
+pub const BACKGROUND_ENV: &str = "ONEAGENTGRAPH_BACKGROUND";
+
 /// The lock file, inside a scratch directory, that proves who owns it.
 pub const OWNER_LOCK_FILE: &str = "owner.lock";
