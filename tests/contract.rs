@@ -1835,6 +1835,28 @@ fn the_readme_graph_uses_the_current_schema_version() {
     );
 }
 
+/// The README's one graph example is a graph this build reads and would run:
+/// parsed through the public schema and held to `validate`, so a shape shown
+/// there — the judge list among them — cannot drift from the types.
+#[test]
+fn the_readme_graph_is_one_this_build_reads_and_validates() {
+    let (_, rest) = README
+        .split_once("```yaml\n")
+        .expect("the README carries a fenced graph example");
+    let (document, _) = rest.split_once("```").expect("the fenced example closes");
+    let graph: GraphConfig =
+        serde_norway::from_str(document).expect("the README graph does not parse");
+    oneagentgraph::config::validate(&graph).expect("the README graph must validate");
+    let Some(Member::Onejudge(worker)) = graph.members.get("worker") else {
+        panic!("the README's worker is a two-party member");
+    };
+    assert_eq!(
+        worker.judge.iter().map(JudgeSide::kind).collect::<Vec<_>>(),
+        vec!["oneharness", "llmlint", "command"],
+        "the README shows the three judge shapes, in that order"
+    );
+}
+
 /// The contract documents `deps` on both member variants and both round-trip.
 #[test]
 fn the_documented_dependency_field_round_trips_on_both_member_kinds() {

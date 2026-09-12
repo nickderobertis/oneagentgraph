@@ -54,7 +54,13 @@ members:
     kind: onejudge
     base_config: ./onejudge.base.yaml
     agent: { oneharness_config: ./oneharness.toml }
-    judge: { oneharness_config: ./oneharness.judge.toml }
+    judge:                            # one side, or a list of sides judged as one panel
+      - oneharness_config: ./oneharness.judge.toml
+        label: reviewer
+      - kind: llmlint
+        config: ./llmlint.yml
+        diff_base: origin/main
+      - command: [./scripts/checks]
     mode: bypass
 ```
 
@@ -68,23 +74,12 @@ field names, and onejudge's schema decides what it may say. [The persona
 format](docs/persona-format.md) documents it, including the `agent:` block
 earlier versions defined, which is now refused with no compatibility path.
 
-A two-party member's `judge:` is one side, as above, or a **list of sides
-judged as one panel**: a harness reviewer (`oneharness_config`), an `llmlint`
-run over the worker's tree (`kind: llmlint`, with its `config` and `diff_base`),
-and a repository's own command (`command`), on one worker at once. Every judge
-sees each turn, the worker is handed one attributed message when any of them
-sends it back, and each judge's own verdict is a `judge-decided` on the stream.
-A single harness side is launched exactly as it always was.
-
-```yaml
-    judge:
-      - oneharness_config: ./oneharness.judge.toml
-        label: reviewer
-      - kind: llmlint
-        config: ./llmlint.yml
-        diff_base: origin/main
-      - command: [./scripts/checks]
-```
+A two-party member's `judge:` is a list of sides judged as one panel — a
+harness reviewer, an `llmlint` run over the worker's tree, and a repository's
+own command, on one worker at once — and a single side is the one-element
+shorthand for it. What each shape carries, how the list becomes onejudge's
+provider, and the `judge-decided` event each judge's verdict arrives as are
+stated in [the contract](docs/contract.md).
 
 A single-sided member may declare `pre_turn` commands — run immediately before
 each of its turns, with what they printed prepended to what that turn is asked.

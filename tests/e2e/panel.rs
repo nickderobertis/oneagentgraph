@@ -67,11 +67,52 @@ fn stacked_graph(workspace: &Workspace, extra_env: &[(&str, String)]) -> String 
     )
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the three helpers below are the
+// observation points these journeys assert composition through, and each is the
+// point *because* it is the subject. `onejudge.yaml` and the `judge-<label>.toml`
+// beside it are the member's launch evidence — `JudgeLaunch::config` documents
+// them as the files an operator reads to see exactly what the member ran, and
+// `Workspace::member_file` exists for that read — and the stream cannot hold what
+// they hold: a member launched as one provider or another, with a judge's config
+// at one path or another, settles with a stream identical to a correct one. The
+// argv log is the llmlint double's recording of what onejudge composed for it, at
+// the same point and for the same reason the harness double's `record-*` files
+// are read by the journeys in dispatch.rs. Every assertion about behaviour — the
+// exit code, the events, each judge's decision, the worker's next instruction —
+// is still made through the CLI.
 /// The effective onejudge config the worker was launched with, parsed.
 fn launched_config(workspace: &Workspace) -> Value {
     let text = workspace.member_file("worker", "onejudge.yaml");
     serde_norway::from_str(&text).expect("the effective config is YAML")
 }
+
+/// One file the run wrote into the worker's scratch beside that config, or
+/// `None` when the run wrote no such file.
+fn scratch_file(workspace: &Workspace, name: &str) -> Option<String> {
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the record names its run")
+        .to_string();
+    std::fs::read_to_string(
+        workspace
+            .state()
+            .join(run_id)
+            .join("members")
+            .join("worker")
+            .join(name),
+    )
+    .ok()
+}
+
+/// Every argv the llmlint double was run with, one per line of its log.
+fn llmlint_invocations(log: &Path) -> Vec<Vec<String>> {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one argv per line"))
+        .collect()
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Every `judge-decided` the worker published for `turn`, in stream order, as
 /// `(judge, kind, decision, reason)`.
@@ -93,15 +134,6 @@ fn decisions(run: &Run, turn: u64) -> Vec<(String, String, String, String)> {
                 field("reason"),
             )
         })
-        .collect()
-}
-
-/// Every argv the llmlint double was run with, one per line of its log.
-fn llmlint_invocations(log: &Path) -> Vec<Vec<String>> {
-    std::fs::read_to_string(log)
-        .unwrap_or_default()
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("one argv per line"))
         .collect()
 }
 
@@ -147,10 +179,10 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
         Some("judge-reviewer.toml"),
         "{config}"
     );
-    let stamped = workspace.member_file("worker", "judge-reviewer.toml");
+    let stamped = scratch_file(&workspace, "judge-reviewer.toml").expect("the reviewer's config");
     assert!(stamped.contains("mode = \"bypass\""), "{stamped}");
     assert!(
-        !reviewer.with_file_name("oneharness.judge.toml").exists(),
+        scratch_file(&workspace, "oneharness.judge.toml").is_none(),
         "the single-judge file must not be written for a stack"
     );
 
@@ -165,7 +197,7 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
         "an absent label is left to onejudge: {config}"
     );
     assert!(
-        !reviewer.with_file_name("llmlint.yml").exists(),
+        scratch_file(&workspace, "llmlint.yml").is_none(),
         "an llmlint config is never copied into the scratch"
     );
 
@@ -340,7 +372,8 @@ fn a_single_harness_judge_is_still_launched_as_the_provider_it_always_was() {
             Some("oneharness.judge.toml"),
             "{label}: {config}"
         );
-        let stamped = workspace.member_file("worker", "oneharness.judge.toml");
+        let stamped =
+            scratch_file(&workspace, "oneharness.judge.toml").expect("the judge's config");
         assert_eq!(
             stamped.contains("# the override's judge"),
             label == "overridden",
