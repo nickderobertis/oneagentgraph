@@ -384,11 +384,9 @@ fn a_single_harness_judge_is_still_launched_as_the_provider_it_always_was() {
 
 /// A list entry that is none of the three shapes, and a side whose config
 /// cannot be read, are refused by both verbs naming the entry — before any
-/// member is built — and an llmlint `bin` that is not there is refused by
-/// onejudge's own probe when the member's plan is built, so it dies without a
-/// turn rather than judging as a silent pass.
+/// member is built.
 #[test]
-fn a_panel_that_cannot_run_is_refused_naming_the_entry() {
+fn a_malformed_judge_entry_is_refused_by_both_verbs_naming_it() {
     let workspace = Workspace::new();
     let refuses = |document: &str, expected: &[&str]| {
         workspace.graph(document);
@@ -434,9 +432,15 @@ fn a_panel_that_cannot_run_is_refused_naming_the_entry() {
         ),
         &["judge entry 1", "nowhere.toml", "cannot read"],
     );
+}
 
-    // A `bin` nothing answers `--version` on: onejudge's probe refuses it when
-    // the plan is built, and the member dies before its first turn.
+/// An llmlint `bin` that is not there is refused by onejudge's own probe when
+/// the member's plan is built, so the member dies without a turn rather than
+/// judging as a silent pass: a death after launch, not a refusal before it.
+#[test]
+fn an_llmlint_bin_nothing_answers_kills_the_member_before_its_first_turn() {
+    let workspace = Workspace::new();
+    let stacked = stacked_graph(&workspace, &[]);
     let missing = workspace.unreachable_harness();
     workspace.graph(&stacked.replace(&fake_llmlint(), &missing));
     let run = workspace.run_task("fake:complete-now: never judged");

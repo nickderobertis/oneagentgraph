@@ -821,14 +821,19 @@ pub fn is_judge_label(label: &str) -> bool {
     is_member_name(label)
 }
 
-/// The refusals a judge list earns before anything is resolved: no judge at
-/// all, a command judge with nothing to run, and a label that could not be a
-/// file name.
+/// The shape refusals a judge list earns before anything is resolved: no judge
+/// at all, a command judge with nothing to run, and a label that could not be a
+/// file name. Whether a side's config can be read is decided when the member is
+/// built, and whether its `bin` answers is onejudge's probe at plan time —
+/// neither is claimed here.
 ///
 /// What a label may be beyond that — unique within the list, once onejudge has
 /// defaulted the absent ones — is onejudge's rule, applied by it when the
 /// member's plan is built, and not restated here.
-fn judge_sides_can_run(name: &str, judges: &[JudgeSide]) -> Result<(), crate::error::Error> {
+fn judge_sides_are_well_formed(
+    name: &str,
+    judges: &[JudgeSide],
+) -> Result<(), crate::error::Error> {
     use crate::error::Error;
     if judges.is_empty() {
         return Err(Error::InvalidConfig(format!(
@@ -992,7 +997,7 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                         "member {name:?}: `max_turns` of 0 lets the member take no turn at all"
                     )));
                 }
-                judge_sides_can_run(name, &member.judge)?;
+                judge_sides_are_well_formed(name, &member.judge)?;
                 // A conversation's own worktree and pace, gated the way a
                 // single-sided member's `dir` is and refused for the same reason:
                 // a document declaring an older schema and naming either would
