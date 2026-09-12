@@ -106,6 +106,64 @@ reset before the first turn restores the whole delay rather than promoting the
 member to its steady cadence. A schedule that fired at
 t=0 has nothing left to defer, so its pending interval is `every` from the start.
 
+## Paced conversations
+
+From `config::FIRST_TWO_PARTY_JOB_VERSION`, `config::OnejudgeMember::schedule` is
+the same `config::Schedule` a single-sided member carries and is held to the same
+rules — `config::schedule_spans` is the one function both `validate` arms call —
+but what a firing *is* differs, and everything below follows from that: a
+`kind: onejudge` member is one long-lived conversation, and a firing of it is one
+turn of that conversation. `config::Member::schedule` answers for both kinds, so
+`run::defers_first_turn`, `run::refuse_a_turn_that_never_comes_due`, and
+`config::GraphConfig::is_background` treat a scheduled two-party member exactly
+as a scheduled single-sided one; `run::clocked` answers for the single-sided
+kind alone, and is what the run spawns a clock from after a wave.
+
+- **The first delay is the run's clock's.** A deferred two-party member comes up
+  with its wave, publishes `member-started` carrying `start_after`, and
+  `run::spawn_cron` counts `run::first_span` down for it exactly as for a
+  single-sided member — the same stop, member-stop, trigger and reset files, and
+  the same `cron-fired` — and `run::cron` then calls `member::run` **once** and
+  returns, because the conversation it opened was the member's whole life. A
+  `start_after: 0` two-party member opens in the wave, and `run::run` spawns no
+  clock for it afterwards.
+- **The hold between turns is the conversation's own.** `invoke::onejudge` puts
+  the schedule's `every` and `resettable`, and whether the member is background,
+  on `invoke::JudgeLaunch::pace` (`judge::Pace`); `judge::run` gives it to a
+  `judge::Hold` that lives inside the observation sink. The hold is taken on the
+  supervisor's `TurnClosed` when that turn carried a `Message` — onejudge's own
+  shape for a continuation — and not on a close with no message between, which is
+  a completion or a settled decision and is followed by no worker turn. The
+  engine publishes that close through the sink before it looks for notes or
+  opens the next worker turn, so a sink that waits is a conversation that waits;
+  `judge::hold_between_turns`, the suite's gate at the same boundary, is the
+  demonstration.
+- **What ends a hold** is read every `judge::HOLD_TICK` from the run's signal
+  directory, derived from the member's scratch as `judge::cancellation_requested`
+  derives it: `every` elapsing, or `<member>.trigger`, publish `cron-fired` and
+  answer the engine `Continue`; `<member>.reset` on a `resettable` pace restarts
+  the count and publishes `cron-reset`; `stop` or `<member>.stop` answers
+  `Break`, and `judge::finish` reports the conversation as a cancel is reported
+  mid-turn — `member-died`, `cause: cancelled`; and, for a background member,
+  `run::QUIESCENT_FILE` answers `Break` and `judge::finish` settles the member
+  with the report's `settled_reason` naming the run's quiescence. A note offered
+  ends a hold too: `note::Courier` counts each note up *before* it blocks in
+  `Notes::send`, the hold reads that count, opens the turn, and the engine's own
+  `take_notes` delivers the note `queued` into it. A trigger or reset left while
+  a turn is live sits in the directory until the next hold reads it.
+- **A hold is not a stall.** The hold stores the activity clock every tick, so
+  `member::Stall` on the supervising thread never sees the wait as silence; that
+  thread's heartbeat is untouched by a sink that blocks.
+- **Quiescence reaches the sink as a file.** The count of unfinished foreground
+  members is `run::Foreground`, whose `finish` writes `run::QUIESCENT_FILE` into
+  the signal directory when the count reaches zero — and at once for a graph
+  seeded at zero. `run::run_wave` reports each member the moment it settles, so
+  a background paced conversation opened in the same wave as the last foreground
+  member learns of that member's finish while the wave is still open.
+- `interrupt` during a hold is exit 3 by the existing route: the member's control
+  record names its provisional address, nothing is listening on the agent side's
+  socket between turns, and `control::deliver` reports the fact.
+
 ## Background and foreground
 
 Whether a member holds the run open is a declaration the document makes per
@@ -147,7 +205,9 @@ it down there. A scheduled member finishes when its clock stops, by the run's
 `run::cron` returns — after the last turn that clock ran has been recorded — so
 a scheduled foreground member never finishes on its own and holds the run open
 until it is cancelled, and a skipped schedule, which never gets a clock, is
-counted down where it is skipped. Before a due or triggered firing, `run::cron`
+counted down where it is skipped. A paced two-party member is the one scheduled
+member that does finish on its own: its clock returns when its conversation
+does, and a foreground one holds the run open exactly that long. Before a due or triggered firing, `run::cron`
 reads that count; when it is zero the clock exits without waiting for its next
 interval, which is the scheduler's quiescence boundary. `run::run_cron_chain`
 reads the same count before each wave it would start, so from the moment the last

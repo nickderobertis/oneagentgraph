@@ -2266,6 +2266,7 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         task_text: oneagentgraph::config::TaskText::under(SCHEMA_VERSION),
         session: "s",
         oneharness_bin: "oneharness",
+        background: false,
     };
     let invocation = oneagentgraph::invoke::build(
         &member,

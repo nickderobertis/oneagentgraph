@@ -203,6 +203,11 @@ pub struct JudgeLaunch {
     /// [`crate::control`].
     pub session: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The pace this member's one conversation runs at, when its schedule paces
+    /// it — see [`crate::judge::Pace`]. `None` for a conversation that is never
+    /// held, which is every two-party member written before graph schema
+    /// version [`crate::config::FIRST_TWO_PARTY_JOB_VERSION`].
+    pub pace: Option<crate::judge::Pace>,
 }
 
 /// One member, ready to start.
@@ -247,6 +252,13 @@ pub struct Context<'a> {
     /// The `oneharness` binary onejudge shells out to, and that a single-sided
     /// member runs directly.
     pub oneharness_bin: &'a str,
+    /// Whether this member is background — the run does not stay open for it —
+    /// which is [`crate::config::GraphConfig::is_background`]'s answer and is
+    /// taken here rather than re-derived, because what an omission means is the
+    /// whole graph's to say. A paced two-party member's conversation is built to
+    /// know it: a background one ends at the run's quiescence rather than
+    /// opening another turn.
+    pub background: bool,
 }
 
 /// Build one member's invocation, resolving everything it names.
@@ -380,6 +392,14 @@ fn onejudge(
             worktree: member_dir(member.dir.as_deref(), context),
             agent_config: agent_path,
             session: context.session.to_string(),
+            // The hold between turns, from the schedule as written: `every` is
+            // the cadence whatever the schema, and the first delay is the run's
+            // clock's — resolved there, where the schema is known.
+            pace: member.schedule.map(|schedule| crate::judge::Pace {
+                every: std::time::Duration::from_secs(schedule.every),
+                resettable: schedule.resettable,
+                background: context.background,
+            }),
         })),
         persona: label,
         // Nothing: this member starts no child process of its own, so it has no
@@ -1209,6 +1229,7 @@ mod tests {
             task_text: TaskText::Template,
             session: "s",
             oneharness_bin: "oneharness",
+            background: false,
         }
     }
 

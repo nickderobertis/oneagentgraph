@@ -1163,6 +1163,7 @@ mod tests {
                 worktree: std::path::PathBuf::from("/work"),
                 agent_config: std::path::PathBuf::from("/scratch/oneharness.toml"),
                 session: "s-worker".into(),
+                pace: None,
             }))),
             start_after: None,
         });

@@ -41,6 +41,18 @@ use crate::scratch::Owned;
 /// see, script, and clean up.
 pub const SIGNAL_DIR: &str = "signals";
 
+/// The file the run itself leaves in [`SIGNAL_DIR`] the moment its last
+/// foreground member finishes — the quiescence boundary, made visible.
+///
+/// The one signal the run writes rather than an operator: a paced two-party
+/// member's hold between turns runs on the engine's own thread, inside the
+/// observation sink, where the count of unfinished foreground members is not
+/// reachable — and the four things that already end such a hold are files in
+/// this directory, read from the member's scratch. So the fifth is one too. A
+/// background paced member reads it at its next hold and ends its conversation
+/// there rather than opening another turn; a clock and a chain read the count.
+pub const QUIESCENT_FILE: &str = "quiescent";
+
 /// Where a run's merged NDJSON is always written, whatever `--output` renders.
 pub const EVENTS_FILE: &str = "events.jsonl";
 
@@ -1200,6 +1212,7 @@ fn run_announcing(
             task_text: TaskText::under(graph.version),
             session: &format!("{run_id}-{name}"),
             oneharness_bin: &request.oneharness_bin,
+            background: graph.is_background(name),
         };
         invocations.insert(
             name.clone(),
@@ -1228,12 +1241,13 @@ fn run_announcing(
     // above zero, and every background clock stops — and no chain starts — once
     // it reaches zero. An unscheduled member finishes at its initial outcome; a
     // scheduled one when its clock stops, which is the clock thread's to count.
-    let foreground_live = Arc::new(AtomicUsize::new(
+    let foreground_live = Arc::new(Foreground::new(
         graph
             .members
             .keys()
             .filter(|name| !graph.is_background(name))
             .count(),
+        &root,
     ));
     let (cron_tx, cron_rx) = mpsc::channel();
     let successful_members = Arc::new(Mutex::new(BTreeSet::new()));
@@ -1268,7 +1282,7 @@ fn run_announcing(
                 // Skipped is finished, whatever its kind: a skipped schedule
                 // never gets a clock, so nothing else will count it down.
                 if !graph.is_background(&name) {
-                    foreground_live.fetch_sub(1, Ordering::SeqCst);
+                    foreground_live.finish();
                 }
             }
         }
@@ -1310,7 +1324,17 @@ fn run_announcing(
                 Arc::clone(&successful_members),
             ));
         }
-        let outcomes = run_wave(&runnable, &invocations, &emitter, bounds);
+        // Each member is counted finished *as it settles* rather than once the
+        // wave has: a paced conversation in this wave holds it open for as long
+        // as it runs, and a background one ends at the run's quiescence — which
+        // is a moment inside the wave when the last foreground member is a
+        // sibling of it. A member the run keeps a clock for is not finished by
+        // its initial turn; the clock counts itself down when it stops.
+        let outcomes = run_wave(&runnable, &invocations, &emitter, bounds, &mut |name| {
+            if !graph.is_background(name) && clocked(&graph.members[name]).is_none() {
+                foreground_live.finish();
+            }
+        });
         for (name, outcome) in &outcomes {
             record.members.insert(name.clone(), describe(outcome));
             failed |= !outcome.is_success();
@@ -1320,16 +1344,13 @@ fn run_announcing(
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .insert(name.clone());
             }
-            // A scheduled member's initial turn is not its finish — its clock
-            // is, and the clock counts itself down when it stops.
-            if !graph.is_background(name) && graph.members[name].schedule().is_none() {
-                foreground_live.fetch_sub(1, Ordering::SeqCst);
-            }
         }
         // A schedule that took its turn at t=0 hands its clock over here, once
         // that turn has settled — the deferred ones already started theirs above.
+        // A paced conversation that opened at t=0 has just returned, and its
+        // schedule started it no second one.
         for (name, _) in outcomes {
-            if let Some(schedule) = graph.members[&name].schedule() {
+            if let Some(schedule) = clocked(&graph.members[&name]) {
                 cron_threads.push(spawn_cron(
                     schedule,
                     first_span(&schedule, graph.version),
@@ -1462,6 +1483,72 @@ pub fn start(request: &Request, env: &BTreeMap<String, String>) -> Result<Runnin
     }
 }
 
+/// How many foreground members are unfinished, and the marker written when the
+/// last one finishes.
+///
+/// One ledger for the whole run, seeded from [`GraphConfig::is_background`] over
+/// every member. A run stays open while the count is above zero, and every
+/// background clock stops — and no chain starts — once it reaches zero; that
+/// moment is also written to [`QUIESCENT_FILE`], for the one reader that cannot
+/// see the count. Seeded at zero — a graph whose every member is background —
+/// the marker is written at once, because that run is quiescent from the start.
+struct Foreground {
+    live: AtomicUsize,
+    marker: PathBuf,
+}
+
+impl Foreground {
+    fn new(count: usize, root: &Path) -> Self {
+        let ledger = Self {
+            live: AtomicUsize::new(count),
+            marker: root.join(SIGNAL_DIR).join(QUIESCENT_FILE),
+        };
+        if count == 0 {
+            ledger.mark();
+        }
+        ledger
+    }
+
+    /// One foreground member finished.
+    fn finish(&self) {
+        if self.live.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.mark();
+        }
+    }
+
+    /// Whether every unfinished member is background.
+    fn quiet(&self) -> bool {
+        self.live.load(Ordering::SeqCst) == 0
+    }
+
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `Err` arm is the
+    // signal directory this run created moments ago having become unwritable —
+    // a host failure rather than a request — and what it decides is that the
+    // count still stands: a clock and a chain read the count, and the one
+    // reader of the file goes on holding, which is the conservative direction.
+    // The `Ok` arm is what `tests/e2e/two_party.rs`'s quiescence journey
+    // drives.
+    fn mark(&self) {
+        let _ = std::fs::write(&self.marker, QUIESCENT_FILE);
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+}
+
+/// The schedule the run keeps a **clock** for: a single-sided member's.
+///
+/// A two-party member's schedule is a pace, not a clock: its conversation is its
+/// whole life, `every` is held from inside it — see [`crate::judge::Pace`] — and
+/// once the conversation has returned there is nothing to fire again. So the run
+/// spawns no clock for one after its wave, and the one it spawns to defer a first
+/// turn fires once. [`Member::schedule`] is still the schedule for everything
+/// else: whether the first turn defers, and what the member is by default.
+fn clocked(member: &Member) -> Option<crate::config::Schedule> {
+    match member {
+        Member::Oneharness(member) => member.schedule,
+        Member::Onejudge(_) => None,
+    }
+}
+
 /// Whether this member's first turn waits, rather than happening in the wave that
 /// starts the member.
 ///
@@ -1485,7 +1572,7 @@ fn spawn_cron(
     emitter: Emitter,
     bounds: Bounds,
     root: PathBuf,
-    live: Arc<AtomicUsize>,
+    live: Arc<Foreground>,
     outcomes: mpsc::Sender<(String, Outcome)>,
     successful: Arc<Mutex<BTreeSet<String>>>,
 ) -> std::thread::JoinHandle<()> {
@@ -1525,12 +1612,12 @@ fn spawn_cron(
             },
         );
         // A scheduled member finishes when its clock stops — by the run's `stop`
-        // or its own `cancel` — and a foreground one held the run open until
-        // then. Counted down here, after the last turn this clock ran has been
-        // recorded, so a foreground schedule is never "finished" with a turn
-        // still in flight.
+        // or its own `cancel`, or, for a paced conversation, by the conversation
+        // returning — and a foreground one held the run open until then. Counted
+        // down here, after the last turn this clock ran has been recorded, so a
+        // foreground schedule is never "finished" with a turn still in flight.
         if !graph.is_background(&name) {
-            live.fetch_sub(1, Ordering::SeqCst);
+            live.finish();
         }
         if let Some(outcome) = outcome {
             let _ = outcomes.send((name, outcome));
@@ -1572,7 +1659,7 @@ fn run_cron_chain(
     bounds: Bounds,
     outcomes: &mpsc::Sender<(String, Outcome)>,
     settled_successes: &Mutex<BTreeSet<String>>,
-    live: &AtomicUsize,
+    live: &Foreground,
 ) {
     let Ok(waves) = ready_order(graph) else {
         return;
@@ -1586,7 +1673,7 @@ fn run_cron_chain(
         // Once the last foreground member has finished, no member starts a new
         // turn — not from a clock, and not from here. The wave in flight when
         // that happened runs to its end and is recorded; the next never starts.
-        if live.load(Ordering::SeqCst) == 0 {
+        if live.quiet() {
             return;
         }
         let runnable: Vec<String> = wave
@@ -1599,7 +1686,9 @@ fn run_cron_chain(
                     .all(|dep| successful.contains(dep))
             })
             .collect();
-        for (name, outcome) in run_wave(&runnable, invocations, emitter, bounds) {
+        // A chain member was counted finished where it was skipped in the
+        // initial waves, so nothing is counted here.
+        for (name, outcome) in run_wave(&runnable, invocations, emitter, bounds, &mut |_| {}) {
             if outcome.is_success() {
                 successful.insert(name.clone());
             }
@@ -1609,11 +1698,17 @@ fn run_cron_chain(
 }
 
 /// Run one wave of members concurrently.
+///
+/// `settled` is told each member's name the moment that member's outcome
+/// arrives, while its siblings may still be running — which is the moment a
+/// foreground member finishes, and the moment a paced sibling still in this
+/// wave has to be able to learn about.
 fn run_wave(
     wave: &[String],
     invocations: &BTreeMap<String, (Invocation, PathBuf)>,
     emitter: &Emitter,
     bounds: Bounds,
+    settled: &mut dyn FnMut(&str),
 ) -> Vec<(String, Outcome)> {
     let (tx, rx) = mpsc::channel();
     let mut running = 0;
@@ -1639,14 +1734,15 @@ fn run_wave(
         });
     }
     drop(tx);
-    let mut settled = Vec::new();
+    let mut outcomes = Vec::new();
     for _ in 0..running {
         if let Ok(outcome) = rx.recv() {
-            settled.push(outcome);
+            settled(&outcome.0);
+            outcomes.push(outcome);
         }
     }
-    settled.sort_by(|a, b| a.0.cmp(&b.0));
-    settled
+    outcomes.sort_by(|a, b| a.0.cmp(&b.0));
+    outcomes
 }
 
 /// Keep firing a scheduled member until its run is asked to stop.
@@ -1670,7 +1766,7 @@ fn cron(
     bounds: Bounds,
     scratch: &Path,
     signals: &Path,
-    live: &AtomicUsize,
+    live: &Foreground,
     mut on_success: impl FnMut(),
 ) -> Option<Outcome> {
     let stop = signals.join("stop");
@@ -1699,7 +1795,7 @@ fn cron(
         if stopped() {
             break;
         }
-        if live.load(Ordering::SeqCst) == 0 {
+        if live.quiet() {
             break;
         }
         if schedule.resettable && reset.exists() {
@@ -1726,6 +1822,13 @@ fn cron(
             on_success();
         }
         last = Some(outcome);
+        // A two-party member's firing was its whole conversation, paced from
+        // inside by the same schedule — see [`crate::judge::Pace`] — so the
+        // clock that opened it has nothing left to fire: the schedule starts
+        // no second conversation.
+        if matches!(invocation.launch, invoke::Launch::Judge(_)) {
+            break;
+        }
         interval = Duration::from_secs(schedule.every);
         counting_since = Instant::now();
     }

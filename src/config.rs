@@ -229,7 +229,7 @@ pub struct OnejudgeMember {
     /// counted from the moment the judge side closes a turn with a next
     /// instruction, and skipped when it closed with none — and when the
     /// conversation settles the schedule starts no second one. The hold is
-    /// [`crate::judge`]'s. Requires graph schema version
+    /// [`crate::judge::Pace`]'s. Requires graph schema version
     /// [`FIRST_TWO_PARTY_JOB_VERSION`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,

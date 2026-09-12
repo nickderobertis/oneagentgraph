@@ -615,15 +615,21 @@ pub(crate) struct Courier {
     notes: onejudge::note::Notes,
     stop: Arc<AtomicBool>,
     emitter: Emitter,
+    offered: Arc<AtomicU64>,
 }
 
 impl Courier {
     /// Open the courier for a member, and the [`Ending`] its supervisor closes it
     /// with.
+    ///
+    /// `offered` is counted up once per note, *before* the courier blocks
+    /// handing it over — see [`Courier::serve`] — so a conversation held between
+    /// turns can see a note arrive and open the turn that will take it.
     pub(crate) fn open(
         spool: Spool,
         notes: onejudge::note::Notes,
         emitter: &Emitter,
+        offered: Arc<AtomicU64>,
     ) -> (Self, Ending) {
         let stop = Arc::new(AtomicBool::new(false));
         let ending = Ending {
@@ -636,6 +642,7 @@ impl Courier {
             notes,
             stop,
             emitter: emitter.clone(),
+            offered,
         };
         (courier, ending)
     }
@@ -644,6 +651,12 @@ impl Courier {
     pub(crate) fn serve(self) {
         while !self.stop.load(Ordering::SeqCst) {
             for (id, note) in self.spool.take() {
+                // Said before the hand-over blocks, because during a paced
+                // conversation's hold between turns the engine disposes of
+                // nothing until the hold ends — and the hold ends on exactly
+                // this: a note offered. A count rather than a flag, so two
+                // notes in one hold are two arrivals rather than one.
+                self.offered.fetch_add(1, Ordering::SeqCst);
                 // Blocks: the conversation is what decides, and for a note that
                 // reaches the supervisor's live turn the decision *is* the answer.
                 let delivery = match self.notes.send(note.clone()) {
@@ -751,7 +764,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let spool = Spool::bind(dir.path()).expect("a spool");
         let (notes, inbox) = onejudge::note::Notes::channel();
-        let (courier, _ending) = Courier::open(spool.clone(), notes, &emitter("worker"));
+        let (courier, _ending) = Courier::open(
+            spool.clone(),
+            notes,
+            &emitter("worker"),
+            Arc::new(AtomicU64::new(0)),
+        );
         std::thread::spawn(move || courier.serve());
 
         // No turn has opened, so there is nothing live to deliver into and the
