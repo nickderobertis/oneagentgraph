@@ -804,9 +804,12 @@ fn judge_file_label(judges: &[JudgeSide], index: usize) -> String {
 /// directory, so a relative path there means what it means for every other ref
 /// of that graph — the directory this process runs in — and is made absolute
 /// against it, because "absolute" is the whole of what the llmlint side of the
-/// provider block promises. Checked for the reason a harness side's config is
-/// read before launch: a file that is not there is the operator's mistake, and
-/// finding it after the agent's first turn is finding it a paid turn too late.
+/// provider block promises. Opened for the reason a harness side's config is
+/// read before launch: a file that is not there, or that this process may not
+/// read, is the operator's mistake, and finding it after the agent's first turn
+/// is finding it a paid turn too late. Opened rather than stat'd because a stat
+/// says nothing about permission, and a directory opens on Linux, so the file
+/// is asked what it is once it is open.
 fn llmlint_config(written: &Path, entry: usize, context: &Context<'_>) -> Result<PathBuf, Error> {
     let anchored = anchored_path(context.graph_dir, written);
     let absolute = if crate::anchor::names_its_own_root(&anchored) {
@@ -819,12 +822,17 @@ fn llmlint_config(written: &Path, entry: usize, context: &Context<'_>) -> Result
             ))
         })?
     };
-    if !absolute.is_file() {
-        return Err(Error::InvalidConfig(format!(
-            "judge entry {entry}: llmlint config {} ({}) cannot be read: not a file",
+    let cannot_read = |why: &dyn std::fmt::Display| {
+        Error::InvalidConfig(format!(
+            "judge entry {entry}: llmlint config {} ({}) cannot be read: {why}",
             absolute.display(),
             written.display()
-        )));
+        ))
+    };
+    let opened = std::fs::File::open(&absolute).map_err(|err| cannot_read(&err))?;
+    let is_file = opened.metadata().is_ok_and(|meta| meta.is_file());
+    if !is_file {
+        return Err(cannot_read(&"not a file"));
     }
     Ok(absolute)
 }
@@ -2088,6 +2096,52 @@ mod tests {
         assert!(
             err.to_string().contains("missing.yml") && err.to_string().contains("cannot be read"),
             "{err}"
+        );
+
+        // A path that is there but is a directory: it opens, and is still not
+        // a config.
+        std::fs::create_dir(dir.path().join("rules")).expect("a directory");
+        let err = compose(
+            dir.path(),
+            &scratch,
+            "judge:\n  - command: [ok]\n  - kind: llmlint\n    config: ./rules\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("judge entry 2: llmlint config")
+                && err.to_string().contains("cannot be read: not a file"),
+            "{err}"
+        );
+    }
+
+    /// An llmlint config that is there but that this process may not read is
+    /// refused before launch, naming the entry and the OS's reason — a stat
+    /// alone would have passed it, and onejudge would have found out after the
+    /// first turn. Unix, because mode bits are how the file is made unreadable;
+    /// and no gate runs as root, which reads every file and would have nothing
+    /// to refuse.
+    #[cfg(unix)]
+    #[test]
+    fn an_llmlint_config_this_process_cannot_read_is_refused_naming_the_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let config = dir.path().join("llmlint.yml");
+        std::fs::write(&config, "rules: []\n").expect("llmlint config");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000))
+            .expect("permissions");
+        let err = compose(
+            dir.path(),
+            &scratch,
+            "judge:\n  - command: [ok]\n  - kind: llmlint\n    config: ./llmlint.yml\n",
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("judge entry 2: llmlint config")
+                && text.contains("llmlint.yml")
+                && text.contains("cannot be read: Permission denied"),
+            "{text}"
         );
     }
 
