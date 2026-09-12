@@ -31,8 +31,8 @@ use oneagentgraph::event::{
     MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS, ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
 use oneagentgraph::liveness::{
-    DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, OWNER_LOCK_FILE,
-    STALL_TIMEOUT_ENV,
+    BACKGROUND_ENV, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV,
+    OWNER_LOCK_FILE, STALL_TIMEOUT_ENV,
 };
 use oneagentgraph::run::{RunId, Started};
 use oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE;
@@ -1339,7 +1339,12 @@ fn the_documented_liveness_bounds_are_the_ones_the_crate_declares() {
         CONTRACT.contains(&format!("default {}s", DEFAULT_STALL_TIMEOUT.as_secs())),
         "the stall deadline in docs/contract.md and DEFAULT_STALL_TIMEOUT disagree"
     );
-    for name in [HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV, OWNER_LOCK_FILE] {
+    for name in [
+        HEARTBEAT_TIMEOUT_ENV,
+        STALL_TIMEOUT_ENV,
+        BACKGROUND_ENV,
+        OWNER_LOCK_FILE,
+    ] {
         assert!(
             CONTRACT.contains(name),
             "docs/contract.md no longer names `{name}`"

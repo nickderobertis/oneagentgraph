@@ -178,7 +178,7 @@ fn run_id(workspace: &Workspace) -> String {
         .to_string()
 }
 
-/// Release the worker and give the run the two ticks it needs to notice.
+/// Release the member held on `path`.
 fn release(path: &Path) {
     std::fs::write(path, "release").expect("release the worker");
 }
@@ -524,6 +524,71 @@ fn background_is_refused_by_name_and_version_however_it_is_named() {
         &release_at.display().to_string(),
     ));
     workspace.run(&["validate", "./graph.yaml"]).expect_code(0);
+}
+
+/// `--detach` reads the variable too — as the refusal it earns before it
+/// launches anything, and as the child's own environment once it does.
+///
+/// The parent reports on a child it then cannot watch, so a variable the child
+/// would refuse has to be refused by the parent: a caller handed `{run_id, …}`
+/// and exit 0 has been told a run really started. And the child inherits the
+/// variable, so a document holding the run open with `background: false` settles
+/// under a detached run whose environment backgrounds that member.
+#[test]
+fn detach_refuses_the_variable_before_launching_and_hands_it_to_the_child() {
+    let workspace = Workspace::new();
+    let release_at = workspace.at("release");
+    release(&release_at);
+    workspace.graph(&foreground_ticker_graph(
+        &fake_harness(),
+        &release_at.display().to_string(),
+    ));
+    let dir = workspace.dir().display().to_string();
+    let detach = ["run", "./graph.yaml", "--dir", &dir, "--detach"];
+
+    let refused = workspace.run_with(&detach, &[(BACKGROUND_ENV, "ghost")]);
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains(BACKGROUND_ENV),
+        "{}",
+        refused.stderr
+    );
+    assert!(refused.stderr.contains("\"ghost\""), "{}", refused.stderr);
+    assert!(
+        refused.stdout.trim().is_empty(),
+        "a refusal printed a detach answer on stdout: {}",
+        refused.stdout
+    );
+    assert!(
+        std::fs::read_dir(workspace.state())
+            .expect("state")
+            .next()
+            .is_none(),
+        "a refused --detach still left a run behind"
+    );
+
+    // Named the member the document holds the run open with: the child is the
+    // run, and it settles only if it read the variable the parent handed it.
+    let started = workspace.run_with(&detach, &[(BACKGROUND_ENV, "ticker")]);
+    started.expect_code(0);
+    let answer: serde_json::Value =
+        serde_json::from_str(started.stdout.trim()).expect("--detach prints one JSON object");
+    let id = answer["run_id"].as_str().expect("a run id").to_string();
+    let deadline = Instant::now() + Duration::from_secs(240);
+    while workspace.record()["exit_code"] != 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    if workspace.record()["exit_code"] != 0 {
+        // Ended rather than left behind: a child that ignored the variable is
+        // one a foreground schedule holds open forever.
+        workspace.run(&["cancel", &id, "--kill"]);
+        panic!(
+            "the detached child did not settle, so it never read the variable its parent \
+             was given: {}",
+            workspace.record()
+        );
+    }
+    assert_eq!(workspace.record()["members"]["worker"], "settled");
 }
 
 /// A deferred first turn that nothing holds the run open for is refused by
