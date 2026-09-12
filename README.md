@@ -42,6 +42,10 @@ oneagentgraph run graph.yaml --task "add the retry" --output json
 A graph is YAML — members, the oneharness config each side uses, personas,
 schedules, and dependencies:
 
+<!-- llmlint: ignore[contracts_have_one_source_or_a_drift_gate] the version this
+example declares is not a second source: `tests/contract.rs`'s
+`the_readme_graph_uses_the_current_schema_version` holds this line to
+`config::SCHEMA_VERSION`, so the example cannot drift from the schema. -->
 ```yaml
 version: 9
 name: node-scope

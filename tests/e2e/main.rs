@@ -52,15 +52,24 @@ mod scheduler;
 mod selection;
 mod session;
 mod support;
-// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the same
-// declaration `mod note;` above carries, for the same reason:
-// `tests/e2e/two_party.rs` declares it itself, on the terms every journey file
-// shares — this crate has exactly one e2e target, so there is no narrower edge
-// for these to sit behind and no way to make one without splitting that target.
-// These journeys cost what the scheduler journeys beside them cost: a hold of a
-// few seconds each, in parallel, and the file finishes in seconds.
+// llmlint: ignore-block[e2e_not_mocked] the same declaration `mod note;` above
+// carries, for the same reason: the journeys are in tests/e2e/two_party.rs,
+// which declares it itself on the terms every journey file shares — the paid
+// harness process is the one double this suite sanctions, replaced at
+// oneharness's own `ONEHARNESS_BIN_<ID>` seam, and everything else in those
+// journeys is real. This line only names the module; a declaration in the file
+// that owns the journeys does not reach the line that declares it.
+//
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] and the same
+// again for the same reason: `tests/e2e/two_party.rs` declares it itself, on
+// the terms every journey file shares — this crate has exactly one e2e target,
+// so there is no narrower edge for these to sit behind and no way to make one
+// without splitting that target. These journeys cost what the scheduler
+// journeys beside them cost: a hold of a few seconds each, in parallel, and the
+// file finishes in seconds.
 mod two_party;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[e2e_not_mocked]
 mod verbs;
 
 use assert_cmd::Command;
