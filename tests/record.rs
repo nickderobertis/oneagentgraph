@@ -26,13 +26,14 @@
 //! * `member-started.json` — the three shapes of the payload a supervisor reads
 //!   first, on the same terms: one per runner, plus the one a member publishes
 //!   when it comes up without taking a turn.
-//! * `graph.v4.yaml` … `graph.v7.yaml` — the graph config
+//! * `graph.v4.yaml` … `graph.v8.yaml` — the graph config
 //!   schema, which is versioned for the same reason and read on the *other* side
 //!   of the same promise: this build does not write these, an author does, and a
 //!   document written against an older schema has to keep meaning what it said.
 //!   Each differs from the one before it by exactly what that version added: the
 //!   `events` block in version 5, the `personas` catalog in version 6, the
-//!   member's own pre-turn views in version 7.
+//!   member's own pre-turn views in version 7, each member's own say over
+//!   whether it holds the run open in version 8.
 //!
 //! Regenerating an old golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -50,8 +51,8 @@ use std::collections::BTreeMap;
 
 use oneagentgraph::config::{
     AgentSide, ConfigRef, Events, GraphConfig, JudgeHarness, JudgeSide, Member, OneharnessMember,
-    OnejudgeMember, PreTurn, Schedule, FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION,
-    FIRST_PRE_TURN_VERSION, SCHEMA_VERSION,
+    OnejudgeMember, PreTurn, Schedule, FIRST_BACKGROUND_VERSION, FIRST_EVENT_FILTER_VERSION,
+    FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION, SCHEMA_VERSION,
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
@@ -68,7 +69,10 @@ use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
 /// the `events` block version 5 added — carrying a matcher of each shape the
 /// grammar has: a source, a kind glob, and the reserved labels; and the
 /// `personas` catalog version 6 added; and the member's own pre-turn views
-/// version 7 added.
+/// version 7 added; and, on both kinds, the `background` version 8 added — the
+/// scheduled member saying what its schedule already implies, and the two-party
+/// member saying what an unscheduled one is by default, so the golden carries
+/// the field spelled both ways.
 fn golden_graph() -> GraphConfig {
     GraphConfig {
         version: SCHEMA_VERSION,
@@ -108,6 +112,7 @@ fn golden_graph() -> GraphConfig {
                         start_after: Some(1800),
                         resettable: true,
                     }),
+                    background: Some(true),
                     pre_turn: vec![PreTurn {
                         command: vec!["./views/queue-depth".into(), "--json".into()],
                         label: Some("queue".into()),
@@ -133,6 +138,7 @@ fn golden_graph() -> GraphConfig {
                     }),
                     mode: "bypass".into(),
                     max_turns: None,
+                    background: Some(false),
                     deps: Vec::new(),
                 }),
             ),
@@ -144,7 +150,7 @@ fn golden_graph() -> GraphConfig {
 /// back to the same graph, and validates as a runnable one.
 #[test]
 fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
-    let golden = include_str!("golden/graph.v7.yaml");
+    let golden = include_str!("golden/graph.v8.yaml");
     let written = serde_norway::to_string(&golden_graph()).expect("a graph serializes");
     assert_eq!(
         written, golden,
@@ -188,6 +194,77 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
     assert_eq!(reporter.pre_turn.len(), 1);
     assert_eq!(reporter.pre_turn[0].view(), "queue");
     assert_eq!(reporter.pre_turn[0].seconds(), 20);
+
+    // The declaration this version added, read back through the one reading of
+    // it rather than off the field: a value that survived the trip as an absent
+    // one would still read the same way on these two members — the default
+    // agrees with what they declare — so the field itself is asserted too.
+    assert_eq!(read.members["reporter"].declared_background(), Some(true));
+    assert_eq!(read.members["worker"].declared_background(), Some(false));
+    assert!(read.is_background("reporter"));
+    assert!(!read.is_background("worker"));
+}
+
+/// A graph written against the schema before `background` existed reads
+/// unchanged, gains no `background` key when written back, keeps the liveness
+/// inference it was written under, and is refused by the field's name if a
+/// member of either kind declares one anyway.
+///
+/// The same three-part promise the journeys below hold, for the field version 8
+/// added — plus the reading, because this version changed what an *omission*
+/// means: under it an unscheduled member is foreground whatever it descends
+/// from, and under version 7 one that descends only from schedules is not.
+#[test]
+fn a_version_seven_graph_still_reads_and_is_refused_the_background_it_predates() {
+    let golden = include_str!("golden/graph.v7.yaml");
+    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 7 graph still reads");
+    assert_eq!(graph.version, FIRST_BACKGROUND_VERSION - 1);
+    for member in graph.members.values() {
+        assert_eq!(
+            member.declared_background(),
+            None,
+            "version 7 has no background declaration"
+        );
+    }
+    oneagentgraph::config::validate(&graph).expect("a version 7 graph still validates");
+    // The inference those documents run under: the schedule is background, and
+    // the member descending from no schedule is not.
+    assert!(graph.is_background("reporter"));
+    assert!(!graph.is_background("worker"));
+
+    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    assert!(
+        !written.contains("background"),
+        "an absent declaration must stay absent, or an older reader now meets a key it \
+         rejects: {written}"
+    );
+    assert_eq!(written, golden, "a version 7 document did not round-trip");
+
+    for (kind, before, after) in [
+        (
+            "worker",
+            "    mode: bypass\n",
+            "    mode: bypass\n    background: true\n",
+        ),
+        (
+            "reporter",
+            "    persona: ./reporter.yaml\n",
+            "    persona: ./reporter.yaml\n    background: false\n",
+        ),
+    ] {
+        let asking: GraphConfig =
+            serde_norway::from_str(&golden.replace(before, after)).expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(error.to_string().contains("`background`"), "{error}");
+        assert!(error.to_string().contains(kind), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_BACKGROUND_VERSION}"
+            )),
+            "{error}"
+        );
+    }
 }
 
 /// A graph written against the schema before `pre_turn` existed reads unchanged,

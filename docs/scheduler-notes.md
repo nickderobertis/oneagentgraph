@@ -73,14 +73,22 @@ state every member is in for the whole of a live run: outcomes fill in as member
 settle, and `Record::declared_members` is what names the members themselves.
 
 `ready_order` refuses the one shape this default can silence: a deferred schedule
-in a graph where every member is scheduled or descends only from scheduled
-members. Such a graph has nothing to hold it past the quiescence rule below, so
-the deferred turn never comes due and the run exits 0 without it. The check is
-per member rather than per graph, because a sibling firing at t=0 does not rescue
-it — a scheduled member is not counted as live work either.
+in a graph that nothing holds open — no member both foreground (below) and
+either scheduled or able to take a turn in the initial waves. Such a graph has
+nothing to hold it past the quiescence rule below, so the deferred turn never
+comes due and the run exits 0 without it. The check is per member rather than
+per graph, because a sibling firing at t=0 does not rescue it — a background
+member is not what holds the run open, whenever it fires. `run::takes_an_initial_turn`
+is the second half of "holds open": a member whose dependency (transitively)
+defers its own first turn is skipped in the initial waves and reached only by
+that dependency's chain, so it holds nothing open however it is declared.
 `run::refuse_a_turn_that_never_comes_due` is that check, at the end of
 `ready_order` so `run` and `validate` share it and so it walks a dependency graph
-already proven acyclic and complete.
+already proven acyclic and complete. Under a schema before
+`config::FIRST_BACKGROUND_VERSION` it reduces to exactly the refusal those
+documents have always met — every member scheduled or descended from schedules,
+and one of them deferred — in the words it has always used; from that version its
+words name `background: false` as an answer.
 
 `config::MAX_SCHEDULE_SECONDS` bounds both of a schedule's spans — a typo guard
 rather than a policy about cadence, since a `u64` of seconds is a member that
@@ -98,11 +106,56 @@ reset before the first turn restores the whole delay rather than promoting the
 member to its steady cadence. A schedule that fired at
 t=0 has nothing left to defer, so its pending interval is `every` from the start.
 
-Before a due or triggered firing, it checks the shared count of live work whose
-ancestry is not solely cron members. `run::solely_cron_descended` computes that
-property from the validated DAG. When the count reaches zero the clock exits
-without waiting for its next interval, which is the scheduler's quiescence
-boundary.
+## Background and foreground
+
+Whether a member holds the run open is a declaration the document makes per
+member: `config::OnejudgeMember::background` and
+`config::OneharnessMember::background`, the same optional field on both kinds,
+read through `config::Member::declared_background` and — the only reading of what
+it *means* — `config::GraphConfig::is_background`. That one function takes the
+whole graph because what an omission means depends on the schema the document
+declares, the way `config::Schedule::first_turn_after` takes the schema for
+`start_after`: from `config::FIRST_BACKGROUND_VERSION` a member naming none is
+background exactly when it carries a schedule, and under every older schema the
+answer is the inference those documents have always run under — a member with a
+schedule, or whose every dependency (transitively) is such a member, is
+background, and every other member is foreground. That inference is the pre-8
+half of `is_background`; `run.rs` carries no second reading of it.
+
+Three spellings set the field, and `run::run` folds them into one before the
+graph is read: `run::apply_background_env` turns `ONEAGENTGRAPH_BACKGROUND`
+(`liveness::BACKGROUND_ENV`, read from the environment the run is *given* and
+never from the graph's own `env:` block) into `members.<id>.background=true`
+overrides, refuses a name the graph lacks with the variable and the name, and
+applies them through `run::apply_overrides` before the request's own `--set`,
+so a `--set` on the same member wins; and `config::validate` then holds whatever
+landed — from the document, the variable, or the flag — to the schema version the
+field requires, so a document older than version 8 is refused by the field's
+name whichever way it was named. `validate` the verb reads no environment; a
+`--detach` preflight does, because the child it launches inherits it.
+
+## Quiescence
+
+The quiescence rule, in one sentence: a run stays open while any foreground
+member is unfinished — not yet started, waiting on its clock, or in a turn — and
+settles once every unfinished member is background. `run::run` keeps that as one
+shared count of unfinished foreground members, seeded from `is_background` over
+every member. An unscheduled member finishes at its initial outcome — settled,
+failed, died, or skipped for an unsuccessful dependency — and `run::run` counts
+it down there. A scheduled member finishes when its clock stops, by the run's
+`stop` or the member's own `cancel`, and `run::spawn_cron` counts it down after
+`run::cron` returns — after the last turn that clock ran has been recorded — so
+a scheduled foreground member never finishes on its own and holds the run open
+until it is cancelled, and a skipped schedule, which never gets a clock, is
+counted down where it is skipped. Before a due or triggered firing, `run::cron`
+reads that count; when it is zero the clock exits without waiting for its next
+interval, which is the scheduler's quiescence boundary. `run::run_cron_chain`
+reads the same count before each wave it would start, so from the moment the last
+foreground member finishes no background member starts a new turn — from a clock
+or from a chain — and the only background turns that complete after it are the
+ones already in flight at it, which run to their end and are recorded. A graph
+whose every member is background runs its initial waves — those are
+unconditional — and settles as soon as they are done, at the first tick after.
 
 Each successful later firing calls `run::run_cron_chain`. The reachable
 descendants are selected by `run::descendants_of`, traversed in the same
@@ -115,9 +168,10 @@ run.
 The chain callback is synchronous: a clock cannot start its next firing while
 the previous firing's chain is still running. This is not retry behavior; it is
 one fresh chain iteration per firing. When quiescence arrives, no new firing is
-created, while a callback already running completes before the cron thread
-joins. `run::run` joins those threads before emitting `graph-settled`, so the
-last admitted chain is present in the final stream and record.
+created and the chain starts no further wave, while the wave already running
+completes before the cron thread joins. `run::run` joins those threads before
+emitting `graph-settled`, so the last admitted turn is present in the final
+stream and record, and a failure among them is the run's exit 1.
 
 The event vocabulary gains no kind. `member-started` gains one payload field,
 `start_after`, on the one a deferred member publishes when it comes up without

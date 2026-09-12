@@ -15,9 +15,10 @@ use std::collections::BTreeSet;
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
-    PreTurn, Schedule, DEFAULT_PRE_TURN_SECONDS, FIRST_EVENT_FILTER_VERSION,
-    FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION, FIRST_SCHEMA_VERSION,
-    FIRST_START_AFTER_VERSION, MAX_PRE_TURN_COMMANDS, MAX_PRE_TURN_SECONDS, SCHEMA_VERSION,
+    PreTurn, Schedule, DEFAULT_PRE_TURN_SECONDS, FIRST_BACKGROUND_VERSION,
+    FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION,
+    FIRST_SCHEMA_VERSION, FIRST_START_AFTER_VERSION, MAX_PRE_TURN_COMMANDS, MAX_PRE_TURN_SECONDS,
+    SCHEMA_VERSION,
 };
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
@@ -1423,6 +1424,7 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
             }),
             mode: "bypass".to_string(),
             max_turns: None,
+            background: Some(false),
             deps: Vec::new(),
         }
     );
@@ -1442,6 +1444,7 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
                 start_after: Some(1800),
                 resettable: true,
             }),
+            background: Some(true),
             pre_turn: vec![PreTurn {
                 command: vec!["./views/queue-depth".to_string(), "--json".to_string()],
                 label: Some("queue".to_string()),
@@ -1626,10 +1629,12 @@ fn the_documented_pre_turn_views_are_gated_and_omitted_when_unset() {
             &format!("version: {older}"),
         );
         let mut graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
-        // The documented graph's catalog and events block postdate every schema
-        // in this loop too; dropping them leaves the views as the one refusal.
+        // The documented graph's catalog, events block, and members' own
+        // `background` postdate every schema in this loop too; dropping them
+        // leaves the views as the one refusal.
         graph.personas = None;
         graph.events = None;
+        drop_background(&mut graph);
         let error = oneagentgraph::config::validate(&graph)
             .expect_err("the field postdates this schema version");
         assert!(error.to_string().contains("`pre_turn`"), "{error}");
@@ -1896,6 +1901,119 @@ fn drop_what_postdates_the_schedule(graph: &mut GraphConfig) {
         if let Member::Oneharness(member) = member {
             member.pre_turn.clear();
         }
+    }
+    drop_background(graph);
+}
+
+/// The documented members' own `background`, removed from both kinds.
+fn drop_background(graph: &mut GraphConfig) {
+    for member in graph.members.values_mut() {
+        match member {
+            Member::Onejudge(member) => member.background = None,
+            Member::Oneharness(member) => member.background = None,
+        }
+    }
+}
+
+/// The documented `background` is on both member kinds, gated on the schema
+/// that has it, read through the one function that decides what an omission
+/// means, and omitted from a member that names none — so a document written
+/// before it existed round-trips byte-identically and keeps the liveness it
+/// was written under.
+#[test]
+fn the_documented_background_is_gated_and_omitted_when_unset() {
+    let documented = fenced_block("yaml");
+    for spelled in ["background: false", "background: true"] {
+        assert!(
+            documented.contains(spelled),
+            "the documented graph must show `{spelled}` on a member"
+        );
+    }
+    let graph: GraphConfig =
+        serde_norway::from_str(&documented).expect("the documented graph parses");
+    // The document says it on both kinds, and the reading agrees with what it
+    // says: the two-party worker holds the run open, the scheduled reporter
+    // does not.
+    assert_eq!(graph.members["worker"].declared_background(), Some(false));
+    assert_eq!(graph.members["reporter"].declared_background(), Some(true));
+    assert!(!graph.is_background("worker"));
+    assert!(graph.is_background("reporter"));
+
+    // A member naming none: the schedule decides, and the document round-trips
+    // without gaining a key an older consumer would reject.
+    let mut unset = graph.clone();
+    drop_background(&mut unset);
+    assert!(
+        !unset.is_background("worker"),
+        "an unscheduled member naming nothing holds the run open"
+    );
+    assert!(
+        unset.is_background("reporter"),
+        "a scheduled member naming nothing is a pacemaker"
+    );
+    let rendered = serde_norway::to_string(&unset).expect("the graph serializes");
+    assert!(
+        !rendered.contains("background"),
+        "an absent `background` must stay absent for older consumers: {rendered}"
+    );
+    let reparsed: GraphConfig = serde_norway::from_str(&rendered).expect("it reparses");
+    assert_eq!(reparsed, unset);
+
+    // And the explicit value overrides the default in both directions.
+    let mut flipped = unset.clone();
+    match flipped.members.get_mut("worker").expect("worker") {
+        Member::Onejudge(worker) => worker.background = Some(true),
+        Member::Oneharness(_) => panic!("worker is onejudge"),
+    }
+    match flipped.members.get_mut("reporter").expect("reporter") {
+        Member::Oneharness(reporter) => reporter.background = Some(false),
+        Member::Onejudge(_) => panic!("reporter is oneharness"),
+    }
+    assert!(flipped.is_background("worker"));
+    assert!(!flipped.is_background("reporter"));
+
+    // Under every schema that predates the field, naming it on either kind is
+    // refused by its name — and a member naming none keeps the inference those
+    // documents were written under, where the scheduled reporter is background
+    // and the worker, which descends from no schedule, is not.
+    for older in FIRST_SCHEMA_VERSION..FIRST_BACKGROUND_VERSION {
+        // The documented schedule also names a `start_after`, which the
+        // schemas before version 4 refuse ahead of anything on the member;
+        // read under those, it names none.
+        let declared = documented
+            .replacen(
+                &format!("version: {SCHEMA_VERSION}"),
+                &format!("version: {older}"),
+                1,
+            )
+            .replace("start_after: 1800, ", "");
+        for kind in ["worker", "reporter"] {
+            let mut graph: GraphConfig =
+                serde_norway::from_str(&declared).expect("an older graph parses");
+            drop_what_postdates_the_schedule(&mut graph);
+            let named = graph.members.get_mut(kind).expect("a documented member");
+            match named {
+                Member::Onejudge(member) => member.background = Some(false),
+                Member::Oneharness(member) => member.background = Some(true),
+            }
+            let error = oneagentgraph::config::validate(&graph)
+                .expect_err("the field postdates this schema version");
+            assert!(error.to_string().contains("`background`"), "{error}");
+            assert!(error.to_string().contains(kind), "{error}");
+            assert!(
+                error.to_string().contains(&format!(
+                    "requires graph schema version {FIRST_BACKGROUND_VERSION}"
+                )),
+                "version {older}: {error}"
+            );
+        }
+        let mut graph: GraphConfig =
+            serde_norway::from_str(&declared).expect("an older graph parses");
+        drop_what_postdates_the_schedule(&mut graph);
+        oneagentgraph::config::validate(&graph)
+            .unwrap_or_else(|err| panic!("version {older} must still validate: {err}"));
+        assert!(!graph.is_background("worker"), "version {older}");
+        assert!(graph.is_background("reporter"), "version {older}");
     }
 }
 

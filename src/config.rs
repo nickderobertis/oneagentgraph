@@ -88,6 +88,87 @@ pub enum Member {
     Oneharness(OneharnessMember),
 }
 
+impl Member {
+    /// Members whose successful settle precedes this member's first run.
+    #[must_use]
+    pub fn deps(&self) -> &[String] {
+        match self {
+            Member::Onejudge(member) => &member.deps,
+            Member::Oneharness(member) => &member.deps,
+        }
+    }
+
+    /// This member's schedule, which only a single-sided member may carry.
+    #[must_use]
+    pub fn schedule(&self) -> Option<Schedule> {
+        match self {
+            Member::Onejudge(_) => None,
+            Member::Oneharness(member) => member.schedule,
+        }
+    }
+
+    /// What this member's document says about holding the run open, if it says
+    /// anything. What an omission means is [`GraphConfig::is_background`]'s.
+    #[must_use]
+    pub fn declared_background(&self) -> Option<bool> {
+        match self {
+            Member::Onejudge(member) => member.background,
+            Member::Oneharness(member) => member.background,
+        }
+    }
+}
+
+impl GraphConfig {
+    /// Whether member `name` is **background** — work the run does not stay open
+    /// for — rather than **foreground**, which holds the run open while it is
+    /// unfinished.
+    ///
+    /// The one reading of `background`, and it takes the whole graph because
+    /// what an omission means depends on the schema this document declares.
+    /// From [`FIRST_BACKGROUND_VERSION`] a member's own `background:` is the
+    /// answer when it names one, and otherwise its schedule decides: a scheduled
+    /// member is a pacemaker unless its author says otherwise, and an unscheduled
+    /// one is the work being paced. Under every older schema the answer is the
+    /// inference those documents have always run under — a member with a
+    /// schedule, or whose every dependency (transitively) is such a member, is
+    /// background, and every other member is foreground — so a document written
+    /// before the field existed runs exactly as it did.
+    ///
+    /// A name this graph has no member called is answered `false`: nothing
+    /// declared it, and every caller reaches this through a graph whose members
+    /// and `deps` [`validate`] and `run::ready_order` have already checked.
+    #[must_use]
+    pub fn is_background(&self, name: &str) -> bool {
+        self.background_memoized(name, &mut BTreeMap::new())
+    }
+
+    /// [`is_background`](Self::is_background), sharing one memo across the
+    /// pre-[`FIRST_BACKGROUND_VERSION`] descent so a diamond of `deps` is walked
+    /// once per member rather than once per path.
+    fn background_memoized(&self, name: &str, memo: &mut BTreeMap<String, bool>) -> bool {
+        if let Some(answer) = memo.get(name) {
+            return *answer;
+        }
+        let Some(member) = self.members.get(name) else {
+            return false;
+        };
+        let answer = if self.version >= FIRST_BACKGROUND_VERSION {
+            member
+                .declared_background()
+                .unwrap_or_else(|| member.schedule().is_some())
+        } else {
+            member.schedule().is_some()
+                || (!member.deps().is_empty()
+                    && member
+                        .deps()
+                        .iter()
+                        .all(|dep| self.background_memoized(dep, memo)))
+        };
+        memo.insert(name.to_string(), answer);
+        answer
+    }
+}
+
 /// A `kind: onejudge` member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -112,6 +193,13 @@ pub struct OnejudgeMember {
     /// Turn ceiling for the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// Whether this member holds the run open. Absent is decided by the schedule.
+    ///
+    /// Read through [`GraphConfig::is_background`], because what its absence
+    /// means depends on the schema the document declares. Requires graph schema
+    /// version [`FIRST_BACKGROUND_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
     /// Members whose successful settle precedes this member's first run.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deps: Vec<String>,
@@ -151,6 +239,13 @@ pub struct OneharnessMember {
     /// Present on a cron member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    /// Whether this member holds the run open. Absent is decided by the schedule.
+    ///
+    /// The same field, on the same terms, as [`OnejudgeMember::background`]:
+    /// read through [`GraphConfig::is_background`], and requiring graph schema
+    /// version [`FIRST_BACKGROUND_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<bool>,
     /// Commands run immediately before each of this member's turns, whose output
     /// is prepended to the instruction that turn receives.
     ///
@@ -360,7 +455,7 @@ pub const MAX_PRE_TURN_COMMANDS: usize = 4;
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 /// How a member's own `task` is read: as the prose it has always been, or as a
 /// template naming the run's task.
@@ -451,6 +546,21 @@ pub const FIRST_PERSONA_CATALOG_VERSION: u32 = 6;
 /// document *using* it says which schema it was written against, rather than
 /// being handed to a build that would silently run no view at all.
 pub const FIRST_PRE_TURN_VERSION: u32 = 7;
+
+/// The first graph schema version in which a member of either kind may declare
+/// [`background`](OnejudgeMember::background) — and, from which, one that
+/// declares none is background exactly when it carries a schedule.
+///
+/// The version exists for the *default* rather than for the field, the way
+/// [`FIRST_START_AFTER_VERSION`] does: before it, whether a member held the run
+/// open was inferred from the graph's shape — a scheduled member, or one whose
+/// every dependency descends from schedules, did not — and from it that is a
+/// declaration the document makes per member, with the schedule deciding only
+/// what an omission means. The two readings agree on every graph that has no
+/// unscheduled member downstream of nothing but schedules, and differ on the
+/// rest, so a document keeps the reading it was written under and is refused the
+/// field rather than run under a rule its schema never had.
+pub const FIRST_BACKGROUND_VERSION: u32 = 8;
 
 /// The first graph schema version in which a single-sided member may carry its
 /// own [`task`](OneharnessMember::task) and [`dir`](OneharnessMember::dir).
@@ -580,6 +690,17 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
             return Err(Error::InvalidConfig(format!(
                 "member name {name:?}: use letters, digits, hyphens, and underscores — a name \
                  is a directory this run creates and a signal file an operator writes"
+            )));
+        }
+        // Whether a member holds the run open, gated the way `schedule.start_after`
+        // is and refused for the same reason: what its absence means is the
+        // schema's answer, so a document declaring an older schema and naming it
+        // would otherwise be run under the inference it was written against,
+        // with the declaration silently dropped.
+        if member.declared_background().is_some() && graph.version < FIRST_BACKGROUND_VERSION {
+            return Err(Error::InvalidConfig(format!(
+                "member {name:?} uses `background`, which requires graph schema version \
+                 {FIRST_BACKGROUND_VERSION}"
             )));
         }
         match member {
@@ -1334,6 +1455,108 @@ mod tests {
         let err = serde_norway::from_str::<GraphConfig>(document)
             .expect_err("a two-party member has no pre_turn");
         assert!(err.to_string().contains("pre_turn"), "{err}");
+    }
+
+    /// `background` is a member's own say over whether it holds the run open,
+    /// on both kinds, from the schema that has it — and what an omission means
+    /// is the schema's: the schedule from that version, the graph's shape before.
+    ///
+    /// Both halves are asserted through parsed documents rather than struct
+    /// literals: the field is absent from every graph in existence, and what its
+    /// absence means under each schema is most of this change.
+    #[test]
+    fn background_is_declared_from_the_schema_that_has_it_and_inferred_before() {
+        // A schedule, its descendant, and a member outside both — the three
+        // shapes the two readings answer differently. Nothing else in it
+        // postdates version 2, so every schema from there reads it as written.
+        let document = |version: u32, ticker: &str, worker: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n",
+                    "  ticker:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+                    "    schedule: {{every: 1800}}\n{}",
+                    "  report:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+                    "    deps: [ticker]\n",
+                    "  worker:\n    kind: onejudge\n    base_config: ./b.yaml\n",
+                    "    mode: bypass\n",
+                    "    agent: {{oneharness_config: ./a.toml}}\n",
+                    "    judge: {{oneharness_config: ./j.toml}}\n",
+                    "    deps: [ticker]\n{}",
+                ),
+                version, ticker, worker
+            )
+        };
+        let read = |version: u32, ticker: &str, worker: &str| -> GraphConfig {
+            let document = document(version, ticker, worker);
+            let graph = parse(&document);
+            validate(&graph).unwrap_or_else(|err| panic!("{document}: {err}"));
+            graph
+        };
+
+        // Stating nothing: from the schema that has the field the schedule
+        // decides, so the two members descending from it are foreground.
+        let current = read(FIRST_BACKGROUND_VERSION, "", "");
+        assert!(current.is_background("ticker"));
+        assert!(!current.is_background("report"));
+        assert!(!current.is_background("worker"));
+        assert!(current
+            .members
+            .values()
+            .all(|member| member.declared_background().is_none()));
+        let rendered = serde_norway::to_string(&current).expect("a graph serializes");
+        assert!(!rendered.contains("background"), "{rendered}");
+
+        // Under every older schema the same document is the inference those
+        // documents have always run under: descending from nothing but a
+        // schedule is background too.
+        for older in 2..FIRST_BACKGROUND_VERSION {
+            let graph = read(older, "", "");
+            assert!(graph.is_background("ticker"), "version {older}");
+            assert!(graph.is_background("report"), "version {older}");
+            assert!(graph.is_background("worker"), "version {older}");
+        }
+
+        // Declared: the value wins over the default in both directions, on
+        // either kind, and survives a round trip.
+        let declared = read(
+            FIRST_BACKGROUND_VERSION,
+            "    background: false\n",
+            "    background: true\n",
+        );
+        assert!(!declared.is_background("ticker"));
+        assert!(!declared.is_background("report"));
+        assert!(declared.is_background("worker"));
+        assert_eq!(
+            declared.members["ticker"].declared_background(),
+            Some(false)
+        );
+        assert_eq!(declared.members["worker"].declared_background(), Some(true));
+        let reparsed: GraphConfig =
+            serde_norway::from_str(&serde_norway::to_string(&declared).expect("serializes"))
+                .expect("reparses");
+        assert_eq!(reparsed, declared);
+
+        // And under every older schema, naming it on either kind is refused by
+        // the field's name rather than run under the inference.
+        for older in 2..FIRST_BACKGROUND_VERSION {
+            for (member, named) in [
+                ("ticker", document(older, "    background: false\n", "")),
+                ("worker", document(older, "", "    background: true\n")),
+            ] {
+                let err = validate(&parse(&named)).expect_err("the field postdates this schema");
+                assert!(err.to_string().contains("`background`"), "{older}: {err}");
+                assert!(err.to_string().contains(member), "{older}: {err}");
+                assert!(
+                    err.to_string().contains(&format!(
+                        "requires graph schema version {FIRST_BACKGROUND_VERSION}"
+                    )),
+                    "{older}: {err}"
+                );
+            }
+        }
+
+        // A name the graph has no member called holds nothing and is nothing.
+        assert!(!current.is_background("ghost"));
     }
 
     /// The contract's own default: a side streams unless a graph turns it off.

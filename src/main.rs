@@ -206,7 +206,13 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     // or a matcher that could match nothing, is an invalid invocation whichever
     // side of the fork runs it.
     requested_filter(args)?;
-    preflight(&args.graph, &overrides, env, task.as_deref())?;
+    preflight(
+        &args.graph,
+        &overrides,
+        RunEnvironment::Read,
+        env,
+        task.as_deref(),
+    )?;
 
     let state = state_dir(env);
     let before: Vec<run::RunId> = history::list(&state)
@@ -287,9 +293,30 @@ const VALIDATE_TASK: &str = "validate: no task is run";
 /// model paired with a chain of two harness families are all found here rather
 /// than after a paid turn has been spent on the members that did start.
 fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
-    let graph = preflight(&args.graph, &[], env, Some(VALIDATE_TASK))?;
+    let graph = preflight(
+        &args.graph,
+        &[],
+        RunEnvironment::Ignore,
+        env,
+        Some(VALIDATE_TASK),
+    )?;
     println!("{}: {} member(s) OK", graph.name, graph.members.len());
     Ok(EXIT_SUCCESS)
+}
+
+/// Whether a preflight reads what the run's *environment* says about the graph
+/// — `ONEAGENTGRAPH_BACKGROUND` — beside the flags it was handed.
+///
+/// A `--detach` preflight does, because the child it launches inherits that
+/// environment and would refuse on it out of sight; `validate` does not, because
+/// it is asked about a document rather than about a run, and takes no `--set`
+/// for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunEnvironment {
+    /// Apply what the environment says, before the flags.
+    Read,
+    /// Check the document and the flags alone.
+    Ignore,
 }
 
 /// Everything `run` does short of launching, without reporting anything.
@@ -302,6 +329,7 @@ fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, 
 fn preflight(
     graph_ref: &str,
     overrides: &[run::Override],
+    environment: RunEnvironment,
     env: &BTreeMap<String, String>,
     task: Option<&str>,
 ) -> Result<GraphConfig, Error> {
@@ -313,6 +341,9 @@ fn preflight(
     // that names nothing, and `--detach` forwards those to the child.
     let mut parsed: serde_json::Value = serde_norway::from_str(&document.content)
         .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?;
+    if environment == RunEnvironment::Read {
+        run::apply_background_env(&mut parsed, env)?;
+    }
     run::apply_overrides(&mut parsed, overrides)?;
     let graph: GraphConfig = serde_norway::from_value(
         serde_norway::to_value(&parsed)

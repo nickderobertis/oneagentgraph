@@ -12,6 +12,7 @@
 //! where the accumulated failure knowledge of this system lives — each is named
 //! after the thing that once broke.
 
+mod background;
 mod dispatch;
 mod events;
 mod interrupt;
