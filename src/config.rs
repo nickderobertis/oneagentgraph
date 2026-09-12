@@ -1508,12 +1508,19 @@ mod tests {
 
         // Under every older schema the same document is the inference those
         // documents have always run under: descending from nothing but a
-        // schedule is background too.
+        // schedule is background too — through a diamond as much as a chain.
         for older in 2..FIRST_BACKGROUND_VERSION {
             let graph = read(older, "", "");
             assert!(graph.is_background("ticker"), "version {older}");
             assert!(graph.is_background("report"), "version {older}");
             assert!(graph.is_background("worker"), "version {older}");
+            let diamond = parse(&format!(
+                "{}  summary:\n    kind: oneharness\n    oneharness_config: ./a.toml\n    \
+                 deps: [ticker, report]\n",
+                document(older, "", "")
+            ));
+            validate(&diamond).expect("a diamond of deps is a legal graph");
+            assert!(diamond.is_background("summary"), "version {older}");
         }
 
         // Declared: the value wins over the default in both directions, on

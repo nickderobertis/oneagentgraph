@@ -2056,6 +2056,14 @@ mod tests {
         let err = ready_order(&graph(&format!("{worker}    deps: [ticker]\n"))).unwrap_err();
         assert!(err.to_string().contains("ticker"), "{err}");
         assert!(ready_order(&graph(&format!("{worker}    deps: [pacemaker]\n"))).is_ok());
+        // Two members behind the same deferred schedule: neither takes an
+        // initial turn, and the second is answered from the first's descent.
+        let err = ready_order(&graph(&format!(
+            "{worker}    deps: [ticker]\n  second:\n    kind: oneharness\n    \
+             oneharness_config: ./a.toml\n    deps: [ticker, worker]\n"
+        )))
+        .unwrap_err();
+        assert!(err.to_string().contains("ticker"), "{err}");
 
         // And the words a version 7 document meets are the ones it always has.
         let older = ALL_SCHEDULED.replace("version: 8", "version: 7");
