@@ -10,7 +10,7 @@
 //! is still there before it does. A doc edit that renames a placeholder fails
 //! here rather than silently skipping the substitution.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
 use oneagentgraph::config::{
@@ -1429,6 +1429,12 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
             }),
             mode: "bypass".to_string(),
             max_turns: None,
+            dir: Some(std::path::PathBuf::from("./api")),
+            schedule: Some(Schedule {
+                every: 300,
+                start_after: Some(0),
+                resettable: false,
+            }),
             background: Some(false),
             deps: Vec::new(),
         }
@@ -1866,9 +1872,13 @@ fn the_documented_member_job_fields_round_trip_and_stay_omitted_when_unset() {
     assert_eq!(reporter.dir, None);
 
     let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    // The reporter's own rendering rather than the whole graph's: the documented
+    // worker carries a `dir` of its own from version 9, so the whole document
+    // legitimately shows the key.
+    let reporter_alone = serde_norway::to_string(reporter).expect("a member serializes");
     assert!(
-        !round_trip.contains("task:") && !round_trip.contains("dir:"),
-        "a member with no job of its own must serialize without either field: {round_trip}"
+        !reporter_alone.contains("task:") && !reporter_alone.contains("dir:"),
+        "a member with no job of its own must serialize without either field: {reporter_alone}"
     );
     let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
     assert_eq!(reparsed, graph);
@@ -1903,8 +1913,12 @@ fn drop_what_postdates_the_schedule(graph: &mut GraphConfig) {
     graph.events = None;
     graph.personas = None;
     for member in graph.members.values_mut() {
-        if let Member::Oneharness(member) = member {
-            member.pre_turn.clear();
+        match member {
+            Member::Oneharness(member) => member.pre_turn.clear(),
+            Member::Onejudge(member) => {
+                member.dir = None;
+                member.schedule = None;
+            }
         }
     }
     drop_background(graph);
@@ -1944,17 +1958,29 @@ fn the_documented_background_is_gated_and_omitted_when_unset() {
     assert!(!graph.is_background("worker"));
     assert!(graph.is_background("reporter"));
 
-    // A member naming none: the schedule decides, and the document round-trips
-    // without gaining a key an older consumer would reject.
+    // A member naming none: the schedule decides, on either kind — the
+    // documented worker is a paced conversation from version 9, so it is a
+    // pacemaker until it says otherwise, and unscheduled it holds the run open —
+    // and the document round-trips without gaining a key an older consumer
+    // would reject.
     let mut unset = graph.clone();
     drop_background(&mut unset);
     assert!(
-        !unset.is_background("worker"),
-        "an unscheduled member naming nothing holds the run open"
+        unset.is_background("worker"),
+        "a scheduled two-party member naming nothing is a pacemaker"
     );
     assert!(
         unset.is_background("reporter"),
         "a scheduled member naming nothing is a pacemaker"
+    );
+    let mut unscheduled = unset.clone();
+    match unscheduled.members.get_mut("worker").expect("worker") {
+        Member::Onejudge(worker) => worker.schedule = None,
+        Member::Oneharness(_) => panic!("worker is onejudge"),
+    }
+    assert!(
+        !unscheduled.is_background("worker"),
+        "an unscheduled member naming nothing holds the run open"
     );
     let rendered = serde_norway::to_string(&unset).expect("the graph serializes");
     assert!(
@@ -1965,7 +1991,7 @@ fn the_documented_background_is_gated_and_omitted_when_unset() {
     assert_eq!(reparsed, unset);
 
     // And the explicit value overrides the default in both directions.
-    let mut flipped = unset.clone();
+    let mut flipped = unscheduled.clone();
     match flipped.members.get_mut("worker").expect("worker") {
         Member::Onejudge(worker) => worker.background = Some(true),
         Member::Oneharness(_) => panic!("worker is onejudge"),
@@ -2056,9 +2082,12 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
     assert_eq!(inherited.start_after, None);
     assert_eq!(inherited.first_turn_after(SCHEMA_VERSION), inherited.every);
     let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    // The reporter's own rendering: the documented worker's schedule names
+    // `start_after: 0`, which is a key it is meant to show.
+    let reporter_alone = serde_norway::to_string(reporter).expect("a member serializes");
     assert!(
-        !round_trip.contains("start_after"),
-        "a schedule that named no start_after must serialize without one: {round_trip}"
+        !reporter_alone.contains("start_after"),
+        "a schedule that named no start_after must serialize without one: {reporter_alone}"
     );
     let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
     assert_eq!(reparsed, graph);
@@ -2288,6 +2317,162 @@ fn a_member_of_either_kind_rejects_an_unknown_field() {
             "the error should name the offending `{kind}` field, got: {error}"
         );
     }
+}
+
+/// The field list serde derives for `T`, read off its own `unknown field …
+/// expected one of …` error — the list `deny_unknown_fields` holds a document
+/// to, and therefore the one source of what a member kind accepts.
+///
+/// Not a list kept in this test: a hand-maintained copy is exactly the drift
+/// this gate exists to refuse, one level down.
+fn serde_fields<T: serde::de::DeserializeOwned>(minimal: &str) -> BTreeSet<String> {
+    let error = serde_norway::from_str::<T>(&format!("{minimal}bogus_field_for_the_gate: 1\n"))
+        .err()
+        .expect("a document carrying a bogus key is refused, or deny_unknown_fields is gone");
+    let text = error.to_string();
+    let (_, listed) = text
+        .split_once("expected one of ")
+        .unwrap_or_else(|| panic!("serde no longer lists the fields it expected: {text}"));
+    // The YAML reader appends where in the document it stopped; the list is
+    // what comes before that.
+    let listed = listed.split(" at line ").next().unwrap_or(listed);
+    let fields: BTreeSet<String> = listed
+        .split(',')
+        .map(|field| field.trim().trim_matches('`').to_string())
+        .collect();
+    assert!(
+        fields
+            .iter()
+            .all(|field| !field.is_empty() && field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')),
+        "the field list read off serde carries something that is not a field: {fields:?} from {text}"
+    );
+    assert!(
+        fields.len() > 3,
+        "the field list read off serde is implausibly short: {fields:?} from {text}"
+    );
+    fields
+}
+
+/// The named exceptions to "a `kind: onejudge` member accepts what a `kind:
+/// oneharness` member accepts", each with the reason the contract gives, held
+/// as one set and reconciled against the contract's own exception paragraph.
+///
+/// **Why the shared-struct form was rejected, so it is not re-proposed:** one
+/// flattened struct of the common settings (`#[serde(flatten)] common: Shared`
+/// on each kind) would make the shared list a type rather than a gate — but
+/// serde's `deny_unknown_fields` is not supported in combination with
+/// `#[serde(flatten)]`, on the outer struct or on the flattened field, and that
+/// attribute is the trust boundary
+/// [`a_member_of_either_kind_rejects_an_unknown_field`] holds on both variants.
+/// The flatten form would have cost the refusal of a typo on every member, so
+/// the two structs stay two, and this gate is what holds them together.
+#[test]
+fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
+    // Each exception, the kind it belongs to, and why — in this test's own
+    // source, so the set is decided here and not by whichever field happens to
+    // differ.
+    let single_sided_only: BTreeMap<&str, &str> = BTreeMap::from([
+        (
+            "pre_turn",
+            "the instruction a two-party member's worker turn opens on is composed by onejudge \
+             (the supervisor's own last words), and this crate has no seam that prepends to it \
+             without changing onejudge — the note seam is the one candidate that could lift this",
+        ),
+        (
+            "oneharness_config",
+            "a two-party member names one config per side, `agent.oneharness_config` and \
+             `judge.oneharness_config`: the same setting spelled per party",
+        ),
+    ]);
+    let two_party_only: BTreeMap<&str, &str> = BTreeMap::from([
+        (
+            "base_config",
+            "the onejudge base document is a property of a conversation",
+        ),
+        ("agent", "one of the two sides of a conversation"),
+        ("judge", "the other side of a conversation"),
+        (
+            "mode",
+            "the approval posture onejudge runs the conversation under; a single-sided member's \
+             is its own oneharness config's",
+        ),
+        (
+            "max_turns",
+            "the turn ceiling of a conversation; a single-sided member has exactly one turn per \
+             firing",
+        ),
+    ]);
+
+    let onejudge = serde_fields::<OnejudgeMember>(concat!(
+        "base_config: ./b.yaml\nmode: bypass\n",
+        "agent: {oneharness_config: ./a.toml}\njudge: {oneharness_config: ./j.toml}\n",
+    ));
+    let oneharness = serde_fields::<OneharnessMember>("oneharness_config: ./a.toml\n");
+
+    // Each direction of the symmetric difference, held to its exception set —
+    // and a failure names the field, because that is what whoever added it
+    // needs to read.
+    for (carried_by, not_by, only, exceptions) in [
+        (
+            "kind: oneharness",
+            "kind: onejudge",
+            oneharness
+                .difference(&onejudge)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            &single_sided_only,
+        ),
+        (
+            "kind: onejudge",
+            "kind: oneharness",
+            onejudge
+                .difference(&oneharness)
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            &two_party_only,
+        ),
+    ] {
+        let named: BTreeSet<String> = exceptions
+            .keys()
+            .map(|field| (*field).to_string())
+            .collect();
+        let drifted: Vec<&String> = only.difference(&named).collect();
+        assert!(
+            drifted.is_empty(),
+            "{drifted:?} is carried by a `{carried_by}` member and not by a `{not_by}` one, and is \
+             not a named exception — either give both kinds the field, or name the exception here \
+             and in docs/contract.md with its reason. The exceptions on record, with theirs: \
+             {exceptions:#?}"
+        );
+        let lifted: Vec<&String> = named.difference(&only).collect();
+        assert!(
+            lifted.is_empty(),
+            "{lifted:?} is named here as a `{carried_by}`-only exception but both kinds now carry \
+             it — retire the exception here and in docs/contract.md"
+        );
+    }
+
+    // The prose and the gate name one set: every field-shaped token the
+    // contract's exception passage backticks is an exception here, and every
+    // exception here is backticked there.
+    let (_, passage) = CONTRACT
+        .split_once("**The settings a `kind: onejudge` member accepts are now")
+        .expect("the contract no longer carries the exception passage");
+    let passage = passage.lines().next().expect("the passage is one bullet");
+    let every_field: BTreeSet<&str> = onejudge.union(&oneharness).map(String::as_str).collect();
+    let documented: BTreeSet<String> = backticked_in(passage)
+        .into_iter()
+        .filter(|token| every_field.contains(token.as_str()))
+        .collect();
+    let gated: BTreeSet<String> = single_sided_only
+        .keys()
+        .chain(two_party_only.keys())
+        .map(|field| (*field).to_string())
+        .collect();
+    assert_eq!(
+        documented, gated,
+        "the exceptions docs/contract.md names and the ones this gate holds are not one set"
+    );
 }
 
 #[test]
