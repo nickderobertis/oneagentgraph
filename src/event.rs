@@ -114,6 +114,9 @@ pub enum EventKind {
     TurnMessage,
     /// A turn finished; see [`TurnCompleted`].
     TurnCompleted,
+    /// One judge of a two-party member's panel decided on a worker turn; see
+    /// [`JudgeDecided`].
+    JudgeDecided,
     /// An operator asked a member's in-flight turn to do something else; see
     /// [`TurnInterrupted`].
     TurnInterrupted,
@@ -155,6 +158,7 @@ impl EventKind {
             EventKind::TurnActivity => "turn-activity",
             EventKind::TurnMessage => "turn-message",
             EventKind::TurnCompleted => "turn-completed",
+            EventKind::JudgeDecided => "judge-decided",
             EventKind::TurnInterrupted => "turn-interrupted",
             EventKind::MemberHeartbeat => "member-heartbeat",
             EventKind::FallbackAdvanced => "fallback-advanced",
@@ -885,6 +889,30 @@ pub struct TurnMessage {
     pub origin: Option<Origin>,
 }
 
+/// The payload of an [`EventKind::JudgeDecided`] event: what one judge of a
+/// two-party member's panel decided about one worker turn.
+///
+/// Relayed from onejudge's `Observation::JudgeDecided`, one per judge per
+/// supervisor turn, in the panel's list order. A member judged by one harness
+/// side — a bare provider rather than a panel — publishes none, because onejudge
+/// records none for it; nothing is synthesized here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeDecided {
+    /// The worker turn this decision is about, as [`TurnStarted::turn`].
+    pub turn: u64,
+    /// The judge's label within its panel — the one the graph gave it, or the
+    /// one onejudge defaulted from its kind.
+    pub judge: String,
+    /// The judge's provider kind: `oneharness`, `llmlint`, or `command`.
+    pub kind: String,
+    /// What it decided: `done`, `continue`, `no_instruction`, `unparseable`, or
+    /// `error` — onejudge's own wire spelling.
+    pub decision: String,
+    /// The judge's own reason, or the error's message for an `error`.
+    pub reason: String,
+}
+
 /// The payload of an [`EventKind::TurnActivity`] event: one tool call, or the
 /// observation that answered one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1601,6 +1629,7 @@ mod tests {
         EventKind::TurnActivity,
         EventKind::TurnMessage,
         EventKind::TurnCompleted,
+        EventKind::JudgeDecided,
         EventKind::TurnInterrupted,
         EventKind::MemberHeartbeat,
         EventKind::FallbackAdvanced,

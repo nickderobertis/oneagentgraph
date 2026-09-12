@@ -998,6 +998,18 @@ fn ingest(
                 }),
             );
         }
+        Observation::JudgeDecided(decided) => {
+            emitter.emit(
+                EventKind::JudgeDecided,
+                as_payload(&crate::event::JudgeDecided {
+                    turn: decided.turn as u64,
+                    judge: decided.judge.to_string(),
+                    kind: decided.kind.to_string(),
+                    decision: decided.decision.as_str().to_string(),
+                    reason: decided.reason.to_string(),
+                }),
+            );
+        }
     }
 }
 
@@ -2519,6 +2531,7 @@ mod tests {
             )),
             telemetry: None,
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         };
         assert_eq!(provider_cause(&classified), Cause::Quota);
 
@@ -2526,6 +2539,7 @@ mod tests {
             error: onejudge::cli::CliError::Engine(onejudge::Error::provider("respond", "boom")),
             telemetry: None,
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         };
         assert_eq!(provider_cause(&bare), Cause::Unclassified);
 
@@ -2534,6 +2548,7 @@ mod tests {
             error: onejudge::cli::CliError::Config("no task".into()),
             telemetry: None,
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         };
         assert_eq!(provider_cause(&config), Cause::Unclassified);
     }
@@ -2559,6 +2574,7 @@ mod tests {
             }))
             .expect("telemetry"),
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         }))
     }
 
@@ -2724,6 +2740,7 @@ mod tests {
                 error: onejudge::cli::CliError::Config("no task".into()),
                 telemetry: None,
                 processes: Vec::new(),
+                judge_decisions: Vec::new(),
             })),
             &emitter,
             dir.path(),
@@ -2848,6 +2865,7 @@ mod tests {
             }))
             .expect("telemetry"),
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         })))
         .expect("send");
 

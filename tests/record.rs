@@ -137,10 +137,11 @@ fn golden_graph() -> GraphConfig {
                         model: None,
                         stream: true,
                     },
-                    judge: JudgeSide::Harness(JudgeHarness {
+                    judge: vec![JudgeSide::Harness(JudgeHarness {
                         oneharness_config: ConfigRef("./oneharness.judge.toml".into()),
                         model: None,
-                    }),
+                        label: None,
+                    })],
                     mode: "bypass".into(),
                     max_turns: None,
                     dir: Some("./api".into()),

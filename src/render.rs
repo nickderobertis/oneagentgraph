@@ -66,6 +66,16 @@ pub fn line(envelope: &Envelope) -> String {
             joined(&[turn_head(envelope), opening])
         }
         EventKind::TurnCompleted => joined(&[turn_head(envelope), usage(envelope)]),
+        // Which judge, what it decided, and why — the line a person watching a
+        // stacked panel reads to see which of its judges sent the worker back.
+        EventKind::JudgeDecided => format!(
+            "turn {} {} ({}) {}: {}",
+            field(envelope, "turn"),
+            field(envelope, "judge"),
+            field(envelope, "kind"),
+            field(envelope, "decision"),
+            field(envelope, "reason").lines().next().unwrap_or_default()
+        ),
         EventKind::TurnInterrupted => {
             let delivered = envelope
                 .payload

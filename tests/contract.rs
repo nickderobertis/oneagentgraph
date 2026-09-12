@@ -54,6 +54,7 @@ const ALL_EVENT_KINDS: &[EventKind] = &[
     EventKind::TurnActivity,
     EventKind::TurnMessage,
     EventKind::TurnCompleted,
+    EventKind::JudgeDecided,
     EventKind::TurnInterrupted,
     EventKind::MemberHeartbeat,
     EventKind::FallbackAdvanced,
@@ -1423,10 +1424,25 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
                 model: None,
                 stream: true,
             },
-            judge: JudgeSide::Harness(oneagentgraph::config::JudgeHarness {
-                oneharness_config: ConfigRef("./oneharness.judge.toml".to_string()),
-                model: None,
-            }),
+            judge: vec![
+                JudgeSide::Harness(oneagentgraph::config::JudgeHarness {
+                    oneharness_config: ConfigRef("./oneharness.judge.toml".to_string()),
+                    model: None,
+                    label: Some("reviewer".to_string()),
+                }),
+                JudgeSide::Llmlint(oneagentgraph::config::JudgeLlmlint {
+                    kind: oneagentgraph::config::LlmlintKind::Llmlint,
+                    config: Some(std::path::PathBuf::from("./llmlint.yml")),
+                    bin: None,
+                    diff_base: Some("origin/main".to_string()),
+                    args: Vec::new(),
+                    label: None,
+                }),
+                JudgeSide::Command(oneagentgraph::config::JudgeCommand {
+                    command: vec!["my-judge".to_string(), "--flag".to_string()],
+                    label: None,
+                }),
+            ],
             mode: "bypass".to_string(),
             max_turns: None,
             dir: Some(std::path::PathBuf::from("./api")),
@@ -2381,8 +2397,8 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
         ),
         (
             "oneharness_config",
-            "a two-party member names one config per side, `agent.oneharness_config` and \
-             `judge.oneharness_config`: the same setting spelled per party",
+            "a two-party member names one config per side, `agent.oneharness_config` and each \
+             harness judge's `oneharness_config`: the same setting spelled per party",
         ),
     ]);
     let two_party_only: BTreeMap<&str, &str> = BTreeMap::from([
@@ -2391,7 +2407,10 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
             "the onejudge base document is a property of a conversation",
         ),
         ("agent", "one of the two sides of a conversation"),
-        ("judge", "the other side of a conversation"),
+        (
+            "judge",
+            "the other side of a conversation — one judge, or a panel of them",
+        ),
         (
             "mode",
             "the approval posture onejudge runs the conversation under; a single-sided member's \
@@ -2476,22 +2495,48 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
     );
 }
 
+/// The two single spellings the contract's judge bullet names read as the
+/// one-element list they are shorthand for, through the member they sit on —
+/// which is the field that reads both spellings — and write back as the
+/// mapping they came from, so a graph written before the list existed
+/// round-trips byte for byte.
 #[test]
-fn the_documented_command_provider_judge_parses() {
-    let documented = backticked()
+fn the_documented_single_judge_spellings_are_the_one_element_list() {
+    let documented: Vec<String> = backticked()
         .into_iter()
-        .find(|token| token.starts_with("judge: {command:"))
-        .expect("the contract no longer shows a command-provider judge");
-    let side = documented.trim_start_matches("judge:").trim().to_string();
-
-    let judge: JudgeSide =
-        serde_norway::from_str(&side).expect("the documented command judge does not parse");
+        .filter(|token| token.starts_with("judge: {"))
+        .collect();
     assert_eq!(
-        judge,
-        JudgeSide::Command(oneagentgraph::config::JudgeCommand {
-            command: vec!["...".to_string()],
-        })
+        documented.len(),
+        2,
+        "the contract no longer shows both single-judge spellings: {documented:?}"
     );
+    for spelling in &documented {
+        let spelling = spelling.replace("...", "./oneharness.judge.toml");
+        let member: OnejudgeMember = serde_norway::from_str(&format!(
+            "base_config: ./b.yaml\nmode: bypass\nagent: {{oneharness_config: ./a.toml}}\n{spelling}\n"
+        ))
+        .unwrap_or_else(|err| panic!("the documented `{spelling}` does not parse: {err}"));
+        assert_eq!(member.judge.len(), 1, "{spelling}");
+        let expected = if spelling.contains("command") {
+            JudgeSide::Command(oneagentgraph::config::JudgeCommand {
+                command: vec!["./oneharness.judge.toml".to_string()],
+                label: None,
+            })
+        } else {
+            JudgeSide::Harness(oneagentgraph::config::JudgeHarness {
+                oneharness_config: ConfigRef("./oneharness.judge.toml".to_string()),
+                model: None,
+                label: None,
+            })
+        };
+        assert_eq!(member.judge[0], expected, "{spelling}");
+        let written = serde_norway::to_string(&member).expect("a member serializes");
+        assert!(
+            written.contains("judge:\n  ") && !written.contains("judge:\n  - "),
+            "one side must write back as the mapping it read from:\n{written}"
+        );
+    }
 }
 
 #[test]
