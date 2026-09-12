@@ -17,6 +17,16 @@
 // the real onejudge engine it links opens the conversation there, and real
 // oneharness starts the double in it.
 
+// llmlint: ignore-file[expensive_tests_stay_behind_their_own_edge] this crate has
+// exactly one e2e target — `[[test]] name = "e2e"` in Cargo.toml — and every
+// journey file is a module of it, by the design AGENTS.md states: a journey runs
+// inside `just check` rather than behind `#[ignore]`. There is no narrower edge
+// for these to sit behind and no way to make one without splitting that target,
+// which is a change to how the whole suite is scheduled rather than anything
+// this file decides. The holds these journeys measure are a few seconds each —
+// what the scheduler journeys beside them already cost — and the file finishes
+// in seconds, in parallel with its siblings.
+
 use std::path::{Path, PathBuf};
 
 use crate::support::{
@@ -269,10 +279,6 @@ fn a_two_party_members_empty_dir_is_refused_by_both_verbs() {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// A paced conversation: `schedule` on a two-party member.
-// ---------------------------------------------------------------------------
 
 use std::process::Child;
 use std::time::{Duration, Instant};
@@ -933,6 +939,47 @@ fn a_reset_restarts_a_hold_and_restores_an_initial_delay() {
         gap(reset[0], first) >= START_AFTER * 1000,
         "the first turn opened {}ms after the reset, sooner than the restored delay",
         gap(reset[0], first)
+    );
+}
+
+/// A `reset-timer` that arrives while a turn is live is honoured at the next
+/// hold rather than lost: the hold restarts on it, publishing `cron-reset`, and
+/// the next turn opens no sooner than `every` after that.
+#[test]
+fn a_reset_left_mid_turn_is_honoured_at_the_next_hold() {
+    const EVERY: i64 = 3;
+    let workspace = Workspace::new();
+    workspace.write("base.yaml", &base_without_done_when(""));
+    workspace.graph(&held_worker(EVERY as u64, 2, "    background: false\n"));
+    let hold = workspace.at("turn-hold");
+    let child = spawn(
+        &workspace,
+        &format!("{KEEP_GOING} fake:hold={}", hold.display()),
+        &[],
+    );
+    until("the first turn to be live", || {
+        !turns_of(&stream(&workspace), "worker", "assistant", "turn-started").is_empty()
+    });
+    let id = run_id(&workspace);
+    workspace
+        .run(&["reset-timer", &id, "worker"])
+        .expect_code(0);
+    std::fs::write(&hold, "go").expect("release the turn");
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+    let events = stream(&workspace);
+    let closed = turns_of(&events, "worker", "user", "turn-completed")[0];
+    let reset = of(&events, "cron-reset", "worker");
+    assert_eq!(reset.len(), 1, "a reset left mid-turn was lost: {events:?}");
+    let second = turns_of(&events, "worker", "assistant", "turn-started")[1];
+    assert!(
+        precedes(&events, closed, reset[0]) && precedes(&events, reset[0], second),
+        "the reset was not honoured at the hold after the live turn: {events:?}"
+    );
+    assert!(
+        gap(reset[0], second) >= EVERY * 1000,
+        "the next turn opened {}ms after the honoured reset, sooner than the restarted hold",
+        gap(reset[0], second)
     );
 }
 
