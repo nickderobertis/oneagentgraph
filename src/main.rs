@@ -373,6 +373,7 @@ fn preflight(
             task_text: oneagentgraph::config::TaskText::under(graph.version),
             session: "validate",
             oneharness_bin: &oneharness_bin(env),
+            background: graph.is_background(name),
         };
         oneagentgraph::invoke::build(member, &context, &mut resolver)
             .map_err(|err| Error::InvalidConfig(format!("member {name:?}: {err}")))?;

@@ -26,14 +26,15 @@
 //! * `member-started.json` — the three shapes of the payload a supervisor reads
 //!   first, on the same terms: one per runner, plus the one a member publishes
 //!   when it comes up without taking a turn.
-//! * `graph.v4.yaml` … `graph.v8.yaml` — the graph config
+//! * `graph.v4.yaml` … `graph.v9.yaml` — the graph config
 //!   schema, which is versioned for the same reason and read on the *other* side
 //!   of the same promise: this build does not write these, an author does, and a
 //!   document written against an older schema has to keep meaning what it said.
 //!   Each differs from the one before it by exactly what that version added: the
 //!   `events` block in version 5, the `personas` catalog in version 6, the
 //!   member's own pre-turn views in version 7, each member's own say over
-//!   whether it holds the run open in version 8.
+//!   whether it holds the run open in version 8, and a two-party member's own
+//!   `dir` and `schedule` in version 9.
 //!
 //! Regenerating an old golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -52,7 +53,8 @@ use std::collections::BTreeMap;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, Events, GraphConfig, JudgeHarness, JudgeSide, Member, OneharnessMember,
     OnejudgeMember, PreTurn, Schedule, FIRST_BACKGROUND_VERSION, FIRST_EVENT_FILTER_VERSION,
-    FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION, SCHEMA_VERSION,
+    FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION, FIRST_TWO_PARTY_JOB_VERSION,
+    SCHEMA_VERSION,
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
@@ -72,7 +74,10 @@ use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
 /// version 7 added; and, on both kinds, the `background` version 8 added — the
 /// scheduled member saying what its schedule already implies, and the two-party
 /// member saying what an unscheduled one is by default, so the golden carries
-/// the field spelled both ways.
+/// the field spelled both ways; and the two-party member's own `dir` and
+/// `schedule` version 9 added, which is what makes that `background: false` a
+/// declaration rather than the default: a scheduled conversation that holds the
+/// run open, the observer shape this version exists for.
 fn golden_graph() -> GraphConfig {
     GraphConfig {
         version: SCHEMA_VERSION,
@@ -138,6 +143,12 @@ fn golden_graph() -> GraphConfig {
                     }),
                     mode: "bypass".into(),
                     max_turns: None,
+                    dir: Some("./api".into()),
+                    schedule: Some(Schedule {
+                        every: 300,
+                        start_after: Some(0),
+                        resettable: false,
+                    }),
                     background: Some(false),
                     deps: Vec::new(),
                 }),
@@ -150,7 +161,7 @@ fn golden_graph() -> GraphConfig {
 /// back to the same graph, and validates as a runnable one.
 #[test]
 fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
-    let golden = include_str!("golden/graph.v8.yaml");
+    let golden = include_str!("golden/graph.v9.yaml");
     let written = serde_norway::to_string(&golden_graph()).expect("a graph serializes");
     assert_eq!(
         written, golden,
@@ -203,6 +214,69 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
     assert_eq!(read.members["worker"].declared_background(), Some(false));
     assert!(read.is_background("reporter"));
     assert!(!read.is_background("worker"));
+
+    // The two-party member's own job this version added, read back through the
+    // accessors both kinds answer: a `dir` that survived the trip as absent
+    // would be a conversation run in the graph's directory, and a schedule that
+    // did would be one never held — which is the state *this* version exists to
+    // end.
+    assert_eq!(
+        read.members["worker"].dir(),
+        Some(std::path::Path::new("./api"))
+    );
+    let pace = read.members["worker"]
+        .schedule()
+        .expect("the golden's worker is paced");
+    assert_eq!(pace.every, 300);
+    assert_eq!(pace.first_turn_after(read.version), 0);
+    assert!(!pace.resettable);
+}
+
+/// A graph written against the schema before a two-party member could carry
+/// its own `dir` and `schedule` reads unchanged, gains neither key when written
+/// back, and is refused by the field's name if a two-party member declares one
+/// anyway.
+///
+/// The same three-part promise the journeys below hold, for the two fields
+/// version 9 added: a two-party member that predates them runs in the run's
+/// directory as one unheld conversation, exactly as it always did, and a
+/// document declaring that schema and asking for either is told which version
+/// has it rather than being run with the field silently dropped.
+#[test]
+fn a_version_eight_graph_still_reads_and_is_refused_the_two_party_job_it_predates() {
+    let golden = include_str!("golden/graph.v8.yaml");
+    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 8 graph still reads");
+    assert_eq!(graph.version, FIRST_TWO_PARTY_JOB_VERSION - 1);
+    assert_eq!(graph.members["worker"].dir(), None);
+    assert_eq!(graph.members["worker"].schedule(), None);
+    oneagentgraph::config::validate(&graph).expect("a version 8 graph still validates");
+    // An unscheduled two-party member holds the run open, as it did.
+    assert!(!graph.is_background("worker"));
+
+    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    assert_eq!(written, golden, "a version 8 document did not round-trip");
+
+    for (field, after) in [
+        ("dir", "    mode: bypass\n    dir: ./api\n"),
+        ("schedule", "    mode: bypass\n    schedule: {every: 300}\n"),
+    ] {
+        let asking: GraphConfig =
+            serde_norway::from_str(&golden.replace("    mode: bypass\n", after))
+                .expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(
+            error.to_string().contains(&format!("onejudge `{field}`")),
+            "{error}"
+        );
+        assert!(error.to_string().contains("worker"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_TWO_PARTY_JOB_VERSION}"
+            )),
+            "{error}"
+        );
+    }
 }
 
 /// A graph written against the schema before `background` existed reads

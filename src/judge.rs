@@ -63,11 +63,32 @@
 //!    `TEARDOWN_GRACE`, the member is reported dead anyway and its thread is
 //!    abandoned. A run that waited would hang on a member it has already
 //!    condemned, which is the failure the watchdog exists to prevent.
+//!
+//! # A paced conversation
+//!
+//! A scheduled two-party member is **one** conversation whose turns are paced,
+//! never a conversation per firing: a continued turn costs a fraction of a fresh
+//! conversation, and a monitor that opens a new one every tick is the bill this
+//! exists to cut. The pace rides [`JudgeLaunch::pace`] as a [`Pace`] and is held
+//! by `Hold`, from inside the observation sink, at the one boundary this crate can
+//! hold: the engine publishes the supervisor's `TurnClosed` through the sink
+//! *before* it looks for notes again and opens the next worker turn, so a sink
+//! that does not return is a conversation that does not move.
+//! `hold_between_turns` — the suite's own gate at that boundary, compiled only
+//! for it — is the demonstration this rests on.
+//!
+//! What the hold does is decided entirely here, from files the run's verbs
+//! already write and one count the note courier keeps: it ends on `every`, on a
+//! `trigger`, on a note offered, on the run's `stop` or the member's own
+//! `cancel`, and — for a background member — on the run's quiescence; a
+//! `reset-timer` restarts it. It refreshes the activity clock every tick, so the
+//! watchdog on the supervising thread never reads the wait as a stall, and that
+//! thread's heartbeat is untouched by it.
 
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use onejudge::cli::{Config, Overrides, RunFailure, RunSummary};
@@ -99,6 +120,219 @@ const TEARDOWN_GRACE: Duration = Duration::from_secs(5);
 /// was reaped starts a new harness process, and one that is not reaped in turn is
 /// a paid turn the member was already condemned for.
 const TEARDOWN_POLL: Duration = Duration::from_millis(100);
+
+/// How often a [`Hold`] looks for what ends it.
+///
+/// The run's own clock ticks at this rate too, so a trigger reaches a held
+/// conversation as promptly as it reaches a single-sided member's clock.
+const HOLD_TICK: Duration = Duration::from_millis(100);
+
+/// The pace a scheduled two-party member's one conversation runs at.
+///
+/// What rides [`JudgeLaunch::pace`]: the schedule's `every` and `resettable`,
+/// resolved where the schema is known, and whether this member is background —
+/// which decides whether the run's quiescence ends its conversation at the next
+/// hold. The first delay is not here: `start_after` is the run's clock's, exactly
+/// as it is for a single-sided member, and the conversation opens when that clock
+/// fires it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pace {
+    /// The hold between turns, counted from the moment the supervisor closes a
+    /// turn with a next instruction.
+    pub every: Duration,
+    /// Whether a `reset-timer` may restart a hold in progress.
+    pub resettable: bool,
+    /// Whether the run's quiescence ends this conversation at its next hold —
+    /// what a background member's hold answers, and what a foreground one's
+    /// never does, because a foreground member is what keeps the run from
+    /// quiescing.
+    pub background: bool,
+}
+
+/// Why a hold ended the conversation instead of opening the next turn.
+///
+/// Written by the sink at the moment it breaks and read by [`finish`] once the
+/// engine has answered, so the settle names what really happened rather than
+/// re-deriving it from a report that says only `stopped_early`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// The run's `stop` or this member's own `cancel` arrived during the hold.
+    Stopped,
+    /// The last foreground member finished during the hold, and this member is
+    /// background: the run has nothing left to hold it open for.
+    Quiescent,
+}
+
+/// The pace, held: the state one paced conversation's sink keeps between
+/// observations, and the hold it takes at the boundary.
+///
+/// A hold is taken on the **supervisor's** close, and only when that turn carried
+/// a next instruction. onejudge's own documented shape is what tells the two
+/// apart — a supervisor turn that continues publishes `Message(User)` and then
+/// `TurnClosed(User)`, while one that completes or settles publishes the close
+/// with no message between — so nothing is asked of the engine that it does not
+/// already say. A turn that closed on a completion is followed by no worker
+/// turn, and holding there would be a wait before nothing.
+struct Hold {
+    pace: Pace,
+    /// The member's scratch, which is where the signal directory is derived from
+    /// — the same derivation [`cancellation_requested`] makes.
+    scratch: PathBuf,
+    /// Whether the supervisor turn now open said anything: `true` from its
+    /// `Message` until its `TurnClosed`.
+    continued: bool,
+    /// The note courier's count of notes offered, read against
+    /// [`Self::seen_offered`] each tick.
+    offered: Arc<AtomicU64>,
+    /// How many offered notes this hold has already seen — so a note that
+    /// arrived and was delivered into an earlier turn does not end a later hold.
+    seen_offered: u64,
+    /// Why the hold ended the conversation, when it did.
+    ended: Arc<Mutex<Option<Ended>>>,
+}
+
+impl Hold {
+    fn new(
+        pace: Pace,
+        scratch: &Path,
+        offered: Arc<AtomicU64>,
+        ended: Arc<Mutex<Option<Ended>>>,
+    ) -> Self {
+        Self {
+            pace,
+            scratch: scratch.to_path_buf(),
+            continued: false,
+            offered,
+            seen_offered: 0,
+            ended,
+        }
+    }
+
+    /// Note one observation, and hold at the boundary when it is the one.
+    ///
+    /// Returns what the sink answers the engine with: `Continue` for every
+    /// observation that is not the boundary and for a hold that ended in the
+    /// next turn, `Break` for a hold that ended the conversation.
+    fn observe(
+        &mut self,
+        observation: &Observation<'_>,
+        emitter: &Emitter,
+        activity: &AtomicU64,
+        started: Instant,
+        abort: &AtomicBool,
+    ) -> ControlFlow<()> {
+        match observation {
+            Observation::TurnOpened(opened) if matches!(opened.role, onejudge::Role::User) => {
+                self.continued = false;
+            }
+            Observation::Message(message) if matches!(message.role, onejudge::Role::User) => {
+                self.continued = true;
+            }
+            Observation::TurnClosed(closed)
+                if matches!(closed.role, onejudge::Role::User) && self.continued =>
+            {
+                self.continued = false;
+                return self.hold(emitter, activity, started, abort);
+            }
+            _ => {}
+        }
+        ControlFlow::Continue(())
+    }
+
+    /// Wait out `every` before the next worker turn, or end the hold early on
+    /// what the contract says ends it.
+    fn hold(
+        &mut self,
+        emitter: &Emitter,
+        activity: &AtomicU64,
+        started: Instant,
+        abort: &AtomicBool,
+    ) -> ControlFlow<()> {
+        let signals = signal_dir(&self.scratch);
+        let name = self
+            .scratch
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let stop = signals.join("stop");
+        let own_stop = signals.join(format!("{name}.stop"));
+        let trigger = signals.join(format!("{name}.trigger"));
+        let reset = signals.join(format!("{name}.reset"));
+        let quiescent = signals.join(crate::run::QUIESCENT_FILE);
+        // Measured against `elapsed` rather than as a deadline, for the reason
+        // `crate::run::cron` gives: the span comes from a document, and an
+        // `Instant + Duration` panics on a sum the platform cannot represent.
+        let mut counting_since = Instant::now();
+        loop {
+            std::thread::sleep(HOLD_TICK);
+            // The wait is the schedule's, not silence: the activity watchdog on
+            // the supervising thread reads this clock, and a hold longer than
+            // the stall bound is still a member doing what it was asked.
+            activity.store(elapsed_millis(started), Ordering::SeqCst);
+            // A watchdog that condemned this member — the heartbeat one, since
+            // the activity one cannot while this refreshes — is answered as the
+            // engine would be answered mid-turn: by stopping.
+            if abort.load(Ordering::SeqCst) {
+                return ControlFlow::Break(());
+            }
+            // A stop beats everything else that landed in the same tick, for
+            // the reason the run's clock reads it after its sleep: a trigger
+            // beside a cancel must not win the member a paid turn.
+            if stop.exists() || own_stop.exists() {
+                self.end(Ended::Stopped);
+                return ControlFlow::Break(());
+            }
+            if self.pace.background && quiescent.exists() {
+                self.end(Ended::Quiescent);
+                return ControlFlow::Break(());
+            }
+            if self.pace.resettable && reset.exists() {
+                let _ = std::fs::remove_file(&reset);
+                counting_since = Instant::now();
+                emitter.emit(EventKind::CronReset, serde_json::Map::new());
+                continue;
+            }
+            let offered = self.offered.load(Ordering::SeqCst);
+            let fired = if trigger.exists() {
+                let _ = std::fs::remove_file(&trigger);
+                true
+            } else if offered != self.seen_offered {
+                // A note is delivered into the next turn to open, so the turn
+                // opens now rather than after `every`: a manager's note to a
+                // paced monitor is never held for the cadence.
+                true
+            } else {
+                counting_since.elapsed() >= self.pace.every
+            };
+            if !fired {
+                continue;
+            }
+            self.seen_offered = offered;
+            emitter.emit(EventKind::CronFired, serde_json::Map::new());
+            return ControlFlow::Continue(());
+        }
+    }
+
+    fn end(&self, ended: Ended) {
+        *self
+            .ended
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ended);
+    }
+}
+
+/// The run's signal directory, derived from a member's scratch.
+///
+/// The scratch is `<run>/members/<name>`, so the run is two levels up and its
+/// signals sit beside `members` — the same shape [`crate::run`] creates and
+/// `cancel`, `trigger` and `reset-timer` write into.
+fn signal_dir(scratch: &Path) -> PathBuf {
+    scratch
+        .parent()
+        .and_then(Path::parent)
+        .map(|root| root.join(crate::run::SIGNAL_DIR))
+        .unwrap_or_default()
+}
 
 /// Run one two-party member to its end, publishing every envelope it produces.
 #[must_use]
@@ -190,6 +424,10 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let abort = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
+    // The note courier's count of notes offered, which a hold reads — see
+    // [`Hold`] — and why a hold ended the conversation, which [`finish`] reads.
+    let offered = Arc::new(AtomicU64::new(0));
+    let ended: Arc<Mutex<Option<Ended>>> = Arc::new(Mutex::new(None));
 
     let engine = {
         let (emitter, activity, abort) =
@@ -199,6 +437,11 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         // a delivery rather than as the supervising side's own words — see
         // [`crate::note::Deliveries`].
         let mut deliveries = crate::note::Deliveries::of(notes.as_ref());
+        // The pace this member's schedule asked for, if it asked for one.
+        let mut hold = launch
+            .pace
+            .clone()
+            .map(|pace| Hold::new(pace, scratch, Arc::clone(&offered), Arc::clone(&ended)));
         // The gate this run's task asked for, if it asked for one — see
         // [`hold_between_turns`], which is compiled only for the suite.
         #[cfg(feature = "test-doubles")]
@@ -215,6 +458,17 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
                 ingest(observation, &emitter, &mut deliveries);
                 #[cfg(feature = "test-doubles")]
                 hold_between_turns(observation, &mut gate);
+                // After the observation is published and before the engine is
+                // answered: a `TurnClosed` that opens a hold is on the stream
+                // before the wait it opens, and the wait decides the answer.
+                if let Some(hold) = hold.as_mut() {
+                    if hold
+                        .observe(observation, &emitter, &activity, started, &abort)
+                        .is_break()
+                    {
+                        return ControlFlow::Break(());
+                    }
+                }
                 if abort.load(Ordering::SeqCst) {
                     ControlFlow::Break(())
                 } else {
@@ -258,7 +512,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // that carries notes into the conversation — is `tests/e2e/note.rs`.
     let ending = match (spool, notes) {
         (Some(spool), Some(notes)) => {
-            let (courier, ending) = crate::note::Courier::open(spool, notes, emitter);
+            let (courier, ending) =
+                crate::note::Courier::open(spool, notes, emitter, Arc::clone(&offered));
             match std::thread::Builder::new().spawn(move || courier.serve()) {
                 Ok(_) => Some(ending),
                 Err(_) => None,
@@ -268,7 +523,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
     supervise(
-        &rx, &abort, emitter, bounds, scratch, started, &activity, ending,
+        &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &ended,
     )
 }
 
@@ -420,9 +675,10 @@ fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<FixtureGa
 /// module's too: the panic containment both members rely on can only be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Eight values, none derivable from another: where the answer arrives, the lever
+// Nine values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
-// the two halves of the activity clock, and how this member's note seam is closed.
+// the two halves of the activity clock, how this member's note seam is closed,
+// and why a hold ended the conversation if one did.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -433,6 +689,7 @@ fn supervise(
     started: Instant,
     activity: &Arc<AtomicU64>,
     ending: Option<crate::note::Ending>,
+    ended: &Mutex<Option<Ended>>,
 ) -> Outcome {
     let heartbeat_file = scratch.join("member.heartbeat");
     let mut last_heartbeat = Instant::now();
@@ -452,11 +709,15 @@ fn supervise(
                 if let Some(ending) = ending.as_ref() {
                     ending.end(&terminal_refusal(&answer));
                 }
+                let held = *ended
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 return finish(
                     answer,
                     emitter,
                     scratch,
                     ending.as_ref().map(crate::note::Ending::endpoint),
+                    held,
                 );
             }
             // A sender dropped without an answer means the engine thread
@@ -813,7 +1074,20 @@ fn usage(usage: &onejudge::Usage) -> crate::event::Usage {
 }
 
 /// Settle or condemn a member whose engine answered.
-fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, notes: Option<&Path>) -> Outcome {
+///
+/// `held` is why a paced conversation's hold ended it, when one did: the engine
+/// then answers with a report that says only `stopped_early`, and what that
+/// stop *was* is this crate's to say. A stop is the cancel it is, reported as a
+/// cancel ends a conversation mid-turn; the run's quiescence is the member's own
+/// settled outcome, never a failure, so a run whose foreground work succeeded
+/// still exits 0.
+fn finish(
+    answer: Answer,
+    emitter: &Emitter,
+    scratch: &Path,
+    notes: Option<&Path>,
+    held: Option<Ended>,
+) -> Outcome {
     match answer {
         Ok(summary) => {
             // Published before the verdict, not conditionally on it: which
@@ -822,9 +1096,33 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, notes: Option<&Path
             // later one ran.
             publish_attribution(emitter, summary.report.telemetry.as_ref());
             record_control(&summary.report, scratch, notes);
-            let completed = onejudge::cli::exit_code(&summary) == 0;
-            let document = serde_json::to_value(&summary.report).unwrap_or(Value::Null);
-            settle_report(emitter, &document, completed, scratch)
+            match held.filter(|_| summary.report.stopped_early) {
+                Some(Ended::Stopped) => died(
+                    emitter,
+                    Rule::ProviderFailure,
+                    Cause::Cancelled,
+                    "the conversation was stopped at its hold between turns",
+                ),
+                Some(Ended::Quiescent) => {
+                    // The report is onejudge's own, with the settle's reason in
+                    // the field onejudge keeps for a conversation that ended
+                    // without a completion decision — so an operator reading the
+                    // artifact sees why the transcript stops where it does.
+                    let mut report = summary.report;
+                    report.settled_reason = Some(
+                        "the run settled with only background members left, so this paced \
+                         conversation ended at its hold rather than opening another turn"
+                            .to_string(),
+                    );
+                    let document = serde_json::to_value(&report).unwrap_or(Value::Null);
+                    settle_report(emitter, &document, true, scratch)
+                }
+                None => {
+                    let completed = onejudge::cli::exit_code(&summary) == 0;
+                    let document = serde_json::to_value(&summary.report).unwrap_or(Value::Null);
+                    settle_report(emitter, &document, completed, scratch)
+                }
+            }
         }
         Err(failure) => {
             // The one place harness attribution for a *failed* run is reachable
@@ -1011,10 +1309,7 @@ fn cancellation_requested(scratch: &Path) -> bool {
     let Some(name) = scratch.file_name() else {
         return false;
     };
-    let Some(root) = scratch.parent().and_then(Path::parent) else {
-        return false;
-    };
-    let signals = root.join(crate::run::SIGNAL_DIR);
+    let signals = signal_dir(scratch);
     signals.join("stop").exists()
         || signals
             .join(format!("{}.stop", name.to_string_lossy()))
@@ -1540,6 +1835,7 @@ mod tests {
             worktree: dir.path().to_path_buf(),
             agent_config: dir.path().join(crate::invoke::AGENT_CONFIG_FILE),
             session: "run-1-worker".to_string(),
+            pace: None,
         };
         (dir, launch)
     }
@@ -2297,6 +2593,7 @@ mod tests {
             &emitter,
             dir.path(),
             None,
+            None,
         );
 
         assert_eq!(
@@ -2348,6 +2645,7 @@ mod tests {
             &emitter,
             dir.path(),
             None,
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -2395,6 +2693,7 @@ mod tests {
             &emitter,
             dir.path(),
             None,
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -2428,6 +2727,7 @@ mod tests {
             })),
             &emitter,
             dir.path(),
+            None,
             None,
         );
         let Outcome::Died(death) = outcome else {
@@ -2468,6 +2768,7 @@ mod tests {
             Instant::now(),
             &Arc::new(AtomicU64::new(0)),
             None,
+            &Mutex::new(None),
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");

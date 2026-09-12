@@ -165,7 +165,8 @@ pub struct JudgeLaunch {
     /// The task prose this member drives to completion.
     pub task: String,
     /// The directory this member's harness works in — `member_dir`, the same
-    /// value a single-sided member's `--cwd` gets.
+    /// value a single-sided member's `--cwd` gets: the member's own `dir` when
+    /// it named one, and the graph's when it did not.
     ///
     /// Named to oneharness rather than entered, because it is not *this
     /// process's* working directory: this one is shared with every other member.
@@ -202,6 +203,11 @@ pub struct JudgeLaunch {
     /// [`crate::control`].
     pub session: String,
     // llmlint: ignore-end[invalid_states_unrepresentable]
+    /// The pace this member's one conversation runs at, when its schedule paces
+    /// it — see [`crate::judge::Pace`]. `None` for a conversation that is never
+    /// held, which is every two-party member written before graph schema
+    /// version [`crate::config::FIRST_TWO_PARTY_JOB_VERSION`].
+    pub pace: Option<crate::judge::Pace>,
 }
 
 /// One member, ready to start.
@@ -246,6 +252,13 @@ pub struct Context<'a> {
     /// The `oneharness` binary onejudge shells out to, and that a single-sided
     /// member runs directly.
     pub oneharness_bin: &'a str,
+    /// Whether this member is background — the run does not stay open for it —
+    /// which is [`crate::config::GraphConfig::is_background`]'s answer and is
+    /// taken here rather than re-derived, because what an omission means is the
+    /// whole graph's to say. A paced two-party member's conversation is built to
+    /// know it: a background one ends at the run's quiescence rather than
+    /// opening another turn.
+    pub background: bool,
 }
 
 /// Build one member's invocation, resolving everything it names.
@@ -371,15 +384,22 @@ fn onejudge(
         launch: Launch::Judge(Box::new(JudgeLaunch {
             config: config_path,
             task: prose,
-            // The graph's own directory, resolved exactly as a single-sided
-            // member's is. `None`, not because this kind has no `dir` of its own
-            // to honour but because `docs/contract.md` scopes that field to
-            // `kind: oneharness`, so `OnejudgeMember` has none to read; the call
-            // is written this way so the day the contract grows one, the value
-            // goes here and nothing else moves.
-            worktree: member_dir(None, context),
+            // The conversation's worktree: the member's own `dir` when it named
+            // one, resolved exactly as a single-sided member's is, and the
+            // graph's directory when it did not. Nothing else moves for it —
+            // the agent side is pinned to `agent_config` by name, so a member
+            // working elsewhere still runs under the config the graph gave it.
+            worktree: member_dir(member.dir.as_deref(), context),
             agent_config: agent_path,
             session: context.session.to_string(),
+            // The hold between turns, from the schedule as written: `every` is
+            // the cadence whatever the schema, and the first delay is the run's
+            // clock's — resolved there, where the schema is known.
+            pace: member.schedule.map(|schedule| crate::judge::Pace {
+                every: std::time::Duration::from_secs(schedule.every),
+                resettable: schedule.resettable,
+                background: context.background,
+            }),
         })),
         persona: label,
         // Nothing: this member starts no child process of its own, so it has no
@@ -1052,9 +1072,9 @@ fn task(context: &Context<'_>) -> Result<String, Error> {
 /// on [`HarnessLaunch::worktree`], which reaches oneharness's own `cwd`; a
 /// two-party one
 /// carries it on [`JudgeLaunch::worktree`], which onejudge puts on the same flag.
-/// Only a `kind: oneharness` member can name a `dir` of its own — that is
-/// `docs/contract.md`'s scoping rather than this function's — so the two-party
-/// call passes `None` and takes the graph's.
+/// Either kind may name a `dir` of its own — the two-party one from graph schema
+/// version [`crate::config::FIRST_TWO_PARTY_JOB_VERSION`] — and both resolve it
+/// here, so a relative `dir` means one thing whichever kind wrote it.
 ///
 /// A member that named none gets `context.dir` **exactly as the run was given
 /// it**, relative or not, because that is what this crate has always passed to
@@ -1209,6 +1229,7 @@ mod tests {
             task_text: TaskText::Template,
             session: "s",
             oneharness_bin: "oneharness",
+            background: false,
         }
     }
 
@@ -1478,6 +1499,61 @@ mod tests {
         )
         .expect("the shipped persona resolves");
         assert_eq!(invocation.persona.as_deref(), Some("reviewer"));
+    }
+
+    /// A two-party member's own `dir` is the conversation's worktree, resolved
+    /// exactly as a single-sided member's is — and whatever it says, the agent
+    /// side stays pinned to the stamped config in the member's scratch.
+    #[test]
+    fn a_two_party_member_is_told_its_own_directory_and_keeps_its_stamped_config() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let two_party = |own: &str| -> Member {
+            serde_norway::from_str(&format!(
+                concat!(
+                    "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\n",
+                    "agent: {{oneharness_config: ./oneharness.toml}}\n",
+                    "judge: {{oneharness_config: ./oneharness.toml}}\n{}",
+                ),
+                own
+            ))
+            .expect("a member")
+        };
+        let mut resolver = Resolver::new();
+        let mut launch = |member: &Member, context: &Context<'_>| -> JudgeLaunch {
+            let invocation = build(member, context, &mut resolver).expect("builds");
+            judge_launch(&invocation).clone()
+        };
+
+        let graph_wide = launch(&two_party(""), &context(dir.path(), &scratch));
+        assert_eq!(
+            graph_wide.worktree,
+            dir.path(),
+            "a member with no directory of its own must be told the graph's, unchanged"
+        );
+
+        // Relative: joined onto the graph's directory and made absolute, exactly
+        // as a single-sided member's is.
+        let relative = launch(&two_party("dir: ./api\n"), &context(dir.path(), &scratch));
+        assert_eq!(relative.worktree, dir.path().join("api"));
+
+        // Absolute: used as written.
+        let elsewhere = tempfile::tempdir().expect("tempdir");
+        let absolute = launch(
+            &two_party(&format!("dir: {}\n", elsewhere.path().display())),
+            &context(dir.path(), &scratch),
+        );
+        assert_eq!(absolute.worktree, elsewhere.path());
+
+        // And whatever `dir` says, the agent side stays pinned to the stamped
+        // config in this member's scratch — the same file, byte for byte, as a
+        // member with no `dir` is pinned to.
+        assert_eq!(relative.agent_config, graph_wide.agent_config);
+        assert_eq!(absolute.agent_config, graph_wide.agent_config);
+        assert_eq!(
+            std::fs::read_to_string(&relative.agent_config).expect("the stamped config"),
+            std::fs::read_to_string(&graph_wide.agent_config).expect("the stamped config"),
+        );
     }
 
     /// A single-sided member's own `task` and `dir` are what oneharness is told,

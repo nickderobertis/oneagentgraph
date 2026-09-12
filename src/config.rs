@@ -98,12 +98,27 @@ impl Member {
         }
     }
 
-    /// This member's schedule, which only a single-sided member may carry.
+    /// This member's schedule, when it carries one.
+    ///
+    /// The same field on both kinds, and the same shape; what a firing *is*
+    /// differs. A single-sided member's is one turn, so its clock fires it again
+    /// and again. A two-party member's is one long-lived conversation, so the
+    /// schedule paces that conversation's turns and never starts a second one —
+    /// see [`OnejudgeMember::schedule`].
     #[must_use]
     pub fn schedule(&self) -> Option<Schedule> {
         match self {
-            Member::Onejudge(_) => None,
+            Member::Onejudge(member) => member.schedule,
             Member::Oneharness(member) => member.schedule,
+        }
+    }
+
+    /// The directory this member works in, when it named one of its own.
+    #[must_use]
+    pub fn dir(&self) -> Option<&std::path::Path> {
+        match self {
+            Member::Onejudge(member) => member.dir.as_deref(),
+            Member::Oneharness(member) => member.dir.as_deref(),
         }
     }
 
@@ -193,6 +208,31 @@ pub struct OnejudgeMember {
     /// Turn ceiling for the conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_turns: Option<u32>,
+    /// The conversation's worktree, when this member's job is not the graph's.
+    ///
+    /// The same field, on the same terms, as [`OneharnessMember::dir`]: the
+    /// directory the agent side's harness runs in (`oneharness run --cwd`) and
+    /// the one onejudge takes as the conversation's skill directory, resolved
+    /// exactly as a single-sided member's is — relative against the run's
+    /// `--dir`, absolute used as written — and defaulting to the run's. The agent
+    /// side stays pinned to its stamped config whatever this says. Requires graph
+    /// schema version [`FIRST_TWO_PARTY_JOB_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dir: Option<PathBuf>,
+    /// The pace this member's **one** conversation runs at, when it is paced.
+    ///
+    /// The same [`Schedule`] a single-sided member carries, under the same
+    /// rules, with one difference in what a firing *is*: a `kind: onejudge`
+    /// member is one long-lived conversation, and a firing of it is one turn of
+    /// that conversation rather than a conversation run to settlement. So
+    /// `start_after` defers the first turn, `every` is a hold between turns —
+    /// counted from the moment the judge side closes a turn with a next
+    /// instruction, and skipped when it closed with none — and when the
+    /// conversation settles the schedule starts no second one. The hold is
+    /// [`crate::judge::Pace`]'s. Requires graph schema version
+    /// [`FIRST_TWO_PARTY_JOB_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Schedule>,
     /// Whether this member holds the run open. Absent is decided by the schedule.
     ///
     /// Read through [`GraphConfig::is_background`], because what its absence
@@ -455,7 +495,7 @@ pub const MAX_PRE_TURN_COMMANDS: usize = 4;
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 /// How a member's own `task` is read: as the prose it has always been, or as a
 /// template naming the run's task.
@@ -569,6 +609,18 @@ pub const FIRST_BACKGROUND_VERSION: u32 = 8;
 /// document keeps parsing and running exactly as before; what the gate buys is
 /// that a document *using* one says which schema it was written against.
 pub const FIRST_MEMBER_JOB_VERSION: u32 = 3;
+
+/// The first graph schema version in which a two-party member may carry its
+/// own [`dir`](OnejudgeMember::dir) and [`schedule`](OnejudgeMember::schedule).
+///
+/// A gate on the *fields*, the way [`FIRST_MEMBER_JOB_VERSION`] is one for the
+/// same two on a single-sided member: both are optional and both default to what
+/// a two-party member has always had — the run's directory, and one conversation
+/// opened in its wave and never held — so a document that names neither runs
+/// exactly as it did under every older schema. What the gate buys is that a
+/// document *using* one says which schema it was written against, rather than
+/// being handed to a build that would refuse the key outright.
+pub const FIRST_TWO_PARTY_JOB_VERSION: u32 = 9;
 
 /// Whether `name` is one a member may have.
 ///
@@ -723,6 +775,26 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                         )));
                     }
                 }
+                // A conversation's own worktree and pace, gated the way a
+                // single-sided member's `dir` is and refused for the same reason:
+                // a document declaring an older schema and naming either would
+                // otherwise run in the graph's directory, or unpaced, without a
+                // word about the field it asked for.
+                for (field, given) in [
+                    ("dir", member.dir.is_some()),
+                    ("schedule", member.schedule.is_some()),
+                ] {
+                    if given && graph.version < FIRST_TWO_PARTY_JOB_VERSION {
+                        return Err(Error::InvalidConfig(format!(
+                            "member {name:?} uses onejudge `{field}`, which requires graph \
+                             schema version {FIRST_TWO_PARTY_JOB_VERSION}"
+                        )));
+                    }
+                }
+                own_dir(name, member.dir.as_deref())?;
+                if let Some(schedule) = member.schedule {
+                    schedule_spans(name, &schedule, graph.version)?;
+                }
             }
             Member::Oneharness(member) => {
                 // A member's own job, gated the way `deps` is: a document that
@@ -744,20 +816,12 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                 // reason: each one *replaces* what the graph supplies, so an
                 // empty one is a member asking for nothing rather than for the
                 // graph's. An empty `dir` would name wherever the launching
-                // process happened to be; an empty `task` becomes the value of
-                // this member's `--prompt`, which is a harness given no
-                // instruction at all. Refusing here is what makes either the
-                // author's typo rather than a member run on it.
-                if member
-                    .dir
-                    .as_ref()
-                    .is_some_and(|dir| dir.as_os_str().is_empty())
-                {
-                    return Err(Error::InvalidConfig(format!(
-                        "member {name:?}: `dir` names no directory — omit it to work in the \
-                         graph's own directory"
-                    )));
-                }
+                // process happened to be — `own_dir`, shared with the two-party
+                // arm; an empty `task` becomes the value of this member's
+                // `--prompt`, which is a harness given no instruction at all.
+                // Refusing here is what makes either the author's typo rather
+                // than a member run on it.
+                own_dir(name, member.dir.as_deref())?;
                 if member
                     .task
                     .as_ref()
@@ -770,38 +834,74 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                 }
                 pre_turn(name, member, graph.version)?;
                 if let Some(schedule) = member.schedule {
-                    if schedule.every == 0 {
-                        return Err(Error::InvalidConfig(format!(
-                            "member {name:?}: a schedule of every 0 seconds never stops firing"
-                        )));
-                    }
-                    // Refused rather than ignored under an older schema: what a
-                    // missing `start_after` means is that schema's answer, so a
-                    // document declaring version 3 and asking for one would
-                    // otherwise be given the t=0 it did not ask for.
-                    if schedule.start_after.is_some() && graph.version < FIRST_START_AFTER_VERSION {
-                        return Err(Error::InvalidConfig(format!(
-                            "member {name:?} uses `schedule.start_after`, which requires graph \
-                             schema version {FIRST_START_AFTER_VERSION}"
-                        )));
-                    }
-                    // A span nobody could mean is refused as the typo it is,
-                    // rather than becoming a member that waits out the heat death
-                    // of the universe while reporting nothing at all.
-                    for (field, seconds) in [
-                        ("every", schedule.every),
-                        ("start_after", schedule.first_turn_after(graph.version)),
-                    ] {
-                        if seconds > MAX_SCHEDULE_SECONDS {
-                            return Err(Error::InvalidConfig(format!(
-                                "member {name:?}: `{field}` of {seconds} seconds is longer than \
-                                 any run this will ever pace — the ceiling is \
-                                 {MAX_SCHEDULE_SECONDS}"
-                            )));
-                        }
-                    }
+                    schedule_spans(name, &schedule, graph.version)?;
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+/// A member's own `dir`, present and empty, refused.
+///
+/// The field *replaces* the run's directory, so an empty one is a member asking
+/// for nothing rather than for the run's: unrefused, it would name wherever the
+/// launching process happened to be. One check for both kinds, because both
+/// resolve the field the same way.
+///
+/// # Errors
+///
+/// [`crate::error::Error::InvalidConfig`] naming the member.
+fn own_dir(name: &str, dir: Option<&std::path::Path>) -> Result<(), crate::error::Error> {
+    if dir.is_some_and(|dir| dir.as_os_str().is_empty()) {
+        return Err(crate::error::Error::InvalidConfig(format!(
+            "member {name:?}: `dir` names no directory — omit it to work in the graph's own \
+             directory"
+        )));
+    }
+    Ok(())
+}
+
+/// Everything a [`Schedule`] has to be, whichever kind of member carries it.
+///
+/// One function for both kinds rather than a copy per arm, because the rules
+/// are the schedule's and not the member's: a span is a span whether it paces a
+/// single-sided member's firings or a two-party member's turns, and a check
+/// that lived in one arm would be the drift `tests/contract.rs` gates the field
+/// lists against, one level down.
+///
+/// # Errors
+///
+/// [`crate::error::Error::InvalidConfig`] naming the member and the field.
+fn schedule_spans(name: &str, schedule: &Schedule, schema: u32) -> Result<(), crate::error::Error> {
+    use crate::error::Error;
+    if schedule.every == 0 {
+        return Err(Error::InvalidConfig(format!(
+            "member {name:?}: a schedule of every 0 seconds never stops firing"
+        )));
+    }
+    // Refused rather than ignored under an older schema: what a missing
+    // `start_after` means is that schema's answer, so a document declaring
+    // version 3 and asking for one would otherwise be given the t=0 it did not
+    // ask for.
+    if schedule.start_after.is_some() && schema < FIRST_START_AFTER_VERSION {
+        return Err(Error::InvalidConfig(format!(
+            "member {name:?} uses `schedule.start_after`, which requires graph schema version \
+             {FIRST_START_AFTER_VERSION}"
+        )));
+    }
+    // A span nobody could mean is refused as the typo it is, rather than
+    // becoming a member that waits out the heat death of the universe while
+    // reporting nothing at all.
+    for (field, seconds) in [
+        ("every", schedule.every),
+        ("start_after", schedule.first_turn_after(schema)),
+    ] {
+        if seconds > MAX_SCHEDULE_SECONDS {
+            return Err(Error::InvalidConfig(format!(
+                "member {name:?}: `{field}` of {seconds} seconds is longer than any run this \
+                 will ever pace — the ceiling is {MAX_SCHEDULE_SECONDS}"
+            )));
         }
     }
     Ok(())
@@ -1455,6 +1555,143 @@ mod tests {
         let err = serde_norway::from_str::<GraphConfig>(document)
             .expect_err("a two-party member has no pre_turn");
         assert!(err.to_string().contains("pre_turn"), "{err}");
+    }
+
+    /// A two-party member may carry its own `dir` and `schedule` from the
+    /// schema that has them, both omitted when unset, and a document declaring
+    /// an older schema is refused by the field's name rather than run in the
+    /// graph's directory or unpaced.
+    #[test]
+    fn a_two_party_members_own_job_requires_the_schema_that_has_it() {
+        let document = |version: u32, own: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n  monitor:\n    kind: onejudge\n",
+                    "    base_config: ./b.yaml\n    mode: bypass\n",
+                    "    agent: {{oneharness_config: ./a.toml}}\n",
+                    "    judge: {{oneharness_config: ./j.toml}}\n{}",
+                ),
+                version, own
+            )
+        };
+        let graph = parse(&document(
+            FIRST_TWO_PARTY_JOB_VERSION,
+            "    dir: ./api\n    schedule: {every: 300, start_after: 0, resettable: true}\n",
+        ));
+        validate(&graph).expect("the schema that has the fields accepts them");
+        let Member::Onejudge(monitor) = &graph.members["monitor"] else {
+            panic!("the member is two-party")
+        };
+        assert_eq!(monitor.dir.as_deref(), Some(std::path::Path::new("./api")));
+        assert_eq!(
+            monitor.schedule,
+            Some(Schedule {
+                every: 300,
+                start_after: Some(0),
+                resettable: true,
+            })
+        );
+        // Through the accessors every caller reads them by, so a two-party
+        // member's answer is the same one a single-sided member gives.
+        assert_eq!(graph.members["monitor"].schedule(), monitor.schedule);
+        assert_eq!(graph.members["monitor"].dir(), monitor.dir.as_deref());
+        let reparsed: GraphConfig =
+            serde_norway::from_str(&serde_norway::to_string(&graph).expect("serializes"))
+                .expect("reparses");
+        assert_eq!(reparsed, graph);
+
+        for (field, own) in [
+            ("dir", "    dir: ./api\n"),
+            ("schedule", "    schedule: {every: 300}\n"),
+        ] {
+            for older in FIRST_SCHEMA_VERSION..FIRST_TWO_PARTY_JOB_VERSION {
+                let err = validate(&parse(&document(older, own)))
+                    .expect_err("the field postdates this schema");
+                assert!(
+                    err.to_string().contains(&format!("onejudge `{field}`")),
+                    "version {older}: {err}"
+                );
+                assert!(
+                    err.to_string().contains(&format!(
+                        "requires graph schema version {FIRST_TWO_PARTY_JOB_VERSION}"
+                    )),
+                    "version {older}: {err}"
+                );
+            }
+        }
+
+        // Present and empty is a typo, not a request for the run's directory.
+        let err = validate(&parse(&document(SCHEMA_VERSION, "    dir: ''\n"))).unwrap_err();
+        assert!(err.to_string().contains("names no directory"), "{err}");
+        assert!(err.to_string().contains("monitor"), "{err}");
+
+        // And a member naming neither validates under every schema this build
+        // reads, and serializes without either key.
+        for version in FIRST_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let unchanged = parse(&document(version, ""));
+            assert!(validate(&unchanged).is_ok(), "version {version}");
+            assert_eq!(unchanged.members["monitor"].schedule(), None);
+            assert_eq!(unchanged.members["monitor"].dir(), None);
+            let rendered = serde_norway::to_string(&unchanged).expect("a graph serializes");
+            assert!(!rendered.contains("dir"), "{rendered}");
+            assert!(!rendered.contains("schedule"), "{rendered}");
+        }
+    }
+
+    /// A two-party member's schedule is held to exactly the rules a single-sided
+    /// one is — each proven on a two-party member rather than inferred from the
+    /// single-sided tests above.
+    #[test]
+    fn a_two_party_schedule_is_held_to_the_rules_a_single_sided_one_is() {
+        let document = |schedule: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n  monitor:\n    kind: onejudge\n",
+                    "    base_config: ./b.yaml\n    mode: bypass\n",
+                    "    agent: {{oneharness_config: ./a.toml}}\n",
+                    "    judge: {{oneharness_config: ./j.toml}}\n",
+                    "    schedule: {}\n",
+                ),
+                SCHEMA_VERSION, schedule
+            )
+        };
+        let scheduled = |schedule: &str| -> Schedule {
+            let graph = parse(&document(schedule));
+            validate(&graph).unwrap_or_else(|err| panic!("{schedule}: {err}"));
+            graph.members["monitor"]
+                .schedule()
+                .expect("the member is scheduled")
+        };
+        // `every: 0` never stops firing.
+        let err = validate(&parse(&document("{every: 0}"))).unwrap_err();
+        assert!(err.to_string().contains("never stops firing"), "{err}");
+        assert!(err.to_string().contains("monitor"), "{err}");
+        // A span longer than any run is refused naming the field, on both.
+        for (schedule, field) in [
+            (format!("{{every: {}}}", MAX_SCHEDULE_SECONDS + 1), "every"),
+            (
+                format!("{{every: 60, start_after: {}}}", MAX_SCHEDULE_SECONDS + 1),
+                "start_after",
+            ),
+        ] {
+            let err = validate(&parse(&document(&schedule))).unwrap_err();
+            assert!(err.to_string().contains(field), "{schedule}: {err}");
+            assert!(
+                err.to_string().contains("longer than any run"),
+                "{schedule}: {err}"
+            );
+        }
+        // A schedule naming no `start_after` waits one `every` before its first
+        // turn under the current schema, and `resettable` defaults off.
+        let inherited = scheduled("{every: 300}");
+        assert_eq!(inherited.start_after, None);
+        assert_eq!(inherited.first_turn_after(SCHEMA_VERSION), 300);
+        assert!(!inherited.resettable);
+        assert_eq!(
+            scheduled("{every: 300, start_after: 0}").first_turn_after(SCHEMA_VERSION),
+            0
+        );
+        assert!(scheduled("{every: 300, resettable: true}").resettable);
     }
 
     /// `background` is a member's own say over whether it holds the run open,
