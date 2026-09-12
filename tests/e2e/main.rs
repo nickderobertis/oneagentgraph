@@ -46,6 +46,7 @@ mod note;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-end[e2e_not_mocked]
 mod origin;
+mod panel;
 mod preturn;
 mod remote;
 mod scheduler;

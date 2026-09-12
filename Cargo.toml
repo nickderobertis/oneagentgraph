@@ -58,7 +58,8 @@ path = "src/main.rs"
 
 # The deterministic programs the e2e suite drives as real subprocesses: one stands
 # in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, one
-# speaks onejudge's `CommandProvider` JSON-lines protocol, and one is a program a
+# speaks onejudge's `CommandProvider` JSON-lines protocol, one is the `llmlint`
+# CLI a graph's `kind: llmlint` judge names as its `bin`, and one is a program a
 # journey's graph points a `pre_turn` view at. All are behind `test-doubles` so a
 # published `cargo install oneagentgraph` never builds them.
 [[bin]]
@@ -69,6 +70,15 @@ required-features = ["test-doubles"]
 [[bin]]
 name = "oneagentgraph-fake-provider"
 path = "src/bin/fake_provider.rs"
+required-features = ["test-doubles"]
+
+# The `llmlint` an llmlint judge runs, on the view double's terms: a `bin` is an
+# argv the graph supplies, so this is the *input* to that judge rather than a
+# stand-in for any part of the engine that runs it — see the binary's own
+# documentation.
+[[bin]]
+name = "oneagentgraph-fake-llmlint"
+path = "src/bin/fake_llmlint.rs"
 required-features = ["test-doubles"]
 
 # The program a journey's graph declares as a `pre_turn` view. Not a seam: a view
@@ -85,8 +95,9 @@ path = "src/lib.rs"
 
 [features]
 # What only the suite needs: the deterministic programs it spawns — a
-# paid-harness stand-in, a onejudge `CommandProvider` backend, and a program a
-# journey points a `pre_turn` view at — and `judge`'s `hold_between_turns`, the
+# paid-harness stand-in, a onejudge `CommandProvider` backend, an `llmlint` for a
+# graph's llmlint judge to name, and a program a journey points a `pre_turn`
+# view at — and `judge`'s `hold_between_turns`, the
 # one fixture that pauses real code rather than standing in for a process,
 # because the conversation boundary it holds is reachable from nowhere else.
 # Non-default, so none of it is ever in a consumer's build; `just check` and the
