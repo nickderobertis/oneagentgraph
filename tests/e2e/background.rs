@@ -129,17 +129,40 @@ fn still_running_after(child: &mut Child, for_: Duration) -> bool {
     child.try_wait().expect("waitable").is_none()
 }
 
+/// [`until`], for a condition only a live run can meet: a run that has already
+/// ended is the assertion failing *now*, with its exit and stderr, rather than
+/// four minutes from now with a timeout that says nothing about why.
+fn while_running(child: &mut Child, what: &str, condition: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(240);
+    while Instant::now() < deadline {
+        if condition() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("waitable") {
+            let mut stderr = String::new();
+            if let Some(pipe) = child.stderr.as_mut() {
+                let _ = std::io::Read::read_to_string(pipe, &mut stderr);
+            }
+            panic!("the run settled before {what}: exit {status:?}\n--- stderr ---\n{stderr}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    panic!("timed out waiting for {what}");
+}
+
 /// The run's exit code once it ends — and a run that does not end inside the
-/// suite's patience is a failed assertion rather than a hung suite.
+/// suite's patience is a failed assertion rather than a hung suite, and is
+/// ended here rather than left holding its members open past the journey.
 fn exit_of(mut child: Child) -> (Option<i32>, String) {
     let deadline = Instant::now() + Duration::from_secs(60);
     while child.try_wait().expect("waitable").is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(
-        child.try_wait().expect("waitable").is_some(),
-        "the run never settled"
-    );
+    if child.try_wait().expect("waitable").is_none() {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the run never settled");
+    }
     let output = child.wait_with_output().expect("the run finishes");
     (
         output.status.code(),
@@ -217,7 +240,8 @@ fn a_scheduled_member_declared_foreground_holds_the_run_open_until_it_is_cancell
     until("the worker to settle", || {
         count(&stream(&workspace), "member-settled", "worker") == 1
     });
-    until(
+    while_running(
+        &mut child,
         "the ticker to fire after the last unscheduled member settled",
         || count_after(&stream(&workspace), "worker", "cron-fired", "ticker") >= 2,
     );
@@ -259,9 +283,11 @@ fn a_set_override_beats_the_environment_and_the_document() {
         count(&stream(&workspace), "member-started", "worker") == 1
     });
     release(&release_at);
-    until("the ticker to fire after the worker settled", || {
-        count_after(&stream(&workspace), "worker", "cron-fired", "ticker") >= 1
-    });
+    while_running(
+        &mut child,
+        "the ticker to fire after the worker settled",
+        || count_after(&stream(&workspace), "worker", "cron-fired", "ticker") >= 1,
+    );
     assert!(
         still_running_after(&mut child, Duration::from_millis(500)),
         "the flag lost to the environment: the run settled over a member --set held open"
@@ -339,7 +365,8 @@ fn the_environment_backgrounds_the_members_it_names_and_only_those() {
     // so the run stays open — and the backgrounded clocks keep firing while it
     // does, because background is about what holds the run open, not about
     // who may take a turn while it is.
-    until(
+    while_running(
+        &mut child,
         "both backgrounded clocks to fire while the keeper holds the run",
         || {
             let stream = stream(&workspace);
@@ -390,9 +417,11 @@ fn the_environment_is_the_runs_own_and_never_the_graphs_env_block() {
         count(&stream(&workspace), "member-started", "worker") == 1
     });
     release(&release_at);
-    until("the ticker to fire after the worker settled", || {
-        count_after(&stream(&workspace), "worker", "cron-fired", "ticker") >= 1
-    });
+    while_running(
+        &mut child,
+        "the ticker to fire after the worker settled",
+        || count_after(&stream(&workspace), "worker", "cron-fired", "ticker") >= 1,
+    );
     assert!(
         still_running_after(&mut child, Duration::from_millis(500)),
         "the graph's own env block backgrounded a member the run's environment never named"
@@ -412,6 +441,10 @@ fn the_environment_is_the_runs_own_and_never_the_graphs_env_block() {
 fn background_is_refused_by_name_and_version_however_it_is_named() {
     let workspace = Workspace::new();
     let release_at = workspace.at("release");
+    // Released before anything runs: every run below is meant to be refused,
+    // and one that is wrongly accepted should end with the wrong exit code
+    // rather than hold the suite open on a worker nobody releases.
+    release(&release_at);
     workspace.graph(&default_graph(
         &fake_harness(),
         &release_at.display().to_string(),
