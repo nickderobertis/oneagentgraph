@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.18](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.17...v0.3.18) - 2026-09-12
+
+### Added
+
+- *(graph)* declare which members are background, and settle a run once only background members survive ([#99](https://github.com/nickderobertis/oneagentgraph/pull/99))
+
 ## [0.3.17](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.16...v0.3.17) - 2026-09-11
 
 ### Fixed
