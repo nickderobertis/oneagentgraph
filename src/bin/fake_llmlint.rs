@@ -60,10 +60,20 @@ impl Verdict {
 }
 
 fn main() -> std::process::ExitCode {
-    let argv: Vec<String> = std::env::args_os()
+    // An argument that is not text is refused rather than dropped: what onejudge
+    // composed is the whole of what a journey reads off the log below, and an
+    // argv with a hole in it would read as onejudge having composed less.
+    let argv: Result<Vec<String>, _> = std::env::args_os()
         .skip(1)
-        .filter_map(|arg| arg.into_string().ok())
+        .map(std::ffi::OsString::into_string)
         .collect();
+    let argv = match argv {
+        Ok(argv) => argv,
+        Err(raw) => {
+            eprintln!("fake-llmlint: argument {raw:?} is not UTF-8");
+            return std::process::ExitCode::from(2);
+        }
+    };
     if let Ok(path) = std::env::var("FAKE_LLMLINT_ARGV_LOG") {
         let line = serde_json::to_string(&argv).expect("an argv serializes");
         let appended = std::fs::OpenOptions::new()
@@ -99,15 +109,21 @@ fn main() -> std::process::ExitCode {
                 eprintln!("fake-llmlint: fail-once needs FAKE_LLMLINT_MARKER");
                 return std::process::ExitCode::from(2);
             };
-            let first = std::fs::OpenOptions::new()
+            // Only "it is already there" means a run came before this one; a
+            // marker that cannot be created for any other reason is a journey
+            // steering this double through a path it cannot use, refused
+            // rather than read as a second run that passes.
+            match std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&marker)
-                .is_ok();
-            if first {
-                Verdict::Fail
-            } else {
-                Verdict::Pass
+            {
+                Ok(_) => Verdict::Fail,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Verdict::Pass,
+                Err(err) => {
+                    eprintln!("fake-llmlint: cannot create FAKE_LLMLINT_MARKER {marker}: {err}");
+                    return std::process::ExitCode::from(2);
+                }
             }
         }
         other => other,

@@ -207,7 +207,9 @@ pub struct OnejudgeMember {
     /// sides, and both spellings read into this one list, so there is exactly
     /// one composition path over it (`crate::invoke`). A one-element list is
     /// written back as the single mapping it reads from, so a document written
-    /// before the list existed round-trips byte for byte.
+    /// before the list existed reads back to the same graph and is written in
+    /// the shape it was written in — which is what keeps the checked-in graph
+    /// goldens, serialized from this build, unchanged.
     #[serde(with = "judge_sides")]
     pub judge: Vec<JudgeSide>,
     /// onejudge approval mode.

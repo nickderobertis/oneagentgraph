@@ -2497,9 +2497,9 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
 
 /// The two single spellings the contract's judge bullet names read as the
 /// one-element list they are shorthand for, through the member they sit on —
-/// which is the field that reads both spellings — and write back as the
-/// mapping they came from, so a graph written before the list existed
-/// round-trips byte for byte.
+/// which is the field that reads both spellings — and write back in the
+/// mapping shape they came from rather than as a list, so a graph written
+/// before the list existed is written back in the shape it was written in.
 #[test]
 fn the_documented_single_judge_spellings_are_the_one_element_list() {
     let documented: Vec<String> = backticked()

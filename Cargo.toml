@@ -275,7 +275,7 @@ test-doubles = []
 # kind. What is decided here is not how a panel decides — that is onejudge's,
 # with onejudge's coverage, stated in its `docs/judges.md` — but that a graph on
 # this host can reach it: `src/config.rs` reads the list, `src/invoke.rs`
-# composes it onto `judges:`, and `tests/e2e/two_party.rs` drives a real stacked
+# composes it onto `judges:`, and `tests/e2e/panel.rs` drives a real stacked
 # panel through the doubles and reads the config it was launched with.
 onejudge = { version = "0.10.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
