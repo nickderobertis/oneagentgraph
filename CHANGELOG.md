@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.19](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.18...v0.3.19) - 2026-09-12
+
+### Added
+
+- *(graph)* schedule and dir on a two-party member, paced one turn per interval, both kinds held to one setting list ([#101](https://github.com/nickderobertis/oneagentgraph/pull/101))
+
 ## [0.3.18](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.17...v0.3.18) - 2026-09-12
 
 ### Added
