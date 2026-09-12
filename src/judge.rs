@@ -27,10 +27,12 @@
 //! ([`crate::event::EventKind::TurnStarted`]), each tool call **and the
 //! observation that answered it**
 //! ([`crate::event::EventKind::TurnActivity`]), each party's own reply
-//! ([`crate::event::EventKind::TurnMessage`]), and that one turn's usage and
-//! bounds ([`crate::event::EventKind::TurnCompleted`]). An operator watching a
-//! live dispatch reads what the agent did and what it said off the journal,
-//! rather than waiting for the settled report.
+//! ([`crate::event::EventKind::TurnMessage`]), that one turn's usage and
+//! bounds ([`crate::event::EventKind::TurnCompleted`]), and — for a member
+//! judged by a panel — what each judge of it decided about the turn
+//! ([`crate::event::EventKind::JudgeDecided`]). An operator watching a live
+//! dispatch reads what the agent did, what it said, and which judge sent it
+//! back off the journal, rather than waiting for the settled report.
 //!
 //! **A failure is typed, not a stderr tail.** onejudge classifies a provider
 //! failure with its own `ProviderErrorKind` — which is oneharness's normalized

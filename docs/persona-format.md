@@ -51,7 +51,7 @@ carry.
 
 | refused field | what owns it instead, in the words the refusal uses |
 | --- | --- |
-| `provider` | the member's own `agent:` and `judge:` in the graph decide its provider |
+| `provider` | the member's own `agent:` and `judge:` in the graph decide its provider — the judges of a panel reach onejudge only from the graph's list |
 | `session` | the run names the session, and every member of it shares one |
 | `task` | the task comes from the member's own `task:`, or from the run's `--task` |
 | `skill` | a relative skill path is resolved against the directory of the config naming it, which for a member is its base config — so name it there |

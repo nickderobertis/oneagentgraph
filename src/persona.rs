@@ -60,7 +60,8 @@ pub const SHIPPED_PERSONAS: &[(&str, &str)] = &[
 pub const MEMBER_OWNED: &[(&str, &str)] = &[
     (
         "provider",
-        "the member's own `agent:` and `judge:` in the graph decide its provider",
+        "the member's own `agent:` and `judge:` in the graph decide its provider — the judges \
+         of a panel reach onejudge only from the graph's list",
     ),
     (
         "session",
