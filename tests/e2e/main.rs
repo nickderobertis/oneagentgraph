@@ -46,7 +46,18 @@ mod note;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 // llmlint: ignore-end[e2e_not_mocked]
 mod origin;
+// llmlint: ignore-block[e2e_not_mocked] the same declaration `mod note;` above
+// carries, for the same reason: the journeys are in tests/e2e/panel.rs, which
+// declares it itself on the terms every journey file shares — the paid harness
+// process is the one double this suite sanctions, replaced at oneharness's own
+// `ONEHARNESS_BIN_<ID>` seam. The `llmlint` and the command judge those graphs
+// name are *inputs* the graph supplies — a `bin` and an argv, on the `pre_turn`
+// view double's terms — and real oneagentgraph composes them onto the real
+// onejudge panel, which probes, spawns, and reads them exactly as it would the
+// programs an operator names. This line only names the module; a declaration
+// in the file that owns the journeys does not reach the line that declares it.
 mod panel;
+// llmlint: ignore-end[e2e_not_mocked]
 mod preturn;
 mod remote;
 mod scheduler;
