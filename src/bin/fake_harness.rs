@@ -41,6 +41,7 @@
 //! | `fake:bare-tool` | take a first tool whose trace exposes neither a call identity nor an observation |
 //! | `fake:no-tool` | take the turn having called no tool at all — the toolless half of a quiet exchange |
 //! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
+//! | `fake:project-skill=<name>` | answer with the body of `.claude/skills/<name>/SKILL.md` under the directory this process was started in — the project skill Claude Code discovers from its working directory, so a journey reads off the transcript *which* directory's skills reached the conversation |
 //! | `fake:silent-reply` | take the turn, do the work, and report **no text** — a completed turn that said nothing, whose stdout is still full of wire framing |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
@@ -1173,6 +1174,42 @@ fn answer(prompt: &str) -> Result<String, String> {
             Err(err) => Err(format!(
                 "cannot read the answer file {}: {err}",
                 path.display()
+            )),
+        };
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
+    // The project skill Claude Code would discover from its working directory,
+    // answered as this turn's words. Beside `answer-file` for its reason — the
+    // judge's prompt embeds the transcript, so this sentinel reaches that side
+    // too — and *relative* on purpose where every other path here is absolute:
+    // the directory it resolves against is the fact under test, which is the
+    // far end of `oneharness run --cwd`, so a journey reading the transcript
+    // learns which directory's skills the conversation was given. A name
+    // rather than a path, so it cannot climb out of that directory.
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `Err` arm is the same
+    // guard rail as `answer-file`'s: a journey names the skill, so one that
+    // cannot be read under the directory the harness was started in is that
+    // journey's own mistake and not anything a user of `oneagentgraph` can
+    // cause. The `Ok` arm is what the `dir` journeys in tests/e2e/dispatch.rs
+    // drive.
+    if let Some(name) = sentinel(prompt, &format!("{MARK}project-skill=")) {
+        if name.is_empty() || name.contains(['/', '\\']) || name == ".." {
+            return Err(format!(
+                "fake:project-skill must name one skill directory, got {name:?}"
+            ));
+        }
+        let skill = std::path::Path::new(".claude")
+            .join("skills")
+            .join(&name)
+            .join("SKILL.md");
+        return match std::fs::read_to_string(&skill) {
+            Ok(body) => Ok(body.trim().to_string()),
+            Err(err) => Err(format!(
+                "cannot read the project skill {} under {}: {err}",
+                skill.display(),
+                std::env::current_dir()
+                    .map(|dir| dir.display().to_string())
+                    .unwrap_or_default()
             )),
         };
     }

@@ -52,6 +52,7 @@ mod scheduler;
 mod selection;
 mod session;
 mod support;
+mod two_party;
 mod verbs;
 
 use assert_cmd::Command;
