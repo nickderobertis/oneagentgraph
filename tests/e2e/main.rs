@@ -52,7 +52,15 @@ mod scheduler;
 mod selection;
 mod session;
 mod support;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] the same
+// declaration `mod note;` above carries, for the same reason:
+// `tests/e2e/two_party.rs` declares it itself, on the terms every journey file
+// shares — this crate has exactly one e2e target, so there is no narrower edge
+// for these to sit behind and no way to make one without splitting that target.
+// These journeys cost what the scheduler journeys beside them cost: a hold of a
+// few seconds each, in parallel, and the file finishes in seconds.
 mod two_party;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod verbs;
 
 use assert_cmd::Command;

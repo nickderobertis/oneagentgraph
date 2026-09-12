@@ -1190,8 +1190,8 @@ fn answer(prompt: &str) -> Result<String, String> {
     // guard rail as `answer-file`'s: a journey names the skill, so one that
     // cannot be read under the directory the harness was started in is that
     // journey's own mistake and not anything a user of `oneagentgraph` can
-    // cause. The `Ok` arm is what the `dir` journeys in tests/e2e/dispatch.rs
-    // drive.
+    // cause. The `Ok` arm is what the two-party `dir` journeys in
+    // tests/e2e/two_party.rs drive.
     if let Some(name) = sentinel(prompt, &format!("{MARK}project-skill=")) {
         if name.is_empty() || name.contains(['/', '\\']) || name == ".." {
             return Err(format!(

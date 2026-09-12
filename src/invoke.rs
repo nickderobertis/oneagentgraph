@@ -1501,14 +1501,9 @@ mod tests {
         assert_eq!(invocation.persona.as_deref(), Some("reviewer"));
     }
 
-    /// A single-sided member's own `task` and `dir` are what oneharness is told,
-    /// and a member carrying neither is told the graph's — byte for byte what it
-    /// was told before either field existed.
-    ///
-    /// Asserted on the argv because that is the whole of what this crate decides
-    /// for a single-sided member: `--prompt` is the job it is given and `--cwd`
-    /// is where it does it, and a member whose job differs from its graph's is
-    /// one where these two differ from the run's.
+    /// A two-party member's own `dir` is the conversation's worktree, resolved
+    /// exactly as a single-sided member's is — and whatever it says, the agent
+    /// side stays pinned to the stamped config in the member's scratch.
     #[test]
     fn a_two_party_member_is_told_its_own_directory_and_keeps_its_stamped_config() {
         let dir = workspace();
@@ -1561,6 +1556,14 @@ mod tests {
         );
     }
 
+    /// A single-sided member's own `task` and `dir` are what oneharness is told,
+    /// and a member carrying neither is told the graph's — byte for byte what it
+    /// was told before either field existed.
+    ///
+    /// Asserted on the argv because that is the whole of what this crate decides
+    /// for a single-sided member: `--prompt` is the job it is given and `--cwd`
+    /// is where it does it, and a member whose job differs from its graph's is
+    /// one where these two differ from the run's.
     #[test]
     fn a_single_sided_member_is_told_its_own_task_and_directory() {
         let dir = workspace();
