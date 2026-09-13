@@ -30,8 +30,9 @@ use crate::support::{
 };
 
 /// The graph every stacked journey runs: one worker judged by a harness
-/// reviewer, an llmlint run over `./llmlint.yml` against `origin/main`, and a
-/// command judge, in that order, with `extra_env` in the graph's own `env:`
+/// reviewer, an llmlint run over `./llmlint.yml` against `origin/main` with two
+/// extra `args`, and a command judge, in that order, with `extra_env` in the
+/// graph's own `env:`
 /// block — which is how the llmlint double is steered, because onejudge's
 /// llmlint judge inherits the environment the graph exported.
 fn stacked_graph(workspace: &Workspace, extra_env: &[(&str, String)]) -> String {
@@ -60,6 +61,7 @@ fn stacked_graph(workspace: &Workspace, extra_env: &[(&str, String)]) -> String 
             "      - oneharness_config: ./oneharness.judge.toml\n        label: reviewer\n",
             "      - kind: llmlint\n        config: ./llmlint.yml\n",
             "        diff_base: origin/main\n        bin: the double below\n",
+            "        args: [--tag, panel]\n",
             "      - command: [the provider below]\n        label: checks\n",
             "    mode: bypass\n",
         ),
@@ -141,8 +143,8 @@ fn decisions(run: &Run, turn: u64) -> Vec<(String, String, String, String)> {
 /// per side in list order — the reviewer's resolved config in its own scratch
 /// file, the llmlint side's `config` absolute and never copied, the command
 /// side as written, labels through verbatim — the llmlint judge really runs
-/// over the worker's tree with the config and base the graph named, and every
-/// judge's decision reaches the stream in the panel's order.
+/// over the worker's tree with the config, base and extra `args` the graph
+/// named, and every judge's decision reaches the stream in the panel's order.
 #[test]
 fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() {
     let workspace = Workspace::new();
@@ -192,6 +194,7 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
     assert_eq!(llmlint_config, workspace.at("llmlint.yml"), "{config}");
     assert_eq!(judges[1]["diff_base"], "origin/main");
     assert_eq!(judges[1]["bin"], fake_llmlint());
+    assert_eq!(judges[1]["args"], serde_json::json!(["--tag", "panel"]));
     assert!(
         judges[1].get("label").is_none(),
         "an absent label is left to onejudge: {config}"
@@ -230,6 +233,12 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
     );
     assert!(lint.iter().any(|arg| arg == "--diff"), "{lint:?}");
     assert_eq!(after("--diff-base"), "origin/main", "{lint:?}");
+    // The graph's own `args` reach the real invocation, after everything
+    // onejudge composes, so a repository's extra llmlint flags are honoured.
+    assert!(
+        lint.ends_with(&["--tag".to_string(), "panel".to_string()]),
+        "{lint:?}"
+    );
 
     // Every judge's own decision, in the panel's order, on the first turn.
     let decided = decisions(&run, 1);
