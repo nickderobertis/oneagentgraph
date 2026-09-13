@@ -252,10 +252,10 @@ test-doubles = []
 # because a graph asking for 0.12 on one side and 0.13 on the other resolves
 # both — the two-copies state `tests/inventory.rs` exists to refuse.
 #
-# **0.10.0 is the compile floor.** It is the release
-# whose judge side is a *list of judges* — a panel — rather than one provider,
-# and everything a `kind: onejudge` member's `judge:` list composes onto lives
-# in it and in nothing before it:
+# **0.10.0 is the compile floor.** It is the release whose judge side is a *list
+# of judges* — a panel — rather than one provider, and everything a
+# `kind: onejudge` member's `judge:` list composes onto lives in it and in
+# nothing before it:
 #
 #   1. `provider.judges: [...]` on a `kind: split` provider, with `judge:` as the
 #      one-element shorthand, each entry an ordinary provider config plus an
