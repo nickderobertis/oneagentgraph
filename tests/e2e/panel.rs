@@ -117,6 +117,23 @@ fn llmlint_invocations(log: &Path) -> Vec<Vec<String>> {
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// One path as the host resolves it, so a path this test spelled and the same
+/// path as the CLI handed it on compare equal when they name one file.
+///
+/// The two are spelled by different parties: `workspace.at(..)` is the
+/// temporary directory as `tempfile` created it, while the llmlint `config` in
+/// the launched provider block is that path made absolute against the
+/// directory the binary ran in — which is how "absolute" is promised for a
+/// graph named as `./graph.yaml`. A host whose temporary directory is a symlink
+/// spells those differently and means the same file — macOS's `/var` →
+/// `/private/var` is the case that fails a string comparison here while
+/// nothing is wrong, and the sibling journeys in dispatch.rs compare the same
+/// way for the same reason.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize()
+        .unwrap_or_else(|err| panic!("{} cannot be resolved: {err}", path.display()))
+}
+
 /// Every `judge-decided` the worker published for `turn`, in stream order, as
 /// `(judge, kind, decision, reason)`.
 fn decisions(run: &Run, turn: u64) -> Vec<(String, String, String, String)> {
@@ -193,7 +210,11 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
     assert_eq!(judges[1]["kind"], "llmlint");
     let llmlint_config = Path::new(judges[1]["config"].as_str().expect("a path"));
     assert!(llmlint_config.is_absolute(), "{config}");
-    assert_eq!(llmlint_config, workspace.at("llmlint.yml"), "{config}");
+    assert_eq!(
+        canonical(llmlint_config),
+        canonical(&workspace.at("llmlint.yml")),
+        "{config}"
+    );
     assert_eq!(judges[1]["diff_base"], "origin/main");
     assert_eq!(judges[1]["bin"], fake_llmlint());
     assert_eq!(judges[1]["args"], serde_json::json!(["--tag", "panel"]));
@@ -227,10 +248,14 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
             .map(|at| lint[at + 1].as_str())
             .unwrap_or_else(|| panic!("no {flag} in {lint:?}"))
     };
-    assert_eq!(Path::new(after("--cwd")), workspace.dir(), "{lint:?}");
     assert_eq!(
-        Path::new(after("-c")),
-        workspace.at("llmlint.yml"),
+        canonical(Path::new(after("--cwd"))),
+        canonical(&workspace.dir()),
+        "{lint:?}"
+    );
+    assert_eq!(
+        canonical(Path::new(after("-c"))),
+        canonical(&workspace.at("llmlint.yml")),
         "{lint:?}"
     );
     assert!(lint.iter().any(|arg| arg == "--diff"), "{lint:?}");
