@@ -76,6 +76,12 @@ required-features = ["test-doubles"]
 # argv the graph supplies, so this is the *input* to that judge rather than a
 # stand-in for any part of the engine that runs it — see the binary's own
 # documentation.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] not a command the
+# tool exposes and not a client of anything: a test double the e2e suite spawns,
+# built only under `test-doubles` (a `cargo install oneagentgraph` never has it),
+# declared the way the three doubles above it already are. Its own project would
+# split one suite's fixtures across two graph nodes for no `nx affected` gain —
+# every change that touches it is a change to the journeys that drive it.
 [[bin]]
 name = "oneagentgraph-fake-llmlint"
 path = "src/bin/fake_llmlint.rs"
