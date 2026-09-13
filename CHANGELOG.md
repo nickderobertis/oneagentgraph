@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.19...v0.4.0) - 2026-09-13
+
+### Added
+
+- *(graph)* [**breaking**] let a two-party member stack several judges, and publish which judge decided what ([#106](https://github.com/nickderobertis/oneagentgraph/pull/106))
+
 ## [0.3.19](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.18...v0.3.19) - 2026-09-12
 
 ### Added
