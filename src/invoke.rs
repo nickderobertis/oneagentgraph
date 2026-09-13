@@ -2057,10 +2057,32 @@ mod tests {
         );
     }
 
+    /// Two harness sides that would share one scratch file — one labelled by
+    /// hand with the name onejudge would default the other to — are refused
+    /// naming the second, rather than its config overwriting the first's.
+    #[test]
+    fn two_harness_judges_that_would_share_one_scratch_file_are_refused_naming_the_second() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let err = compose(
+            dir.path(),
+            &scratch,
+            concat!(
+                "judge:\n  - oneharness_config: ./oneharness.toml\n",
+                "  - oneharness_config: ./oneharness.toml\n    label: oneharness\n",
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("judge entry 2: its config would be written to"),
+            "{err}"
+        );
+    }
+
     /// A side whose config cannot be read is refused naming the entry — a
     /// harness side through the resolver, an llmlint side by the path it
-    /// anchored — and two harness sides that would share one scratch file are
-    /// refused naming both, rather than the second overwriting the first.
+    /// anchored.
     #[test]
     fn a_judge_whose_config_cannot_be_resolved_is_refused_naming_the_entry() {
         let dir = workspace();
@@ -2073,13 +2095,6 @@ mod tests {
             (
                 "judge:\n  - command: [ok]\n  - kind: llmlint\n    config: ./missing.yml\n",
                 "judge entry 2: llmlint config",
-            ),
-            (
-                concat!(
-                    "judge:\n  - oneharness_config: ./oneharness.toml\n",
-                    "  - oneharness_config: ./oneharness.toml\n    label: oneharness\n",
-                ),
-                "judge entry 2: its config would be written to",
             ),
         ] {
             let err = compose(dir.path(), &scratch, document).unwrap_err();
