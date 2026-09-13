@@ -274,10 +274,11 @@ impl Bounds {
 /// is handed while [`crate::harness`]'s stamps it for every `ActionEvent`.
 ///
 /// **Streamed provider output does not clear it, because at this crate's pins
-/// nothing delivers it here.** Re-read on 2026-09-12 against the two engines
+/// nothing delivers it here.** Re-read on 2026-09-13 against the two engines
 /// this crate links — both bullets survived the bump unchanged, the `onejudge`
-/// one re-read against 0.10.0's own engine loop rather than carried over, panel
-/// included. The stamp is a date rather than a release of this crate on
+/// one re-read against 0.11.0's own engine loop rather than carried over, panel
+/// included: that release threads `user.artifacts` into the judge's evidence
+/// and moves no `Observation`. The stamp is a date rather than a release of this crate on
 /// purpose: it records when the upstream channels were last actually read,
 /// which a version bumped by the release automation would silently claim on
 /// its behalf. The two versions
@@ -291,7 +292,7 @@ impl Bounds {
 ///   `tool_result`. A turn's prose is not on that channel at all, so a
 ///   single-sided member spending ten minutes generating a report hands this
 ///   clock nothing to stamp.
-/// * `onejudge` 0.10.0 publishes `Observation::Message` **after**
+/// * `onejudge` 0.11.0 publishes `Observation::Message` **after**
 ///   `respond_streaming` has returned — the turn's finished text, as it is
 ///   appended to the transcript. That is a turn boundary rather than progress
 ///   within a turn, so it clears the clock only once the report it would have
