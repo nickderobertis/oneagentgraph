@@ -805,9 +805,13 @@ fn judge_file_label(judges: &[JudgeSide], index: usize) -> String {
 /// provider block promises. Opened for the reason a harness side's config is
 /// read before launch: a file that is not there, or that this process may not
 /// read, is the operator's mistake, and finding it after the agent's first turn
-/// is finding it a paid turn too late. Opened rather than stat'd because a stat
-/// says nothing about permission, and a directory opens on Linux, so the file
-/// is asked what it is once it is open.
+/// is finding it a paid turn too late. Asked what it is before it is opened,
+/// and then opened: a stat says nothing about permission, so the open is what
+/// proves this process may read it; but a directory opens on Linux and is
+/// refused by the open on Windows, so asking after opening would name a
+/// different reason on each host for the one mistake. The stat first gives the
+/// directory one reason everywhere, and leaves the open to say only what the
+/// stat cannot.
 fn llmlint_config(written: &Path, entry: usize, context: &Context<'_>) -> Result<PathBuf, Error> {
     let anchored = anchored_path(context.graph_dir, written);
     let absolute = if crate::anchor::names_its_own_root(&anchored) {
@@ -827,11 +831,11 @@ fn llmlint_config(written: &Path, entry: usize, context: &Context<'_>) -> Result
             written.display()
         ))
     };
-    let opened = std::fs::File::open(&absolute).map_err(|err| cannot_read(&err))?;
-    let is_file = opened.metadata().is_ok_and(|meta| meta.is_file());
-    if !is_file {
+    let meta = std::fs::metadata(&absolute).map_err(|err| cannot_read(&err))?;
+    if !meta.is_file() {
         return Err(cannot_read(&"not a file"));
     }
+    std::fs::File::open(&absolute).map_err(|err| cannot_read(&err))?;
     Ok(absolute)
 }
 
