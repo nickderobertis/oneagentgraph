@@ -3,9 +3,10 @@
 //! and the real onejudge panel it links.
 //!
 //! What is read is what the member was actually launched with: the effective
-//! onejudge config in its scratch, the argv the llmlint judge was really run
-//! with, and each judge's own decision as it reached the merged stream — never
-//! a value this crate composed and then asserted against itself.
+//! onejudge config at the path its `member-started` event published, the argv
+//! the llmlint judge was really run with, and each judge's own decision as it
+//! reached the merged stream — never a value this crate composed and then
+//! asserted against itself.
 
 // llmlint: ignore-file[e2e_not_mocked] the same declaration its sibling journey
 // files carry, and for the same reason — see tests/e2e/support.rs: the paid
@@ -21,7 +22,7 @@
 // inside `just check` rather than behind `#[ignore]`. Each journey here is one
 // short conversation of the doubled harness, and the file finishes in seconds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -69,41 +70,41 @@ fn stacked_graph(workspace: &Workspace, extra_env: &[(&str, String)]) -> String 
     )
 }
 
-// llmlint: ignore-block[tests_mirror_real_usage] the three helpers below are the
-// observation points these journeys assert composition through, and each is the
-// point *because* it is the subject. `onejudge.yaml` and the `judge-<label>.toml`
-// beside it are the member's launch evidence — `JudgeLaunch::config` documents
-// them as the files an operator reads to see exactly what the member ran, and
-// `Workspace::member_file` exists for that read — and the stream cannot hold what
-// they hold: a member launched as one provider or another, with a judge's config
-// at one path or another, settles with a stream identical to a correct one. The
-// argv log is the llmlint double's recording of what onejudge composed for it, at
-// the same point and for the same reason the harness double's `record-*` files
-// are read by the journeys in dispatch.rs. Every assertion about behaviour — the
-// exit code, the events, each judge's decision, the worker's next instruction —
-// is still made through the CLI.
-/// The effective onejudge config the worker was launched with, parsed.
-fn launched_config(workspace: &Workspace) -> Value {
-    let text = workspace.member_file("worker", "onejudge.yaml");
-    serde_norway::from_str(&text).expect("the effective config is YAML")
+// llmlint: ignore-block[tests_mirror_real_usage] the helpers below read files
+// only at paths the CLI itself published — `member-started` names the effective
+// onejudge config a member was launched with, and that config names each harness
+// judge's `judge_config` — so what is opened is what the stream told an operator
+// to open: `JudgeLaunch::config` documents these as the launch evidence a person
+// reads to see exactly what the member ran. Nothing here reconstructs the state
+// directory's layout. The read is the assertion because the stream cannot hold
+// what the file holds: a member launched as one provider or another, with a
+// judge's config at one path or another, settles with a stream identical to a
+// correct one. The argv log is the llmlint double's recording of what onejudge
+// composed for it, at the same point and for the same reason the harness
+// double's `record-*` files are read by the journeys in dispatch.rs. Every
+// assertion about behaviour — the exit code, the events, each judge's decision,
+// the worker's next instruction — is still made through the CLI.
+/// The effective onejudge config the worker was launched with, at the path
+/// its `member-started` event published: where it is, and what it says.
+fn launched_config(run: &Run) -> (PathBuf, Value) {
+    let started = run.of_kind("member-started");
+    let path = PathBuf::from(
+        started[0]["payload"]["config"]
+            .as_str()
+            .expect("member-started names the launched config"),
+    );
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("cannot read {} ({err})", path.display()));
+    (
+        path,
+        serde_norway::from_str(&text).expect("the effective config is YAML"),
+    )
 }
 
-/// One file the run wrote into the worker's scratch beside that config, or
-/// `None` when the run wrote no such file.
-fn scratch_file(workspace: &Workspace, name: &str) -> Option<String> {
-    let run_id = workspace.record()["run_id"]
-        .as_str()
-        .expect("the record names its run")
-        .to_string();
-    std::fs::read_to_string(
-        workspace
-            .state()
-            .join(run_id)
-            .join("members")
-            .join("worker")
-            .join(name),
-    )
-    .ok()
+/// One file beside the launched config — in the scratch the CLI named — or
+/// `None` when the run wrote no such file there.
+fn beside(config: &Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(config.with_file_name(name)).ok()
 }
 
 /// Every argv the llmlint double was run with, one per line of its log.
@@ -161,8 +162,8 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
         serde_json::json!(true)
     );
 
-    // What the member was launched with, read back from its scratch.
-    let config = launched_config(&workspace);
+    // What the member was launched with, read from where the stream said it is.
+    let (launched, config) = launched_config(&run);
     let provider = &config["provider"];
     assert_eq!(provider["kind"], "split", "{config}");
     assert_eq!(provider["skill"]["kind"], "oneharness", "{config}");
@@ -181,10 +182,11 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
         Some("judge-reviewer.toml"),
         "{config}"
     );
-    let stamped = scratch_file(&workspace, "judge-reviewer.toml").expect("the reviewer's config");
+    assert_eq!(reviewer.parent(), launched.parent(), "{config}");
+    let stamped = std::fs::read_to_string(reviewer).expect("the reviewer's config");
     assert!(stamped.contains("mode = \"bypass\""), "{stamped}");
     assert!(
-        scratch_file(&workspace, "oneharness.judge.toml").is_none(),
+        beside(&launched, "oneharness.judge.toml").is_none(),
         "the single-judge file must not be written for a stack"
     );
 
@@ -200,7 +202,7 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
         "an absent label is left to onejudge: {config}"
     );
     assert!(
-        scratch_file(&workspace, "llmlint.yml").is_none(),
+        beside(&launched, "llmlint.yml").is_none(),
         "an llmlint config is never copied into the scratch"
     );
 
@@ -369,7 +371,7 @@ fn a_single_harness_judge_is_still_launched_as_the_provider_it_always_was() {
             "{label}: a bare provider decides nothing on the stream"
         );
 
-        let config = launched_config(&workspace);
+        let (launched, config) = launched_config(&run);
         let provider = &config["provider"];
         assert_eq!(provider["kind"], "oneharness", "{label}: {config}");
         assert_eq!(provider["stream"], true, "{label}: {config}");
@@ -381,8 +383,12 @@ fn a_single_harness_judge_is_still_launched_as_the_provider_it_always_was() {
             Some("oneharness.judge.toml"),
             "{label}: {config}"
         );
-        let stamped =
-            scratch_file(&workspace, "oneharness.judge.toml").expect("the judge's config");
+        assert_eq!(
+            judge_config.parent(),
+            launched.parent(),
+            "{label}: {config}"
+        );
+        let stamped = std::fs::read_to_string(judge_config).expect("the judge's config");
         assert_eq!(
             stamped.contains("# the override's judge"),
             label == "overridden",
