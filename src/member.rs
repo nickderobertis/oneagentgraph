@@ -274,12 +274,13 @@ impl Bounds {
 /// is handed while [`crate::harness`]'s stamps it for every `ActionEvent`.
 ///
 /// **Streamed provider output does not clear it, because at this crate's pins
-/// nothing delivers it here.** Re-read on 2026-09-11 against the two engines
+/// nothing delivers it here.** Re-read on 2026-09-12 against the two engines
 /// this crate links — both bullets survived the bump unchanged, the `onejudge`
-/// one re-read against 0.8.1's own engine loop rather than carried over. The stamp is a
-/// date rather than a release of this crate on purpose: it records when the
-/// upstream channels were last actually read, which a version bumped by the
-/// release automation would silently claim on its behalf. The two versions
+/// one re-read against 0.10.0's own engine loop rather than carried over, panel
+/// included. The stamp is a date rather than a release of this crate on
+/// purpose: it records when the upstream channels were last actually read,
+/// which a version bumped by the release automation would silently claim on
+/// its behalf. The two versions
 /// named below are not stamps but live claims about what is linked, so this
 /// module's `the_engines_this_rule_was_read_against_are_the_ones_the_manifest_links`
 /// holds each against `Cargo.toml`. It is named in prose rather than linked
@@ -290,11 +291,14 @@ impl Bounds {
 ///   `tool_result`. A turn's prose is not on that channel at all, so a
 ///   single-sided member spending ten minutes generating a report hands this
 ///   clock nothing to stamp.
-/// * `onejudge` 0.8.1 publishes `Observation::Message` **after**
+/// * `onejudge` 0.10.0 publishes `Observation::Message` **after**
 ///   `respond_streaming` has returned — the turn's finished text, as it is
 ///   appended to the transcript. That is a turn boundary rather than progress
 ///   within a turn, so it clears the clock only once the report it would have
-///   vouched for already exists.
+///   vouched for already exists. The panel's `Observation::JudgeDecided` is the
+///   same shape on the other side: one per judge, delivered only once the whole
+///   supervisor call has returned, so a stacked panel deliberating is as silent
+///   here as a single judge is.
 /// * The `alive N ago` an operator-facing view prints is `member-heartbeat`,
 ///   which [`crate::harness`] and [`crate::judge`] emit on their supervisor's
 ///   own timer whatever the member is doing. It is this process saying it is

@@ -27,10 +27,12 @@
 //! ([`crate::event::EventKind::TurnStarted`]), each tool call **and the
 //! observation that answered it**
 //! ([`crate::event::EventKind::TurnActivity`]), each party's own reply
-//! ([`crate::event::EventKind::TurnMessage`]), and that one turn's usage and
-//! bounds ([`crate::event::EventKind::TurnCompleted`]). An operator watching a
-//! live dispatch reads what the agent did and what it said off the journal,
-//! rather than waiting for the settled report.
+//! ([`crate::event::EventKind::TurnMessage`]), that one turn's usage and
+//! bounds ([`crate::event::EventKind::TurnCompleted`]), and — for a member
+//! judged by a panel — what each judge of it decided about the turn
+//! ([`crate::event::EventKind::JudgeDecided`]). An operator watching a live
+//! dispatch reads what the agent did, what it said, and which judge sent it
+//! back off the journal, rather than waiting for the settled report.
 //!
 //! **A failure is typed, not a stderr tail.** onejudge classifies a provider
 //! failure with its own `ProviderErrorKind` — which is oneharness's normalized
@@ -995,6 +997,18 @@ fn ingest(
                     usage: closed.usage.map(usage).unwrap_or_default(),
                     started_at: closed.started_at.clone(),
                     finished_at: closed.finished_at.clone(),
+                }),
+            );
+        }
+        Observation::JudgeDecided(decided) => {
+            emitter.emit(
+                EventKind::JudgeDecided,
+                as_payload(&crate::event::JudgeDecided {
+                    turn: decided.turn as u64,
+                    judge: decided.judge.to_string(),
+                    kind: decided.kind.to_string(),
+                    decision: decided.decision.as_str().to_string(),
+                    reason: decided.reason.to_string(),
                 }),
             );
         }
@@ -2519,6 +2533,7 @@ mod tests {
             )),
             telemetry: None,
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         };
         assert_eq!(provider_cause(&classified), Cause::Quota);
 
@@ -2526,6 +2541,7 @@ mod tests {
             error: onejudge::cli::CliError::Engine(onejudge::Error::provider("respond", "boom")),
             telemetry: None,
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         };
         assert_eq!(provider_cause(&bare), Cause::Unclassified);
 
@@ -2534,6 +2550,7 @@ mod tests {
             error: onejudge::cli::CliError::Config("no task".into()),
             telemetry: None,
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         };
         assert_eq!(provider_cause(&config), Cause::Unclassified);
     }
@@ -2559,6 +2576,7 @@ mod tests {
             }))
             .expect("telemetry"),
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         }))
     }
 
@@ -2724,6 +2742,7 @@ mod tests {
                 error: onejudge::cli::CliError::Config("no task".into()),
                 telemetry: None,
                 processes: Vec::new(),
+                judge_decisions: Vec::new(),
             })),
             &emitter,
             dir.path(),
@@ -2848,6 +2867,7 @@ mod tests {
             }))
             .expect("telemetry"),
             processes: Vec::new(),
+            judge_decisions: Vec::new(),
         })))
         .expect("send");
 

@@ -31,12 +31,27 @@ Rules that hold as this grows:
 ## The seams that are easy to get wrong
 
 **Each conversation side is pinned without a wrapper script, and without a `cd`.**
-onejudge gives the judge side `oneharness run --config <judge_config>` and the
+onejudge gives a harness judge `oneharness run --config <judge_config>` and the
 agent side none, so the agent side is pinned by *placing* its resolved config at
 `<member scratch>/oneharness.toml` and **naming that directory as the
 conversation's worktree** — oneharness discovers a project config upward from
 `--cwd`. Naming rather than entering, because every member of a graph now shares
 one process: a member that `cd`-ed would pin its siblings too.
+
+**The judge side is a list, composed by one path.** `OnejudgeMember::judge` is
+`Vec<JudgeSide>` whichever spelling the graph used, and `invoke::provider_block`
+is the only place it becomes onejudge's `provider`: a list of exactly one harness
+side is the `kind: oneharness` block it always was, at `oneharness.judge.toml`;
+anything else is `kind: split` with `judges:` in list order — each harness side
+at its own `judge-<label>.toml`, the label being the graph's or the one onejudge
+defaults, an llmlint side's `config` anchored to the graph's directory and
+handed over absolute (never copied: an llmlint config resolves its plugins
+relative to itself), a command side as written. Do not add a second composition
+path, and do not restate onejudge's own rules for a panel here — label
+uniqueness once defaulted, how a panel decides, what an llmlint run's exit codes
+mean are onejudge's (`docs/judges.md` at the pinned release); what this crate
+checks is only what it needs for its own files: a label is a file-name-safe
+component, and two harness sides may not claim one scratch file.
 
 **Nothing per-member is exported.** Same reason. A member's `mode` and its
 `ONEAGENTGRAPH_SCRATCH_DIR` ownership stamp go into that member's own resolved

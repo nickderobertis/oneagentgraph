@@ -461,6 +461,16 @@ pub fn fake_provider() -> String {
     env!("CARGO_BIN_EXE_oneagentgraph-fake-provider").to_string()
 }
 
+/// The compiled `llmlint` a journey's graph names as an llmlint judge's `bin`.
+///
+/// On the view double's terms below: a `bin` is a program the graph supplies,
+/// so this is the input to that judge rather than a seam standing in for part
+/// of it — real oneagentgraph composes the judge list, and the real onejudge
+/// engine probes, spawns, bounds, and reads this exactly as it would `llmlint`.
+pub fn fake_llmlint() -> String {
+    env!("CARGO_BIN_EXE_oneagentgraph-fake-llmlint").to_string()
+}
+
 /// The compiled program a journey's graph declares as a `pre_turn` view.
 ///
 /// Not a fake of anything this crate owns: a view *is* an argv the operator

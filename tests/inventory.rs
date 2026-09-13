@@ -292,6 +292,38 @@ fn the_graph_resolves_one_oneharness_core_and_it_is_the_one_the_manifest_takes()
     );
 }
 
+/// The graph resolves **one** `onejudge`, and it is the one the manifest takes.
+///
+/// The same assertion for the engine that drives every two-party member, and
+/// for the same reason it is made against the lock rather than the manifest: a
+/// second copy could only arrive through a dependency's own requirement, which
+/// the manifest cannot see. Exact for the reason above — the requirement here is
+/// a full `x.y.z` with a measured reason beside it, and a lock that drifted past
+/// the prose is the prose going stale.
+#[test]
+fn the_graph_resolves_one_onejudge_and_it_is_the_one_the_manifest_takes() {
+    let (_, rest) = MANIFEST
+        .split_once("\nonejudge = { version = \"")
+        .expect("the manifest still takes `onejudge` by version");
+    let (required, _) = rest.split_once('"').expect("the requirement is quoted");
+
+    let resolved: Vec<&str> = LOCKFILE
+        .split("name = \"onejudge\"\nversion = \"")
+        .skip(1)
+        .map(|rest| {
+            rest.split_once('"')
+                .expect("a locked package's version is quoted")
+                .0
+        })
+        .collect();
+
+    assert_eq!(
+        resolved,
+        [required],
+        "the graph should carry exactly one `onejudge`, the one the manifest takes"
+    );
+}
+
 /// The wire names both documents share still name the types this crate
 /// serializes.
 ///

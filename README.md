@@ -54,7 +54,13 @@ members:
     kind: onejudge
     base_config: ./onejudge.base.yaml
     agent: { oneharness_config: ./oneharness.toml }
-    judge: { oneharness_config: ./oneharness.judge.toml }
+    judge:                            # one side, or a list of sides judged as one panel
+      - oneharness_config: ./oneharness.judge.toml
+        label: reviewer
+      - kind: llmlint
+        config: ./llmlint.yml
+        diff_base: origin/main
+      - command: [./scripts/checks]
     mode: bypass
 ```
 
@@ -67,6 +73,17 @@ by path. A persona is a onejudge config fragment: it is written in onejudge's ow
 field names, and onejudge's schema decides what it may say. [The persona
 format](docs/persona-format.md) documents it, including the `agent:` block
 earlier versions defined, which is now refused with no compatibility path.
+
+A two-party member's `judge:` is a list of sides judged as one panel — a
+harness reviewer, an `llmlint` run over the worker's tree, and a repository's
+own command, on one worker at once — and a single side is the one-element
+shorthand for it. A harness side names an `oneharness_config`, an `llmlint`
+side says `kind: llmlint` with its `config` resolved from the graph's own
+directory, and a command side names a `command`; each may carry a `label`. A
+list of one harness side composes the same onejudge provider it always did;
+any other list composes onejudge's `split` provider with the judges in list
+order, and each judge's verdict on each worker turn is published as a
+`judge-decided` event naming the judge, its kind, its decision and its reason.
 
 A single-sided member may declare `pre_turn` commands — run immediately before
 each of its turns, with what they printed prepended to what that turn is asked.

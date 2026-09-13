@@ -66,6 +66,16 @@ pub fn line(envelope: &Envelope) -> String {
             joined(&[turn_head(envelope), opening])
         }
         EventKind::TurnCompleted => joined(&[turn_head(envelope), usage(envelope)]),
+        // Which judge, what it decided, and why — the line a person watching a
+        // stacked panel reads to see which of its judges sent the worker back.
+        EventKind::JudgeDecided => format!(
+            "turn {} {} ({}) {}: {}",
+            field(envelope, "turn"),
+            field(envelope, "judge"),
+            field(envelope, "kind"),
+            field(envelope, "decision"),
+            field(envelope, "reason").lines().next().unwrap_or_default()
+        ),
         EventKind::TurnInterrupted => {
             let delivered = envelope
                 .payload
@@ -347,6 +357,15 @@ mod tests {
                        "started_at": "2026-08-08T06:12:20.000Z",
                        "finished_at": "2026-08-08T06:12:22.847Z"}),
                 "turn-completed turn 2 (assistant) in=10 out=5 cache_r=4 cache_w=- cost=0.002",
+            ),
+            // Which judge, what it decided, and the first line of why: a
+            // reason is llmlint's whole summary line or a model's prose, and
+            // one line of it is what a person scanning the stream reads.
+            (
+                EventKind::JudgeDecided,
+                json!({"turn": 2, "judge": "llmlint", "kind": "llmlint", "decision": "continue",
+                       "reason": "1 violation, 2 rules hold\nsee the report"}),
+                "judge-decided turn 2 llmlint (llmlint) continue: 1 violation, 2 rules hold",
             ),
             (
                 EventKind::TurnInterrupted,

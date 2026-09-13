@@ -639,57 +639,204 @@ const ASK_FOR_CONTROL: bool = true;
 
 /// The onejudge `provider` block for a two-party member.
 ///
-/// A harness-backed judge is one `kind: oneharness` provider carrying both
-/// sides. A command judge cannot be expressed that way, so the two sides are
-/// split — which is exactly onejudge's `split` provider.
+/// A list holding exactly one harness-backed judge is one `kind: oneharness`
+/// provider carrying both sides — byte for byte the block a member composed
+/// before it could carry a list, which is what keeps every single-judge graph
+/// and every `judge.oneharness_config=…` override running as it did. Any other
+/// list cannot be expressed that way, so the two sides are split — onejudge's
+/// `split` provider — with the judges under `judges:` in list order, one entry
+/// per side: a harness side with its own resolved config in the member's
+/// scratch, an llmlint side with its `config` anchored to the graph's directory
+/// and handed over absolute, a command side as written. A label passes through
+/// verbatim, and an absent one is left for onejudge to default.
 fn provider_block(
-    judge: &JudgeSide,
+    judges: &[JudgeSide],
     agent: &AgentSide,
     mode: Option<&str>,
     context: &Context<'_>,
     resolver: &mut Resolver,
 ) -> Result<Value, Error> {
-    match judge {
-        JudgeSide::Harness(harness) => {
-            let (config, _) = harness_side(
-                &harness.oneharness_config,
-                None,
-                Side {
-                    model: harness.model.as_deref(),
-                    mode,
-                    scratch: Some(context.scratch),
-                },
-                context,
-                resolver,
-            )?;
-            let path = context.scratch.join(JUDGE_CONFIG_FILE);
-            write(&path, &config)?;
-            Ok(serde_json::json!({
-                "kind": "oneharness",
-                "bin": context.oneharness_bin,
-                "judge_config": path.display().to_string(),
-                "stream": agent.stream,
-                "control": ASK_FOR_CONTROL,
-            }))
-        }
-        JudgeSide::Command(command) => {
-            if command.command.is_empty() {
-                return Err(Error::InvalidConfig(
-                    "a command judge needs a command to run".to_string(),
-                ));
-            }
-            Ok(serde_json::json!({
-                "kind": "split",
-                "skill": {
+    if let [JudgeSide::Harness(harness)] = judges {
+        let (config, _) = judge_config(harness, mode, context, resolver)?;
+        let path = context.scratch.join(JUDGE_CONFIG_FILE);
+        write(&path, &config)?;
+        return Ok(serde_json::json!({
+            "kind": "oneharness",
+            "bin": context.oneharness_bin,
+            "judge_config": path.display().to_string(),
+            "stream": agent.stream,
+            "control": ASK_FOR_CONTROL,
+        }));
+    }
+    if judges.is_empty() {
+        return Err(Error::InvalidConfig(
+            "`judge` names no side — a two-party member needs at least one judge".to_string(),
+        ));
+    }
+    // Which scratch file each harness judge's config went to, so two judges
+    // that would share one — a label another already carries, or one that
+    // spells the name onejudge defaults an unlabelled judge to — are refused
+    // here, naming both, rather than the second silently overwriting the first.
+    let mut written: std::collections::BTreeMap<PathBuf, usize> = std::collections::BTreeMap::new();
+    let mut entries = Vec::with_capacity(judges.len());
+    for (index, judge) in judges.iter().enumerate() {
+        let entry = index + 1;
+        let mut block = match judge {
+            JudgeSide::Harness(harness) => {
+                let (config, _) =
+                    judge_config(harness, mode, context, resolver).map_err(|err| match err {
+                        Error::InvalidConfig(why) => {
+                            Error::InvalidConfig(format!("judge entry {entry}: {why}"))
+                        }
+                        other => other,
+                    })?;
+                let name = judge_file_label(judges, index);
+                let path = context.scratch.join(format!("judge-{name}.toml"));
+                if let Some(earlier) = written.insert(path.clone(), entry) {
+                    return Err(Error::InvalidConfig(format!(
+                        "judge entry {entry}: its config would be written to {}, which judge \
+                         entry {earlier} already claims — give one of them a different `label`",
+                        path.display()
+                    )));
+                }
+                write(&path, &config)?;
+                serde_json::json!({
                     "kind": "oneharness",
                     "bin": context.oneharness_bin,
-                    "stream": agent.stream,
-                    "control": ASK_FOR_CONTROL,
-                },
-                "judge": {"kind": "command", "command": command.command},
-            }))
+                    "judge_config": path.display().to_string(),
+                })
+            }
+            JudgeSide::Llmlint(llmlint) => {
+                let mut block = serde_json::json!({"kind": "llmlint"});
+                if let Some(config) = &llmlint.config {
+                    block["config"] = Value::String(
+                        llmlint_config(config, entry, context)?
+                            .display()
+                            .to_string(),
+                    );
+                }
+                if let Some(bin) = &llmlint.bin {
+                    block["bin"] = Value::String(bin.clone());
+                }
+                if let Some(base) = &llmlint.diff_base {
+                    block["diff_base"] = Value::String(base.clone());
+                }
+                if !llmlint.args.is_empty() {
+                    block["args"] = serde_json::json!(llmlint.args);
+                }
+                block
+            }
+            JudgeSide::Command(command) => {
+                if let Some(why) = crate::config::command_judge_refusal(&command.command) {
+                    return Err(Error::InvalidConfig(format!("judge entry {entry}: {why}")));
+                }
+                serde_json::json!({"kind": "command", "command": command.command})
+            }
+        };
+        if let Some(label) = judge.label() {
+            block["label"] = Value::String(label.to_string());
         }
+        entries.push(block);
     }
+    Ok(serde_json::json!({
+        "kind": "split",
+        "skill": {
+            "kind": "oneharness",
+            "bin": context.oneharness_bin,
+            "stream": agent.stream,
+            "control": ASK_FOR_CONTROL,
+        },
+        "judges": entries,
+    }))
+}
+
+/// Resolve one harness judge's oneharness config, stamped with this member's
+/// own values exactly as the agent side's is.
+fn judge_config(
+    harness: &crate::config::JudgeHarness,
+    mode: Option<&str>,
+    context: &Context<'_>,
+    resolver: &mut Resolver,
+) -> Result<(String, Option<String>), Error> {
+    harness_side(
+        &harness.oneharness_config,
+        None,
+        Side {
+            model: harness.model.as_deref(),
+            mode,
+            scratch: Some(context.scratch),
+        },
+        context,
+        resolver,
+    )
+}
+
+/// The name the harness judge at `index` is known by, for the scratch file its
+/// config is written to: its own label, or — so the file carries the name the
+/// judge is reported under on every other surface — the label onejudge defaults
+/// an unlabelled judge to, `<kind>` for the first judge of that kind and
+/// `<kind>-<n>` for repeats, counting judges of that kind in list order.
+fn judge_file_label(judges: &[JudgeSide], index: usize) -> String {
+    let judge = &judges[index];
+    if let Some(label) = judge.label() {
+        return label.to_string();
+    }
+    let kind = judge.kind();
+    let nth = judges[..=index]
+        .iter()
+        .filter(|earlier| earlier.kind() == kind)
+        .count();
+    if nth == 1 {
+        kind.to_string()
+    } else {
+        format!("{kind}-{nth}")
+    }
+}
+
+/// Where an llmlint judge's `config` points, absolute, once anchored to the
+/// graph document's directory the way every other path in a graph is.
+///
+/// Anchored and checked here, never copied: an llmlint config resolves its own
+/// plugins relative to itself, so the file onejudge is handed has to be the one
+/// the operator wrote, where they wrote it. A graph read from a URL has no
+/// directory, so a relative path there means what it means for every other ref
+/// of that graph — the directory this process runs in — and is made absolute
+/// against it, because "absolute" is the whole of what the llmlint side of the
+/// provider block promises. Opened for the reason a harness side's config is
+/// read before launch: a file that is not there, or that this process may not
+/// read, is the operator's mistake, and finding it after the agent's first turn
+/// is finding it a paid turn too late. Asked what it is before it is opened,
+/// and then opened: a stat says nothing about permission, so the open is what
+/// proves this process may read it; but a directory opens on Linux and is
+/// refused by the open on Windows, so asking after opening would name a
+/// different reason on each host for the one mistake. The stat first gives the
+/// directory one reason everywhere, and leaves the open to say only what the
+/// stat cannot.
+fn llmlint_config(written: &Path, entry: usize, context: &Context<'_>) -> Result<PathBuf, Error> {
+    let anchored = anchored_path(context.graph_dir, written);
+    let absolute = if crate::anchor::names_its_own_root(&anchored) {
+        anchored
+    } else {
+        std::path::absolute(&anchored).map_err(|err| {
+            Error::InvalidConfig(format!(
+                "judge entry {entry}: cannot resolve llmlint config {}: {err}",
+                anchored.display()
+            ))
+        })?
+    };
+    let cannot_read = |why: &dyn std::fmt::Display| {
+        Error::InvalidConfig(format!(
+            "judge entry {entry}: llmlint config {} ({}) cannot be read: {why}",
+            absolute.display(),
+            written.display()
+        ))
+    };
+    let meta = std::fs::metadata(&absolute).map_err(|err| cannot_read(&err))?;
+    if !meta.is_file() {
+        return Err(cannot_read(&"not a file"));
+    }
+    std::fs::File::open(&absolute).map_err(|err| cannot_read(&err))?;
+    Ok(absolute)
 }
 
 /// What one conversation side's resolved config carries beyond what its author
@@ -1759,44 +1906,260 @@ mod tests {
         }
     }
 
-    /// A command judge composes onejudge's `split` provider, and an empty
-    /// command is refused rather than written into a config nothing can run.
+    /// The judge list `document` spells, read through the member field that
+    /// accepts both the single spelling and the list.
+    fn judges(document: &str) -> Vec<JudgeSide> {
+        let member: OnejudgeMember = serde_norway::from_str(&format!(
+            "base_config: ./base.yaml\nmode: bypass\nagent: {{oneharness_config: ./oneharness.toml}}\n{document}"
+        ))
+        .expect("a member");
+        member.judge
+    }
+
+    /// The provider block `document`'s judge list composes over a fresh
+    /// scratch, or the refusal it earns.
+    fn compose(dir: &Path, scratch: &Path, document: &str) -> Result<Value, Error> {
+        let agent: AgentSide =
+            serde_norway::from_str("oneharness_config: ./oneharness.toml\n").expect("a side");
+        provider_block(
+            &judges(document),
+            &agent,
+            Some("bypass"),
+            &context(dir, scratch),
+            &mut Resolver::new(),
+        )
+    }
+
+    /// A single harness judge — spelled as the mapping every graph wrote before
+    /// a member could carry a list, or as a list of that one side — composes
+    /// the `kind: oneharness` block it composed at the release before the list
+    /// existed, field for field, with the judge's config at the file it was
+    /// always at.
+    #[test]
+    fn a_single_harness_judge_composes_the_block_it_composed_before_the_list_existed() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        // The block as the release before this one composed it, written out
+        // rather than derived, so a drift in either spelling is a drift from
+        // *that* rather than from the other spelling.
+        let before = serde_json::json!({
+            "kind": "oneharness",
+            "bin": "oneharness",
+            "judge_config": scratch.join(JUDGE_CONFIG_FILE).display().to_string(),
+            "stream": true,
+            "control": true,
+        });
+        for spelling in [
+            "judge: {oneharness_config: ./oneharness.toml}\n",
+            "judge:\n  - oneharness_config: ./oneharness.toml\n",
+        ] {
+            let block = compose(dir.path(), &scratch, spelling).expect("a provider");
+            assert_eq!(block, before, "{spelling}");
+            let written = std::fs::read_to_string(scratch.join(JUDGE_CONFIG_FILE)).expect("config");
+            assert!(
+                written.contains("mode = \"bypass\""),
+                "{spelling}: {written}"
+            );
+        }
+    }
+
+    /// A single command judge composes onejudge's `split` provider with that
+    /// one judge under `judges:`, an empty command is refused naming the
+    /// entry rather than written into a config nothing can run, and an empty
+    /// list is refused rather than composed as a panel of nobody.
     #[test]
     fn a_command_judge_composes_the_split_provider() {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
-        let agent: AgentSide =
-            serde_norway::from_str("oneharness_config: ./oneharness.toml\n").expect("a side");
-        let judge = JudgeSide::Command(crate::config::JudgeCommand {
-            command: vec!["my-provider".into(), "--flag".into()],
-        });
-        let block = provider_block(
-            &judge,
-            &agent,
-            Some("bypass"),
-            &context(dir.path(), &scratch),
-            &mut Resolver::new(),
+        let block = compose(
+            dir.path(),
+            &scratch,
+            "judge: {command: [my-provider, --flag], label: checks}\n",
         )
         .expect("a provider");
         assert_eq!(block["kind"], serde_json::json!("split"));
-        assert_eq!(
-            block["judge"]["command"][0],
-            serde_json::json!("my-provider")
-        );
         assert_eq!(block["skill"]["stream"], serde_json::json!(true));
+        assert_eq!(block["skill"]["control"], serde_json::json!(true));
+        assert_eq!(
+            block["judges"],
+            serde_json::json!([
+                {"kind": "command", "command": ["my-provider", "--flag"], "label": "checks"}
+            ])
+        );
 
-        let empty = JudgeSide::Command(crate::config::JudgeCommand {
-            command: Vec::new(),
-        });
-        let err = provider_block(
-            &empty,
-            &agent,
-            Some("bypass"),
-            &context(dir.path(), &scratch),
-            &mut Resolver::new(),
+        let err = compose(dir.path(), &scratch, "judge: [{command: []}]\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("judge entry 1: a command judge needs a command to run"),
+            "{err}"
+        );
+
+        let err = compose(dir.path(), &scratch, "judge: []\n").unwrap_err();
+        assert!(err.to_string().contains("names no side"), "{err}");
+    }
+
+    /// A stack of judges composes `kind: split` with one entry per side in
+    /// list order: each harness side's resolved config in its own scratch file,
+    /// named by its label or by the name onejudge defaults an unlabelled judge
+    /// to; the llmlint side's `config` anchored to the graph's directory and
+    /// handed over absolute, never copied; labels through verbatim and absent
+    /// ones absent.
+    #[test]
+    fn a_stack_of_judges_composes_split_with_one_entry_per_side_in_order() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        std::fs::write(dir.path().join("llmlint.yml"), "rules: []\n").expect("llmlint config");
+        let block = compose(
+            dir.path(),
+            &scratch,
+            concat!(
+                "judge:\n",
+                "  - oneharness_config: ./oneharness.toml\n    label: reviewer\n",
+                "  - kind: llmlint\n    config: ./llmlint.yml\n    diff_base: origin/main\n",
+                "    args: [--rule, no_todo]\n",
+                "  - command: [my-judge]\n",
+                "  - oneharness_config: ./oneharness.toml\n",
+                "  - kind: llmlint\n    bin: /opt/llmlint\n    label: lint\n",
+            ),
+        )
+        .expect("a provider");
+        assert_eq!(block["kind"], serde_json::json!("split"));
+        assert_eq!(block["skill"]["kind"], serde_json::json!("oneharness"));
+        assert!(block.get("judge").is_none(), "{block}");
+
+        let llmlint_config = dir.path().join("llmlint.yml");
+        assert!(crate::anchor::names_its_own_root(&llmlint_config));
+        let reviewer = scratch.join("judge-reviewer.toml");
+        let second = scratch.join("judge-oneharness-2.toml");
+        assert_eq!(
+            block["judges"],
+            serde_json::json!([
+                {"kind": "oneharness", "bin": "oneharness",
+                 "judge_config": reviewer.display().to_string(), "label": "reviewer"},
+                {"kind": "llmlint", "config": llmlint_config.display().to_string(),
+                 "diff_base": "origin/main", "args": ["--rule", "no_todo"]},
+                {"kind": "command", "command": ["my-judge"]},
+                {"kind": "oneharness", "bin": "oneharness",
+                 "judge_config": second.display().to_string()},
+                {"kind": "llmlint", "bin": "/opt/llmlint", "label": "lint"},
+            ])
+        );
+        // Each harness side's own file, stamped as the agent side's is, and the
+        // single-judge file untouched: nothing composed here is that block.
+        for path in [&reviewer, &second] {
+            let written = std::fs::read_to_string(path).expect("config");
+            assert!(
+                written.contains("mode = \"bypass\""),
+                "{}: {written}",
+                path.display()
+            );
+        }
+        assert!(!scratch.join(JUDGE_CONFIG_FILE).exists());
+        assert!(
+            !scratch.join("llmlint.yml").exists(),
+            "an llmlint config is never copied"
+        );
+    }
+
+    /// Two harness sides that would share one scratch file — one labelled by
+    /// hand with the name onejudge would default the other to — are refused
+    /// naming the second, rather than its config overwriting the first's.
+    #[test]
+    fn two_harness_judges_that_would_share_one_scratch_file_are_refused_naming_the_second() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let err = compose(
+            dir.path(),
+            &scratch,
+            concat!(
+                "judge:\n  - oneharness_config: ./oneharness.toml\n",
+                "  - oneharness_config: ./oneharness.toml\n    label: oneharness\n",
+            ),
         )
         .unwrap_err();
-        assert!(err.to_string().contains("needs a command to run"), "{err}");
+        assert!(
+            err.to_string()
+                .contains("judge entry 2: its config would be written to"),
+            "{err}"
+        );
+    }
+
+    /// A side whose config cannot be read is refused naming the entry — a
+    /// harness side through the resolver, an llmlint side by the path it
+    /// anchored.
+    #[test]
+    fn a_judge_whose_config_cannot_be_resolved_is_refused_naming_the_entry() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        for (document, expected) in [
+            (
+                "judge:\n  - command: [ok]\n  - oneharness_config: ./missing.toml\n",
+                "judge entry 2: cannot read",
+            ),
+            (
+                "judge:\n  - command: [ok]\n  - kind: llmlint\n    config: ./missing.yml\n",
+                "judge entry 2: llmlint config",
+            ),
+        ] {
+            let err = compose(dir.path(), &scratch, document).unwrap_err();
+            assert!(err.to_string().contains(expected), "{document}: {err}");
+        }
+        let err = compose(
+            dir.path(),
+            &scratch,
+            "judge:\n  - command: [ok]\n  - kind: llmlint\n    config: ./missing.yml\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("missing.yml") && err.to_string().contains("cannot be read"),
+            "{err}"
+        );
+
+        // A path that is there but is a directory: it opens, and is still not
+        // a config.
+        std::fs::create_dir(dir.path().join("rules")).expect("a directory");
+        let err = compose(
+            dir.path(),
+            &scratch,
+            "judge:\n  - command: [ok]\n  - kind: llmlint\n    config: ./rules\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("judge entry 2: llmlint config")
+                && err.to_string().contains("cannot be read: not a file"),
+            "{err}"
+        );
+    }
+
+    /// An llmlint config that is there but that this process may not read is
+    /// refused before launch, naming the entry and the OS's reason — a stat
+    /// alone would have passed it, and onejudge would have found out after the
+    /// first turn. Unix, because mode bits are how the file is made unreadable;
+    /// and no gate runs as root, which reads every file and would have nothing
+    /// to refuse.
+    #[cfg(unix)]
+    #[test]
+    fn an_llmlint_config_this_process_cannot_read_is_refused_naming_the_entry() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let config = dir.path().join("llmlint.yml");
+        std::fs::write(&config, "rules: []\n").expect("llmlint config");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o000))
+            .expect("permissions");
+        let err = compose(
+            dir.path(),
+            &scratch,
+            "judge:\n  - command: [ok]\n  - kind: llmlint\n    config: ./llmlint.yml\n",
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(
+            text.contains("judge entry 2: llmlint config")
+                && text.contains("llmlint.yml")
+                && text.contains("cannot be read: Permission denied"),
+            "{text}"
+        );
     }
 
     /// A side with nothing of its own to carry is handed back untouched, and one

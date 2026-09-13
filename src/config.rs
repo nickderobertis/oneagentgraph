@@ -201,8 +201,17 @@ pub struct OnejudgeMember {
     pub task: Option<String>,
     /// The side that does the work.
     pub agent: AgentSide,
-    /// The side that supervises.
-    pub judge: JudgeSide,
+    /// The sides that supervise — the judge panel.
+    ///
+    /// One side in the document is the one-element shorthand for a list of
+    /// sides, and both spellings read into this one list, so there is exactly
+    /// one composition path over it (`crate::invoke`). A one-element list is
+    /// written back as the single mapping it reads from, so a document written
+    /// before the list existed reads back to the same graph and is written in
+    /// the shape it was written in — which is what keeps the checked-in graph
+    /// goldens, serialized from this build, unchanged.
+    #[serde(with = "judge_sides")]
+    pub judge: Vec<JudgeSide>,
     /// onejudge approval mode.
     pub mode: String,
     /// Turn ceiling for the conversation.
@@ -372,15 +381,93 @@ pub struct AgentSide {
     pub stream: bool,
 }
 
-/// The judge side of a onejudge member: an oneharness identity chain, or a
-/// command provider.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One judge of a onejudge member's panel: an oneharness identity chain, an
+/// `llmlint` run, or a command provider.
+///
+/// Told apart by the one field each shape requires — `oneharness_config`,
+/// `kind: llmlint`, `command` — rather than by serde's untagged fallback, so a
+/// mapping that is none of the three is refused naming what it carried instead
+/// of with "did not match any variant". The harness and command shapes are
+/// spelled exactly as they were before a member could carry a list, so every
+/// graph written against the single spelling — and every
+/// `members.<name>.judge.oneharness_config=…` override — still reads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 pub enum JudgeSide {
     /// Supervised by a harness selected from an oneharness config.
     Harness(JudgeHarness),
+    /// Supervised by one `llmlint` run over the worker's tree.
+    Llmlint(JudgeLlmlint),
     /// Supervised by a command provider.
     Command(JudgeCommand),
+}
+
+impl JudgeSide {
+    /// The label this judge asked to be known by, whatever its shape.
+    #[must_use]
+    pub fn label(&self) -> Option<&str> {
+        match self {
+            JudgeSide::Harness(side) => side.label.as_deref(),
+            JudgeSide::Llmlint(side) => side.label.as_deref(),
+            JudgeSide::Command(side) => side.label.as_deref(),
+        }
+    }
+
+    /// The provider kind onejudge knows this judge as, which is also what it
+    /// defaults an unlabelled judge's label from.
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            JudgeSide::Harness(_) => "oneharness",
+            JudgeSide::Llmlint(_) => "llmlint",
+            JudgeSide::Command(_) => "command",
+        }
+    }
+
+    /// Read one judge off the mapping a graph wrote, or say which of the three
+    /// shapes it is not.
+    fn classify(entry: serde_json::Value) -> Result<Self, String> {
+        let Some(map) = entry.as_object() else {
+            return Err(format!("{entry} is not a mapping"));
+        };
+        let shape = if map.contains_key("oneharness_config") {
+            "a harness side"
+        } else if let Some(kind) = map.get("kind") {
+            if kind != "llmlint" {
+                return Err(format!(
+                    "`kind: {}` names no judge shape: the graph spells a harness side by its \
+                     `oneharness_config` and a command side by its `command`, and `kind:` only \
+                     ever says `llmlint`",
+                    kind.as_str()
+                        .map_or_else(|| kind.to_string(), str::to_string)
+                ));
+            }
+            "an llmlint side"
+        } else if map.contains_key("command") {
+            "a command side"
+        } else {
+            let keys: Vec<&str> = map.keys().map(String::as_str).collect();
+            return Err(format!(
+                "{{{}}} is none of the three judge shapes: a harness side names an \
+                 `oneharness_config`, an llmlint side says `kind: llmlint`, and a command side \
+                 names a `command`",
+                keys.join(", ")
+            ));
+        };
+        let read = match shape {
+            "a harness side" => serde_json::from_value(entry).map(JudgeSide::Harness),
+            "an llmlint side" => serde_json::from_value(entry).map(JudgeSide::Llmlint),
+            _ => serde_json::from_value(entry).map(JudgeSide::Command),
+        };
+        read.map_err(|err| format!("{shape}: {err}"))
+    }
+}
+
+impl<'de> Deserialize<'de> for JudgeSide {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let entry = serde_json::Value::deserialize(deserializer)?;
+        JudgeSide::classify(entry).map_err(serde::de::Error::custom)
+    }
 }
 
 /// The harness-backed judge side.
@@ -393,6 +480,50 @@ pub struct JudgeHarness {
     /// [`AgentSide::model`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// This judge's name on every surface onejudge attributes to it; absent,
+    /// onejudge defaults it from the kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// The `llmlint` judge side: one lint run over the worker's tree per decision,
+/// recognized by its `kind: llmlint`.
+///
+/// Every field but `config` is handed to onejudge as written. `config` is a
+/// path resolved against the graph document's directory, like every other path
+/// a graph names, and handed over absolute — never copied into the member's
+/// scratch, because an llmlint config resolves its own plugins relative to
+/// itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JudgeLlmlint {
+    /// The shape's own tag, which is what tells it from the other two.
+    pub kind: LlmlintKind,
+    /// The llmlint config file, relative to the graph document. Absent, llmlint
+    /// discovers its own from the worker's tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config: Option<PathBuf>,
+    /// The llmlint executable. Absent, onejudge runs `llmlint` from `PATH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bin: Option<String>,
+    /// The git revision to review the worker's changes against. Absent, llmlint
+    /// judges the whole tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_base: Option<String>,
+    /// Extra arguments appended to every `llmlint lint` run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// This judge's name, as on [`JudgeHarness::label`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// The one value [`JudgeLlmlint::kind`] takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LlmlintKind {
+    /// `kind: llmlint`.
+    Llmlint,
 }
 
 /// The command-provider judge side.
@@ -401,6 +532,53 @@ pub struct JudgeHarness {
 pub struct JudgeCommand {
     /// The command and its arguments.
     pub command: Vec<String>,
+    /// This judge's name, as on [`JudgeHarness::label`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// The two spellings of [`OnejudgeMember::judge`], read into one list and
+/// written back as the shorter one.
+mod judge_sides {
+    use serde::de::Error as _;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::JudgeSide;
+
+    /// One mapping or a list of them. A shape that is neither — a scalar, a
+    /// list holding a scalar — is refused naming the entry, as one mapping that
+    /// is none of the three judge shapes is.
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<JudgeSide>, D::Error> {
+        let written = serde_json::Value::deserialize(deserializer)?;
+        match written {
+            serde_json::Value::Array(entries) => entries
+                .into_iter()
+                .enumerate()
+                .map(|(index, entry)| {
+                    JudgeSide::classify(entry).map_err(|why| {
+                        D::Error::custom(format!("judge entry {}: {why}", index + 1))
+                    })
+                })
+                .collect(),
+            entry @ serde_json::Value::Object(_) => JudgeSide::classify(entry)
+                .map(|side| vec![side])
+                .map_err(|why| D::Error::custom(format!("judge: {why}"))),
+            other => Err(D::Error::custom(format!(
+                "judge: {other} is neither one side nor a list of sides"
+            ))),
+        }
+    }
+
+    /// A one-element list as the single mapping it reads from, and any other
+    /// length as the list.
+    pub fn serialize<S: Serializer>(sides: &[JudgeSide], serializer: S) -> Result<S::Ok, S::Error> {
+        match sides {
+            [one] => one.serialize(serializer),
+            many => many.serialize(serializer),
+        }
+    }
 }
 
 /// A cron member's schedule.
@@ -634,6 +812,86 @@ pub fn is_member_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// Whether `label` is one a judge may carry: onejudge's own `[A-Za-z0-9_-]+`,
+/// which is also the shape [`is_member_name`] holds a member to, and for the
+/// same reason here — a harness judge's label names the file its resolved
+/// config is written to in the member's scratch.
+#[must_use]
+pub fn is_judge_label(label: &str) -> bool {
+    is_member_name(label)
+}
+
+/// Why `command` could not be spawned as a command judge, when it could not.
+///
+/// The same two refusals a `pre_turn` view's argv earns, for the same reason:
+/// this is an argv a graph supplies and onejudge's command provider hands
+/// straight to a process. An empty list names no program and a blank one is a
+/// spawn of the current directory on POSIX and of nothing at all on Windows;
+/// a NUL cannot cross into a process on either platform, so a word carrying
+/// one is refused here rather than becoming a spawn error on every turn.
+/// Shared by the graph's validation and by [`crate::invoke`]'s composition so
+/// the two cannot drift.
+pub(crate) fn command_judge_refusal(command: &[String]) -> Option<String> {
+    if command
+        .first()
+        .is_none_or(|program| program.trim().is_empty())
+    {
+        return Some(
+            "a command judge needs a command to run — its `command` is an argv spawned \
+             directly, so the program is its first element"
+                .to_string(),
+        );
+    }
+    command
+        .iter()
+        .find(|word| word.contains('\0'))
+        .map(|word| {
+            format!("{word:?} carries a NUL, which no argument can — this is an argv handed straight to a process")
+        })
+}
+
+/// The shape refusals a judge list earns before anything is resolved: no judge
+/// at all, a command judge with nothing to run, and a label that could not be a
+/// file name. Whether a side's config can be read is decided when the member is
+/// built, and whether its `bin` answers is onejudge's probe at plan time —
+/// neither is claimed here.
+///
+/// What a label may be beyond that — unique within the list, once onejudge has
+/// defaulted the absent ones — is onejudge's rule, applied by it when the
+/// member's plan is built, and not restated here.
+fn judge_sides_are_well_formed(
+    name: &str,
+    judges: &[JudgeSide],
+) -> Result<(), crate::error::Error> {
+    use crate::error::Error;
+    if judges.is_empty() {
+        return Err(Error::InvalidConfig(format!(
+            "member {name:?}: `judge` names no side — a two-party member needs at least one \
+             judge"
+        )));
+    }
+    for (index, judge) in judges.iter().enumerate() {
+        let entry = index + 1;
+        if let JudgeSide::Command(command) = judge {
+            if let Some(why) = command_judge_refusal(&command.command) {
+                return Err(Error::InvalidConfig(format!(
+                    "member {name:?}: judge entry {entry}: {why}"
+                )));
+            }
+        }
+        if let Some(label) = judge.label() {
+            if !is_judge_label(label) {
+                return Err(Error::InvalidConfig(format!(
+                    "member {name:?}: judge entry {entry}: label {label:?} — use letters, digits, \
+                     hyphens, and underscores; a label names this judge on every surface and, for \
+                     a harness judge, the config file this run writes for it"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Everything about a graph that can be checked without launching it.
 ///
 /// The schema itself is checked by serde — `deny_unknown_fields` is the trust
@@ -768,13 +1026,7 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                         "member {name:?}: `max_turns` of 0 lets the member take no turn at all"
                     )));
                 }
-                if let JudgeSide::Command(command) = &member.judge {
-                    if command.command.is_empty() {
-                        return Err(Error::InvalidConfig(format!(
-                            "member {name:?}: a command judge needs a command to run"
-                        )));
-                    }
-                }
+                judge_sides_are_well_formed(name, &member.judge)?;
                 // A conversation's own worktree and pace, gated the way a
                 // single-sided member's `dir` is and refused for the same reason:
                 // a document declaring an older schema and naming either would
@@ -1276,6 +1528,180 @@ mod tests {
         ] {
             let err = validate(&parse(&document)).unwrap_err();
             assert!(err.to_string().contains(expected), "{document}: {err}");
+        }
+    }
+
+    /// A two-party member's `judge:` reads as one list whether it was written
+    /// as one side or as several, each entry told apart by the one field its
+    /// shape requires; a one-element list writes back as the mapping it came
+    /// from and a longer one as the list, so both spellings round-trip.
+    #[test]
+    fn a_judge_list_reads_into_one_representation_and_writes_back_as_it_came() {
+        let single = parse(concat!(
+            "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+            "    base_config: ./b.yaml\n    mode: bypass\n",
+            "    agent: {oneharness_config: ./a.toml}\n",
+            "    judge: {oneharness_config: ./j.toml}\n",
+        ));
+        let Member::Onejudge(member) = &single.members["w"] else {
+            panic!("w is onejudge")
+        };
+        assert_eq!(
+            member.judge,
+            vec![JudgeSide::Harness(JudgeHarness {
+                oneharness_config: ConfigRef("./j.toml".into()),
+                model: None,
+                label: None,
+            })]
+        );
+        let written = serde_norway::to_string(&single).expect("serializes");
+        assert!(
+            written.contains("    judge:\n      oneharness_config: ./j.toml\n"),
+            "{written}"
+        );
+
+        let stacked = parse(concat!(
+            "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+            "    base_config: ./b.yaml\n    mode: bypass\n",
+            "    agent: {oneharness_config: ./a.toml}\n",
+            "    judge:\n",
+            "      - oneharness_config: ./j.toml\n        model: opus\n        label: reviewer\n",
+            "      - kind: llmlint\n        config: ./llmlint.yml\n        bin: /opt/llmlint\n",
+            "        diff_base: origin/main\n        args: [--rule, no_todo]\n        label: lint\n",
+            "      - command: [my-judge, --flag]\n",
+        ));
+        validate(&stacked).expect("a stacked panel validates");
+        let Member::Onejudge(member) = &stacked.members["w"] else {
+            panic!("w is onejudge")
+        };
+        assert_eq!(
+            member.judge,
+            vec![
+                JudgeSide::Harness(JudgeHarness {
+                    oneharness_config: ConfigRef("./j.toml".into()),
+                    model: Some("opus".into()),
+                    label: Some("reviewer".into()),
+                }),
+                JudgeSide::Llmlint(JudgeLlmlint {
+                    kind: LlmlintKind::Llmlint,
+                    config: Some(PathBuf::from("./llmlint.yml")),
+                    bin: Some("/opt/llmlint".into()),
+                    diff_base: Some("origin/main".into()),
+                    args: vec!["--rule".into(), "no_todo".into()],
+                    label: Some("lint".into()),
+                }),
+                JudgeSide::Command(JudgeCommand {
+                    command: vec!["my-judge".into(), "--flag".into()],
+                    label: None,
+                }),
+            ]
+        );
+        assert_eq!(
+            member.judge.iter().map(JudgeSide::kind).collect::<Vec<_>>(),
+            vec!["oneharness", "llmlint", "command"]
+        );
+        let written = serde_norway::to_string(&stacked).expect("serializes");
+        assert!(
+            written.contains("    judge:\n    - oneharness_config: ./j.toml\n"),
+            "{written}"
+        );
+        assert!(written.contains("kind: llmlint\n"), "{written}");
+        let reread = parse(&written);
+        assert_eq!(reread, stacked, "a stacked panel must round-trip");
+    }
+
+    /// A judge entry that is none of the three shapes is refused naming the
+    /// entry — by its position in a list, and by what it carried instead —
+    /// and a shape's own unknown field is refused naming that shape.
+    #[test]
+    fn a_judge_entry_that_is_none_of_the_three_shapes_is_refused_naming_it() {
+        let document = |judge: &str| {
+            format!(
+                concat!(
+                    "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+                    "    base_config: ./b.yaml\n    mode: bypass\n",
+                    "    agent: {{oneharness_config: ./a.toml}}\n",
+                    "    judge: {}\n",
+                ),
+                judge
+            )
+        };
+        for (judge, expected) in [
+            (
+                "[{oneharness_config: ./j.toml}, {foo: 1, bar: 2}]",
+                "judge entry 2: {foo, bar} is none of the three judge shapes",
+            ),
+            (
+                "[{kind: oneharness, judge_config: ./j.toml}]",
+                "judge entry 1: `kind: oneharness` names no judge shape",
+            ),
+            (
+                "[{kind: llmlint, command: [x]}]",
+                "judge entry 1: an llmlint side: unknown field `command`",
+            ),
+            (
+                "{oneharness_config: ./j.toml, command: [x]}",
+                "judge: a harness side: unknown field `command`",
+            ),
+            (
+                "{label: reviewer}",
+                "judge: {label} is none of the three judge shapes",
+            ),
+            ("3", "judge: 3 is neither one side nor a list of sides"),
+            ("[1]", "judge entry 1: 1 is not a mapping"),
+        ] {
+            let err = serde_norway::from_str::<GraphConfig>(&document(judge))
+                .expect_err(&format!("{judge} must be refused"));
+            assert!(err.to_string().contains(expected), "{judge}: {err}");
+        }
+    }
+
+    /// A panel's own pre-launch refusals: no judge at all, a command judge with
+    /// nothing to run — no program, a blank one, or a word no process can be
+    /// handed — and a label that could not be a file name — each naming the
+    /// member and, in a list, the entry.
+    #[test]
+    fn a_panel_that_could_never_run_is_refused_naming_the_entry() {
+        let document = |judge: &str| {
+            format!(
+                concat!(
+                    "version: 1\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+                    "    base_config: ./b.yaml\n    mode: bypass\n",
+                    "    agent: {{oneharness_config: ./a.toml}}\n",
+                    "    judge: {}\n",
+                ),
+                judge
+            )
+        };
+        validate(&parse(&document(
+            "[{oneharness_config: ./j.toml, label: a-B_1}, {kind: llmlint}, {command: [x]}]",
+        )))
+        .expect("a labelled stack validates");
+        for (judge, expected) in [
+            ("[]", "member \"w\": `judge` names no side"),
+            (
+                "[{command: [x]}, {command: []}]",
+                "member \"w\": judge entry 2: a command judge needs a command to run",
+            ),
+            (
+                "[{command: [x]}, {command: ['  ']}]",
+                "member \"w\": judge entry 2: a command judge needs a command to run",
+            ),
+            (
+                "[{command: [x, \"a\\0b\"]}]",
+                "member \"w\": judge entry 1: \"a\\0b\" carries a NUL",
+            ),
+            (
+                "[{command: [x]}, {kind: llmlint, label: 'lint run'}]",
+                "member \"w\": judge entry 2: label \"lint run\"",
+            ),
+            (
+                "{oneharness_config: ./j.toml, label: ''}",
+                "member \"w\": judge entry 1: label \"\"",
+            ),
+        ] {
+            let err = validate(&parse(&document(judge))).unwrap_err();
+            assert!(err.to_string().contains(expected), "{judge}: {err}");
         }
     }
 

@@ -58,7 +58,8 @@ path = "src/main.rs"
 
 # The deterministic programs the e2e suite drives as real subprocesses: one stands
 # in for a paid harness CLI at oneharness's own `ONEHARNESS_BIN_<ID>` seam, one
-# speaks onejudge's `CommandProvider` JSON-lines protocol, and one is a program a
+# speaks onejudge's `CommandProvider` JSON-lines protocol, one is the `llmlint`
+# CLI a graph's `kind: llmlint` judge names as its `bin`, and one is a program a
 # journey's graph points a `pre_turn` view at. All are behind `test-doubles` so a
 # published `cargo install oneagentgraph` never builds them.
 [[bin]]
@@ -69,6 +70,21 @@ required-features = ["test-doubles"]
 [[bin]]
 name = "oneagentgraph-fake-provider"
 path = "src/bin/fake_provider.rs"
+required-features = ["test-doubles"]
+
+# The `llmlint` an llmlint judge runs, on the view double's terms: a `bin` is an
+# argv the graph supplies, so this is the *input* to that judge rather than a
+# stand-in for any part of the engine that runs it — see the binary's own
+# documentation.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] not a command the
+# tool exposes and not a client of anything: a test double the e2e suite spawns,
+# built only under `test-doubles` (a `cargo install oneagentgraph` never has it),
+# declared the way the three doubles above it already are. Its own project would
+# split one suite's fixtures across two graph nodes for no `nx affected` gain —
+# every change that touches it is a change to the journeys that drive it.
+[[bin]]
+name = "oneagentgraph-fake-llmlint"
+path = "src/bin/fake_llmlint.rs"
 required-features = ["test-doubles"]
 
 # The program a journey's graph declares as a `pre_turn` view. Not a seam: a view
@@ -85,8 +101,9 @@ path = "src/lib.rs"
 
 [features]
 # What only the suite needs: the deterministic programs it spawns — a
-# paid-harness stand-in, a onejudge `CommandProvider` backend, and a program a
-# journey points a `pre_turn` view at — and `judge`'s `hold_between_turns`, the
+# paid-harness stand-in, a onejudge `CommandProvider` backend, an `llmlint` for a
+# graph's llmlint judge to name, and a program a journey points a `pre_turn`
+# view at — and `judge`'s `hold_between_turns`, the
 # one fixture that pauses real code rather than standing in for a process,
 # because the conversation boundary it holds is reachable from nowhere else.
 # Non-default, so none of it is ever in a consumer's build; `just check` and the
@@ -226,22 +243,47 @@ test-doubles = []
 # embedder put a word in the transcript the judge is shown. `crate::note` records
 # what each disposition means.
 #
-# 0.8.1 is the thirteenth raise, and like 0.5.3 it is taken for what it links
-# rather than for a call — every call above still resolves against 0.7.0. Its
-# published requirement is `oneharness-core` `^0.13.0`, the release that runs a
-# controlled codex turn under its candidate's model and refuses one the server
-# would run elsewhere (see the `oneharness-core` block below). The core release
-# is a pre-1.0 minor, so the `^0.12.1` that used to sit here excluded it and a
-# lock refresh alone could not take it: the two requirements are edited together
-# because a graph asking for 0.12 on one side and 0.13 on the other resolves both
-# — the two-copies state `tests/inventory.rs` exists to refuse. 0.8.0, carried
-# along with it, is onejudge's own: a supervisor answer that does not parse is
-# re-asked instead of ending the member, and an evaluator verifies the finished
-# tree read-only. Re-read on 2026-09-11 in the published sources: the engine
-# still publishes `Observation::Message` after `respond_streaming` returns and
-# still forwards each `ActionEvent` through the live callback, so neither
-# `src/member.rs`'s stall rule nor `src/judge.rs`'s relay needed to move.
-onejudge = { version = "0.8.1", features = ["cli"] }
+# 0.8.1 was the thirteenth raise, taken for what it links: its published
+# requirement is `oneharness-core` `^0.13.0`, the release that runs a controlled
+# codex turn under its candidate's model and refuses one the server would run
+# elsewhere (see the `oneharness-core` block below). The core release is a
+# pre-1.0 minor, so the `^0.12.1` that used to sit here excluded it and a lock
+# refresh alone could not take it: the two requirements are edited together
+# because a graph asking for 0.12 on one side and 0.13 on the other resolves
+# both — the two-copies state `tests/inventory.rs` exists to refuse.
+#
+# **0.10.0 is what is linked, and it is a compile floor.** It is the release
+# whose judge side is a *list of judges* — a panel — rather than one provider,
+# and everything a `kind: onejudge` member's `judge:` list composes onto lives
+# in it and in nothing before it:
+#
+#   1. `provider.judges: [...]` on a `kind: split` provider, with `judge:` as the
+#      one-element shorthand, each entry an ordinary provider config plus an
+#      optional `label` (`[A-Za-z0-9_-]+`, unique in the list, defaulted from the
+#      kind). Every judge runs against each worker turn concurrently, and the
+#      worker is handed one attributed message. A panel of one is byte-identical
+#      to the bare provider it replaces, which is what keeps every single-judge
+#      graph here running as it did.
+#   2. `kind: llmlint`, a judge that is one `llmlint` run over the worker's tree
+#      rather than a model's opinion — `bin`, `config`, `diff_base`, `args` —
+#      valid only as a judge entry, probed at plan build so an absent executable
+#      is a config error before any turn and never a silent pass.
+#   3. `Observation::JudgeDecided { turn, judge, kind, decision, reason }`, one
+#      per judge per supervisor turn, which `src/judge.rs` relays as this crate's
+#      `judge-decided` event. The seam is exhaustive, so below 0.10.0 that arm
+#      does not compile.
+#   4. Report schema 12: `judge_decisions` on the report and on `RunFailure`,
+#      and a `judge` label on every per-judge attribution, session link and
+#      spawned process — the shape `member-settled`'s artifact now carries.
+#
+# Its `oneharness-core` requirement is still `^0.13.0`, so the one-copy rule
+# below holds unchanged. 0.9.0, carried along, is the panel without the llmlint
+# kind. What is decided here is not how a panel decides — that is onejudge's,
+# with onejudge's coverage, stated in its `docs/judges.md` — but that a graph on
+# this host can reach it: `src/config.rs` reads the list, `src/invoke.rs`
+# composes it onto `judges:`, and `tests/e2e/panel.rs` drives a real stacked
+# panel through the doubles and reads the config it was launched with.
+onejudge = { version = "0.10.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
@@ -269,7 +311,7 @@ onejudge = { version = "0.8.1", features = ["cli"] }
 # This crate used to ask for 0.10 while onejudge asked for 0.8, so the graph
 # carried two copies and every oneharness fix released into 0.9-0.12 reached only
 # the half onejudge does not drive — a fix nobody had, on the side that needed
-# it. onejudge 0.8.1 asks for `^0.13.0`, which the 0.13.0 here satisfies out of
+# it. onejudge 0.10.0 asks for `^0.13.0`, which the 0.13.0 here satisfies out of
 # that one copy, which is why the two requirements move together and why neither
 # may be bumped past what the other admits: split them again and the second copy
 # comes back — which `tests/inventory.rs` asserts against the committed lockfile,
