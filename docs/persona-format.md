@@ -30,6 +30,9 @@ user:                      # onejudge: the simulated supervisor; omit it entirel
   done_when: "the change meets the task's acceptance criteria"
   done_when_replaces_base: false   # ours: see "How it merges" below
   max_turns: 8
+  artifacts: [docs/design.md]      # files or directories every judge-side prompt
+                                   #   names to read directly, gitignored ones
+                                   #   included; relative to the member's worktree
 evals:                     # onejudge: extra checks over the finished transcript
   - criterion: "the change is well-scoped"
     kind: numeric

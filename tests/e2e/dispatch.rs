@@ -1590,6 +1590,105 @@ fn agent_turns(run: &Run) -> usize {
         .count()
 }
 
+/// A judge told where the work under evaluation is, rather than left to find it
+/// through git — which never shows a gitignored design document. `user.artifacts`
+/// is onejudge's key, so what this crate owes is that it survives every way a
+/// member can be handed it: a persona's delta, the base config the persona
+/// merges over, and `ONEJUDGE_ARTIFACTS` in the member's environment.
+///
+/// Read off the supervisor's own prompt rather than the effective config: a list
+/// that reached the file but never the judge would read as configured and change
+/// nothing.
+#[test]
+fn named_artifacts_reach_the_judge_from_a_persona_a_base_or_the_environment() {
+    const SECTION: &str = "ARTIFACTS TO READ DIRECTLY";
+    const DELTA: &str = concat!(
+        "name: lead\nsystem_prompt: |\n  Role marker: you lead.\n",
+        "user:\n  persona: |\n    Supervisor marker: push hard.\n",
+    );
+
+    /// Every prompt the supervisor of one completed run was given, in a worktree
+    /// carrying the design document each case names by the same relative path.
+    fn supervisor_prompt(workspace: &Workspace) -> String {
+        let plans = workspace.dir().join("plans");
+        std::fs::create_dir_all(&plans).expect("plans dir");
+        std::fs::write(plans.join("design.md"), "# design\n").expect("design doc");
+        let record = workspace.at("supervisor.txt");
+        workspace
+            .run_task(&format!(
+                "fake:complete-now: judge the design fake:record-supervisor-prompt={}",
+                record.display()
+            ))
+            .expect_code(0);
+        std::fs::read_to_string(&record).expect("the supervisor was prompted")
+    }
+    fn names_the_design(workspace: &Workspace, prompt: &str, via: &str) {
+        let design = workspace.dir().join("plans").join("design.md");
+        assert!(
+            prompt.contains(SECTION) && prompt.contains(&design.display().to_string()),
+            "artifacts named {via} never reached the judge's prompt:\n{prompt}"
+        );
+    }
+
+    // Named nowhere, the prompt is the one every member was given before the key
+    // existed.
+    let plain = Workspace::new();
+    let prompt = supervisor_prompt(&plain);
+    assert!(
+        !prompt.contains(SECTION),
+        "a member naming no artifacts was handed a section for them:\n{prompt}"
+    );
+
+    // In a persona's delta: validated as a persona, then merged and planned.
+    let persona = Workspace::new();
+    persona.write(
+        "roles/lead.yaml",
+        &format!("{DELTA}  artifacts: [plans/design.md]\n"),
+    );
+    let role = persona.at("roles/lead.yaml").display().to_string();
+    persona.run(&["persona", "validate", &role]).expect_code(0);
+    persona.graph(
+        &two_party_graph(&fake_harness(), NO_ENV)
+            .replace("persona: engineer", "persona: ./roles/lead.yaml"),
+    );
+    names_the_design(&persona, &supervisor_prompt(&persona), "by a persona");
+
+    // In the base config the member's persona merges over.
+    let base = Workspace::new();
+    base.write(
+        "base.yaml",
+        &format!("{BASE}  artifacts: [plans/design.md]\n"),
+    );
+    names_the_design(&base, &supervisor_prompt(&base), "by a base config");
+
+    // In the member's environment, through the graph's `env:` block.
+    let env = Workspace::new();
+    env.graph(&two_party_graph(
+        &fake_harness(),
+        &[("ONEJUDGE_ARTIFACTS", "plans/design.md")],
+    ));
+    names_the_design(&env, &supervisor_prompt(&env), "by ONEJUDGE_ARTIFACTS");
+
+    // A list written as one bare path is not onejudge's shape, and the persona is
+    // refused before any member could run on it.
+    let scalar = Workspace::new();
+    scalar.write(
+        "roles/lead.yaml",
+        &format!("{DELTA}  artifacts: plans/design.md\n"),
+    );
+    let refused = scalar.run(&[
+        "persona",
+        "validate",
+        &scalar.at("roles/lead.yaml").display().to_string(),
+    ]);
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("lead.yaml") && refused.stderr.contains("expected a sequence"),
+        "the refusal named neither the persona nor the shape it wanted: {}",
+        refused.stderr
+    );
+}
+
 /// Every event carries the member and persona it came from, and the run id every
 /// event in the run shares — the reserved labels a consumer joins on.
 ///
