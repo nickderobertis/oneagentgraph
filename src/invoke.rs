@@ -727,10 +727,8 @@ fn provider_block(
                 block
             }
             JudgeSide::Command(command) => {
-                if command.command.is_empty() {
-                    return Err(Error::InvalidConfig(format!(
-                        "judge entry {entry}: a command judge needs a command to run"
-                    )));
+                if let Some(why) = crate::config::command_judge_refusal(&command.command) {
+                    return Err(Error::InvalidConfig(format!("judge entry {entry}: {why}")));
                 }
                 serde_json::json!({"kind": "command", "command": command.command})
             }

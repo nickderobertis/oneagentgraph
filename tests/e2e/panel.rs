@@ -391,9 +391,9 @@ fn a_single_harness_judge_is_still_launched_as_the_provider_it_always_was() {
     }
 }
 
-/// A list entry that is none of the three shapes, and a side whose config
-/// cannot be read, are refused by both verbs naming the entry — before any
-/// member is built.
+/// A list entry that is none of the three shapes, a side whose config cannot
+/// be read, and a command side whose argv no process could be handed are
+/// refused by both verbs naming the entry — before any member is built.
 #[test]
 fn a_malformed_judge_entry_is_refused_by_both_verbs_naming_it() {
     let workspace = Workspace::new();
@@ -433,6 +433,10 @@ fn a_malformed_judge_entry_is_refused_by_both_verbs_naming_it() {
     refuses(
         &stacked.replace("config: ./llmlint.yml", "config: ./nowhere.yml"),
         &["judge entry 2", "nowhere.yml", "cannot be read"],
+    );
+    refuses(
+        &stacked.replace(&fake_provider(), "' '"),
+        &["judge entry 3", "a command judge needs a command to run"],
     );
     refuses(
         &stacked.replace(

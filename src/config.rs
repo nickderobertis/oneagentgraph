@@ -821,6 +821,35 @@ pub fn is_judge_label(label: &str) -> bool {
     is_member_name(label)
 }
 
+/// Why `command` could not be spawned as a command judge, when it could not.
+///
+/// The same two refusals a `pre_turn` view's argv earns, for the same reason:
+/// this is an argv a graph supplies and onejudge's command provider hands
+/// straight to a process. An empty list names no program and a blank one is a
+/// spawn of the current directory on POSIX and of nothing at all on Windows;
+/// a NUL cannot cross into a process on either platform, so a word carrying
+/// one is refused here rather than becoming a spawn error on every turn.
+/// Shared by the graph's validation and by [`crate::invoke`]'s composition so
+/// the two cannot drift.
+pub(crate) fn command_judge_refusal(command: &[String]) -> Option<String> {
+    if command
+        .first()
+        .is_none_or(|program| program.trim().is_empty())
+    {
+        return Some(
+            "a command judge needs a command to run — its `command` is an argv spawned \
+             directly, so the program is its first element"
+                .to_string(),
+        );
+    }
+    command
+        .iter()
+        .find(|word| word.contains('\0'))
+        .map(|word| {
+            format!("{word:?} carries a NUL, which no argument can — this is an argv handed straight to a process")
+        })
+}
+
 /// The shape refusals a judge list earns before anything is resolved: no judge
 /// at all, a command judge with nothing to run, and a label that could not be a
 /// file name. Whether a side's config can be read is decided when the member is
@@ -844,9 +873,9 @@ fn judge_sides_are_well_formed(
     for (index, judge) in judges.iter().enumerate() {
         let entry = index + 1;
         if let JudgeSide::Command(command) = judge {
-            if command.command.is_empty() {
+            if let Some(why) = command_judge_refusal(&command.command) {
                 return Err(Error::InvalidConfig(format!(
-                    "member {name:?}: judge entry {entry}: a command judge needs a command to run"
+                    "member {name:?}: judge entry {entry}: {why}"
                 )));
             }
         }
@@ -1628,8 +1657,9 @@ mod tests {
     }
 
     /// A panel's own pre-launch refusals: no judge at all, a command judge with
-    /// nothing to run, and a label that could not be a file name — each naming
-    /// the member and, in a list, the entry.
+    /// nothing to run — no program, a blank one, or a word no process can be
+    /// handed — and a label that could not be a file name — each naming the
+    /// member and, in a list, the entry.
     #[test]
     fn a_panel_that_could_never_run_is_refused_naming_the_entry() {
         let document = |judge: &str| {
@@ -1652,6 +1682,14 @@ mod tests {
             (
                 "[{command: [x]}, {command: []}]",
                 "member \"w\": judge entry 2: a command judge needs a command to run",
+            ),
+            (
+                "[{command: [x]}, {command: ['  ']}]",
+                "member \"w\": judge entry 2: a command judge needs a command to run",
+            ),
+            (
+                "[{command: [x, \"a\\0b\"]}]",
+                "member \"w\": judge entry 1: \"a\\0b\" carries a NUL",
             ),
             (
                 "[{command: [x]}, {kind: llmlint, label: 'lint run'}]",
