@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.0...v0.4.1) - 2026-09-14
+
+### Added
+
+- *(deps)* link the onejudge that names the artifacts a judge reads ([#111](https://github.com/nickderobertis/oneagentgraph/pull/111))
+
 ## [0.4.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.3.19...v0.4.0) - 2026-09-13
 
 ### Added
