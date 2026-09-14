@@ -80,7 +80,7 @@
 //! for it — is the demonstration this rests on.
 //!
 //! What the hold does is decided entirely here, from files the run's verbs
-//! already write and one count the note courier keeps: it ends on `every`, on a
+//! already write and one count the note relay keeps: it ends on `every`, on a
 //! `trigger`, on a note offered, on the run's `stop` or the member's own
 //! `cancel`, and — for a background member — on the run's quiescence; a
 //! `reset-timer` restarts it. It refreshes the activity clock every tick, so the
@@ -183,7 +183,7 @@ struct Hold {
     /// Whether the supervisor turn now open said anything: `true` from its
     /// `Message` until its `TurnClosed`.
     continued: bool,
-    /// The note courier's count of notes offered, read against
+    /// The note relay's count of notes offered, read against
     /// [`Self::seen_offered`] each tick.
     offered: Arc<AtomicU64>,
     /// How many offered notes this hold has already seen — so a note that
@@ -365,11 +365,11 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
     // The note endpoint is bound before the plan is built, because the engine's
-    // end of the same channel goes *on* that plan. A member that could not bind
-    // one runs exactly as it did before notes existed: no inbox, and nothing able
-    // to send to it.
-    let spool = crate::note::Spool::bind(scratch);
-    let (notes, inbox) = match spool {
+    // end of the conversation's channel goes *on* that plan. A member that could
+    // not bind one runs exactly as it did before notes existed: no inbox, and
+    // nothing able to send to it.
+    let endpoint = crate::note::Endpoint::bind(scratch);
+    let (notes, inbox) = match endpoint {
         Some(_) => {
             let (notes, inbox) = onejudge::note::Notes::channel();
             (Some(notes), Some(inbox))
@@ -412,21 +412,22 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         session_dir: None,
         cwd: launch.worktree.clone(),
     };
-    // The record names the endpoint bound above, so a caller that reads the
-    // record and offers a note has somewhere to offer it into.
+    // The record names the endpoint bound above — the spool's address as the
+    // backend states it — so a caller that reads the record and offers a note
+    // has somewhere to offer it into.
     crate::control::write_with_notes(
         scratch,
         &crate::control::Turn::Open {
             address: address.clone(),
         },
-        spool.as_ref().map(crate::note::Spool::path),
+        endpoint.as_ref().map(crate::note::Endpoint::address),
     );
 
     let activity = Arc::new(AtomicU64::new(0));
     let abort = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
-    // The note courier's count of notes offered, which a hold reads — see
+    // The note relay's count of notes offered, which a hold reads — see
     // [`Hold`] — and why a hold ended the conversation, which [`finish`] reads.
     let offered = Arc::new(AtomicU64::new(0));
     let ended: Arc<Mutex<Option<Ended>>> = Arc::new(Mutex::new(None));
@@ -438,7 +439,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         // announced, so the turn that received a caller's note is published as
         // a delivery rather than as the supervising side's own words — see
         // [`crate::note::Deliveries`].
-        let mut deliveries = crate::note::Deliveries::of(notes.as_ref());
+        let mut deliveries =
+            crate::note::Deliveries::of(endpoint.as_ref().map(crate::note::Endpoint::relayed));
         // The pace this member's schedule asked for, if it asked for one.
         let mut hold = launch
             .pace
@@ -501,22 +503,22 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
 
     // On a thread of its own, because `Notes::send` blocks until the conversation
     // has disposed of the note — for a supervisor-side delivery, until its
-    // re-taken decision comes back. Servicing the spool from the supervision loop
-    // below would put a judge invocation between two heartbeats.
+    // re-taken decision comes back. Relaying from the supervision loop below
+    // would put a judge invocation between two heartbeats.
     //
     // llmlint: ignore-block[changed_behavior_has_e2e] the `None` arm is a host
     // that refused this run one more thread, the same unreachable refusal the
     // engine thread's own arm above records and for the same reason: no graph,
     // task or config asks for it, and no seam this crate sanctions fakes
     // `pthread_create`. What it decides is that the member runs on without a note
-    // courier rather than being killed over one, and every note offered to it is
-    // then answered by `submit`'s own deadline. The reachable half — a courier
+    // relay rather than being killed over one, and every note offered to it is
+    // then answered by the endpoint's own close. The reachable half — a relay
     // that carries notes into the conversation — is `tests/e2e/note.rs`.
-    let ending = match (spool, notes) {
-        (Some(spool), Some(notes)) => {
-            let (courier, ending) =
-                crate::note::Courier::open(spool, notes, emitter, Arc::clone(&offered));
-            match std::thread::Builder::new().spawn(move || courier.serve()) {
+    let ending = match (endpoint, notes) {
+        (Some(endpoint), Some(notes)) => {
+            let (relay, ending) =
+                crate::note::Relay::open(endpoint, notes, emitter, Arc::clone(&offered));
+            match std::thread::Builder::new().spawn(move || relay.serve()) {
                 Ok(_) => Some(ending),
                 Err(_) => None,
             }
@@ -1009,6 +1011,7 @@ fn ingest(
                     kind: decided.kind.to_string(),
                     decision: decided.decision.as_str().to_string(),
                     reason: decided.reason.to_string(),
+                    truncated: false,
                 }),
             );
         }
@@ -1411,6 +1414,7 @@ fn publish_attribution(emitter: &Emitter, telemetry: Option<&onejudge::Telemetry
                 reason: candidate.reason.clone(),
                 role: Some(Role::from(attribution.role)),
                 turn: Some(u64::from(attribution.turn_index)),
+                truncated: false,
             };
             emitter.emit(EventKind::FallbackAdvanced, as_payload(&advanced));
         }
@@ -1499,6 +1503,7 @@ fn session_pointer(
         history_dir: location.dir().to_string(),
         history_project: location.project().to_string(),
         history_session: location.session().to_string(),
+        truncated: false,
     };
     let artifact = Artifact {
         id: history_id,
@@ -2018,7 +2023,7 @@ mod tests {
         }
 
         let events = recorder.events();
-        let kinds: Vec<_> = events.iter().map(|event| event.kind).collect();
+        let kinds: Vec<_> = events.iter().map(|event| event.kind.clone()).collect();
         assert_eq!(
             kinds,
             vec![
@@ -2625,10 +2630,13 @@ mod tests {
             .map(|event| event.kind)
             .collect();
         assert!(
-            !kinds.contains(&EventKind::MemberDied),
+            !kinds.iter().any(|kind| *kind == EventKind::MemberDied),
             "a member died over a classification its own record contradicts: {kinds:?}"
         );
-        assert!(kinds.contains(&EventKind::MemberSettled), "{kinds:?}");
+        assert!(
+            kinds.iter().any(|kind| *kind == EventKind::MemberSettled),
+            "{kinds:?}"
+        );
         // The turn the record describes is carried, and what it was carried over
         // is on the artifact rather than left for nobody to find.
         let stored = std::fs::read_to_string(dir.path().join(crate::member::REPORT_FILE))

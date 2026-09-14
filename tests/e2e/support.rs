@@ -204,9 +204,29 @@ impl Workspace {
             .expect("the binary starts")
     }
 
+    /// `program` — a build of this CLI other than the one under test — with these
+    /// arguments, armed exactly as [`run`](Workspace::run) arms the binary, so a
+    /// journey can hold what this build writes to what another build reads.
+    pub fn run_as(&self, program: &str, args: &[&str]) -> Run {
+        let output = self
+            .command_for(program, args, &[])
+            .output()
+            .expect("the program runs");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
     /// The binary, armed with this workspace's directories and environment.
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_oneagentgraph"));
+        self.command_for(env!("CARGO_BIN_EXE_oneagentgraph"), args, env)
+    }
+
+    /// `program`, armed with this workspace's directories and environment.
+    fn command_for(&self, program: &str, args: &[&str], env: &[(&str, &str)]) -> Command {
+        let mut command = Command::new(program);
         command
             .args(args)
             .current_dir(self.path())

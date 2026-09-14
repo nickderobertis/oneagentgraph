@@ -1308,6 +1308,7 @@ fn run_announcing(
                     member::started_payload(&MemberStarted {
                         runner: member::runner(&invocation.launch),
                         start_after: Some(schedule.first_turn_after(graph.version)),
+                        truncated: false,
                     }),
                 );
             cron_threads.push(spawn_cron(

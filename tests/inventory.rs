@@ -324,6 +324,78 @@ fn the_graph_resolves_one_onejudge_and_it_is_the_one_the_manifest_takes() {
     );
 }
 
+/// Every version of `package` the committed lockfile resolves.
+fn locked(package: &str) -> Vec<&'static str> {
+    LOCKFILE
+        .split(&format!("name = \"{package}\"\nversion = \""))
+        .skip(1)
+        .map(|rest| {
+            rest.split_once('"')
+                .expect("a locked package's version is quoted")
+                .0
+        })
+        .collect()
+}
+
+/// The graph resolves **one** `onemessagebus` and **one** `onemessagebus-agent`,
+/// each the one the manifest takes — the same bus `onejudge` links.
+///
+/// A second copy of either is two sets of bus types that look alike and are not
+/// the same type: a note this crate re-exports from `onejudge` and one it builds
+/// from the bus would stop being interchangeable, and an envelope one side
+/// emits would be a different `Envelope` from the one the other reads.
+#[test]
+fn the_graph_resolves_one_bus_and_it_is_the_one_the_manifest_takes() {
+    for package in ["onemessagebus", "onemessagebus-agent"] {
+        let (_, rest) = MANIFEST
+            .split_once(&format!("\n{package} = \""))
+            .unwrap_or_else(|| panic!("the manifest still takes `{package}` by version"));
+        let (required, _) = rest.split_once('"').expect("the requirement is quoted");
+        assert_eq!(
+            locked(package),
+            [required],
+            "the graph should carry exactly one `{package}`, the one the manifest takes"
+        );
+    }
+}
+
+/// The note this crate re-exports from `onejudge` *is* the bus's note: a value
+/// obtained through one path is accepted by a function typed by the other, in
+/// both directions, and the in-process channel `onejudge` hands its engine is
+/// the bus's own sender and inbox.
+///
+/// Compiled rather than asserted at run time, because a second copy of the bus
+/// in the graph would make these mismatched types — this test would not build.
+#[test]
+fn a_note_through_onejudge_is_the_note_the_bus_declares() {
+    fn bus_note(note: onemessagebus_agent::note::Note) -> onemessagebus_agent::note::Note {
+        note
+    }
+    fn crate_note(note: oneagentgraph::note::Note) -> oneagentgraph::note::Note {
+        note
+    }
+
+    let through_onejudge =
+        oneagentgraph::note::Note::new(oneagentgraph::note::Addressee::Worker, "one note type")
+            .expect("a note");
+    let through_the_bus = bus_note(through_onejudge.clone());
+    assert_eq!(crate_note(through_the_bus), through_onejudge);
+
+    let (notes, inbox): (
+        onemessagebus::Sender<onemessagebus_agent::note::Note, onemessagebus_agent::note::Accepted>,
+        onemessagebus::Inbox<onemessagebus_agent::note::Note, onemessagebus_agent::note::Accepted>,
+    ) = onejudge::note::Notes::channel();
+    let sending = std::thread::spawn(move || notes.send(through_onejudge));
+    inbox
+        .take_within(std::time::Duration::from_secs(10))
+        .expect("the note arrives")
+        .answer(oneagentgraph::note::Accepted::Queued);
+    assert_eq!(
+        sending.join().expect("the sender"),
+        Ok(onemessagebus_agent::note::Accepted::Queued)
+    );
+}
+
 /// The wire names both documents share still name the types this crate
 /// serializes.
 ///

@@ -147,7 +147,7 @@ kind alone, and is what the run spawns a clock from after a wave.
   mid-turn — `member-died`, `cause: cancelled`; and, for a background member,
   `run::QUIESCENT_FILE` answers `Break` and `judge::finish` settles the member
   with the report's `settled_reason` naming the run's quiescence. A note offered
-  ends a hold too: `note::Courier` counts each note up *before* it blocks in
+  ends a hold too: `note::Relay` counts each note up *before* it blocks in
   `Notes::send`, the hold reads that count, opens the turn, and the engine's own
   `take_notes` delivers the note `queued` into it. A trigger or reset left while
   a turn is live sits in the directory until the next hold reads it.

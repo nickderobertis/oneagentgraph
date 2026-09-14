@@ -1759,8 +1759,8 @@ fn every_event_carries_the_labels_a_consumer_joins_on() {
     }
 }
 
-/// `seq` is monotonic per stream with no gaps, which is how a consumer detects
-/// loss.
+/// `seq` is monotonic per stream from 1 with no gaps, which is how a consumer
+/// detects loss.
 #[test]
 fn seq_is_monotonic_with_no_gaps() {
     let workspace = Workspace::new();
@@ -1769,8 +1769,8 @@ fn seq_is_monotonic_with_no_gaps() {
 
     let events = run.events();
     let stream = events[0]["stream"].clone();
-    for (expected, event) in events.iter().enumerate() {
-        assert_eq!(event["seq"], serde_json::json!(expected as u64), "{event}");
+    for (expected, event) in (1u64..).zip(&events) {
+        assert_eq!(event["seq"], serde_json::json!(expected), "{event}");
         assert_eq!(event["stream"], stream, "{event}");
     }
 }

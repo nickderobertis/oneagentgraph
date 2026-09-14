@@ -14,7 +14,10 @@ use crate::event::{Envelope, EventKind};
 #[must_use]
 pub fn line(envelope: &Envelope) -> String {
     let member = envelope.labels.member.as_deref().unwrap_or("graph");
-    let detail = match envelope.kind {
+    let Some(kind) = EventKind::from_wire(envelope.kind.as_str()) else {
+        return format!("{} {member} {}", envelope.ts, envelope.kind);
+    };
+    let detail = match kind {
         EventKind::GraphStarted => field(envelope, "name"),
         // Whichever runner this member has: a child process names its program,
         // and one driven in this process names the engine driving it.
@@ -229,13 +232,16 @@ impl<W: std::io::Write> Text<W> {
 
     /// Render one complete line.
     ///
-    /// A line that does not parse is not an envelope this crate wrote — it is
-    /// forwarded rather than dropped, because swallowing it would make the text
-    /// view say less than the stream it renders.
+    /// A line that does not parse, or whose kind is not one this crate writes, is
+    /// not an envelope this crate wrote — it is forwarded rather than dropped,
+    /// because swallowing it would make the text view say less than the stream it
+    /// renders.
     fn emit(&mut self, entry: &str) -> std::io::Result<()> {
         match serde_json::from_str::<Envelope>(entry) {
-            Ok(envelope) => writeln!(self.sink, "{}", line(&envelope)),
-            Err(_) => writeln!(self.sink, "{entry}"),
+            Ok(envelope) if EventKind::from_wire(envelope.kind.as_str()).is_some() => {
+                writeln!(self.sink, "{}", line(&envelope))
+            }
+            _ => writeln!(self.sink, "{entry}"),
         }
     }
 }
@@ -280,7 +286,8 @@ mod tests {
             stream: "run-1".into(),
             seq: 0,
             source: Source::Agentgraph,
-            kind,
+            kind: kind.into(),
+            dimensions: Default::default(),
             labels: Labels {
                 member: Some("worker".into()),
                 ..Labels::default()

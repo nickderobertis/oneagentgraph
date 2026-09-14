@@ -68,13 +68,13 @@ fn seqs(run: &Run) -> Vec<u64> {
     numbers
 }
 
-/// Assert the stream is numbered `0..n` with nothing missing — what a filtered
+/// Assert the stream is numbered `1..=n` with nothing missing — what a filtered
 /// stream must still be, or every deliberate omission reads as a dropped event.
 fn assert_gapless(run: &Run) {
     let numbers = seqs(run);
     assert_eq!(
         numbers,
-        (0..numbers.len() as u64).collect::<Vec<_>>(),
+        (1..=numbers.len() as u64).collect::<Vec<_>>(),
         "the stream has a gap in it: {:?}",
         run.kinds()
     );

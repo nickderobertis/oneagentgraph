@@ -102,6 +102,21 @@ fn parked(workspace: &Workspace, task: &str) -> Parked {
     }
 }
 
+/// The build that pulls the lever in [`an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work`]:
+/// the one under test, unless `ONEAGENTGRAPH_E2E_INTERRUPTER` names another.
+///
+/// The run is always this build's, so naming a *previous release* here holds the
+/// `control.json` this build records to the reader that release ships — the
+/// record's shape is a promise to a build that is already installed. Run that
+/// way with a wrapper that execs `uv tool run --from 'oneagentgraph-cli==<x.y.z>'
+/// oneagentgraph "$@"`; unset, the journey is the ordinary one `just check` runs.
+fn interrupter() -> String {
+    std::env::var("ONEAGENTGRAPH_E2E_INTERRUPTER")
+        .ok()
+        .filter(|program| !program.is_empty())
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_oneagentgraph").to_string())
+}
+
 /// The task that parks a member's agent turn, writing the marker [`parked`]
 /// waits for.
 fn parking_task(workspace: &Workspace, did_work: Option<&PathBuf>) -> String {
@@ -161,13 +176,16 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
     // turn still there for the interrupt below. Driven through the real refusal
     // rather than a restatement of it — a control character is not message text,
     // because it reaches a harness inside a protocol frame.
-    let unusable = workspace.run(&[
-        "interrupt",
-        &run_id,
-        "worker",
-        "--input",
-        "do this\u{1b}[2Kinstead",
-    ]);
+    let unusable = workspace.run_as(
+        &interrupter(),
+        &[
+            "interrupt",
+            &run_id,
+            "worker",
+            "--input",
+            "do this\u{1b}[2Kinstead",
+        ],
+    );
     unusable.expect_code(2);
     assert!(
         unusable.stderr.contains("not message text"),
@@ -184,7 +202,10 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
         "fake:complete-now fake:did-work={} stop and write the summary instead",
         redirected_work.display()
     );
-    let interrupted = workspace.run(&["interrupt", &run_id, "worker", "--input", &redirection]);
+    let interrupted = workspace.run_as(
+        &interrupter(),
+        &["interrupt", &run_id, "worker", "--input", &redirection],
+    );
     interrupted.expect_code(0);
 
     // The verb answers on the stream every other producer in this stack answers
@@ -256,7 +277,10 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
     // And the same lever on the same member, now that it is over: the run's own
     // record says it settled, so the answer is that fact rather than a socket
     // asked about a turn nobody is running.
-    let late = workspace.run(&["interrupt", &run_id, "worker", "--input", "one more thing"]);
+    let late = workspace.run_as(
+        &interrupter(),
+        &["interrupt", &run_id, "worker", "--input", "one more thing"],
+    );
     late.expect_code(3);
     assert!(
         late.of_kind("turn-interrupted")[0]["payload"]["reason"]

@@ -128,8 +128,9 @@ pub struct Record {
     /// What the run knew about the member's turn when it last wrote.
     pub turn: Turn,
     /// Where the member's own thread receives role-addressed notes for the
-    /// conversation's life — [`crate::note::Spool`], a sibling of this file in
-    /// the same member scratch.
+    /// conversation's life — the address of the bus [`crate::note::Spool`] it
+    /// bound, as the backend states it, a sibling of this file in the same member
+    /// scratch.
     ///
     /// Absent for a member that binds none: a single-sided `kind: oneharness`
     /// member has no second party for a note to be addressed *away* from, so

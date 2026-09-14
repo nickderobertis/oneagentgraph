@@ -25,10 +25,11 @@ use oneagentgraph::error::{
 };
 use oneagentgraph::event::{
     session_label, Artifact, Cause, Disposition, Envelope, EventFilter, EventKind,
-    FallbackAdvanced, Labels, Matcher, MemberDied, MemberStarted, OneharnessSession, Origin, Party,
-    PreTurnContext, PreTurnOutcome, Role, Runner, Source, TurnActivity, TurnCompleted,
-    TurnInterrupted, TurnMessage, TurnStarted, Usage, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS,
-    MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS, ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
+    FallbackAdvanced, Labels, MatchFields, Matcher, MemberDied, MemberStarted, OneharnessSession,
+    Origin, Party, PreTurnContext, PreTurnOutcome, Role, Runner, Source, TurnActivity,
+    TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage, ENVELOPE_VERSION,
+    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
+    ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
 use oneagentgraph::liveness::{
     BACKGROUND_ENV, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV,
@@ -37,6 +38,7 @@ use oneagentgraph::liveness::{
 use oneagentgraph::run::{RunId, Started};
 use oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE;
 use oneagentgraph::sweep::{families, RUNS_FAMILY, TEMP_FAMILY};
+use onemessagebus_agent::AgentFilter;
 use serde_json::{json, Value};
 
 /// The approved contract itself.
@@ -760,6 +762,7 @@ fn a_turn_interrupted_payload_names_the_member_and_whether_it_landed() {
         delivered: true,
         input_bytes: 31,
         reason: None,
+        truncated: false,
     };
     let serialized = serde_json::to_value(&delivered).expect("serializes");
     assert_eq!(
@@ -776,6 +779,7 @@ fn a_turn_interrupted_payload_names_the_member_and_whether_it_landed() {
         delivered: false,
         input_bytes: 0,
         reason: Some("the member is between turns".to_string()),
+        truncated: false,
     };
     let serialized = serde_json::to_value(&refused).expect("serializes");
     assert_eq!(serialized["reason"], json!("the member is between turns"));
@@ -844,6 +848,7 @@ fn a_fallback_advanced_payload_names_the_identity_and_the_classified_reason() {
         reason: "quota".to_string(),
         role: None,
         turn: None,
+        truncated: false,
     };
     let serialized = serde_json::to_value(&advanced).expect("serializes");
     assert_eq!(
@@ -1507,8 +1512,11 @@ fn the_documented_event_filter_is_the_grammar_the_crate_applies() {
                     ..Matcher::default()
                 },
                 Matcher {
-                    member: Some("worker".to_string()),
-                    persona: Some("engineer".to_string()),
+                    fields: MatchFields {
+                        member: Some("worker".to_string()),
+                        persona: Some("engineer".to_string()),
+                        ..MatchFields::default()
+                    },
                     ..Matcher::default()
                 },
             ],
@@ -1527,15 +1535,20 @@ fn the_documented_event_filter_is_the_grammar_the_crate_applies() {
     };
     // The glob admits every kind it spans, the labels admit the member's own
     // turns, and the exclusion beats both.
-    assert!(filter.allows(Source::Agentgraph, "member-started", &worker));
-    assert!(filter.allows(Source::Agentgraph, "member-settled", &worker));
-    assert!(filter.allows(Source::Agentgraph, "turn-completed", &worker));
-    assert!(!filter.allows(Source::Agentgraph, "turn-activity", &worker));
+    assert!(filter.admits(Source::Agentgraph, "member-started", &worker, None));
+    assert!(filter.admits(Source::Agentgraph, "member-settled", &worker, None));
+    assert!(filter.admits(Source::Agentgraph, "turn-completed", &worker, None));
+    assert!(!filter.admits(Source::Agentgraph, "turn-activity", &worker, None));
     // A `member-*` kind still passes on an envelope carrying neither label,
     // because a matcher list is a disjunction...
-    assert!(filter.allows(Source::Agentgraph, "member-died", &Labels::default()));
+    assert!(filter.admits(Source::Agentgraph, "member-died", &Labels::default(), None));
     // ...and the graph's own events, which match no matcher, do not.
-    assert!(!filter.allows(Source::Agentgraph, "graph-started", &Labels::default()));
+    assert!(!filter.admits(
+        Source::Agentgraph,
+        "graph-started",
+        &Labels::default(),
+        None
+    ));
 }
 
 /// A graph that names no `events` block serializes without one, so a document
@@ -2213,6 +2226,7 @@ fn a_member_started_payload_describes_its_runner_and_its_deferred_delay() {
             worktree: "/scratch".to_string(),
         },
         start_after: None,
+        truncated: false,
     };
     let written = serde_json::to_value(&library).expect("serializes");
     assert_eq!(
@@ -2241,6 +2255,7 @@ fn a_member_started_payload_describes_its_runner_and_its_deferred_delay() {
             cwd: "/work".to_string(),
         },
         start_after: Some(1800),
+        truncated: false,
     };
     let written = serde_json::to_value(&deferred).expect("serializes");
     assert_eq!(

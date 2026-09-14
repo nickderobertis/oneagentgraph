@@ -556,6 +556,7 @@ fn advance(emitter: &Emitter, fallback: Option<&FallbackReport>) {
             // per-side, per-turn chains.
             role: None,
             turn: None,
+            truncated: false,
         };
         emitter.emit(EventKind::FallbackAdvanced, as_payload(&advanced));
     }
@@ -766,7 +767,7 @@ mod tests {
         }
 
         let events = recorder.events();
-        let kinds: Vec<_> = events.iter().map(|event| event.kind).collect();
+        let kinds: Vec<_> = events.iter().map(|event| event.kind.clone()).collect();
         assert_eq!(
             kinds,
             vec![
