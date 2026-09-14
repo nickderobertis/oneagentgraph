@@ -1759,6 +1759,52 @@ fn every_event_carries_the_labels_a_consumer_joins_on() {
     }
 }
 
+/// A credential this process holds never reaches the stream: a value under a
+/// credential-shaped environment name that turns up in a payload is replaced
+/// with `[redacted]` before the envelope is written — on stdout and in the run's
+/// own `events.jsonl` alike.
+#[test]
+fn a_credential_the_process_holds_is_redacted_before_it_reaches_the_stream() {
+    let workspace = Workspace::new();
+    let secret = "e2e-credential-7f3a91c2";
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &format!("fake:complete-now: deploy with the key {secret}"),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[("ONEAGENTGRAPH_E2E_DEPLOY_TOKEN", secret)],
+    );
+    run.expect_code(0);
+
+    assert!(
+        !run.stdout.contains(secret),
+        "a credential reached the stream:\n{}",
+        run.stdout
+    );
+    let journal = std::fs::read_to_string(
+        workspace.record()["events_path"]
+            .as_str()
+            .expect("the record names its events file"),
+    )
+    .expect("the run's own events file");
+    assert!(
+        !journal.contains(secret),
+        "a credential reached the run's events file"
+    );
+    let opened = run.of_kind("turn-started");
+    let instruction = opened[0]["payload"]["instruction"]
+        .as_str()
+        .expect("an instruction");
+    assert!(
+        instruction.contains("deploy with the key [redacted]"),
+        "the task reached the stream without its credential redacted: {instruction}"
+    );
+}
+
 /// `seq` is monotonic per stream from 1 with no gaps, which is how a consumer
 /// detects loss.
 #[test]
