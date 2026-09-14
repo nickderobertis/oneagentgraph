@@ -41,7 +41,7 @@ left to each implementation's convenience. Kebab-case wire strings need nothing
 wider.
 
 **`seq` numbers what the stream carries, not what was produced.** A suppressed
-envelope takes no number with it, so a filtered stream is `0..n` with no gaps.
+envelope takes no number with it, so a filtered stream is `1..=n` with no gaps.
 The envelope contract has a consumer detect loss through per-stream `seq` gaps;
 numbering filtered-out events would make every deliberate omission read as a
 dropped one, which defeats the point of filtering for a consumer whose loss

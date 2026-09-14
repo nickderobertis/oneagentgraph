@@ -30,7 +30,7 @@ use crate::event::EventFilter;
 pub struct ConfigRef(pub String);
 
 /// One graph.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GraphConfig {
     /// Schema version.
@@ -67,7 +67,7 @@ pub struct GraphConfig {
 /// A block rather than a bare `filter:` key, because what a run publishes is a
 /// subject of its own — this is where a second decision about the stream goes,
 /// rather than beside the members that happen to feed it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Events {
     /// Which envelopes reach the stream; absent is all of them.

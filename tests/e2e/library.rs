@@ -124,8 +124,8 @@ fn a_library_caller_watches_cancels_and_waits_for_a_live_graph() {
             && event.payload.get("cause").and_then(|value| value.as_str()) == Some("cancelled")
     }));
     assert_eq!(
-        streamed.last().map(|event| event.kind),
-        Some(EventKind::GraphSettled)
+        streamed.last().map(|event| event.kind.as_str()),
+        Some(EventKind::GraphSettled.as_str())
     );
 
     let on_disk: Vec<Envelope> = std::fs::read_to_string(running_path(&workspace))
@@ -244,7 +244,7 @@ fn a_library_callers_own_filter_narrows_the_stream_it_receives() {
             .iter()
             .any(|event| event.kind.as_str().starts_with("turn-")),
         "the caller's filter did not reach the stream it receives: {:?}",
-        streamed.iter().map(|e| e.kind).collect::<Vec<_>>()
+        streamed.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>()
     );
     assert!(
         streamed
@@ -340,18 +340,18 @@ fn a_run_whose_filter_omits_graph_started_still_starts_and_settles() {
         assert!(
             streamed.iter().any(|event| event.kind == expected),
             "{expected:?} never arrived: {:?}",
-            streamed.iter().map(|e| e.kind).collect::<Vec<_>>()
+            streamed.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>()
         );
     }
     assert_eq!(
-        streamed.last().map(|event| event.kind),
-        Some(EventKind::GraphSettled)
+        streamed.last().map(|event| event.kind.as_str()),
+        Some(EventKind::GraphSettled.as_str())
     );
-    // And `seq` still numbers from zero with no gap, so the missing envelope is
+    // And `seq` still numbers from one with no gap, so the missing envelope is
     // not readable as a dropped one.
     assert_eq!(
         streamed.iter().map(|event| event.seq).collect::<Vec<_>>(),
-        (0..streamed.len() as u64).collect::<Vec<_>>()
+        (1..=streamed.len() as u64).collect::<Vec<_>>()
     );
 
     let record = workspace.record();

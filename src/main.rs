@@ -534,6 +534,7 @@ fn publish(run_id: &run::RunId, member: &str, input_bytes: u64, reason: Option<S
         delivered: reason.is_none(),
         input_bytes,
         reason,
+        truncated: false,
     };
     emitter.emit(
         EventKind::TurnInterrupted,

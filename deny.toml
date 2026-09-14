@@ -33,6 +33,14 @@ allow = [
     # without even the attribution clause — strictly weaker than the `MIT` above,
     # and so imposes no term this MIT crate cannot carry downstream.
     "MIT-0",
+    # Reviewed with `onemessagebus` 0.4.0, the bus this crate and onejudge share:
+    # Zlib covers `foldhash`, which `hashbrown`'s default hasher pulls in once
+    # `jsonschema` 0.56 → `referencing` 0.56 takes `hashbrown` with its default
+    # features. No lockfile choice here avoids it while that bus is linked. The
+    # licence asks only that its origin not be misrepresented and that altered
+    # copies of *its* source be marked — attribution optional — so it imposes no
+    # term this MIT crate cannot carry downstream.
+    "Zlib",
 ]
 confidence-threshold = 0.9
 exceptions = []

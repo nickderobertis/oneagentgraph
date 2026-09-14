@@ -58,8 +58,8 @@ use oneagentgraph::config::{
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
-    Cause, Disposition, EventFilter, Matcher, MemberDied, MemberStarted, Runner, Source,
-    ENVELOPE_VERSION,
+    Cause, Disposition, EventFilter, MatchFields, Matcher, MemberDied, MemberStarted, Runner,
+    Source, ENVELOPE_VERSION,
 };
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
@@ -93,8 +93,11 @@ fn golden_graph() -> GraphConfig {
                     },
                     Matcher {
                         source: Some(Source::Agentgraph),
-                        member: Some("worker".into()),
-                        persona: Some("engineer".into()),
+                        fields: MatchFields {
+                            member: Some("worker".into()),
+                            persona: Some("engineer".into()),
+                            ..MatchFields::default()
+                        },
                         ..Matcher::default()
                     },
                 ],
@@ -668,6 +671,7 @@ fn golden_starts() -> Vec<MemberStarted> {
                 worktree: "/state/node-scope-1786171301679-1447994/members/worker".into(),
             },
             start_after: None,
+            truncated: false,
         },
         MemberStarted {
             runner: Runner::Process {
@@ -687,6 +691,7 @@ fn golden_starts() -> Vec<MemberStarted> {
                 cwd: "/state/node-scope-1786171301679-1447994/members/reporter".into(),
             },
             start_after: None,
+            truncated: false,
         },
         MemberStarted {
             runner: Runner::Process {
@@ -706,6 +711,7 @@ fn golden_starts() -> Vec<MemberStarted> {
                 cwd: "/state/node-scope-1786171301679-1447994/members/reporter".into(),
             },
             start_after: Some(1800),
+            truncated: false,
         },
     ]
 }

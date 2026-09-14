@@ -292,7 +292,7 @@ impl Bounds {
 ///   `tool_result`. A turn's prose is not on that channel at all, so a
 ///   single-sided member spending ten minutes generating a report hands this
 ///   clock nothing to stamp.
-/// * `onejudge` 0.11.0 publishes `Observation::Message` **after**
+/// * `onejudge` 0.12.0 publishes `Observation::Message` **after**
 ///   `respond_streaming` has returned — the turn's finished text, as it is
 ///   appended to the transcript. That is a turn boundary rather than progress
 ///   within a turn, so it clears the clock only once the report it would have
@@ -573,6 +573,7 @@ pub fn run(invocation: &Invocation, emitter: &Emitter, bounds: Bounds, scratch: 
         started_payload(&MemberStarted {
             runner: runner(&invocation.launch),
             start_after: None,
+            truncated: false,
         }),
     );
     match &invocation.launch {
@@ -1148,6 +1149,7 @@ mod tests {
                 views: Vec::new(),
             }))),
             start_after: None,
+            truncated: false,
         };
         let published = started_payload(&harness);
         assert_eq!(published["runner"], "library");
@@ -1171,6 +1173,7 @@ mod tests {
                 pace: None,
             }))),
             start_after: None,
+            truncated: false,
         });
         assert_eq!(judge["runner"], "library");
         assert_eq!(judge["engine"], ONEJUDGE_ENGINE);

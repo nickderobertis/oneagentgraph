@@ -355,6 +355,71 @@ fn a_judge_that_sends_the_worker_back_is_named_and_its_findings_open_the_next_tu
     );
 }
 
+/// A judge's reason longer than the payload bound reaches the stream cut at the
+/// bound, marked `truncated`, and still reads back through the public
+/// `JudgeDecided` type — the bus emitter's cut is a record this crate's own
+/// stream carries, never one its own type refuses.
+///
+/// The long reason is the command judge's own words: it releases a worker that
+/// reports a blocker nothing in the run can clear, and names that blocker in its
+/// reason, so a worker reporting one past the bound is a judge answering past it.
+#[test]
+fn a_judges_reason_past_the_bound_is_cut_on_the_stream_and_reads_back_through_its_type() {
+    let workspace = Workspace::new();
+    workspace.graph(&stacked_graph(&workspace, &[]));
+    let condition = "a credential this run was never given ".repeat(160);
+    let answer = workspace.write(
+        "report.txt",
+        &format!("There is no next action for me to take.\n\nblocker: {condition}\n"),
+    );
+    let run = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        &format!(
+            "fake:complete-now judged by a stack fake:answer-file={}",
+            answer.display()
+        ),
+        "--dir",
+        &workspace.dir().display().to_string(),
+    ]);
+
+    let checks: Vec<Value> = run
+        .of_kind("judge-decided")
+        .into_iter()
+        .filter(|event| event["payload"]["judge"] == "checks")
+        .collect();
+    let decided = checks
+        .first()
+        .unwrap_or_else(|| panic!("the command judge decided nothing:\n{}", run.stdout));
+    let full = format!(
+        "terminal blocker reported: {}",
+        condition.trim().trim_end_matches('.')
+    );
+    assert!(full.len() > oneagentgraph::event::MAX_PAYLOAD_TEXT_BYTES);
+
+    let payload = decided["payload"].clone();
+    assert_eq!(payload["truncated"], true, "{decided}");
+    let reason = payload["reason"].as_str().expect("a reason");
+    assert_eq!(
+        reason.len(),
+        oneagentgraph::event::MAX_PAYLOAD_TEXT_BYTES,
+        "{decided}"
+    );
+    assert!(
+        full.starts_with(reason),
+        "the cut kept something other than the reason's head: {reason}"
+    );
+
+    let read: oneagentgraph::event::JudgeDecided =
+        serde_json::from_value(payload).unwrap_or_else(|err| {
+            panic!("the stream's own record did not read back ({err}): {decided}")
+        });
+    assert!(read.truncated);
+    assert_eq!(read.judge, "checks");
+    assert_eq!(read.kind, "command");
+}
+
 /// A single harness judge — the spelling every graph on this host uses, and
 /// the `judge.oneharness_config=…` override laid over it — is still launched
 /// as the `kind: oneharness` provider carrying both sides, with the judge's
