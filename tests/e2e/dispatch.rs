@@ -1602,6 +1602,8 @@ fn agent_turns(run: &Run) -> usize {
 #[test]
 fn named_artifacts_reach_the_judge_from_a_persona_a_base_or_the_environment() {
     const SECTION: &str = "ARTIFACTS TO READ DIRECTLY";
+    /// The design document, spelled as every case names it.
+    const NAMED: &str = "plans/design.md";
     const DELTA: &str = concat!(
         "name: lead\nsystem_prompt: |\n  Role marker: you lead.\n",
         "user:\n  persona: |\n    Supervisor marker: push hard.\n",
@@ -1623,7 +1625,10 @@ fn named_artifacts_reach_the_judge_from_a_persona_a_base_or_the_environment() {
         std::fs::read_to_string(&record).expect("the supervisor was prompted")
     }
     fn names_the_design(workspace: &Workspace, prompt: &str, via: &str) {
-        let design = workspace.dir().join("plans").join("design.md");
+        // onejudge joins the path onto the worktree as it was named, separators
+        // and all, so on Windows the line reads `...\work\plans/design.md`:
+        // joined the same way here, the expectation holds on every platform.
+        let design = workspace.dir().join(NAMED);
         assert!(
             prompt.contains(SECTION) && prompt.contains(&design.display().to_string()),
             "artifacts named {via} never reached the judge's prompt:\n{prompt}"
@@ -1643,7 +1648,7 @@ fn named_artifacts_reach_the_judge_from_a_persona_a_base_or_the_environment() {
     let persona = Workspace::new();
     persona.write(
         "roles/lead.yaml",
-        &format!("{DELTA}  artifacts: [plans/design.md]\n"),
+        &format!("{DELTA}  artifacts: [{NAMED}]\n"),
     );
     let role = persona.at("roles/lead.yaml").display().to_string();
     persona.run(&["persona", "validate", &role]).expect_code(0);
@@ -1655,27 +1660,21 @@ fn named_artifacts_reach_the_judge_from_a_persona_a_base_or_the_environment() {
 
     // In the base config the member's persona merges over.
     let base = Workspace::new();
-    base.write(
-        "base.yaml",
-        &format!("{BASE}  artifacts: [plans/design.md]\n"),
-    );
+    base.write("base.yaml", &format!("{BASE}  artifacts: [{NAMED}]\n"));
     names_the_design(&base, &supervisor_prompt(&base), "by a base config");
 
     // In the member's environment, through the graph's `env:` block.
     let env = Workspace::new();
     env.graph(&two_party_graph(
         &fake_harness(),
-        &[("ONEJUDGE_ARTIFACTS", "plans/design.md")],
+        &[("ONEJUDGE_ARTIFACTS", NAMED)],
     ));
     names_the_design(&env, &supervisor_prompt(&env), "by ONEJUDGE_ARTIFACTS");
 
     // A list written as one bare path is not onejudge's shape, and the persona is
     // refused before any member could run on it.
     let scalar = Workspace::new();
-    scalar.write(
-        "roles/lead.yaml",
-        &format!("{DELTA}  artifacts: plans/design.md\n"),
-    );
+    scalar.write("roles/lead.yaml", &format!("{DELTA}  artifacts: {NAMED}\n"));
     let refused = scalar.run(&[
         "persona",
         "validate",
