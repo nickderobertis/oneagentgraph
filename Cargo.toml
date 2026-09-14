@@ -252,10 +252,10 @@ test-doubles = []
 # because a graph asking for 0.12 on one side and 0.13 on the other resolves
 # both — the two-copies state `tests/inventory.rs` exists to refuse.
 #
-# **0.10.0 is what is linked, and it is a compile floor.** It is the release
-# whose judge side is a *list of judges* — a panel — rather than one provider,
-# and everything a `kind: onejudge` member's `judge:` list composes onto lives
-# in it and in nothing before it:
+# **0.10.0 is the compile floor.** It is the release whose judge side is a *list
+# of judges* — a panel — rather than one provider, and everything a
+# `kind: onejudge` member's `judge:` list composes onto lives in it and in
+# nothing before it:
 #
 #   1. `provider.judges: [...]` on a `kind: split` provider, with `judge:` as the
 #      one-element shorthand, each entry an ordinary provider config plus an
@@ -283,7 +283,21 @@ test-doubles = []
 # this host can reach it: `src/config.rs` reads the list, `src/invoke.rs`
 # composes it onto `judges:`, and `tests/e2e/panel.rs` drives a real stacked
 # panel through the doubles and reads the config it was launched with.
-onejudge = { version = "0.10.0", features = ["cli"] }
+#
+# 0.11.0 is the fifteenth raise, and it is what is linked; every call above
+# still resolves against 0.10.0, so the compile floor stays there. It is taken
+# for `user.artifacts`: a list of files or directories every judge-side prompt
+# names to read directly, relative ones against the evidence worktree, replaced
+# by `ONEJUDGE_ARTIFACTS`. A judge left to find a design document through git
+# never sees one that is gitignored, and loops on a question it cannot answer;
+# below 0.11.0 the key is a `deny_unknown_fields` refusal instead. This crate adds
+# no schema for it — the persona merge copies `user.*` over the base and the plan
+# is onejudge's own — so what is decided here is that it arrives:
+# `tests/e2e/dispatch.rs`'s
+# `named_artifacts_reach_the_judge_from_a_persona_a_base_or_the_environment`
+# reads it off the supervisor's prompt from a persona, a base, and the
+# environment. Its `oneharness-core` requirement is still `^0.13.0`.
+onejudge = { version = "0.11.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The engine a `kind: oneharness` member's turn runs on, and its typed report.
 #
@@ -311,7 +325,7 @@ onejudge = { version = "0.10.0", features = ["cli"] }
 # This crate used to ask for 0.10 while onejudge asked for 0.8, so the graph
 # carried two copies and every oneharness fix released into 0.9-0.12 reached only
 # the half onejudge does not drive — a fix nobody had, on the side that needed
-# it. onejudge 0.10.0 asks for `^0.13.0`, which the 0.13.0 here satisfies out of
+# it. onejudge 0.11.0 asks for `^0.13.0`, which the 0.13.0 here satisfies out of
 # that one copy, which is why the two requirements move together and why neither
 # may be bumped past what the other admits: split them again and the second copy
 # comes back — which `tests/inventory.rs` asserts against the committed lockfile,
