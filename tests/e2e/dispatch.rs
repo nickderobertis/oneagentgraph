@@ -2125,20 +2125,19 @@ fn a_command_judge_supervises_through_the_split_provider() {
     // that command itself fails, onejudge preserves the agent turn's failure as
     // the member's result rather than replacing it with a judge-side error.
     let failed_frames = workspace.at("failed-frames.ndjson");
-    let failed_attempts = workspace.at("failed-attempts.log");
+    let failed_once = workspace.at("failed-once");
+    let failed_task = format!(
+        "fake:complete-now fake:crash-once={}: judged after a lost turn",
+        failed_once.display()
+    );
     let failed = workspace.run_task_with(
-        "fake:complete-now: judged after a lost turn",
+        &failed_task,
         &[
             (
                 "FAKE_PROVIDER_RECORD",
                 failed_frames.to_str().expect("UTF-8 path"),
             ),
             ("FAKE_PROVIDER_LOST", "fail"),
-            ("FAKE_HARNESS_UNAVAILABLE_ATTEMPTS", "1"),
-            (
-                "FAKE_HARNESS_ATTEMPT_LOG",
-                failed_attempts.to_str().expect("UTF-8 path"),
-            ),
         ],
     );
     failed.expect_code(1);
@@ -2171,17 +2170,12 @@ fn a_command_judge_supervises_through_the_split_provider() {
     // A lost-turn response must be deliberate. With no configured disposition,
     // the double refuses instead of silently applying its ordinary taken-turn
     // decision and opening another turn for the wrong reason.
-    let unconfigured_attempts = workspace.at("unconfigured-attempts.log");
-    let unconfigured = workspace.run_task_with(
-        "fake:complete-now: lost turn with no judge disposition",
-        &[
-            ("FAKE_HARNESS_UNAVAILABLE_ATTEMPTS", "1"),
-            (
-                "FAKE_HARNESS_ATTEMPT_LOG",
-                unconfigured_attempts.to_str().expect("UTF-8 path"),
-            ),
-        ],
+    let unconfigured_once = workspace.at("unconfigured-once");
+    let unconfigured_task = format!(
+        "fake:complete-now fake:crash-once={}: lost turn with no judge disposition",
+        unconfigured_once.display()
     );
+    let unconfigured = workspace.run_task_with(&unconfigured_task, &[]);
     unconfigured.expect_code(1);
     assert_eq!(
         unconfigured.of_kind("member-died")[0]["payload"]["rule"],
@@ -2191,20 +2185,19 @@ fn a_command_judge_supervises_through_the_split_provider() {
     // The same graph can recover instead: the command's concrete next message
     // opens another agent turn, which succeeds and is then supervised as taken.
     let recovered_frames = workspace.at("recovered-frames.ndjson");
-    let recovered_attempts = workspace.at("recovered-attempts.log");
+    let recovered_once = workspace.at("recovered-once");
+    let recovered_task = format!(
+        "fake:complete-now fake:crash-once={}: judged after a recovered lost turn",
+        recovered_once.display()
+    );
     let recovered = workspace.run_task_with(
-        "fake:complete-now: judged after a recovered lost turn",
+        &recovered_task,
         &[
             (
                 "FAKE_PROVIDER_RECORD",
                 recovered_frames.to_str().expect("UTF-8 path"),
             ),
             ("FAKE_PROVIDER_LOST", "continue"),
-            ("FAKE_HARNESS_UNAVAILABLE_ATTEMPTS", "1"),
-            (
-                "FAKE_HARNESS_ATTEMPT_LOG",
-                recovered_attempts.to_str().expect("UTF-8 path"),
-            ),
         ],
     );
     recovered.expect_code(0);
