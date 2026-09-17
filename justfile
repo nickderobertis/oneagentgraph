@@ -32,7 +32,7 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # it for real. onejudge has no entry: it is a library dependency now, pinned by
 # `Cargo.lock`, so there is nothing to install and nothing on `PATH` to shadow.
 # A two-party member's turns run through this CLI, so the `oneharness-core` it
-# links is the one those journeys prove: 0.12.0 is the first release linking
+# links is the one those journeys prove: 0.13.0 is the first release linking
 # core 0.14.0 — the one `Cargo.toml` takes — and the model-mismatch and overload
 # journeys in `tests/e2e/selection.rs` need it. The e2e suite reads this number
 # (`tests/e2e/support.rs`) and drives only a CLI at it.
