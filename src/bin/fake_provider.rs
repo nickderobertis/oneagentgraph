@@ -95,14 +95,27 @@ fn main() -> std::process::ExitCode {
         eprintln!("fake-provider: the request is not JSON");
         return std::process::ExitCode::from(1);
     };
-    if let Ok(path) = std::env::var("FAKE_PROVIDER_RECORD") {
+    if let Ok(named) = std::env::var("FAKE_PROVIDER_RECORD") {
+        let path = std::path::PathBuf::from(&named);
+        let usable = path.is_absolute()
+            && !path
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+            && path.parent().is_some_and(std::path::Path::is_dir);
+        if !usable {
+            eprintln!(
+                "fake-provider: FAKE_PROVIDER_RECORD must name an absolute path in an existing \
+                 directory, got {named:?}"
+            );
+            return std::process::ExitCode::from(1);
+        }
         let recorded = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
             .and_then(|mut file| writeln!(file, "{request}"));
         if recorded.is_err() {
-            eprintln!("fake-provider: could not append the request to {path:?}");
+            eprintln!("fake-provider: could not append the request to {named:?}");
             return std::process::ExitCode::from(1);
         }
     }

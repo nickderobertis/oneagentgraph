@@ -2121,6 +2121,19 @@ fn a_command_judge_supervises_through_the_split_provider() {
         "a successful agent turn was not carried to its command judge: {taken:?}"
     );
 
+    // The recording destination crosses the subprocess boundary. Refuse a
+    // relative value rather than letting the command write wherever its caller
+    // happened to launch it.
+    let unsafe_record = workspace.run_task_with(
+        "fake:complete-now: judged with an unsafe recording path",
+        &[("FAKE_PROVIDER_RECORD", "relative-frames.ndjson")],
+    );
+    unsafe_record.expect_code(1);
+    assert!(
+        !workspace.at("work/relative-frames.ndjson").exists(),
+        "the command judge wrote to an unvalidated relative recording path"
+    );
+
     // A classified agent failure is offered to the command judge once. When
     // that command itself fails, onejudge preserves the agent turn's failure as
     // the member's result rather than replacing it with a judge-side error.
