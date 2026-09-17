@@ -2138,13 +2138,9 @@ fn a_command_judge_supervises_through_the_split_provider() {
     // that command itself fails, onejudge preserves the agent turn's failure as
     // the member's result rather than replacing it with a judge-side error.
     let failed_frames = workspace.at("failed-frames.ndjson");
-    let failed_once = workspace.at("failed-once");
-    let failed_task = format!(
-        "fake:complete-now fake:crash-once={}: judged after a lost turn",
-        failed_once.display()
-    );
+    let failed_task = "fake:complete-now fake:crash-before-recovery: judged after a lost turn";
     let failed = workspace.run_task_with(
-        &failed_task,
+        failed_task,
         &[
             (
                 "FAKE_PROVIDER_RECORD",
@@ -2183,12 +2179,10 @@ fn a_command_judge_supervises_through_the_split_provider() {
     // A lost-turn response must be deliberate. With no configured disposition,
     // the double refuses instead of silently applying its ordinary taken-turn
     // decision and opening another turn for the wrong reason.
-    let unconfigured_once = workspace.at("unconfigured-once");
-    let unconfigured_task = format!(
-        "fake:complete-now fake:crash-once={}: lost turn with no judge disposition",
-        unconfigured_once.display()
+    let unconfigured = workspace.run_task_with(
+        "fake:complete-now fake:crash-before-recovery: lost turn with no judge disposition",
+        &[],
     );
-    let unconfigured = workspace.run_task_with(&unconfigured_task, &[]);
     unconfigured.expect_code(1);
     assert_eq!(
         unconfigured.of_kind("member-died")[0]["payload"]["rule"],
@@ -2198,13 +2192,10 @@ fn a_command_judge_supervises_through_the_split_provider() {
     // The same graph can recover instead: the command's concrete next message
     // opens another agent turn, which succeeds and is then supervised as taken.
     let recovered_frames = workspace.at("recovered-frames.ndjson");
-    let recovered_once = workspace.at("recovered-once");
-    let recovered_task = format!(
-        "fake:complete-now fake:crash-once={}: judged after a recovered lost turn",
-        recovered_once.display()
-    );
+    let recovered_task =
+        "fake:complete-now fake:crash-before-recovery: judged after a recovered lost turn";
     let recovered = workspace.run_task_with(
-        &recovered_task,
+        recovered_task,
         &[
             (
                 "FAKE_PROVIDER_RECORD",

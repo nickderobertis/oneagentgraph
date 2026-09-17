@@ -49,7 +49,7 @@
 //! | `fake:entered=<path>` | write `<path>` the moment any turn begins |
 //! | `fake:started=<path>` | *agent's controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *agent's controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
-//! | `fake:crash-once=<path>` | crash the first turn that reaches this marker, then let the replacement turn run |
+//! | `fake:crash-before-recovery` | crash every launch of the initial turn, then let a command judge's recovery turn run |
 //! | `FAKE_HARNESS_FAIL_AFTER_MARKER` | let an `exec`-shaped provider run once, then crash later launches |
 //! | `FAKE_HARNESS_FAIL_ONCE_MARKER` | crash an `exec`-shaped provider once, then allow later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
@@ -800,16 +800,11 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     if steers(prompt, "hang") {
         hang(sentinel_path(prompt, "tick").as_deref());
     }
-    if let Some(marker) = sentinel_path(prompt, "crash-once") {
-        if std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&marker)
-            .is_ok()
-        {
-            eprintln!("fake-harness: the first turn crashed");
-            std::process::exit(1);
-        }
+    if steers(prompt, "crash-before-recovery")
+        && !prompt.contains("retry the agent turn after the classified failure")
+    {
+        eprintln!("fake-harness: the unrecovered turn crashed");
+        std::process::exit(1);
     }
     let session = std::env::var("FAKE_HARNESS_SESSION").unwrap_or_else(|_| "fake-session".into());
     // Written before any wait, so a journey can wait for a turn that is really
