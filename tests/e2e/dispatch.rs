@@ -2096,12 +2096,128 @@ fn a_command_judge_supervises_through_the_split_provider() {
             "assessment: \"Name the follow-up work this run left out of scope.\"\n",
         ),
     );
-    let run = workspace.run_task("fake:complete-now: judged by a command");
+    let taken_frames = workspace.at("taken-frames.ndjson");
+    let run = workspace.run_task_with(
+        "fake:complete-now: judged by a command",
+        &[(
+            "FAKE_PROVIDER_RECORD",
+            taken_frames.to_str().expect("UTF-8 path"),
+        )],
+    );
     run.expect_code(0);
     assert_eq!(
         run.of_kind("member-settled")[0]["payload"]["completed"],
         serde_json::json!(true)
     );
+    let taken: Vec<serde_json::Value> = workspace
+        .read("taken-frames.ndjson")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a recorded provider frame"))
+        .filter(|frame: &serde_json::Value| frame["op"] == "supervisor")
+        .collect();
+    assert_eq!(
+        taken[0]["turn"],
+        serde_json::json!({"outcome": "taken"}),
+        "a successful agent turn was not carried to its command judge: {taken:?}"
+    );
+
+    // The recording destination crosses the subprocess boundary. Refuse a
+    // relative value rather than letting the command write wherever its caller
+    // happened to launch it.
+    let unsafe_record = workspace.run_task_with(
+        "fake:complete-now: judged with an unsafe recording path",
+        &[("FAKE_PROVIDER_RECORD", "relative-frames.ndjson")],
+    );
+    unsafe_record.expect_code(1);
+    assert!(
+        !workspace.at("work/relative-frames.ndjson").exists(),
+        "the command judge wrote to an unvalidated relative recording path"
+    );
+
+    // A classified agent failure is offered to the command judge once. When
+    // that command itself fails, onejudge preserves the agent turn's failure as
+    // the member's result rather than replacing it with a judge-side error.
+    let failed_frames = workspace.at("failed-frames.ndjson");
+    let failed_task = "fake:complete-now fake:crash-before-recovery: judged after a lost turn";
+    let failed = workspace.run_task_with(
+        failed_task,
+        &[
+            (
+                "FAKE_PROVIDER_RECORD",
+                failed_frames.to_str().expect("UTF-8 path"),
+            ),
+            ("FAKE_PROVIDER_LOST", "fail"),
+        ],
+    );
+    failed.expect_code(1);
+    let died = &failed.of_kind("member-died")[0];
+    assert_eq!(died["payload"]["rule"], "provider-failure");
+    let failed_frame: serde_json::Value = serde_json::from_str(
+        workspace
+            .read("failed-frames.ndjson")
+            .lines()
+            .find(|line| line.contains("\"op\":\"supervisor\""))
+            .expect("the lost turn reached the command judge"),
+    )
+    .expect("a recorded provider frame");
+    assert_eq!(failed_frame["turn"]["outcome"], "lost");
+    assert!(
+        failed_frame["turn"]["cause"]
+            .as_str()
+            .is_some_and(|cause| !cause.is_empty()),
+        "the lost turn carried no classified cause: {failed_frame}"
+    );
+    assert_eq!(died["payload"]["cause"], "protocol");
+    assert!(
+        !died["payload"]["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("configured to fail the lost turn"),
+        "the judge command's failure replaced the classified agent failure: {died}"
+    );
+
+    // A lost-turn response must be deliberate. With no configured disposition,
+    // the double refuses instead of silently applying its ordinary taken-turn
+    // decision and opening another turn for the wrong reason.
+    let unconfigured = workspace.run_task_with(
+        "fake:complete-now fake:crash-before-recovery: lost turn with no judge disposition",
+        &[],
+    );
+    unconfigured.expect_code(1);
+    assert_eq!(
+        unconfigured.of_kind("member-died")[0]["payload"]["rule"],
+        "provider-failure"
+    );
+
+    // The same graph can recover instead: the command's concrete next message
+    // opens another agent turn, which succeeds and is then supervised as taken.
+    let recovered_frames = workspace.at("recovered-frames.ndjson");
+    let recovered_task =
+        "fake:complete-now fake:crash-before-recovery: judged after a recovered lost turn";
+    let recovered = workspace.run_task_with(
+        recovered_task,
+        &[
+            (
+                "FAKE_PROVIDER_RECORD",
+                recovered_frames.to_str().expect("UTF-8 path"),
+            ),
+            ("FAKE_PROVIDER_LOST", "continue"),
+        ],
+    );
+    recovered.expect_code(0);
+    let recovered: Vec<serde_json::Value> = workspace
+        .read("recovered-frames.ndjson")
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("a recorded provider frame"))
+        .filter(|frame: &serde_json::Value| frame["op"] == "supervisor")
+        .collect();
+    assert_eq!(
+        recovered.len(),
+        2,
+        "unexpected supervisor frames: {recovered:?}"
+    );
+    assert_eq!(recovered[0]["turn"]["outcome"], "lost");
+    assert_eq!(recovered[1]["turn"]["outcome"], "taken");
 
     // And the other half of the same supervisor: a member that never reaches its
     // bar is asked for another turn until the cap, then settles incomplete.

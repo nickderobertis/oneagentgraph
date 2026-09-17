@@ -265,14 +265,22 @@ impl Workspace {
     /// shorter ones is testing a watchdog, and passes them itself through
     /// [`run_with`](Workspace::run_with) and [`bounds`].
     pub fn run_task(&self, task: &str) -> Run {
-        self.run(&[
-            "run",
-            "./graph.yaml",
-            "--task",
-            task,
-            "--dir",
-            &self.dir().display().to_string(),
-        ])
+        self.run_task_with(task, &[])
+    }
+
+    /// Run the default graph against one task with extra process environment.
+    pub fn run_task_with(&self, task: &str, env: &[(&str, &str)]) -> Run {
+        self.run_with(
+            &[
+                "run",
+                "./graph.yaml",
+                "--task",
+                task,
+                "--dir",
+                &self.dir().display().to_string(),
+            ],
+            env,
+        )
     }
 
     /// The one run this workspace recorded.
