@@ -16,7 +16,7 @@
 > this document proposed, added upstream as proposed — a second entry point
 > rather than a field on `RunControls`, so the exhaustive literals embedders had
 > already written kept compiling. Both names arrived in **0.10.1** and are
-> unchanged here, re-measured against 0.13.0 rather than assumed; the floor is a
+> unchanged here, re-measured against 0.14.0 rather than assumed; the floor is a
 > **compile floor**, not a preference, because below 0.10.1 neither exists and
 > `src/harness.rs` does not build, which is what stops a future edit from quietly
 > falling back to unsupervised `run`. The version emphasised above is the linked

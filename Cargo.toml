@@ -343,7 +343,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.13.0; that was re-measured for this bump rather than assumed, and
+# 0.14.0; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
 # **0.14.0 is what is linked, and it is linked exactly once.** In addition to the
