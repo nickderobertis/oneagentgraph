@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.4](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.3...v0.4.4) - 2026-09-17
+
+### Fixed
+
+- *(deps)* relink oneharness-core and onejudge for the overload fallback ([#124](https://github.com/nickderobertis/oneagentgraph/pull/124))
+
 ## [0.4.3](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.2...v0.4.3) - 2026-09-17
 
 ### Fixed
