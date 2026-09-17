@@ -8,7 +8,7 @@
 > where it lives. `src/harness.rs` is the module; `src/judge.rs` is its twin for
 > the other member kind, and the two are deliberately the same shape.
 >
-> **What provides it** is `oneharness-core` **0.13.0**, the release this crate
+> **What provides it** is `oneharness-core` **0.14.0**, the release this crate
 > links today: a
 > [`ProcessSupervisor`](#grouping-the-seam-this-whole-document-was-written-to-get)
 > trait with a `spawning(&mut Command)` / `spawned(&Child)` pair, and

@@ -321,6 +321,119 @@ fn a_chain_that_reaches_a_working_identity_reports_the_step_past() {
     assert!(!run.of_kind("member-settled").is_empty());
 }
 
+/// Codex capacity exhaustion is carried through with the producer's two wire
+/// spellings while the chain advances to its backup.
+#[cfg(unix)]
+#[test]
+fn a_server_overloaded_codex_candidate_falls_through_with_its_failure_kind_unchanged() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            "server_overloaded_max_retries = 0\n",
+        ),
+    );
+    let overloaded = workspace.write(
+        "overloaded.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=server_overloaded exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&overloaded);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            ("env.ONEHARNESS_BIN_CODEX", overloaded.display().to_string()),
+            (FAKE_HARNESS_KEY, fake_harness()),
+        ],
+    ));
+
+    let run = workspace.run_task("fake:complete-now: use the backup after overload");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        advanced[0]["payload"]["identity"],
+        serde_json::json!("codex")
+    );
+    assert_eq!(
+        advanced[0]["payload"]["reason"],
+        serde_json::json!("server-overloaded")
+    );
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    let report_path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .expect("the settle names its oneharness report");
+    let report: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(report_path).expect("read the oneharness report"),
+    )
+    .expect("the report is JSON");
+    assert_eq!(
+        report["fallback"]["fell_through"][0]["reason"],
+        serde_json::json!("server-overloaded"),
+        "{report}"
+    );
+    assert_eq!(
+        report["results"][0]["failure_kind"],
+        serde_json::json!("server_overloaded"),
+        "{report}"
+    );
+}
+
+/// The same core release is linked into onejudge: its agent side advances past
+/// the overload and the conversation settles on the backup identity.
+#[cfg(unix)]
+#[test]
+fn a_two_party_member_advances_past_a_server_overloaded_codex_candidate() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        concat!(
+            "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+            "server_overloaded_max_retries = 0\n",
+        ),
+    );
+    let overloaded = workspace.write(
+        "overloaded.sh",
+        &format!(
+            "#!/bin/sh\nFAKE_HARNESS_REFUSAL=server_overloaded exec {} \"$@\"\n",
+            fake_harness()
+        ),
+    );
+    make_executable(&overloaded);
+    workspace.graph(&two_party_graph(
+        &fake_harness(),
+        &[("ONEHARNESS_BIN_CODEX", overloaded.display().to_string())],
+    ));
+
+    let run = workspace.run_task("fake:complete-now: use the backup after overload");
+    run.expect_code(0);
+
+    let advanced = run.of_kind("fallback-advanced");
+    assert_eq!(advanced.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        advanced[0]["payload"]["identity"],
+        serde_json::json!("codex")
+    );
+    assert_eq!(
+        advanced[0]["payload"]["reason"],
+        serde_json::json!("server-overloaded")
+    );
+    assert_eq!(advanced[0]["payload"]["role"], serde_json::json!("agent"));
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    assert_eq!(settled[0]["payload"]["completed"], serde_json::json!(true));
+}
+
 /// A **two-party** member reports the candidates each side stepped past, with
 /// the side and the turn it happened on.
 ///

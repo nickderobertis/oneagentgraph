@@ -890,7 +890,7 @@ pub enum Disposition {
 ///
 /// A closed set, for the same reason [`crate::member::Rule`] is one: this is what
 /// a supervisor branches on, and a cause spelled two ways is a branch that
-/// silently stops matching. The ten classified kinds are onejudge's own
+/// silently stops matching. The classified kinds are onejudge's own
 /// `ProviderErrorKind` — which is in turn oneharness's normalized `failure_kind` —
 /// mapped **totally**, so a category added upstream is a compile error here rather
 /// than a new bare string on the wire. The last three are the causes that exist
@@ -1295,6 +1295,12 @@ mod tests {
             assert_eq!(kind.as_str(), name, "onejudge renamed {name:?}");
             assert_eq!(Cause::from(kind).as_str(), name);
         }
+        // onejudge deliberately folds oneharness's more specific producer token
+        // into its existing transient-overload category.
+        assert_eq!(
+            onejudge::ProviderErrorKind::classify("server_overloaded"),
+            onejudge::ProviderErrorKind::Overloaded
+        );
         // The three causes that exist outside that taxonomy.
         assert_eq!(Cause::from(Disposition::Exited), Cause::Exited);
         assert_eq!(Cause::from(Disposition::Signaled), Cause::Signaled);
