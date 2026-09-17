@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.2...v0.4.3) - 2026-09-17
+
+### Fixed
+
+- *(deps)* link the onemessagebus release without the onejudge codec and onejudge protocol v8 ([#119](https://github.com/nickderobertis/oneagentgraph/pull/119))
+
 ## [0.4.2](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.1...v0.4.2) - 2026-09-14
 
 ### Changed
