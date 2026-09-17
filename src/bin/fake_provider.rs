@@ -32,6 +32,12 @@
 //! `onejudge-echo-provider` in the cargo bin directory built from a release older
 //! than the engine `Cargo.lock` links.
 //!
+//! `FAKE_PROVIDER_RECORD=<path>` appends every request frame as one JSON line.
+//! On a lost supervisor turn, `FAKE_PROVIDER_LOST=continue` supplies a recovery
+//! instruction and `FAKE_PROVIDER_LOST=fail` exits 1. A lost turn without
+//! either setting is refused, so a journey cannot accidentally exercise the
+//! ordinary completed-turn answer.
+//!
 //! What would close this: `pub` access to that responder from the onejudge
 //! *library* under the same feature, which would make this file three lines. That
 //! is an upstream proposal, not a change to make from here.
@@ -40,12 +46,33 @@
 // one response object from the first and a classified failure from the second.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 
 use serde_json::{json, Value};
 
 /// The score a numeric judgement answers when the request names no usable bound.
 const DEFAULT_MAX_SCORE: u64 = 5;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnOutcome {
+    Taken,
+    Lost,
+}
+
+enum LostAction {
+    Continue,
+    Fail,
+}
+
+impl LostAction {
+    fn from_env() -> Result<Self, Option<String>> {
+        match std::env::var("FAKE_PROVIDER_LOST").ok() {
+            Some(value) if value == "continue" => Ok(Self::Continue),
+            Some(value) if value == "fail" => Ok(Self::Fail),
+            other => Err(other),
+        }
+    }
+}
 
 /// Whether the task carries `sentinel`.
 ///
@@ -68,6 +95,17 @@ fn main() -> std::process::ExitCode {
         eprintln!("fake-provider: the request is not JSON");
         return std::process::ExitCode::from(1);
     };
+    if let Ok(path) = std::env::var("FAKE_PROVIDER_RECORD") {
+        let recorded = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .and_then(|mut file| writeln!(file, "{request}"));
+        if recorded.is_err() {
+            eprintln!("fake-provider: could not append the request to {path:?}");
+            return std::process::ExitCode::from(1);
+        }
+    }
     // `messages` is the half of the protocol every answer below is derived from:
     // the task steers the verdict, and the turn count decides whether the
     // supervisor lets the conversation finish. A request without it is one this
@@ -98,31 +136,74 @@ fn main() -> std::process::ExitCode {
         }
         (_, persona) => persona.unwrap_or_default(),
     };
+    let turn = if op == Some("supervisor") {
+        let Some(turn) = request.get("turn").and_then(Value::as_object) else {
+            eprintln!("fake-provider: the supervisor request has no `turn` object");
+            return std::process::ExitCode::from(1);
+        };
+        match turn.get("outcome").and_then(Value::as_str) {
+            Some("taken") => Some(TurnOutcome::Taken),
+            Some("lost")
+                if turn
+                    .get("cause")
+                    .and_then(Value::as_str)
+                    .is_some_and(|cause| !cause.trim().is_empty()) =>
+            {
+                Some(TurnOutcome::Lost)
+            }
+            other => {
+                eprintln!("fake-provider: invalid supervisor turn outcome {other:?}");
+                return std::process::ExitCode::from(1);
+            }
+        }
+    } else {
+        None
+    };
     let response = match op {
         // The unified per-turn supervisor: it decides completion, or supplies the
         // next simulated-user message.
         Some("supervisor") => {
-            match reported_blocker(messages) {
-                // The worker says it is blocked, and the persona this supervisor
-                // was handed decides what that means — see [`retryable`].
-                Some(blocker) if retryable(persona, &blocker) => json!({
-                    "completion": false,
-                    "message": format!("run it again and keep going: {blocker}"),
-                    "reason": "the blocker reported is one the worker could retry in this run",
-                }),
-                // Released: `completion: false` with no message at all, which is
-                // onejudge's own `NoInstruction` — the conversation ends on the
-                // work it has, with the done-when verdict still to come.
-                Some(blocker) => json!({
-                    "completion": false,
-                    "reason": format!("terminal blocker reported: {blocker}"),
-                }),
-                None if !steers(&task, "should-fail") && turns >= 1 => {
-                    json!({"completion": true, "reason": "fake supervisor verified completion"})
+            if turn == Some(TurnOutcome::Lost) {
+                match LostAction::from_env() {
+                    Ok(LostAction::Continue) => json!({
+                        "completion": false,
+                        "message": "retry the agent turn after the classified failure",
+                        "reason": "fake supervisor recovers the lost turn",
+                    }),
+                    Ok(LostAction::Fail) => {
+                        eprintln!("fake-provider: configured to fail the lost turn");
+                        return std::process::ExitCode::from(1);
+                    }
+                    Err(other) => {
+                        eprintln!(
+                            "fake-provider: lost turn needs FAKE_PROVIDER_LOST=continue or fail, got {other:?}"
+                        );
+                        return std::process::ExitCode::from(1);
+                    }
                 }
-                None => json!({"completion": false,
+            } else {
+                match reported_blocker(messages) {
+                    // The worker says it is blocked, and the persona this supervisor
+                    // was handed decides what that means — see [`retryable`].
+                    Some(blocker) if retryable(persona, &blocker) => json!({
+                        "completion": false,
+                        "message": format!("run it again and keep going: {blocker}"),
+                        "reason": "the blocker reported is one the worker could retry in this run",
+                    }),
+                    // Released: `completion: false` with no message at all, which is
+                    // onejudge's own `NoInstruction` — the conversation ends on the
+                    // work it has, with the done-when verdict still to come.
+                    Some(blocker) => json!({
+                        "completion": false,
+                        "reason": format!("terminal blocker reported: {blocker}"),
+                    }),
+                    None if !steers(&task, "should-fail") && turns >= 1 => {
+                        json!({"completion": true, "reason": "fake supervisor verified completion"})
+                    }
+                    None => json!({"completion": false,
                                "message": "verify it before you call it done",
                                "reason": "fake supervisor requires another turn"}),
+                }
             }
         }
         Some("user") => json!({"message": "verify it before you call it done", "stop": false}),

@@ -306,7 +306,13 @@ test-doubles = []
 # `src/note.rs` does not compile, and above the bus requirement it asks for the
 # graph would carry a second bus — two `Note` types that look alike and are not
 # the same type, which `tests/inventory.rs` refuses against the lockfile.
-onejudge = { version = "0.12.0", features = ["cli"] }
+#
+# 0.13.0 is the seventeenth raise. It speaks protocol v8 to command judges: each
+# supervisor request carries the agent turn's typed outcome, and a lost turn is
+# offered to that command before onejudge classifies the run or opens the next
+# agent turn. This crate does not derive that outcome; its command-judge e2e
+# drives the composed member and records onejudge's own frame.
+onejudge = { version = "0.13.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The stack's typed message bus, linked rather than restated. The envelope, its
 # labels and sources, the filter grammar, the payload bounds and redaction, the
@@ -316,10 +322,11 @@ onejudge = { version = "0.12.0", features = ["cli"] }
 # inbox's `Spool` backend. `docs/contract.md` names the bus's own contract as the
 # source of the envelope section it quotes.
 #
-# 0.4.0 of both, and exactly the version `onejudge` 0.12.0 asks for, so one bus
-# serves this crate and the conversation it drives.
-onemessagebus = "0.4.0"
-onemessagebus-agent = "0.4.0"
+# 0.7.0 of both, and exactly the version `onejudge` 0.13.0 asks for, so one bus
+# serves this crate and the conversation it drives. This is the configured-
+# binding release: the bus no longer owns the onejudge codec.
+onemessagebus = "0.7.0"
+onemessagebus-agent = "0.7.0"
 # The payload structs are registered with the bus's schema registry as
 # `Message` types, which is a `schemars` derivation. The same major and feature
 # the bus itself takes, so the one `JsonSchema` trait is the bus's.
