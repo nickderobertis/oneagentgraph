@@ -91,6 +91,8 @@ pub enum Reason {
     Quota,
     /// The identity was not authenticated, so nothing ran.
     Auth,
+    /// Codex serving capacity remained exhausted after local retries.
+    ServerOverloaded,
     /// The candidate was never started at all.
     Skipped,
     /// Anything else oneharness said, kept verbatim so a refusal can name it.
@@ -104,6 +106,7 @@ impl Reason {
         match self {
             Reason::Quota => "quota",
             Reason::Auth => "auth",
+            Reason::ServerOverloaded => "server-overloaded",
             Reason::Skipped => "skipped",
             Reason::Other(word) => word,
         }
@@ -113,7 +116,10 @@ impl Reason {
     /// chain handing the turn on is the chain doing its job.
     #[must_use]
     pub fn is_fallthrough(&self) -> bool {
-        matches!(self, Reason::Quota | Reason::Auth | Reason::Skipped)
+        matches!(
+            self,
+            Reason::Quota | Reason::Auth | Reason::ServerOverloaded | Reason::Skipped
+        )
     }
 }
 
@@ -122,6 +128,7 @@ impl From<&str> for Reason {
         match word {
             "quota" => Reason::Quota,
             "auth" => Reason::Auth,
+            "server-overloaded" => Reason::ServerOverloaded,
             "skipped" => Reason::Skipped,
             other => Reason::Other(other.to_string()),
         }
@@ -493,6 +500,11 @@ mod tests {
         // The line the whole judgment turns on: `skipped` is a candidate that
         // was never started, and `rate_limit` is one that ran and was billed.
         assert!(Reason::Skipped.is_fallthrough());
+        assert!(Reason::from("server-overloaded").is_fallthrough());
+        assert_eq!(
+            Reason::from("server-overloaded").as_str(),
+            "server-overloaded"
+        );
         assert!(!Reason::Other("rate_limit".into()).is_fallthrough());
         assert_eq!(Reason::from("auth"), Reason::Auth);
         assert_eq!(Reason::Other("odd".into()).as_str(), "odd");

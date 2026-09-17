@@ -66,6 +66,7 @@
 //! | `FAKE_HARNESS_REFUSAL=quota` | a zero-work 429 the chain steps past |
 //! | `FAKE_HARNESS_REFUSAL=auth` | an unauthenticated refusal, on stderr alone |
 //! | `FAKE_HARNESS_REFUSAL=rate_limit` | the refusal a chain does **not** step past |
+//! | `FAKE_HARNESS_REFUSAL=server_overloaded` | Codex reports a zero-work capacity refusal the chain steps past |
 //! | `FAKE_HARNESS_DECLARED_REJECTION=rate_limit` | a turn that ran, answered and was billed, declaring the provider's 429 in the same terminal record and exiting 0 — so its record reads `status: ok`, `exit_code: 0`, billed usage |
 //! | `FAKE_HARNESS_CRASH=<code>` | exit that code having published nothing |
 //! | `FAKE_HARNESS_SERVED_MODEL=<model>` | *codex `app-server` only:* name that model as the one the thread runs under, whatever `thread/start` asked for — the refusal oneharness answers before a token is spent |
@@ -171,6 +172,8 @@ enum Refusal {
     Quota,
     /// The same shape after billed work, which a chain does not step past.
     RateLimit,
+    /// Codex serving capacity is temporarily exhausted before any work.
+    ServerOverloaded,
 }
 
 /// A provider rejection the harness **declares in the terminal record of a turn
@@ -235,6 +238,7 @@ impl Refusal {
             "auth" => Some(Some(Refusal::Auth)),
             "quota" => Some(Some(Refusal::Quota)),
             "rate_limit" => Some(Some(Refusal::RateLimit)),
+            "server_overloaded" => Some(Some(Refusal::ServerOverloaded)),
             _ => None,
         }
     }
@@ -435,7 +439,8 @@ fn main() -> std::process::ExitCode {
     let requested = std::env::var("FAKE_HARNESS_REFUSAL").unwrap_or_default();
     let Some(refusal) = Refusal::parse(&requested) else {
         eprintln!(
-            "fake-harness: FAKE_HARNESS_REFUSAL must be auth, quota, or rate_limit, got \
+            "fake-harness: FAKE_HARNESS_REFUSAL must be auth, quota, rate_limit, or \
+             server_overloaded, got \
              {requested:?}"
         );
         return exit(2);
@@ -470,6 +475,15 @@ fn main() -> std::process::ExitCode {
                 "type": "result", "subtype": "success", "terminal_reason": "rate_limit",
                 "api_error_status": 429, "result": "",
                 "usage": {"input_tokens": 900, "output_tokens": 120}, "total_cost_usd": 0.42,
+            }));
+            return exit(REFUSAL_EXIT);
+        }
+        // Codex reports this on its structured failure surface. It carries no
+        // usage or answer, so oneharness retries it and then advances the chain.
+        Some(Refusal::ServerOverloaded) => {
+            emit(&json!({
+                "type": "turn.failed",
+                "error": {"codex_error_info": "server_overloaded"},
             }));
             return exit(REFUSAL_EXIT);
         }

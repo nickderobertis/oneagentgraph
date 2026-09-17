@@ -276,7 +276,7 @@ impl Bounds {
 /// **Streamed provider output does not clear it, because at this crate's pins
 /// nothing delivers it here.** Re-read on 2026-09-17 against the two engines
 /// this crate links — both bullets survived the bump unchanged, the `onejudge`
-/// one re-read against 0.13.0's own engine loop rather than carried over, panel
+/// one re-read against 0.13.1's own engine loop rather than carried over, panel
 /// included: that release offers a classified lost agent turn to a command
 /// supervisor before returning or retrying, but publishes no `Observation`
 /// while either provider call is in flight. The stamp is a date rather than a release of this crate on
@@ -288,12 +288,12 @@ impl Bounds {
 /// holds each against `Cargo.toml`. It is named in prose rather than linked
 /// because it is a `#[cfg(test)]` item, which rustdoc cannot resolve:
 ///
-/// * `oneharness_core` 0.13.0 delivers a streaming run's events to an
+/// * `oneharness_core` 0.14.0 delivers a streaming run's events to an
 ///   `EventSink` as `ActionEvent`s, whose `kind` is `tool_call` or
 ///   `tool_result`. A turn's prose is not on that channel at all, so a
 ///   single-sided member spending ten minutes generating a report hands this
 ///   clock nothing to stamp.
-/// * `onejudge` 0.13.0 publishes `Observation::Message` **after**
+/// * `onejudge` 0.13.1 publishes `Observation::Message` **after**
 ///   `respond_streaming` has returned — the turn's finished text, as it is
 ///   appended to the transcript. That is a turn boundary rather than progress
 ///   within a turn, so it clears the clock only once the report it would have
