@@ -36,6 +36,7 @@
 //! process learns whether the ask was honored at all, because onejudge reports
 //! `control` only on the finished run.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use oneharness_core::domain::control::{ControlReason, ControlResponse};
@@ -490,14 +491,7 @@ fn settled(record: &crate::run::Record, member: &str) -> bool {
 #[must_use]
 pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
     let mut command = std::process::Command::new(bin);
-    command.args(["interrupt", "--session", &address.session]);
-    if let Some(dir) = &address.session_dir {
-        command.arg("--session-dir").arg(dir);
-    }
-    command.arg("--cwd").arg(&address.cwd).arg("--compact");
-    if let Some(text) = input {
-        command.args(["--input", text]);
-    }
+    command.args(argv(address, input));
     let output = match command.output() {
         Ok(output) => output,
         Err(err) => {
@@ -528,6 +522,42 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
              said: {stderr}"
         )),
     }
+}
+
+/// The argument vector one delivery runs, built apart from the spawn so the
+/// flags it depends on are a test's to hold rather than an inspection's.
+///
+/// **`--format json` is asked for rather than assumed.** This verb reads the
+/// answer back as a [`ControlResponse`], which makes it a program consuming
+/// oneharness's machine contract, and a program says so with the flag rather than
+/// relying on which view the CLI happens to print by default — that default is
+/// becoming the human-readable one. `--compact` puts that JSON on one line; it
+/// selects no format of its own, so the pair is what states the ask. The flag is
+/// why the justfile's `oneharness-version` pins the release it does: an older CLI
+/// refuses it outright, which here would read as an answer this build could not
+/// parse.
+fn argv(address: &Address, input: Option<&str>) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec![
+        "interrupt".into(),
+        "--session".into(),
+        address.session.as_str().into(),
+    ];
+    if let Some(dir) = &address.session_dir {
+        argv.push("--session-dir".into());
+        argv.push(dir.as_os_str().into());
+    }
+    argv.push("--cwd".into());
+    argv.push(address.cwd.as_os_str().into());
+    argv.extend(
+        ["--format", "json", "--compact"]
+            .into_iter()
+            .map(OsString::from),
+    );
+    if let Some(text) = input {
+        argv.push("--input".into());
+        argv.push(text.into());
+    }
+    argv
 }
 
 /// One refusal, in the words the contract gives an operator.
@@ -648,6 +678,46 @@ mod tests {
                     .contains("not one this build can read"),
                 "{hostile} was accepted"
             );
+        }
+    }
+
+    /// Every delivery asks for the machine contract by name: `--format json`,
+    /// beside the `--compact` that puts it on one line.
+    ///
+    /// Held by a test rather than by eye because the failure it guards is
+    /// silent. `--compact` selects no format of its own, so a delivery that
+    /// only said `--compact` would, against a CLI whose default view is the
+    /// human-readable one, get prose back — which this verb reports as an answer
+    /// it could not read, leaving the turn an operator meant to redirect running.
+    ///
+    /// Driven over both address shapes and both asks, because each adds argv of
+    /// its own around the pair.
+    #[test]
+    fn every_delivery_asks_for_json_by_name() {
+        let named = Address {
+            session_dir: Some("/state/oneharness/sessions".into()),
+            ..address()
+        };
+        for target in [address(), named] {
+            for input in [None, Some("do this instead")] {
+                let words: Vec<String> = argv(&target, input)
+                    .iter()
+                    .map(|word| word.to_string_lossy().into_owned())
+                    .collect();
+                let format = words
+                    .iter()
+                    .position(|word| word == "--format")
+                    .unwrap_or_else(|| panic!("no `--format` in {words:?}"));
+                assert_eq!(
+                    words.get(format + 1).map(String::as_str),
+                    Some("json"),
+                    "`--format` is not followed by `json` in {words:?}"
+                );
+                assert!(
+                    words.iter().any(|word| word == "--compact"),
+                    "no `--compact` in {words:?}"
+                );
+            }
         }
     }
 

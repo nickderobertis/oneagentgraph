@@ -92,10 +92,15 @@ candidate — `PATH`, then `$CARGO_HOME/bin` — whose `--version` is exactly it
 used to select on capability (the first candidate answering `interrupt --help`),
 which let a *newer* CLI on `PATH` win over the pin and drive an `oneharness` CI
 never runs, so a green `check` here could sit against a red gate. The version
-matters because a two-party member's turns run through this CLI, so the
-`oneharness-core` *it* links is the one those journeys prove — the pin is the
-first release linking the core `Cargo.toml` takes, and the model-mismatch
-journeys in `tests/e2e/selection.rs` exist only there. A host whose `PATH` and
+matters twice over. A two-party member's turns run through this CLI, so the
+`oneharness-core` *it* links is the one those journeys prove, and the
+model-mismatch journeys in `tests/e2e/selection.rs` exist only where that core
+refuses a codex turn the server would run under another model. And `smoke` and
+`interrupt` pass `--format json`, which the pin is the first release to take at
+all — an older CLI refuses it as an unknown argument, so a host below the pin
+does not merely behave differently, it answers those two verbs nothing. The
+smoke and interrupt journeys are what hold that: they drive exactly the pin with
+the flag in the argv. A host whose `PATH` and
 cargo bin both hold another version is refused by name with the instruction
 (`just bootstrap`); `ONEAGENTGRAPH_TEST_ONEHARNESS` names an install outright,
 and is held to the same pin.

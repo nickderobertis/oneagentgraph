@@ -54,6 +54,7 @@
 // and would refuse an identity oneharness accepts. What this module *does* decide,
 // the classification, is the closed `Reason` set above.
 
+use std::ffi::OsString;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
@@ -245,13 +246,32 @@ fn command(program: &str) -> Command {
     command
 }
 
+/// The argument vector one smoke turn runs, built apart from the spawn so the
+/// flags it depends on are a test's to hold rather than an inspection's.
+///
+/// **`--format json` is asked for rather than assumed.** This module reads the
+/// report back with `serde_json`, which makes it a program consuming oneharness's
+/// machine contract, and a program says so with the flag rather than relying on
+/// which view the CLI happens to print by default — that default is becoming the
+/// human-readable one. `--compact` puts that JSON on one line; it selects no
+/// format of its own, so the pair is what states the ask. The flag is why the
+/// justfile's `oneharness-version` pins the release it does: an older CLI
+/// refuses it outright.
+fn argv(dir: &Path) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = vec!["run".into(), "--cwd".into(), dir.into()];
+    argv.extend(
+        ["--format", "json", "--compact", "--prompt", PROMPT]
+            .into_iter()
+            .map(OsString::from),
+    );
+    argv
+}
+
 /// One attempt, with no retry of its own: [`launch`] owns the backoff, and it
 /// only re-enters here for a refusal that spent nothing.
 fn once(oneharness_bin: &str, dir: &Path) -> Result<Verdict, Refusal> {
     let output = command(oneharness_bin)
-        .args(["run", "--cwd"])
-        .arg(dir)
-        .args(["--compact", "--prompt", PROMPT])
+        .args(argv(dir))
         .current_dir(dir)
         .output()
         .map_err(|err| Refusal {
@@ -508,6 +528,39 @@ mod tests {
         assert!(!Reason::Other("rate_limit".into()).is_fallthrough());
         assert_eq!(Reason::from("auth"), Reason::Auth);
         assert_eq!(Reason::Other("odd".into()).as_str(), "odd");
+    }
+
+    /// The smoke turn asks for the machine contract by name: `--format json`,
+    /// beside the `--compact` that puts it on one line.
+    ///
+    /// Held by a test rather than by eye because the failure it guards is
+    /// silent. `--compact` selects no format of its own, so a turn that only
+    /// said `--compact` would, against a CLI whose default view is the
+    /// human-readable one, get prose back — which this module reports as
+    /// "answered no report" after the turn has already been paid for.
+    #[test]
+    fn the_smoke_turn_asks_for_json_by_name() {
+        let words: Vec<String> = argv(Path::new("/tmp/smoke-dir"))
+            .iter()
+            .map(|word| word.to_string_lossy().into_owned())
+            .collect();
+        let format = words
+            .iter()
+            .position(|word| word == "--format")
+            .unwrap_or_else(|| panic!("no `--format` in {words:?}"));
+        assert_eq!(
+            words.get(format + 1).map(String::as_str),
+            Some("json"),
+            "`--format` is not followed by `json` in {words:?}"
+        );
+        assert!(
+            words.iter().any(|word| word == "--compact"),
+            "no `--compact` in {words:?}"
+        );
+        // The turn itself, so the flags above are read as an argument to the
+        // verb this module spends money on rather than to some other one.
+        assert_eq!(words.first().map(String::as_str), Some("run"));
+        assert!(words.iter().any(|word| word == PROMPT), "{words:?}");
     }
 
     /// `rate_limit` is not a fall-through: that record carries billed work, so a
