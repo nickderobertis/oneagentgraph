@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.4...v0.4.5) - 2026-09-18
+
+### Added
+
+- *(smoke)* ask oneharness for JSON explicitly and pin the CLI that accepts it ([#129](https://github.com/nickderobertis/oneagentgraph/pull/129))
+
 ## [0.4.4](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.3...v0.4.4) - 2026-09-17
 
 ### Fixed
