@@ -373,3 +373,14 @@ from `Cargo.toml`'s. What changed is which question each answers: the linked
 version now selects the chain, classifies each refusal and writes the report for
 a `kind: oneharness` member, while the installed CLI governs `interrupt`, `smoke`,
 and the `oneharness run` onejudge starts per side per turn.
+
+**Both spawns say `--format json`.** Each reads what it gets back with a parser —
+the smoke's report through `serde_json`, the interrupt's answer as a
+`ControlResponse` — so each is a program consuming oneharness's machine contract,
+and a program states that with the flag rather than relying on which view the CLI
+prints by default; that default is becoming the human-readable one. `--compact`
+goes on saying *how* the JSON is printed and selects no format of its own, which
+is why it is not the statement. The flag is what the `oneharness-version` pin is
+at 0.14.0 for: it is the first release taking `--format` on those verbs, and an
+older CLI refuses it as an unknown argument. Nothing in the table above moves —
+that column is the library call's, and a call has no format to print.

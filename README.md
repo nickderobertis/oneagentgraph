@@ -28,7 +28,9 @@ Windows (x86-64) are attached to every [release], with `sha256` checksums.
 
 [onejudge] is a **library dependency**, linked into this binary — there is
 nothing to install for it. `run`, `smoke`, and `interrupt` drive the [oneharness]
-CLI, so that has to be on `PATH`; `health`, `validate`, `history`, `persona`,
+CLI, so that has to be on `PATH`, at **0.14.0 or newer** — `smoke` and
+`interrupt` ask it for JSON by name (`--format json`), which an older release
+refuses as an unknown argument. `health`, `validate`, `history`, `persona`,
 `trigger`, `reset-timer`, `cancel`, and `sweep` need nothing at all — `health`
 reads oneharness's own identity sweep through its library, in this process.
 `ONEAGENTGRAPH_ONEHARNESS_BIN` names a pinned install instead.
