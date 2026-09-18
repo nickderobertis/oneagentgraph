@@ -381,6 +381,8 @@ and a program states that with the flag rather than relying on which view the CL
 prints by default; that default is becoming the human-readable one. `--compact`
 goes on saying *how* the JSON is printed and selects no format of its own, which
 is why it is not the statement. The flag is what the `oneharness-version` pin is
-at 0.14.0 for: it is the first release taking `--format` on those verbs, and an
-older CLI refuses it as an unknown argument. Nothing in the table above moves —
+chosen for: it names the first release taking `--format` on those verbs, an older
+CLI refuses it as an unknown argument, and the smoke and interrupt journeys drive
+exactly that pin with the flag in their argv — so a pin below it fails them
+rather than drifting from this paragraph. Nothing in the table above moves —
 that column is the library call's, and a call has no format to print.

@@ -31,15 +31,16 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # The one CLI this crate still spawns, pinned here because the e2e suite drives
 # it for real. onejudge has no entry: it is a library dependency now, pinned by
 # `Cargo.lock`, so there is nothing to install and nothing on `PATH` to shadow.
-# 0.14.0 is the first release taking `--format json`, which `src/smoke.rs` and
+# The pin is the first release taking `--format json`, which `src/smoke.rs` and
 # `src/control.rs` pass to say they are reading oneharness's machine contract
-# rather than whichever view its CLI defaults to printing — an older CLI refuses
-# the flag outright, so this pin is what makes that statement runnable.
+# rather than whichever view its CLI defaults to printing. An older CLI refuses
+# the flag outright, and the smoke and interrupt journeys drive exactly this pin
+# with the flag in their argv, so lowering it fails them rather than drifting.
 # A two-party member's turns run through this CLI, so the `oneharness-core` it
 # links is the one those journeys prove — the model-mismatch and overload
 # journeys in `tests/e2e/selection.rs` need the behaviour core 0.13.0 introduced,
-# and 0.14.0 links core 0.15.0, which still has it. That is a *different* version
-# from the `oneharness-core` `Cargo.toml` takes, and deliberately so: the linked
+# which the core this release links still has. That is a newer version than the
+# `oneharness-core` `Cargo.toml` takes, and deliberately separate: the linked
 # engine answers what a `kind: oneharness` member does, and this CLI answers what
 # `smoke`, `interrupt`, and onejudge's per-side turns do
 # (`docs/oneharness-library.md`). The e2e suite reads this number

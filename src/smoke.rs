@@ -255,7 +255,8 @@ fn command(program: &str) -> Command {
 /// which view the CLI happens to print by default — that default is becoming the
 /// human-readable one. `--compact` puts that JSON on one line; it selects no
 /// format of its own, so the pair is what states the ask. The flag is why the
-/// justfile's `oneharness-version` is at 0.14.0: an older CLI refuses it outright.
+/// justfile's `oneharness-version` pins the release it does: an older CLI
+/// refuses it outright.
 fn argv(dir: &Path) -> Vec<OsString> {
     let mut argv: Vec<OsString> = vec!["run".into(), "--cwd".into(), dir.into()];
     argv.extend(

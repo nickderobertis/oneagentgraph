@@ -533,8 +533,9 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
 /// relying on which view the CLI happens to print by default — that default is
 /// becoming the human-readable one. `--compact` puts that JSON on one line; it
 /// selects no format of its own, so the pair is what states the ask. The flag is
-/// why the justfile's `oneharness-version` is at 0.14.0: an older CLI refuses it
-/// outright, which here would read as an answer this build could not parse.
+/// why the justfile's `oneharness-version` pins the release it does: an older CLI
+/// refuses it outright, which here would read as an answer this build could not
+/// parse.
 fn argv(address: &Address, input: Option<&str>) -> Vec<OsString> {
     let mut argv: Vec<OsString> = vec![
         "interrupt".into(),
