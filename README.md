@@ -110,8 +110,11 @@ which — a fact, not an error.
 
 Under disk pressure, `oneagentgraph sweep --dry-run` says what scratch exists,
 what is reclaimable, and what it could not examine; without `--dry-run` it
-reclaims what it proves is dead. What counts as proof is the liveness rules in
-[the contract](docs/contract.md), which is where they are stated.
+reclaims what it proves is dead. `--format json` writes the same report as one
+JSON object a script reads by field name, and `--min-age-hours` takes a
+non-negative decimal — `0.5` is thirty minutes, the same floor `onevcs sweep`
+takes. What counts as proof, and the JSON's shape, are stated in
+[the contract](docs/contract.md).
 
 **oneagentgraph owns no harness, model, or fallback logic.** oneharness keeps
 owning identity chains, fallback, model pins, and quota classification; onejudge

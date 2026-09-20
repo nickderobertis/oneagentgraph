@@ -121,7 +121,7 @@ oneagentgraph interrupt RUN MEMBER [--input TEXT | --input-file F]   # redirect 
 oneagentgraph history [RUN] | history show ID
 oneagentgraph health                      # per-identity binding/utilization/reset, read from oneharness data
 oneagentgraph smoke [--dir PATH]
-oneagentgraph sweep [--dry-run] [--min-age-hours H]   # report this crate's own scratch, and reclaim what is provably dead
+oneagentgraph sweep [--dry-run] [--min-age-hours H] [--format json|text]   # report this crate's own scratch, and reclaim what is provably dead
 oneagentgraph persona new NAME | persona validate PATH
 ```
 
@@ -163,7 +163,28 @@ A `session` label, among an envelope's free-form extras, names the conversation 
 
 `interrupt` is `cancel`'s sibling — same addressing, different intent. `cancel` ends a turn and the worker's whole accumulated context goes with it; `interrupt` redirects one that keeps running, so a turn that went the wrong way is corrected rather than restarted. Its exit codes: `0` delivered, `3` the member has no controllable turn in flight, `2` invalid arguments or an unknown run/member, `1` a delivery that was attempted and failed. Exit `3` is **a fact, not an error**, and the answer names which one it is: the member is between turns, it has already settled, it runs on a harness with no out-of-band turn control, or it opens no controllable turn at all (a single-sided member has no onejudge agent side to open one). Every outcome publishes one `turn-interrupted`. The address comes from onejudge's report `control: {session, session_dir, cwd}` — the three values `oneharness interrupt` takes — and a member whose report carries `control: null` is the exit-`3` case; nothing about a control socket, a store directory, or a harness's control mechanism is derived here.
 
-`sweep` is the liveness rules below, made invokable. It reports every **family** of scratch this crate creates — `runs`, the run state directory, and `temp`, the throwaway directories it leaves under `TMPDIR` — naming for each the directories it examined and what became of them, and naming every family it could **not** examine and why. Every family lands in exactly one of those two lists, so `reclaimed 0 bytes` can never hide a family that was never looked at; a family whose root does not exist yet is an examined zero, and one that cannot be read is unexamined with the reason. A directory is reclaimed only when nothing can still be using it: the `owner.lock` is free, the pid-with-start-token it records no longer names a live process, and no live process carries that directory as its scratch stamp — anything else is retained, with the reason, and ending a process a directory still names is `cancel --kill`'s job rather than this verb's. `--min-age-hours` (default 24, `0` to sweep whatever is provably dead) keeps a sweep run in anger from taking run records their operator is about to read; `--dry-run` reports without removing anything. Exit 0 whatever it finds — an unexamined family is a reported fact, not a refusal.
+`sweep` is the liveness rules below, made invokable. It reports every **family** of scratch this crate creates — `runs`, the run state directory, and `temp`, the throwaway directories it leaves under `TMPDIR` — naming for each the directories it examined and what became of them, and naming every family it could **not** examine and why. Every family lands in exactly one of those two lists, so `reclaimed 0 bytes` can never hide a family that was never looked at; a family whose root does not exist yet is an examined zero, and one that cannot be read is unexamined with the reason. A directory is reclaimed only when nothing can still be using it: the `owner.lock` is free, the pid-with-start-token it records no longer names a live process, and no live process carries that directory as its scratch stamp — anything else is retained, with the reason, and ending a process a directory still names is `cancel --kill`'s job rather than this verb's. `--min-age-hours` (default 24, `0` to sweep whatever is provably dead) keeps a sweep run in anger from taking run records their operator is about to read; it is a **non-negative decimal number of hours**, so `0.5` is thirty minutes — the same value `onevcs sweep` takes, so one floor serves both — and a negative or non-numeric value is refused as a bad argument, exit 2, before any family is examined. `--dry-run` reports without removing anything. Exit 0 whatever it finds — an unexamined family is a reported fact, not a refusal.
+
+`--format json` writes the same report as **one JSON object** on stdout, serialized from the value the text form renders; `--format text` (the default) is the text form, unchanged. Its shape, whose field names are the contract a consumer reads by name — and reads from `onevcs sweep --format json` alike:
+
+```json sweep-report
+{
+  "schema_version": 1,
+  "verb": "oneagentgraph sweep",
+  "dry_run": false,
+  "min_age_hours": 4.0,
+  "examined": [
+    {"family": "runs", "path": "/home/me/.local/state/oneagentgraph/runs", "directories": 12},
+    {"family": "temp", "path": "/tmp", "directories": 3}
+  ],
+  "not_examined": [],
+  "reclaimed": [{"path": "/home/me/.local/state/oneagentgraph/runs/node-scope-1786171301679-1447994", "bytes": 12345}],
+  "retained": [{"path": "/tmp/oneagentgraph-smoke-4242", "why": "/tmp/oneagentgraph-smoke-4242 was written 300s ago, inside this sweep's 14400s floor; pass `--min-age-hours 0` to sweep whatever is provably dead"}],
+  "totals": {"examined_directories": 15, "reclaimed": 1, "reclaimed_bytes": 12345, "retained": 1}
+}
+```
+
+`examined[]` carries one entry per family this build reached, `directories` being how many of this crate's directories its root held; `not_examined[]` carries every family it did not, each with `family`, `path`, the `reason`, and a non-empty `owner` naming the verb or the concrete operator action that reaches it. The invariant both forms state: **every family named is either examined by this verb or carries an owner** — and `not_examined` is present as an empty list when there is none, said out loud rather than omitted. `reclaimed[]` is what the sweep took, or under `dry_run` what it would have taken, and `retained[]` what it kept with the proof that kept it, as `path` and `why`; `totals` counts those same lists, so the two cannot disagree. `min_age_hours` is the floor applied, in the unit the flag takes. `schema_version` moves with any change to this shape.
 
 Liveness (ported from ai-orchestrator intact): heartbeat wrapper (default deadline 60s, `ONEAGENTGRAPH_HEARTBEAT_TIMEOUT`), activity watchdog (default 1800s, `ONEAGENTGRAPH_STALL_TIMEOUT`), scratch ownership via a non-blocking kernel-exclusive lock on `owner.lock` + pid-with-start-token, descendant reaping, successor contract for processes meant to outlive their launcher.
 

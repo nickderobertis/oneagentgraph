@@ -893,6 +893,319 @@ fn sweep_names_the_family_it_could_not_examine() {
     );
 }
 
+/// `sweep --format json` is the text report as fields, and the text report is
+/// unchanged beside it.
+///
+/// The consumer this exists for ran this verb next to `onevcs sweep` and counted
+/// what each examined and reclaimed by `awk`-parsing the two human reports — a
+/// parser held to this verb's exact wording by a test of its own — and passed an
+/// integer floor because this verb refused the `0.5` its sibling took. So the
+/// journey prepares one directory per family, reads the JSON back by field name
+/// against the documented set, holds the text form to today's rendering byte
+/// for byte, and drives the floor's grammar through the binary: the JSON is
+/// added beside the text, never carved out of it.
+#[test]
+fn sweep_writes_the_same_report_as_json_and_leaves_the_text_form_unchanged() {
+    /// The keys one JSON object carries, for an exact comparison: a field the
+    /// consumer reads by name that went missing, or one it never agreed to,
+    /// both fail here.
+    fn keys(value: &serde_json::Value) -> std::collections::BTreeSet<String> {
+        value
+            .as_object()
+            .unwrap_or_else(|| panic!("not a JSON object: {value}"))
+            .keys()
+            .cloned()
+            .collect()
+    }
+    /// The same, as the set a test names.
+    fn named(names: &[&str]) -> std::collections::BTreeSet<String> {
+        names.iter().map(ToString::to_string).collect()
+    }
+    /// The one object on stdout — one, because a consumer parses the whole of
+    /// it, and a second object or a stray line is a parse failure there.
+    fn document(run: &crate::support::Run) -> serde_json::Value {
+        serde_json::from_str(&run.stdout).unwrap_or_else(|err| {
+            panic!(
+                "sweep --format json is not one JSON object ({err}):\n{}",
+                run.stdout
+            )
+        })
+    }
+    /// The invariant both forms state: every family named is examined, or
+    /// carries a non-empty owner.
+    fn assert_every_family_is_examined_or_owned(document: &serde_json::Value) {
+        for family in document["not_examined"]
+            .as_array()
+            .expect("not_examined is present as a list even when empty")
+        {
+            assert_eq!(keys(family), named(&["family", "path", "reason", "owner"]));
+            assert!(
+                family["owner"]
+                    .as_str()
+                    .is_some_and(|owner| !owner.is_empty()),
+                "a family neither examined nor owned: {family}"
+            );
+        }
+        let mut families: Vec<&str> = document["examined"]
+            .as_array()
+            .expect("examined")
+            .iter()
+            .chain(document["not_examined"].as_array().expect("not_examined"))
+            .map(|family| family["family"].as_str().expect("a family name"))
+            .collect();
+        families.sort_unstable();
+        assert_eq!(
+            families,
+            vec!["runs", "temp"],
+            "a family the verb knows of is in neither list: {document}"
+        );
+    }
+
+    let workspace = Workspace::new();
+    // The `runs` family, the way a finished run leaves it: a real record.
+    workspace
+        .run_task("fake:complete-now: leave a record behind")
+        .expect_code(0);
+    let id = run_id(&workspace.state()).expect("a run");
+    let recorded = workspace.state().join(&id);
+    // The `temp` family, in a root of this journey's own rather than the host's:
+    // one of this crate's throwaway directories, as an exited `smoke` leaves it.
+    let temp = workspace.at("tmp");
+    let smoke = temp.join("oneagentgraph-smoke-4242");
+    std::fs::create_dir_all(&smoke).expect("mkdir");
+    std::fs::write(
+        smoke.join(oneagentgraph::liveness::OWNER_LOCK_FILE),
+        format!("{} 1\n", std::process::id()),
+    )
+    .expect("write");
+    let temp_env = temp.display().to_string();
+    let env = [("TMPDIR", temp_env.as_str())];
+
+    // The floor's grammar, refused before anything is examined: a sweep in
+    // anger with a bad floor takes nothing.
+    for bad in ["-1", "abc"] {
+        let refused = workspace.run_with(&["sweep", "--min-age-hours", bad], &env);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains("invalid value") && refused.stderr.contains("--min-age-hours"),
+            "a bad floor was not refused as a bad argument: {}",
+            refused.stderr
+        );
+        assert!(
+            refused.stdout.is_empty(),
+            "a refusal must not read as a report: {}",
+            refused.stdout
+        );
+        assert!(
+            recorded.is_dir() && smoke.is_dir(),
+            "a refused sweep took something"
+        );
+    }
+
+    // Half an hour is a floor, applied as thirty minutes: a record written a
+    // moment ago is inside it, and the reason says which floor kept it.
+    let half = workspace.run_with(
+        &[
+            "sweep",
+            "--dry-run",
+            "--min-age-hours",
+            "0.5",
+            "--format",
+            "json",
+        ],
+        &env,
+    );
+    half.expect_code(0);
+    let half = document(&half);
+    assert_eq!(half["min_age_hours"], serde_json::json!(0.5));
+    assert_eq!(half["dry_run"], serde_json::json!(true));
+    assert_eq!(half["reclaimed"], serde_json::json!([]));
+    let retained = half["retained"].as_array().expect("retained");
+    assert_eq!(retained.len(), 2, "{half}");
+    for kept in retained {
+        assert_eq!(keys(kept), named(&["path", "why"]));
+        assert!(
+            kept["why"]
+                .as_str()
+                .is_some_and(|why| why.contains("inside this sweep's 1800s floor")),
+            "a floor of 0.5 hours was not applied as thirty minutes: {kept}"
+        );
+    }
+    assert_eq!(half["totals"]["retained"], serde_json::json!(2));
+
+    // The whole shape, over a root holding one directory per family.
+    let dry = workspace.run_with(
+        &[
+            "sweep",
+            "--dry-run",
+            "--min-age-hours",
+            "0",
+            "--format",
+            "json",
+        ],
+        &env,
+    );
+    dry.expect_code(0);
+    let dry = document(&dry);
+    assert_eq!(
+        keys(&dry),
+        named(&[
+            "schema_version",
+            "verb",
+            "dry_run",
+            "min_age_hours",
+            "examined",
+            "not_examined",
+            "reclaimed",
+            "retained",
+            "totals",
+        ])
+    );
+    assert_eq!(dry["schema_version"], serde_json::json!(1));
+    assert_eq!(dry["verb"], serde_json::json!("oneagentgraph sweep"));
+    assert_eq!(dry["dry_run"], serde_json::json!(true));
+    assert_eq!(dry["min_age_hours"], serde_json::json!(0.0));
+    let examined = dry["examined"].as_array().expect("examined");
+    assert_eq!(examined.len(), 2, "{dry}");
+    for family in examined {
+        assert_eq!(keys(family), named(&["family", "path", "directories"]));
+    }
+    assert_eq!(examined[0]["family"], serde_json::json!("runs"));
+    assert_eq!(
+        examined[0]["path"],
+        serde_json::json!(workspace.state().display().to_string())
+    );
+    assert_eq!(examined[1]["family"], serde_json::json!("temp"));
+    assert_eq!(examined[1]["path"], serde_json::json!(temp_env));
+    assert_eq!(examined[0]["directories"], serde_json::json!(1));
+    assert_eq!(examined[1]["directories"], serde_json::json!(1));
+    assert_eq!(dry["not_examined"], serde_json::json!([]));
+    assert_every_family_is_examined_or_owned(&dry);
+    let reclaimed = dry["reclaimed"].as_array().expect("reclaimed");
+    assert_eq!(reclaimed.len(), 2, "{dry}");
+    for directory in reclaimed {
+        assert_eq!(keys(directory), named(&["path", "bytes"]));
+        assert!(
+            directory["bytes"].as_u64().is_some_and(|bytes| bytes > 0),
+            "{directory}"
+        );
+    }
+    assert_eq!(
+        reclaimed[0]["path"],
+        serde_json::json!(recorded.display().to_string())
+    );
+    assert_eq!(
+        reclaimed[1]["path"],
+        serde_json::json!(smoke.display().to_string())
+    );
+    assert_eq!(dry["retained"], serde_json::json!([]));
+    assert_eq!(
+        keys(&dry["totals"]),
+        named(&[
+            "examined_directories",
+            "reclaimed",
+            "reclaimed_bytes",
+            "retained"
+        ])
+    );
+    let record_bytes = reclaimed[0]["bytes"].as_u64().expect("bytes");
+    let smoke_bytes = reclaimed[1]["bytes"].as_u64().expect("bytes");
+    assert_eq!(
+        dry["totals"],
+        serde_json::json!({
+            "examined_directories": 2,
+            "reclaimed": 2,
+            "reclaimed_bytes": record_bytes + smoke_bytes,
+            "retained": 0,
+        })
+    );
+
+    // The text form over the same root: what the verb rendered before it had a
+    // JSON form, byte for byte, with and without `--format text` — and built
+    // from the JSON's own content, so the two cannot say different things.
+    let expected_text = format!(
+        "sweep: examined family \"runs\" at {state} — 1 directory\n\
+         sweep:   would reclaim {record} ({record_size})\n\
+         sweep: examined family \"temp\" at {temp} — 1 directory\n\
+         sweep:   would reclaim {smoke} ({smoke_size})\n\
+         sweep: would reclaim {total} from 2 directories; of the scratch families this \
+         oneagentgraph build knows it writes, examined: runs, temp; unexamined: none; this \
+         covers those families only — not the host, and not scratch another tool owns\n",
+        state = workspace.state().display(),
+        record = recorded.display(),
+        record_size = oneagentgraph::sweep::human(record_bytes),
+        temp = temp.display(),
+        smoke = smoke.display(),
+        smoke_size = oneagentgraph::sweep::human(smoke_bytes),
+        total = oneagentgraph::sweep::human(record_bytes + smoke_bytes),
+    );
+    let text = workspace.run_with(&["sweep", "--dry-run", "--min-age-hours", "0"], &env);
+    text.expect_code(0);
+    assert_eq!(text.stdout, expected_text, "the text form drifted");
+    let explicit = workspace.run_with(
+        &[
+            "sweep",
+            "--dry-run",
+            "--min-age-hours",
+            "0",
+            "--format",
+            "text",
+        ],
+        &env,
+    );
+    explicit.expect_code(0);
+    assert_eq!(
+        explicit.stdout, text.stdout,
+        "`--format text` is not the default form"
+    );
+    assert!(
+        recorded.is_dir() && smoke.is_dir(),
+        "a dry run took something"
+    );
+
+    // A family the verb could not reach lands in `not_examined` with its owner,
+    // and the invariant still holds — the JSON says who reaches it, where the
+    // text says only that this sweep did not.
+    let blocked = workspace.write("not-a-directory", "").display().to_string();
+    let partial = workspace.run_with(
+        &[
+            "sweep",
+            "--dry-run",
+            "--min-age-hours",
+            "0",
+            "--format",
+            "json",
+        ],
+        &[("TMPDIR", &blocked)],
+    );
+    partial.expect_code(0);
+    let partial = document(&partial);
+    assert_eq!(partial["examined"].as_array().map(Vec::len), Some(1));
+    let unexamined = partial["not_examined"].as_array().expect("not_examined");
+    assert_eq!(unexamined.len(), 1, "{partial}");
+    assert_eq!(unexamined[0]["family"], serde_json::json!("temp"));
+    assert_eq!(unexamined[0]["path"], serde_json::json!(blocked));
+    assert!(
+        unexamined[0]["owner"]
+            .as_str()
+            .is_some_and(|owner| owner.contains("oneagentgraph sweep")),
+        "{partial}"
+    );
+    assert_every_family_is_examined_or_owned(&partial);
+
+    // And in anger: the same two directories, taken, under `dry_run: false`.
+    let swept = workspace.run_with(&["sweep", "--min-age-hours", "0", "--format", "json"], &env);
+    swept.expect_code(0);
+    let swept = document(&swept);
+    assert_eq!(swept["dry_run"], serde_json::json!(false));
+    assert_eq!(swept["reclaimed"], dry["reclaimed"]);
+    assert_eq!(swept["totals"], dry["totals"]);
+    assert!(
+        !recorded.exists() && !smoke.exists(),
+        "a sweep left behind what it reported reclaiming"
+    );
+}
+
 /// `health` forwards what oneharness knows about each identity — through
 /// oneharness's own library, with no `oneharness` process anywhere — and says why
 /// there is no answer when there is none.
