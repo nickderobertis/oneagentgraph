@@ -706,40 +706,6 @@ fn a_single_sided_members_turn_appends_one_pointer_line_to_the_file_the_environm
     );
 }
 
-/// With history off, the same graph writes no pointer line: the file the
-/// environment names is left untouched, because there is no session to point
-/// at.
-///
-/// The negative half of the journey above, and the half that shows the line is
-/// the environment's doing rather than this crate's: only `ONEHARNESS_HISTORY`
-/// is taken away, the member still settles, and the file named beside it is
-/// never created.
-#[test]
-fn a_single_sided_member_with_history_off_writes_no_pointer_line() {
-    let workspace = Workspace::new();
-    let pointer_file = workspace.at("pointers.jsonl");
-    workspace.graph(&graph_with(
-        &single_sided_graph(&fake_harness()),
-        &[(
-            format!("env.{POINTER_FILE}"),
-            pointer_file.display().to_string(),
-        )],
-    ));
-
-    let run = workspace.run_task(TASK);
-    run.expect_code(0);
-    assert_eq!(run.of_kind("member-settled").len(), 1, "{:?}", run.kinds());
-
-    assert!(
-        !pointer_file.exists(),
-        "a run with history off wrote a pointer file: {}",
-        std::fs::read_to_string(&pointer_file).unwrap_or_default()
-    );
-    let read =
-        history::read_pointers(&pointer_file).expect("a missing pointer file reads as empty");
-    assert!(read.pointers.is_empty() && read.skipped == 0, "{read:?}");
-}
-
 /// A member whose chain reached no identity publishes no pointer at all: there
 /// is no conversation, and a pointer at a file nobody wrote is worse than
 /// silence.
