@@ -27,6 +27,13 @@
 //! of [`Report::lines`] names whose families it counted: an empty unexamined
 //! list was read as "nothing is accumulating" once, while the disk was full.
 //!
+//! One [`Report`], two renderings: [`Report::lines`] for an operator, and
+//! [`Report::document`] for a program — the [`Document`] `--format json` writes,
+//! whose `examined` and `not_examined` lists are the same two lists, so a
+//! consumer counting from the JSON counts what the text says. Before it, the
+//! one consumer counted by parsing the text with `awk`, held to this module's
+//! exact wording by a test of its own.
+//!
 //! # What is never taken
 //!
 //! Three proofs, in this order, and any one of them retains the directory:
@@ -54,6 +61,8 @@
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+use serde::{Deserialize, Serialize};
 
 use crate::scratch::{reclaimable, stamped_for, SCRATCH_PREFIX};
 
@@ -213,8 +222,119 @@ pub struct FamilySweep {
 pub struct Report {
     /// Whether this sweep removed anything.
     pub mode: Mode,
+    /// The floor it applied: how long a directory is left alone after its last
+    /// write. Carried so the report says what it was judged against, rather
+    /// than leaving a reader to guess which flag produced it.
+    pub min_age: Duration,
     /// Every family, in the order [`families`] lists them.
     pub families: Vec<FamilySweep>,
+}
+
+/// The version of the [`Document`] `--format json` writes. Bumped with any
+/// change to that shape, so a consumer pinned to one reads what it expects.
+pub const DOCUMENT_SCHEMA_VERSION: u32 = 1;
+
+/// The verb a [`Document`] names as its author. A consumer reading this beside
+/// `onevcs sweep --format json` tells the two documents apart by it.
+pub const VERB: &str = "oneagentgraph sweep";
+
+/// The machine-readable report: what `--format json` writes, serialized from
+/// the same [`Report`] the text form renders.
+///
+/// The field names are the contract, stated in `docs/contract.md` and read by
+/// name from a consumer that reads `onevcs sweep --format json` the same way.
+/// Both lists are always present — an empty `not_examined` is said out loud,
+/// because a consumer that has to infer it from an absent key cannot tell an
+/// empty list from a document that never had one. Unknown fields are refused on
+/// the way back in, so a document from a newer schema is a loud failure rather
+/// than a silently dropped field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Document {
+    /// [`DOCUMENT_SCHEMA_VERSION`].
+    pub schema_version: u32,
+    /// [`VERB`].
+    pub verb: String,
+    /// Whether this was a [`Mode::Report`] sweep, which removed nothing.
+    pub dry_run: bool,
+    /// The floor, in the unit the flag takes.
+    pub min_age_hours: f64,
+    /// Every family this sweep examined, with how many directories it found.
+    pub examined: Vec<ExaminedFamily>,
+    /// Every family it did not, each with the reason and who reaches it.
+    pub not_examined: Vec<NotExaminedFamily>,
+    /// Every directory it took — or, under `dry_run`, would have taken.
+    pub reclaimed: Vec<ReclaimedDirectory>,
+    /// Every directory it kept, with the proof that kept it.
+    pub retained: Vec<RetainedDirectory>,
+    /// The counts a consumer reads without walking the lists.
+    pub totals: Totals,
+}
+
+/// One family a [`Document`] says was examined.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExaminedFamily {
+    /// [`FamilyName::as_str`].
+    pub family: String,
+    /// The root that was read.
+    pub path: String,
+    /// How many of this crate's directories it held.
+    pub directories: usize,
+}
+
+/// One family a [`Document`] says was not examined.
+///
+/// The invariant both renderings hold: every family named is either examined
+/// or carries an `owner` — the verb, or the concrete operator action, that
+/// reaches it. A family this crate's sweep could not read is still this verb's:
+/// its owner names what has to be true of the root for the next sweep to reach
+/// it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotExaminedFamily {
+    /// [`FamilyName::as_str`].
+    pub family: String,
+    /// The root that could not be read.
+    pub path: String,
+    /// Why not.
+    pub reason: String,
+    /// Who reaches it. Never empty.
+    pub owner: String,
+}
+
+/// One directory a [`Document`] says was reclaimed, or would be.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReclaimedDirectory {
+    /// Where it was.
+    pub path: String,
+    /// What removing it gave back.
+    pub bytes: u64,
+}
+
+/// One directory a [`Document`] says was retained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedDirectory {
+    /// Where it is.
+    pub path: String,
+    /// The proof that kept it, as [`Disposition::Retained`] phrases it.
+    pub why: String,
+}
+
+/// The counts a [`Document`] closes with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Totals {
+    /// Every directory across every examined family.
+    pub examined_directories: usize,
+    /// How many were reclaimed, or would be.
+    pub reclaimed: usize,
+    /// What they gave back, or would.
+    pub reclaimed_bytes: u64,
+    /// How many were kept.
+    pub retained: usize,
 }
 
 impl Report {
@@ -271,6 +391,75 @@ impl Report {
             }
         }
         (examined, unexamined)
+    }
+
+    /// The report a program reads: the same lists and totals as
+    /// [`Report::lines`], as fields rather than wording.
+    ///
+    /// `reclaimed` answers for both modes the way [`Report::reclaimable_bytes`]
+    /// does — under `dry_run` it is what the sweep would have taken — and
+    /// `totals` counts the same entries the lists carry, so the two cannot
+    /// disagree.
+    #[must_use]
+    pub fn document(&self) -> Document {
+        let mut examined = Vec::new();
+        let mut not_examined = Vec::new();
+        let mut reclaimed = Vec::new();
+        let mut retained = Vec::new();
+        for family in &self.families {
+            match &family.examination {
+                Examination::Examined(entries) => {
+                    examined.push(ExaminedFamily {
+                        family: family.name.as_str().to_string(),
+                        path: family.root.display().to_string(),
+                        directories: entries.len(),
+                    });
+                    for entry in entries {
+                        match &entry.disposition {
+                            Disposition::Reclaimed | Disposition::Reclaimable => {
+                                reclaimed.push(ReclaimedDirectory {
+                                    path: entry.path.display().to_string(),
+                                    bytes: entry.bytes,
+                                });
+                            }
+                            Disposition::Retained(reason) => retained.push(RetainedDirectory {
+                                path: entry.path.display().to_string(),
+                                why: reason.clone(),
+                            }),
+                        }
+                    }
+                }
+                Examination::Unexamined(reason) => not_examined.push(NotExaminedFamily {
+                    family: family.name.as_str().to_string(),
+                    path: family.root.display().to_string(),
+                    reason: reason.clone(),
+                    // Nothing but this verb reaches its own families, so the
+                    // owner is this verb — with what has to change first,
+                    // because "run it again" alone would name the sweep that
+                    // just failed to.
+                    owner: format!(
+                        "{VERB}, once {} is a directory this process can list",
+                        family.root.display()
+                    ),
+                }),
+            }
+        }
+        Document {
+            schema_version: DOCUMENT_SCHEMA_VERSION,
+            verb: VERB.to_string(),
+            dry_run: self.mode == Mode::Report,
+            min_age_hours: self.min_age.as_secs_f64() / 3600.0,
+            totals: Totals {
+                examined_directories: examined.iter().map(|family| family.directories).sum(),
+                reclaimed: reclaimed.len(),
+                reclaimed_bytes: self.reclaimable_bytes(),
+                retained: retained.len(),
+            },
+            examined,
+            not_examined,
+            reclaimed,
+            retained,
+        }
     }
 
     /// The report an operator reads, one line at a time.
@@ -381,6 +570,7 @@ pub fn human(bytes: u64) -> String {
 pub fn sweep(families: &[Family], mode: Mode, min_age: Duration, now: SystemTime) -> Report {
     Report {
         mode,
+        min_age,
         families: families
             .iter()
             .map(|family| FamilySweep {
@@ -891,6 +1081,157 @@ mod tests {
         );
         assert_eq!(report.reclaimable_count(), 0);
         assert!(fresh.is_dir());
+    }
+
+    /// The document is the report's lists as fields: what the text says was
+    /// examined, taken, and kept is what the JSON carries, and the totals count
+    /// those same entries.
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn the_document_carries_the_same_lists_the_text_renders() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let state = root.path().join("state");
+        let temp = root.path().join("temp");
+        let dead = state.join("node-scope-dead");
+        abandoned(&dead);
+        std::fs::write(dead.join("events.ndjson"), vec![b'x'; 4096]).expect("write");
+        let live = state.join("node-scope-live");
+        let _owned = Owned::claim(&live).expect("claim");
+        let ours = temp.join(format!("{SCRATCH_PREFIX}smoke-1"));
+        abandoned(&ours);
+
+        let report = sweep(
+            &two_families(&state, &temp),
+            Mode::Report,
+            Duration::from_secs(30 * 60),
+            SystemTime::now() + Duration::from_secs(60 * 60),
+        );
+        let document = report.document();
+        assert_eq!(document.schema_version, DOCUMENT_SCHEMA_VERSION);
+        assert_eq!(document.verb, VERB);
+        assert!(document.dry_run, "a report-only sweep is a dry run");
+        assert!((document.min_age_hours - 0.5).abs() < f64::EPSILON);
+        assert_eq!(
+            document.examined,
+            vec![
+                ExaminedFamily {
+                    family: RUNS_FAMILY.to_string(),
+                    path: state.display().to_string(),
+                    directories: 2,
+                },
+                ExaminedFamily {
+                    family: TEMP_FAMILY.to_string(),
+                    path: temp.display().to_string(),
+                    directories: 1,
+                },
+            ]
+        );
+        assert!(document.not_examined.is_empty());
+        assert_eq!(
+            document.reclaimed,
+            vec![
+                ReclaimedDirectory {
+                    path: dead.display().to_string(),
+                    bytes: 4096
+                        + std::fs::metadata(dead.join(OWNER_LOCK_FILE))
+                            .expect("lock")
+                            .len(),
+                },
+                ReclaimedDirectory {
+                    path: ours.display().to_string(),
+                    bytes: std::fs::metadata(ours.join(OWNER_LOCK_FILE))
+                        .expect("lock")
+                        .len(),
+                },
+            ]
+        );
+        assert_eq!(document.retained.len(), 1);
+        assert_eq!(document.retained[0].path, live.display().to_string());
+        assert!(
+            document.retained[0]
+                .why
+                .contains(&live.display().to_string()),
+            "{}",
+            document.retained[0].why
+        );
+        assert_eq!(
+            document.totals,
+            Totals {
+                examined_directories: 3,
+                reclaimed: 2,
+                reclaimed_bytes: report.reclaimable_bytes(),
+                retained: 1,
+            }
+        );
+        // And the same sweep in anger is not a dry run.
+        let taken = sweep(
+            &two_families(&state, &temp),
+            Mode::Reclaim,
+            Duration::ZERO,
+            SystemTime::now(),
+        );
+        assert!(!taken.document().dry_run);
+        assert_eq!(taken.document().totals.reclaimed, 2);
+    }
+
+    /// A family the sweep could not read lands in `not_examined` with the reason
+    /// and an owner — never in `examined` as a zero, and never without saying
+    /// who reaches it.
+    #[test]
+    fn the_document_names_an_unexamined_family_with_its_reason_and_owner() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let blocked = root.path().join("not-a-directory");
+        std::fs::write(&blocked, "").expect("write");
+
+        let document = sweep(
+            &two_families(&blocked, root.path()),
+            Mode::Reclaim,
+            Duration::ZERO,
+            SystemTime::now(),
+        )
+        .document();
+        assert_eq!(document.examined.len(), 1);
+        assert_eq!(document.examined[0].family, TEMP_FAMILY);
+        assert_eq!(document.not_examined.len(), 1);
+        let unexamined = &document.not_examined[0];
+        assert_eq!(unexamined.family, RUNS_FAMILY);
+        assert_eq!(unexamined.path, blocked.display().to_string());
+        assert!(!unexamined.reason.is_empty());
+        assert!(
+            unexamined.owner.contains(VERB) && unexamined.owner.contains(&unexamined.path),
+            "an owner that names neither the verb nor what it needs: {}",
+            unexamined.owner
+        );
+        assert_eq!(document.totals.examined_directories, 0);
+    }
+
+    /// The document round-trips through its own type and refuses a field it
+    /// does not name, so a consumer reading it back by name reads what was
+    /// written — and a newer schema fails loudly rather than dropping a field.
+    #[test]
+    fn the_document_round_trips_and_refuses_an_unknown_field() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let document = sweep(
+            &two_families(&root.path().join("state"), root.path()),
+            Mode::Report,
+            DEFAULT_MIN_AGE,
+            SystemTime::now(),
+        )
+        .document();
+        let written = serde_json::to_value(&document).expect("serializes");
+        assert_eq!(written["min_age_hours"], serde_json::json!(24.0));
+        assert_eq!(
+            written["not_examined"],
+            serde_json::json!([]),
+            "an empty list is said out loud rather than omitted"
+        );
+        assert_eq!(
+            serde_json::from_value::<Document>(written.clone()).expect("round-trips"),
+            document
+        );
+        let mut newer = written;
+        newer["surprise"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Document>(newer).is_err());
     }
 
     /// Sizes are rendered the way a filesystem is read, and the boundaries are

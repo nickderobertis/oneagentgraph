@@ -676,6 +676,9 @@ fn ensure_git_worktree(dir: &std::path::Path) -> Result<(), Error> {
 /// defaults. Exit 0 whatever it finds: a family it could not examine is a
 /// *reported* fact, not a refusal — the report names it, and an operator acting
 /// on that is the whole point of the verb.
+///
+/// One report, rendered the way `--format` asks: the lines an operator reads,
+/// or one JSON object a program reads the same lists and totals from.
 fn sweep_scratch(args: &SweepArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     let families = sweep::families(state_dir(env), temp_root(env));
     let mode = if args.dry_run {
@@ -686,11 +689,19 @@ fn sweep_scratch(args: &SweepArgs, env: &BTreeMap<String, String>) -> Result<i32
     let report = sweep::sweep(
         &families,
         mode,
-        std::time::Duration::from_secs(args.min_age_hours.saturating_mul(3600)),
+        args.min_age_hours.as_duration(),
         std::time::SystemTime::now(),
     );
-    for line in report.lines() {
-        println!("{line}");
+    match args.format {
+        OutputFormat::Text => {
+            for line in report.lines() {
+                println!("{line}");
+            }
+        }
+        OutputFormat::Json => println!(
+            "{}",
+            serde_json::to_string_pretty(&report.document()).unwrap_or_default()
+        ),
     }
     Ok(EXIT_SUCCESS)
 }
