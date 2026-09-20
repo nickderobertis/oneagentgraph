@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use oneagentgraph::cli::DEFAULT_MIN_AGE_HOURS;
+use oneagentgraph::cli::{MinAgeHours, DEFAULT_MIN_AGE_HOURS};
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
     PreTurn, Schedule, DEFAULT_PRE_TURN_SECONDS, FIRST_BACKGROUND_VERSION,
@@ -37,7 +37,9 @@ use oneagentgraph::liveness::{
 };
 use oneagentgraph::run::{RunId, Started};
 use oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE;
-use oneagentgraph::sweep::{families, RUNS_FAMILY, TEMP_FAMILY};
+use oneagentgraph::sweep::{
+    families, Document, DOCUMENT_SCHEMA_VERSION, RUNS_FAMILY, TEMP_FAMILY, VERB,
+};
 use onemessagebus_agent::AgentFilter;
 use serde_json::{json, Value};
 
@@ -1396,6 +1398,106 @@ fn the_documented_sweep_names_the_families_and_the_floor_the_crate_applies() {
     assert_eq!(named, vec![RUNS_FAMILY, TEMP_FAMILY]);
 }
 
+/// The documented `--format json` report, driven through the type the binary
+/// serializes — so a field the document names and the crate does not carry, or
+/// the reverse, fails here rather than in the consumer that reads it by name.
+///
+/// The invariant is checked on the example as well as stated by the prose: every
+/// family it names is examined or carries an owner, and `not_examined` is there
+/// even when empty.
+#[test]
+fn the_documented_sweep_report_round_trips_through_the_document_type() {
+    let documented: Value = serde_json::from_str(&fenced_block("json sweep-report"))
+        .expect("the sweep-report example is not JSON");
+    let keys: BTreeSet<&str> = documented
+        .as_object()
+        .expect("a mapping")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            "schema_version",
+            "verb",
+            "dry_run",
+            "min_age_hours",
+            "examined",
+            "not_examined",
+            "reclaimed",
+            "retained",
+            "totals",
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+    );
+
+    let document: Document = serde_json::from_value(documented.clone())
+        .expect("the documented sweep report does not parse");
+    assert_eq!(document.schema_version, DOCUMENT_SCHEMA_VERSION);
+    assert_eq!(document.verb, VERB);
+    assert_eq!(
+        serde_json::to_value(&document).expect("serializes"),
+        documented,
+        "serializing the parsed report must reproduce the documented shape"
+    );
+
+    // The example names both families the crate sweeps, as examined; a family
+    // that were neither examined nor owned would be one the document lets a
+    // reader forget.
+    let examined: Vec<&str> = document
+        .examined
+        .iter()
+        .map(|family| family.family.as_str())
+        .collect();
+    assert_eq!(examined, vec![RUNS_FAMILY, TEMP_FAMILY]);
+    for family in &document.not_examined {
+        assert!(
+            !family.owner.is_empty(),
+            "a not_examined family without an owner: {family:?}"
+        );
+    }
+    assert!(
+        documented["not_examined"].is_array(),
+        "not_examined must be present as a list even when empty"
+    );
+    let totals = &document.totals;
+    assert_eq!(
+        totals.examined_directories,
+        document
+            .examined
+            .iter()
+            .map(|family| family.directories)
+            .sum::<usize>()
+    );
+    assert_eq!(totals.reclaimed, document.reclaimed.len());
+    assert_eq!(
+        totals.reclaimed_bytes,
+        document.reclaimed.iter().map(|dir| dir.bytes).sum::<u64>()
+    );
+    assert_eq!(totals.retained, document.retained.len());
+
+    // The prose states the invariant and the floor's grammar in so many words,
+    // and the grammar it states is the one the flag parses.
+    assert!(
+        CONTRACT.contains("every family named is either examined by this verb or carries an owner"),
+        "the contract no longer states the sweep invariant"
+    );
+    assert!(
+        CONTRACT.contains("non-negative decimal number of hours"),
+        "the contract no longer states the floor's grammar"
+    );
+    assert_eq!(
+        "0.5"
+            .parse::<MinAgeHours>()
+            .expect("the documented `0.5`")
+            .as_duration(),
+        std::time::Duration::from_secs(30 * 60)
+    );
+    assert!("-1".parse::<MinAgeHours>().is_err());
+    assert!("abc".parse::<MinAgeHours>().is_err());
+}
+
 #[test]
 fn the_documented_graph_round_trips_through_the_config_schema() {
     let yaml = fenced_block("yaml");
@@ -2626,6 +2728,7 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "--kill",
         "--dry-run",
         "--min-age-hours",
+        "--format",
         "--input",
         "--input-file",
     ] {
