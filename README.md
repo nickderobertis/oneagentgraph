@@ -35,6 +35,15 @@ name (`--format json`), which an older release refuses as an unknown argument. `
 reads oneharness's own identity sweep through its library, in this process.
 `ONEAGENTGRAPH_ONEHARNESS_BIN` names a pinned install instead.
 
+A `kind: oneharness` member's turn runs on the linked `oneharness-core` in this
+process too, so what that engine reads from the environment it reads from the
+graph's `env:` block: with `ONEHARNESS_HISTORY=1` and
+`ONEHARNESS_HISTORY_POINTER_FILE=<file>` there, every such turn appends one
+pointer line to that file saying where its session went — oneharness's own
+contract, read back through the core's `io::history::read_pointers`. Nothing
+here writes or sets it; the requirement in [`Cargo.toml`](Cargo.toml) is what
+decides the linked core has it, and `tests/inventory.rs` holds it there.
+
 ## What it does
 
 ```bash

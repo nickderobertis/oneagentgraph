@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(deps)* relink `oneharness-core` 0.17.0 and `onejudge` 0.13.3 together, so a `kind: oneharness` member's in-process turn runs on the core that writes a per-run history pointer line (`ONEHARNESS_HISTORY_POINTER_FILE`) and a two-party member's sides link the same core; `tests/inventory.rs` holds `io::history::read_pointers` / `domain::history::HistoryPointer` as a floor and `tests/e2e/session.rs` reads the line back through the real graph
+
 ## [0.4.5](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.4...v0.4.5) - 2026-09-18
 
 ### Added

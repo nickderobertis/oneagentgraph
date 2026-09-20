@@ -313,12 +313,27 @@ test-doubles = []
 # agent turn. This crate does not derive that outcome; its command-judge e2e
 # drives the composed member and records onejudge's own frame.
 #
-# 0.13.1 is the eighteenth raise, and moves in lockstep with oneharness-core
-# 0.14.0 below. It reads that core's `server_overloaded` failure kind and
+# 0.13.1 is the eighteenth raise, and moved in lockstep with oneharness-core
+# 0.14.0. It reads that core's `server_overloaded` failure kind and
 # `server-overloaded` fall-through reason, so a temporarily overloaded Codex
 # identity retries and then advances through a two-party member's chain instead
 # of ending the member.
-onejudge = { version = "0.13.1", features = ["cli"] }
+#
+# 0.13.3 is the nineteenth raise, and moves in lockstep with oneharness-core
+# 0.17.0 below for the reason 0.5.3 and 0.8.1 did: its published requirement is
+# `^0.17.0`, so the two are edited together or the graph carries two cores —
+# the state `tests/inventory.rs` refuses. Nothing this crate calls changed
+# between 0.13.1 and 0.13.3 (`engine.rs` is byte-identical); what moved is what
+# each release links and asks of the CLI it spawns:
+#
+#   1. 0.13.2 asks the `oneharness run` it spawns for its JSON report by name
+#      (`--format json`), the way `src/smoke.rs` and `src/control.rs` already
+#      do, which is why the CLI pin in the `justfile` is the first release that
+#      accepts the flag.
+#   2. 0.13.3 links the core that writes a per-run history pointer line, so a
+#      two-party member's sides run on the same core a single-sided member's
+#      in-process turn does — one engine, one pointer contract.
+onejudge = { version = "0.13.3", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The stack's typed message bus, linked rather than restated. The envelope, its
 # labels and sources, the filter grammar, the payload bounds and redaction, the
@@ -343,14 +358,38 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.14.0; that was re-measured for this bump rather than assumed, and
+# 0.17.0; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.14.0 is what is linked, and it is linked exactly once.** In addition to the
-# 0.13.0 model-binding behavior below, it classifies Codex's transient overload
-# as `server_overloaded` and advances the identity chain with
-# `server-overloaded` after retrying that identity. This is the release carrying
-# oh-1295, and onejudge 0.13.1 asks for the same core release.
+# **0.17.0 is what is linked, and it is linked exactly once.** It is taken for
+# the history pointer: with history on, every harness run the core begins
+# appends one `domain::history::HistoryPointer` line to the file
+# `ONEHARNESS_HISTORY_POINTER_FILE` names — `history_id`, and the
+# `history_dir` / `history_project` / `history_session` this crate's own
+# `oneharness-session` event already spells — and `io::history::read_pointers`
+# reads it back typed. A `kind: oneharness` member's turn is this core called
+# in-process, with no `oneharness` binary between it and the environment, so
+# the line reaches a consumer of that turn only through the core linked here;
+# `src/harness.rs` deliberately sets no `history_pointer_file` of its own, so
+# the environment stays the one way a consumer names the file.
+# `tests/inventory.rs` holds the two names as a floor, and
+# `tests/e2e/session.rs` drives a single-sided member through the real graph
+# and reads the line back. 0.17.0 is a breaking minor for the new `RunRequest`
+# field; the literal in `src/harness.rs` spreads `..RunRequest::default()`, so
+# it compiles unchanged. onejudge 0.13.3 asks for the same core release.
+#
+# The three minors between 0.14.0 and it forced nothing here, each re-read
+# against its CHANGELOG entry: 0.14.1 reads a null Claude rate-limit snapshot
+# as a transient; 0.15.0's break is the CLI's `--format`, which `src/smoke.rs`
+# and `src/control.rs` already pass; 0.16.0's break moves `run_mode`'s default
+# to `fallback` and the CLI's stdout to text — the request here leaves
+# `run_mode` to the config, every config this suite writes says `fallback`
+# outright, and no stdout is read from the library; 0.16.1 falls through a
+# clean-exit rate limit and honours a base `ONEHARNESS_BIN_<ID>` for a variant.
+#
+# 0.14.0, carried along, classifies Codex's transient overload as
+# `server_overloaded` and advances the identity chain with `server-overloaded`
+# after retrying that identity (oh-1295).
 #
 # 0.13.0 is the release
 # that runs a controlled codex turn under its candidate's model: the app-server
@@ -377,7 +416,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # requirement. The rule that went with the split is retired with it, because
 # there is no longer a second set of types to confuse this one with; what remains
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.14.0"
+oneharness-core = "0.17.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

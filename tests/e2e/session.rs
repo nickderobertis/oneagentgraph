@@ -21,13 +21,23 @@ use serde_json::Value;
 #[cfg(unix)]
 use crate::support::make_executable;
 use crate::support::{
-    as_env, assert_session_labels, bounds, fake_harness, graph_with, two_party_graph, Run,
-    Workspace, FAKE_HARNESS_KEY,
+    as_env, assert_session_labels, bounds, fake_harness, graph_with, single_sided_graph,
+    two_party_graph, Run, Workspace, FAKE_HARNESS_KEY,
 };
 
 /// The task these journeys run: one turn, completed, so a member reaches its
 /// settle and both sides of the conversation write a history record.
 const TASK: &str = "fake:complete-now: say something worth reading back";
+
+/// oneharness's own two variables for the pointer journeys below: the one that
+/// turns history on, and the one that names the file every harness run with
+/// history on appends its pointer line to. Spelled once, here, because the
+/// README restates them for a user and is held to these.
+const HISTORY_ON: &str = "ONEHARNESS_HISTORY";
+const POINTER_FILE: &str = "ONEHARNESS_HISTORY_POINTER_FILE";
+
+/// The README, which is the one place outside the journeys that names them.
+const README: &str = include_str!("../../README.md");
 
 fn sessions(run: &Run) -> Vec<Value> {
     run.of_kind("oneharness-session")
@@ -562,6 +572,138 @@ fn the_text_rendering_names_the_record_a_pointer_opens() {
             "a rendered pointer names no record: {line}"
         );
     }
+}
+
+/// A single-sided member's one turn appends one pointer line to the file the
+/// graph's environment names, and that line opens the session the member's own
+/// report says it had.
+///
+/// The turn is `oneharness_core::io::run::run_supervised` on a thread of this
+/// process — no `oneharness` binary sits between the engine and the
+/// environment — so the per-run pointer line the core writes for every harness
+/// run reaches a consumer of *this* turn only through the core this crate links,
+/// and only from the environment it inherits: `ONEHARNESS_HISTORY=1` and
+/// `ONEHARNESS_HISTORY_POINTER_FILE` in the graph's `env:` block and nothing
+/// else configured, exactly as a host that starts many runs names one file for
+/// all of them. Nothing here is this crate's own behaviour — `src/harness.rs`
+/// sets no `history_pointer_file` — which is why the journey drives it end to
+/// end rather than asserting on a request field.
+///
+/// The evidence the line is held to is the member's own `member-settled` report
+/// — the core's `RunReport`, whose `history_file` is the session the run wrote
+/// — because a single-sided member publishes no `oneharness-session` event:
+/// that event is read off onejudge's per-side telemetry and is a two-party
+/// member's. The report names the file and not the record inside it, so the
+/// pointer's `history_id` is held against the one record that file holds — a
+/// session fresh to this run, with one harness run in it. The pointer's three
+/// path fields are resolved through oneharness's own `find_session_path`, the
+/// way a consumer resolves that event's, rather than joined back together here.
+#[test]
+fn a_single_sided_members_turn_appends_one_pointer_line_to_the_file_the_environment_names() {
+    let workspace = Workspace::new();
+    let pointer_file = workspace.at("pointers.jsonl");
+    workspace.graph(&graph_with(
+        &single_sided_graph(&fake_harness()),
+        &[
+            (format!("env.{HISTORY_ON}"), "1".to_string()),
+            (
+                format!("env.{POINTER_FILE}"),
+                pointer_file.display().to_string(),
+            ),
+        ],
+    ));
+
+    let run = workspace.run_task(TASK);
+    run.expect_code(0);
+
+    // The README tells a user these two names and nothing else here restates
+    // them; held to the ones this journey just drove through the real core, so
+    // a name oneharness moved fails here rather than staying in the prose.
+    for name in [HISTORY_ON, POINTER_FILE] {
+        assert!(
+            README.contains(&format!("`{name}")),
+            "README.md no longer names `{name}`, which this journey drives"
+        );
+    }
+
+    // What the member itself says about its session: the one run report its
+    // settle stored, naming the session file the one candidate that ran wrote.
+    let settled = run.of_kind("member-settled");
+    assert_eq!(settled.len(), 1, "{:?}", run.kinds());
+    let report_path = settled[0]["payload"]["report_path"]
+        .as_str()
+        .expect("a settled member says where its report went");
+    let report: Value = serde_json::from_str(
+        &std::fs::read_to_string(report_path).expect("the stored report reads back"),
+    )
+    .expect("the stored report is the run report");
+    assert_eq!(
+        report["results"].as_array().map(Vec::len),
+        Some(1),
+        "one candidate ran: {report}"
+    );
+    let history_file = report["history_file"]
+        .as_str()
+        .expect("with history on, the report names its session file");
+    let records = history::read_session_display(Path::new(history_file))
+        .expect("the session file the report names reads back");
+    assert_eq!(
+        records.len(),
+        1,
+        "one harness run, so one record: {records:?}"
+    );
+    let history_id = records[0]["history_id"]
+        .as_str()
+        .expect("a record names its id");
+
+    let read = history::read_pointers(&pointer_file)
+        .unwrap_or_else(|err| panic!("{} did not read back: {err}", pointer_file.display()));
+    assert_eq!(
+        read.skipped,
+        0,
+        "a line in {} was not a complete pointer",
+        pointer_file.display()
+    );
+    assert_eq!(
+        read.pointers.len(),
+        1,
+        "one harness run, so one pointer line: {:?}",
+        read.pointers
+    );
+    let pointer = &read.pointers[0];
+    assert_eq!(
+        pointer.history_id().to_string(),
+        history_id,
+        "the pointer names a record other than the one in the session the member's report names"
+    );
+    // The consumer's own resolution, step for step, off the pointer's three
+    // path fields — the same three the `oneharness-session` event spells.
+    let dir = history::resolve_dir(Some(pointer.history_dir())).expect("the pointer named a store");
+    let resolved = history::find_session_path(
+        &dir,
+        Some(pointer.history_project()),
+        pointer.history_session(),
+    )
+    .expect("the history store is readable")
+    .unwrap_or_else(|| {
+        panic!(
+            "no session file under {} for {}/{}",
+            dir.display(),
+            pointer.history_project(),
+            pointer.history_session()
+        )
+    });
+    assert_eq!(
+        resolved,
+        PathBuf::from(history_file),
+        "the pointer's path fields resolve to a session other than the one the report names"
+    );
+    assert!(
+        read_record(&resolved, &records[0]["history_id"])["prompt"]
+            .as_str()
+            .is_some_and(|it| !it.is_empty()),
+        "the record the pointer opened carries no conversation"
+    );
 }
 
 /// A member whose chain reached no identity publishes no pointer at all: there

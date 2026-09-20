@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 use std::process::{Child, Command};
 
 use oneagentgraph::event::{Cause, Disposition, MemberDied, Runner};
+use oneharness_core::domain::history::HistoryId;
 use oneharness_core::domain::report::{FallbackReport, RunReport, RunResult};
 use oneharness_core::io::cancel::CancelToken;
 use oneharness_core::io::run::{RunControls, RunOutcome, RunRequest};
@@ -117,6 +118,43 @@ fn the_seam_the_conversion_rests_on_is_still_there() {
     assert!(
         INVENTORY.contains("run_supervised") && INVENTORY.contains("ProcessSupervisor"),
         "the inventory stopped naming the seam it rests on"
+    );
+}
+
+/// The pointer line and its reader, as the signatures a consumer of an
+/// in-process turn resolves them by.
+///
+/// Written as coercions so the assertion is one the compiler checks, the way
+/// [`Supervised`] is: a lock resolved below the release that carries them —
+/// `oneharness-core` 0.17.0 — does not build this test, and the requirement
+/// cannot slide back to a core that writes no line without this file saying so.
+/// Nothing here writes a pointer or reads a real one: `src/harness.rs` sets no
+/// `history_pointer_file` of its own, because the environment is how a consumer
+/// names the file and the core reads it there, and the journey in
+/// `tests/e2e/session.rs` is what drives that through a real member. What is
+/// exercised at run time is only the reader's documented answer for a file that
+/// does not exist — empty, nothing skipped — because a consumer polls the file
+/// before the first run has begun.
+type PointerReader = fn(
+    &std::path::Path,
+) -> Result<
+    oneharness_core::io::history::HistoryPointers,
+    oneharness_core::errors::OneharnessError,
+>;
+type PointerId = fn(&oneharness_core::domain::history::HistoryPointer) -> HistoryId;
+
+#[test]
+fn the_pointer_line_and_its_reader_are_in_the_linked_core() {
+    let read: PointerReader = oneharness_core::io::history::read_pointers;
+    let id: PointerId = oneharness_core::domain::history::HistoryPointer::history_id;
+    let _ = id;
+
+    let scratch = tempfile::tempdir().expect("a scratch directory");
+    let pointers = read(&scratch.path().join("never-written.jsonl"))
+        .expect("a pointer file nobody has written yet reads as empty, not as an error");
+    assert!(
+        pointers.pointers.is_empty() && pointers.skipped == 0,
+        "a missing pointer file read as something: {pointers:?}"
     );
 }
 
