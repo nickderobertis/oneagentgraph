@@ -29,6 +29,16 @@ use crate::support::{
 /// settle and both sides of the conversation write a history record.
 const TASK: &str = "fake:complete-now: say something worth reading back";
 
+/// oneharness's own two variables for the pointer journeys below: the one that
+/// turns history on, and the one that names the file every harness run with
+/// history on appends its pointer line to. Spelled once, here, because the
+/// README restates them for a user and is held to these.
+const HISTORY_ON: &str = "ONEHARNESS_HISTORY";
+const POINTER_FILE: &str = "ONEHARNESS_HISTORY_POINTER_FILE";
+
+/// The README, which is the one place outside the journeys that names them.
+const README: &str = include_str!("../../README.md");
+
 fn sessions(run: &Run) -> Vec<Value> {
     run.of_kind("oneharness-session")
 }
@@ -595,16 +605,26 @@ fn a_single_sided_members_turn_appends_one_pointer_line_to_the_file_the_environm
     workspace.graph(&graph_with(
         &single_sided_graph(&fake_harness()),
         &[
-            ("env.ONEHARNESS_HISTORY", "1"),
+            (format!("env.{HISTORY_ON}"), "1".to_string()),
             (
-                "env.ONEHARNESS_HISTORY_POINTER_FILE",
-                &pointer_file.display().to_string(),
+                format!("env.{POINTER_FILE}"),
+                pointer_file.display().to_string(),
             ),
         ],
     ));
 
     let run = workspace.run_task(TASK);
     run.expect_code(0);
+
+    // The README tells a user these two names and nothing else here restates
+    // them; held to the ones this journey just drove through the real core, so
+    // a name oneharness moved fails here rather than staying in the prose.
+    for name in [HISTORY_ON, POINTER_FILE] {
+        assert!(
+            README.contains(&format!("`{name}")),
+            "README.md no longer names `{name}`, which this journey drives"
+        );
+    }
 
     // What the member itself says about its session: the one run report its
     // settle stored, naming the session file the one candidate that ran wrote.
@@ -701,7 +721,7 @@ fn a_single_sided_member_with_history_off_writes_no_pointer_line() {
     workspace.graph(&graph_with(
         &single_sided_graph(&fake_harness()),
         &[(
-            "env.ONEHARNESS_HISTORY_POINTER_FILE",
+            format!("env.{POINTER_FILE}"),
             pointer_file.display().to_string(),
         )],
     ));
