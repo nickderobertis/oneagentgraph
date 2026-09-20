@@ -874,6 +874,47 @@ pub struct MemberDied {
     /// ran in-library, which has none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stderr_tail: Option<String>,
+    /// Every candidate an exhausted fallback chain attempted, in attempt order —
+    /// present exactly when [`cause`](Self::cause) is
+    /// [`Cause::FallbackChainExhausted`], and omitted otherwise rather than
+    /// written empty, so every other death's shape is what it was.
+    ///
+    /// A list rather than a rendering of one, because the chain as a whole is
+    /// what died: reporting any single candidate's failure would discard the ones
+    /// that explain why the rest were never reached, and an operator triaging an
+    /// exhausted chain needs to know which subscription refused, with what, for
+    /// each of them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub candidates: Vec<AttemptedCandidate>,
+}
+
+/// One candidate an exhausted fallback chain attempted, as a [`MemberDied`] with
+/// cause [`Cause::FallbackChainExhausted`] carries it.
+///
+/// Read off oneharness's own per-candidate result rather than off the chain's
+/// fall-through summary, because the result is where a candidate's
+/// classification and its own words are: `identity` is the composed id —
+/// variant included — that selects the same candidate again, which is what an
+/// operator restoring one subscription of several acts on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptedCandidate {
+    /// The candidate as the chain named it: the harness id, `<base>:<variant>`
+    /// when the chain named a variant.
+    pub identity: String,
+    /// oneharness's normalized `failure_kind` for this candidate, in its own
+    /// spelling — `auth`, `quota`, `model_mismatch`, and the rest of that closed
+    /// set. `null`, serialized rather than omitted so the shape is the same for
+    /// every candidate, for one oneharness could not classify: a binary that was
+    /// not installed, or one that could not be executed.
+    pub failure_kind: Option<String>,
+    /// The candidate's own account of why it could not run, bounded by
+    /// [`MAX_PAYLOAD_TEXT_BYTES`]; empty for a candidate that said nothing beyond
+    /// its classification.
+    pub detail: String,
+    /// Whether [`detail`](Self::detail) was cut to its documented bound.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
 }
 
 /// How a member's process ended.
@@ -893,9 +934,10 @@ pub enum Disposition {
 /// silently stops matching. The classified kinds are onejudge's own
 /// `ProviderErrorKind` — which is in turn oneharness's normalized `failure_kind` —
 /// mapped **totally**, so a category added upstream is a compile error here rather
-/// than a new bare string on the wire. The last three are the causes that exist
-/// only outside that taxonomy: a child process's two dispositions, and an engine
-/// failure that named no kind at all.
+/// than a new bare string on the wire. The last four are the causes that exist
+/// only outside that taxonomy: a child process's two dispositions, a fallback
+/// chain that reached no candidate, and an engine failure that named no kind at
+/// all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Cause {
@@ -923,6 +965,10 @@ pub enum Cause {
     Exited,
     /// The member's own process was terminated by a signal.
     Signaled,
+    /// A single-sided member's fallback chain stepped past every candidate it
+    /// named and none ran. Not a kind of any one candidate's — each of those is
+    /// carried on [`MemberDied::candidates`] — but the chain's own outcome.
+    FallbackChainExhausted,
     /// The member failed without any classification at all.
     Unclassified,
 }
@@ -944,6 +990,7 @@ impl Cause {
             Cause::Other => "other",
             Cause::Exited => "exited",
             Cause::Signaled => "signaled",
+            Cause::FallbackChainExhausted => "fallback_chain_exhausted",
             Cause::Unclassified => "unclassified",
         }
     }

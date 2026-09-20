@@ -19,10 +19,11 @@
 //!   it is the case the version range exists for.
 //! * `control.v2.json` — what this build writes, byte for byte: the same three
 //!   shapes, plus the note endpoint a two-party member's own thread binds.
-//! * `member-died.json` — the two shapes of the one *event* payload that
-//!   changed when onejudge became a library. It is not in `record.json`, but it
-//!   is in the `events.jsonl` a record points at, which outlives the run exactly
-//!   as the record does, and onepipeline compiles against it.
+//! * `member-died.json` — the three shapes of the one *event* payload that
+//!   changed when onejudge became a library, and again when an exhausted chain
+//!   became its own cause. It is not in `record.json`, but it is in the
+//!   `events.jsonl` a record points at, which outlives the run exactly as the
+//!   record does, and onepipeline compiles against it.
 //! * `member-started.json` — the three shapes of the payload a supervisor reads
 //!   first, on the same terms: one per runner, plus the one a member publishes
 //!   when it comes up without taking a turn.
@@ -58,8 +59,8 @@ use oneagentgraph::config::{
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
-    Cause, Disposition, EventFilter, MatchFields, Matcher, MemberDied, MemberStarted, Runner,
-    Source, ENVELOPE_VERSION,
+    AttemptedCandidate, Cause, Disposition, EventFilter, MatchFields, Matcher, MemberDied,
+    MemberStarted, Runner, Source, ENVELOPE_VERSION,
 };
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
@@ -599,9 +600,10 @@ fn an_empty_optional_field_is_omitted_and_a_filled_one_round_trips() {
     );
 }
 
-/// The two `member-died` payloads this build writes, in the order the golden
-/// commits them: the member that really was a child process, then the one this
-/// process drove in-library.
+/// The three `member-died` payloads this build writes, in the order the golden
+/// commits them: the member that really was a child process, the one this
+/// process drove in-library, and the single-sided member whose chain reached no
+/// candidate — the one death that carries `candidates`.
 fn golden_deaths() -> Vec<MemberDied> {
     vec![
         MemberDied {
@@ -612,6 +614,7 @@ fn golden_deaths() -> Vec<MemberDied> {
             exit_code: Some(2),
             disposition: Some(Disposition::Exited),
             stderr_tail: "harness failed (quota)".to_string().into(),
+            candidates: Vec::new(),
         },
         MemberDied {
             rule: "provider-failure".into(),
@@ -621,11 +624,35 @@ fn golden_deaths() -> Vec<MemberDied> {
             exit_code: None,
             disposition: None,
             stderr_tail: None,
+            candidates: Vec::new(),
+        },
+        MemberDied {
+            rule: "provider-failure".into(),
+            cause: Cause::FallbackChainExhausted,
+            detail: "claude-code [auth], codex [not-installed]".into(),
+            truncated: false,
+            exit_code: None,
+            disposition: None,
+            stderr_tail: None,
+            candidates: vec![
+                AttemptedCandidate {
+                    identity: "claude-code".into(),
+                    failure_kind: Some("auth".into()),
+                    detail: "claude-code: not logged in".into(),
+                    truncated: false,
+                },
+                AttemptedCandidate {
+                    identity: "codex".into(),
+                    failure_kind: None,
+                    detail: "`codex` not found on PATH; harness skipped".into(),
+                    truncated: false,
+                },
+            ],
         },
     ]
 }
 
-/// `member-died`'s two shapes are byte-for-byte the committed golden.
+/// `member-died`'s three shapes are byte-for-byte the committed golden.
 ///
 /// This payload is the one wire shape the onejudge library conversion changed,
 /// and both halves of the change are here because both have to keep holding. A
@@ -633,7 +660,10 @@ fn golden_deaths() -> Vec<MemberDied> {
 /// `disposition`, and `stderr_tail` — dropping those would narrow what a
 /// single-sided member's death says. One driven in this process reports none of
 /// them, and says the same thing through `cause` and `detail` instead; writing
-/// them as `null` would have a consumer read a process that never existed.
+/// them as `null` would have a consumer read a process that never existed. The
+/// third is the exhausted chain: `candidates` rides that death alone, and the
+/// first two shapes are the proof it is omitted from every other rather than
+/// written empty — an optional field a consumer compiled before it never sees.
 ///
 /// It rides envelope version 1, unchanged: `v` is the shared envelope's own
 /// version, duplicated verbatim into every producer in this stack, so bumping it

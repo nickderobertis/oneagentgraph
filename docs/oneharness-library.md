@@ -163,6 +163,30 @@ the type it already is, and each candidate's reason is published through
 oneharness's own `as_str()`, so a respelling upstream fails a test here rather
 than reaching a consumer.
 
+**An exhausted chain is reported as the chain's death, with every candidate on
+it.** `FallbackReport::ran` naming nobody is oneharness's own reading that
+every candidate fell through, and `harness::finish` reports that as
+`member-died` with cause `fallback_chain_exhausted` and `candidates`: one entry
+per `RunReport::results` row, in attempt order — which on an exhausted chain is
+every candidate attempted — carrying `RunResult::harness_id` (the field
+oneharness defines as the composed id, variant included, that selects the same
+candidate again),
+`RunResult::failure_kind` through its own `as_str()` (`null` where oneharness
+classified none: a candidate not installed, or one that could not be executed),
+and its words bounded at the payload text bound — `RunResult::error` where
+oneharness composed one, else the tail of the candidate's own `stderr`, else of
+its `stdout`, because a refusal classified off a stderr line composes no
+`error` and the line is the account. Each step past is still
+its own `fallback-advanced` ahead of the death, so a consumer that folds those is
+unchanged; what the aggregate adds is the outcome nothing named before — that the
+chain as a whole reached nothing — and the per-candidate errors in a structured
+place rather than in the run's `failure_summary`, which is still the `detail`. A
+chain that *stopped* at a candidate which ran and failed is deliberately not
+this: the candidates behind it were never tried, so it is that candidate's death
+and keeps the cause it always had. `docs/contract.md`'s `member-died` paragraph
+is the contract for the field names, and `tests/contract.rs` holds its example
+to the types.
+
 **Isolation of failure — replaced by the thread seam.** A crashed child could not
 take the graph down; an in-process panic can. `src/judge.rs` already answered this
 and its answer is reused: the engine runs on a thread and answers over an
@@ -337,19 +361,23 @@ reachable, and each would widen the approved contract — so each is a proposal 
 its owner rather than an edit.
 
 1. **`cause` could name five more failure kinds.** `oneharness_core`'s
-   `FailureKind` is a wider set than the closed `cause` vocabulary — nine kinds
-   at 0.13.0: `session_not_found`, `tool_deferred`, `untrusted_directory`,
+   `FailureKind` is a wider set than the closed `cause` vocabulary — ten kinds
+   at 0.17.0: `session_not_found`, `tool_deferred`, `untrusted_directory`,
    `input_too_large` and `model_mismatch` have no spelling there. The last is
    0.13.0's: the harness reported it would run the turn under a model other than
    the one requested, and oneharness refused before a token was spent, naming
    the served model in `RunResult::observed_model` beside the requested one. A
-   dead single-sided member therefore reports `unclassified` with the run's
-   `failure_summary` as its detail, rather than a partial map that would report
-   five kinds as something they are not. Naming them widens a closed set
-   consumers branch on, so it is a proposal. The *fall-through* side needs no
-   proposal: a chain that stepped past a candidate for `model-mismatch` reaches
-   the stream as `fallback-advanced` with that reason, because the payload reads
-   `FallbackReport`'s reason as the type it is rather than through a map.
+   single-sided member whose chain *stopped* at a candidate that ran and failed
+   therefore reports `unclassified` with the run's `failure_summary` as its
+   detail, rather than a partial map that would report five kinds as something
+   they are not. Naming them widens a closed set consumers branch on, so it is a
+   proposal. Neither the *fall-through* side nor the *exhausted* chain needs
+   one: a chain that stepped past a candidate for `model-mismatch` reaches the
+   stream as `fallback-advanced` with that reason, because the payload reads
+   `FallbackReport`'s reason as the type it is rather than through a map, and a
+   chain that stepped past every candidate dies as `fallback_chain_exhausted`
+   carrying each candidate's own `failure_kind` in oneharness's spelling —
+   `model_mismatch` included — as the paragraph above describes.
 2. **A single-sided member could become interruptible.** `RunRequest::control`
    and `RunReport::control` are right there, and `src/judge.rs` already reads that
    pair. Adding it would give `oneagentgraph interrupt` a lever on a member kind

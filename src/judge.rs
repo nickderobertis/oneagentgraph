@@ -1703,6 +1703,10 @@ fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
         exit_code: None,
         disposition: None,
         stderr_tail: None,
+        // A two-party member's chains are per side and per turn, and each
+        // candidate they step past is a `fallback-advanced` of its own; the
+        // aggregate is a single-sided chain's — see `crate::harness`.
+        candidates: Vec::new(),
     };
     emitter.emit(EventKind::MemberDied, as_payload(&payload));
     Outcome::Died(Death { rule, payload })

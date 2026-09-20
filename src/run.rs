@@ -2468,6 +2468,7 @@ mod tests {
                         exit_code: None,
                         disposition: None,
                         stderr_tail: None,
+                        candidates: Vec::new(),
                     },
                 })),
                 "died (activity)",

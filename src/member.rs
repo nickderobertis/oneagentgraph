@@ -627,6 +627,7 @@ pub(crate) fn unstartable(reason: &str) -> MemberDied {
         exit_code: None,
         disposition: None,
         stderr_tail: None,
+        candidates: Vec::new(),
     }
 }
 
