@@ -40,10 +40,9 @@ process too, so what that engine reads from the environment it reads from the
 graph's `env:` block: with `ONEHARNESS_HISTORY=1` and
 `ONEHARNESS_HISTORY_POINTER_FILE=<file>` there, every such turn appends one
 pointer line to that file saying where its session went — oneharness's own
-contract, read back with `oneharness history pointers <file>` (CLI 0.16.0 or
-newer) or the core's `io::history::read_pointers`. Nothing here writes or sets
-it; the requirement in [`Cargo.toml`](Cargo.toml) is what decides the linked
-core has it.
+contract, read back through the core's `io::history::read_pointers`. Nothing
+here writes or sets it; the requirement in [`Cargo.toml`](Cargo.toml) is what
+decides the linked core has it, and `tests/inventory.rs` holds it there.
 
 ## What it does
 
