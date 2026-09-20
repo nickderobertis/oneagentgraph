@@ -57,9 +57,16 @@ one NDJSON stream.
   `allow-git` beside it is what holds that, so the tree resolves from crates.io
   alone rather than from whichever host has a checkout. The `onejudge` floor is a
   floor rather than a preference — each bump of it buys a seam this crate's
-  supervision is built on, and dropping below it stops compiling. The number and
-  the reason for it live at the dependency in `Cargo.toml`, which is also where
-  the next one goes; do not copy either here.
+  supervision is built on, and dropping below it stops compiling. The
+  `oneharness-core` requirement moves **with** it, never alone: onejudge asks for
+  a core release of its own, and two requirements that admit different cores
+  resolve two of them, which `tests/inventory.rs` refuses. The latest pair was
+  raised for the core's per-run history pointer line — the one way a host sees
+  the session of a `kind: oneharness` turn, which runs on the linked core with no
+  `oneharness` binary between it and the environment — and `tests/inventory.rs`
+  holds that reader as a floor too. The numbers and the reason for each live at
+  the dependency in `Cargo.toml`, which is also where the next one goes; do not
+  copy either here.
 - **Excluded, and why:** `install.sh` / a composite `action.yml` / a container
   image — the documented install surfaces are crates.io, PyPI, and npm, all of
   which *carry* the artifact rather than downloading a release asset by name, so
