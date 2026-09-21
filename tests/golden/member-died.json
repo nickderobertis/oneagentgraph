@@ -11,5 +11,22 @@
     "rule": "provider-failure",
     "cause": "quota",
     "detail": "provider error (respond): the subscription is exhausted"
+  },
+  {
+    "rule": "provider-failure",
+    "cause": "fallback_chain_exhausted",
+    "detail": "claude-code [auth], codex [not-installed]",
+    "candidates": [
+      {
+        "identity": "claude-code",
+        "failure_kind": "auth",
+        "detail": "claude-code: not logged in"
+      },
+      {
+        "identity": "codex",
+        "failure_kind": null,
+        "detail": "`codex` not found on PATH; harness skipped"
+      }
+    ]
   }
 ]

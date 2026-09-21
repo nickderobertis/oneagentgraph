@@ -24,11 +24,11 @@ use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
 use oneagentgraph::event::{
-    session_label, Artifact, Cause, Disposition, Envelope, EventFilter, EventKind,
-    FallbackAdvanced, Labels, MatchFields, Matcher, MemberDied, MemberStarted, OneharnessSession,
-    Origin, Party, PreTurnContext, PreTurnOutcome, Role, Runner, Source, TurnActivity,
-    TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage, ENVELOPE_VERSION,
-    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
+    session_label, Artifact, AttemptedCandidate, Cause, Disposition, Envelope, EventFilter,
+    EventKind, FallbackAdvanced, Labels, MatchFields, Matcher, MemberDied, MemberStarted,
+    OneharnessSession, Origin, Party, PreTurnContext, PreTurnOutcome, Role, Runner, Source,
+    TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
+    ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
     ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
 };
 use oneagentgraph::liveness::{
@@ -1011,7 +1011,14 @@ fn the_documented_session_label_is_on_exactly_the_kinds_this_build_stamps_it_on(
 
 #[test]
 fn a_member_died_payload_carries_every_documented_field() {
-    for field in ["rule", "cause", "detail", "exit_code", "stderr_tail"] {
+    for field in [
+        "rule",
+        "cause",
+        "detail",
+        "exit_code",
+        "stderr_tail",
+        "candidates",
+    ] {
         assert!(
             backticked().iter().any(|token| token == field),
             "the contract no longer names the member-died field `{field}`"
@@ -1026,6 +1033,7 @@ fn a_member_died_payload_carries_every_documented_field() {
         exit_code: Some(1),
         disposition: Some(Disposition::Exited),
         stderr_tail: Some("harness failed (quota)".to_string()),
+        candidates: Vec::new(),
     };
     let serialized = serde_json::to_value(&exited).expect("serializes");
     assert_eq!(
@@ -1080,6 +1088,7 @@ fn a_member_died_payload_carries_every_documented_field() {
         exit_code: None,
         disposition: None,
         stderr_tail: None,
+        candidates: Vec::new(),
     };
     let serialized = serde_json::to_value(&in_process).expect("serializes");
     assert_eq!(
@@ -1094,6 +1103,95 @@ fn a_member_died_payload_carries_every_documented_field() {
     assert_eq!(
         serde_json::from_value::<MemberDied>(serialized).expect("parses"),
         in_process
+    );
+}
+
+/// The death of an exhausted chain, driven through the documented example: the
+/// cause names the chain, and `candidates` carries every candidate it attempted
+/// — the identity as the chain named it, oneharness's own classification, and
+/// the candidate's words — with every entry the same shape.
+///
+/// The block is its own fenced example because every field on it is one a
+/// consumer reads by name, and the consumer is another program: onepipeline's
+/// relink reads this document for the field names and this crate's enum for the
+/// cause, so the two are held together here.
+#[test]
+fn a_member_died_for_an_exhausted_chain_carries_every_candidate_it_attempted() {
+    let documented: Value = serde_json::from_str(&fenced_block("json member-died"))
+        .expect("the member-died example is not JSON");
+    let died: MemberDied = serde_json::from_value(documented.clone())
+        .expect("the documented member-died payload does not parse");
+    assert_eq!(died.cause, Cause::FallbackChainExhausted);
+    assert_eq!(died.rule, "provider-failure");
+    assert_eq!(
+        died.candidates,
+        vec![
+            AttemptedCandidate {
+                identity: "claude-code".to_string(),
+                failure_kind: Some("auth".to_string()),
+                detail: "claude-code: not logged in".to_string(),
+                truncated: false,
+            },
+            AttemptedCandidate {
+                identity: "claude-code:alternate".to_string(),
+                failure_kind: Some("quota".to_string()),
+                detail: "the subscription is exhausted".to_string(),
+                truncated: false,
+            },
+        ],
+        "the documented candidates are not the ones this build reads"
+    );
+    assert_eq!(
+        serde_json::to_value(&died).expect("serializes"),
+        documented,
+        "serializing the parsed payload must reproduce the documented shape"
+    );
+    for name in ["identity", "failure_kind"] {
+        assert!(
+            backticked().iter().any(|token| token == name),
+            "the contract no longer names the candidate field `{name}`"
+        );
+    }
+
+    // A candidate oneharness could not classify carries `null`, serialized, so
+    // an entry is the same shape whether or not it was classified; and a cut
+    // detail says so, as every bounded text field does.
+    let unclassified = AttemptedCandidate {
+        identity: "codex".to_string(),
+        failure_kind: None,
+        detail: "x".repeat(MAX_PAYLOAD_TEXT_BYTES),
+        truncated: true,
+    };
+    let serialized = serde_json::to_value(&unclassified).expect("serializes");
+    assert_eq!(serialized["failure_kind"], Value::Null);
+    assert_eq!(serialized["truncated"], json!(true));
+    assert_eq!(
+        serde_json::from_value::<AttemptedCandidate>(serialized).expect("parses"),
+        unclassified
+    );
+    // And a candidate carrying a field this build does not know is refused,
+    // as every payload struct refuses one.
+    assert!(serde_json::from_value::<AttemptedCandidate>(json!({
+        "identity": "codex", "failure_kind": null, "detail": "", "reason": "auth",
+    }))
+    .is_err());
+
+    // Every other death omits the list rather than writing it empty, so the
+    // shapes committed for those deaths are untouched — the golden in
+    // `tests/record.rs` holds the bytes.
+    let other = MemberDied {
+        cause: Cause::Unclassified,
+        candidates: Vec::new(),
+        ..died
+    };
+    let serialized = serde_json::to_value(&other).expect("serializes");
+    assert!(
+        serialized.get("candidates").is_none(),
+        "a death that was not the chain's carried a candidate list: {serialized}"
+    );
+    assert_eq!(
+        serde_json::from_value::<MemberDied>(serialized).expect("parses"),
+        other
     );
 }
 
@@ -1114,6 +1212,7 @@ fn the_documented_causes_are_the_ones_a_member_died_payload_takes() {
         Cause::Other,
         Cause::Exited,
         Cause::Signaled,
+        Cause::FallbackChainExhausted,
         Cause::Unclassified,
     ];
     let documented: BTreeSet<String> = backticked()

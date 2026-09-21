@@ -600,6 +600,147 @@ fn the_heartbeat_rule_condemns_a_member_whose_liveness_cannot_be_confirmed() {
     assert_eq!(died[0]["payload"]["cause"], serde_json::json!("cancelled"));
 }
 
+/// **A turn loop held past the heartbeat bound does not condemn a live member**
+/// — the property the rule used to get wrong, and the reason the beat is no
+/// longer kept by the loop that applies it.
+///
+/// That loop is also where a member's events are published and its tree
+/// examined, and both of those wait on things outside this process. Running
+/// eight members at once produced routine 46–58 second returns and several near
+/// 90, each one read as a dead member and each one tearing down a healthy
+/// worker's whole dispatch. The beat is kept by a thread of the member's own
+/// now, so a loop that comes back late reads a beat that kept going.
+///
+/// The lateness is arranged at the loop's own hold rather than by loading the
+/// host: what it stands in for is a stream reader that is behind and a process
+/// table that is slow to walk, neither of which a journey can produce on
+/// demand. Everything else is real — this binary, the member, and its harness.
+/// The harness is blocked mid-turn throughout, which is when the incident
+/// happened, and stays blocked for a further pass of the loop after the hold is
+/// released, so the beat is read while the tool call the loop was late for is
+/// still in flight.
+///
+/// The two markers are spelled here as the `fake:` sentinels beside them are,
+/// because a task is prose a member is handed: `src/member.rs` defines both and
+/// says why each is steered through the task rather than this process's
+/// environment.
+#[test]
+fn a_turn_loop_held_past_the_bound_does_not_condemn_a_live_member() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph());
+    let release_loop = workspace.at("release-loop");
+    let release_turn = workspace.at("release-turn");
+    let held_at = workspace.at("release-loop.entered");
+    // Four seconds, held for twelve: the bound is not merely grazed but passed
+    // three times over, while the member is alive and working throughout. Both
+    // numbers are wider than the property needs, and deliberately: this journey
+    // asserts that nothing was condemned, so it runs beside the rest of a
+    // parallel suite on exactly the loaded host the incident came from, and a
+    // margin near the beat's own cadence would make *this* journey the flake.
+    // Stall wide, so a member that is condemned is condemned by the rule under
+    // test.
+    let env = bounds("4", "600");
+
+    let releaser = {
+        let (release_loop, release_turn) = (release_loop.clone(), release_turn.clone());
+        std::thread::spawn(move || {
+            until("the turn loop to reach its hold", || held_at.is_file());
+            std::thread::sleep(std::time::Duration::from_secs(12));
+            std::fs::write(&release_loop, "go").expect("release the loop");
+            // Two refresh cadences, so the loop makes passes of its own — and
+            // reads the beat — before the turn it is supervising can answer.
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            std::fs::write(&release_turn, "go").expect("release the turn");
+        })
+    };
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &format!(
+                "fake:complete-now: fake:hold={} oneagentgraph-fixture:hold-turn-loop={}",
+                release_turn.display(),
+                release_loop.display()
+            ),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &as_env(&env),
+    );
+    releaser.join().expect("releaser");
+
+    run.expect_code(0);
+    assert!(
+        run.of_kind("member-died").is_empty(),
+        "a live member was condemned for its supervision's lateness: {:?}",
+        run.of_kind("member-died")
+    );
+    assert_eq!(workspace.record()["members"]["worker"], "settled");
+    // And the operator-facing view still has what it reads `alive N ago` from:
+    // the beat moving off the loop did not move `member-heartbeat` with it.
+    assert!(
+        !run.of_kind("member-heartbeat").is_empty(),
+        "a member supervised across the bound published no heartbeat: {:?}",
+        run.kinds()
+    );
+}
+
+/// The other half of the same rule: a member whose **supervisor heartbeat**
+/// stops is condemned, by the bound that always applied.
+///
+/// Moving the beat off the turn loop narrows what the rule fires on, and this is
+/// the case it exists for and must keep — a member nobody can confirm alive.
+/// The fixture stops this member's heartbeat thread on its first refresh, which
+/// is the same reading a host that refused the thread leaves, and the rule has
+/// to reach the member anyway.
+///
+/// The thread says it stopped, so a condemnation caused by the stop is
+/// distinguishable from one caused by anything else; the stall bound is far
+/// wider than the heartbeat one but not unreachable, so a member this rule fails
+/// to condemn is reported as the activity watchdog's rather than hanging the
+/// suite.
+#[test]
+fn a_member_whose_supervisor_heartbeat_stops_is_condemned_by_the_same_bound() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph());
+    // Written before the run, so the thread stops on its first refresh rather
+    // than racing the journey for it.
+    let stop = workspace.write("stop-beating", "now");
+    let env = bounds("1.5", "20");
+    let run = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &format!(
+                "fake:hang oneagentgraph-fixture:stop-heartbeat={}",
+                stop.display()
+            ),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &as_env(&env),
+    );
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    assert_eq!(
+        died[0]["payload"]["rule"],
+        serde_json::json!("heartbeat"),
+        "a stopped beat was condemned by another rule: {}",
+        died[0]["payload"]
+    );
+    assert_eq!(died[0]["payload"]["cause"], serde_json::json!("cancelled"));
+    assert!(
+        workspace.at("stop-beating.entered").is_file(),
+        "the member was condemned without the beat having stopped: {}\n--- stdout ---\n{}",
+        died[0]["payload"],
+        run.stdout
+    );
+}
+
 /// A member the **activity watchdog** condemns takes its descendants with it.
 ///
 /// The `member-died` event above is the supervisor's *decision*; this is the

@@ -21,7 +21,7 @@
 use crate::support::make_executable;
 use crate::support::{
     fake_harness, graph_with, two_party_graph, Workspace, CHAIN, FAKE_HARNESS_KEY, FALLBACK_CHAIN,
-    MIXED_CHAIN, NO_ENV,
+    MIXED_CHAIN, NO_ENV, UNREACHABLE_HARNESS_KEY,
 };
 
 // llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
@@ -270,6 +270,141 @@ fn a_chain_that_refuses_every_candidate_reports_each_one_and_fails() {
     );
     let died = run.of_kind("member-died");
     assert_eq!(died.len(), 1, "{:?}", run.kinds());
+}
+
+/// A chain that reaches nothing dies as **the chain's** death, carrying every
+/// candidate it attempted — so an operator reads which subscription refused,
+/// with what, off the one event that says the member is gone rather than off
+/// free text.
+///
+/// Three candidates, three different answers: a refusal oneharness classifies,
+/// the same refusal from a *variant* of that harness, and a candidate with no
+/// binary at all, which oneharness steps past with no classification of its
+/// own. The variant is the point of the second: the death has to name a
+/// candidate as the chain did, `<base>:<variant>`, because that is the spelling
+/// that selects the same subscription again. The variant names its binary in
+/// its own config, where a variant can — the route `tests/e2e/dispatch.rs`'s
+/// env-file journey already takes — so nothing paid is reachable from this
+/// config on any machine, whichever layer resolves it: the base
+/// `ONEHARNESS_BIN_CLAUDE_CODE` override covers a variant at the linked core,
+/// and the config's `bin` is what an older core falls to.
+#[test]
+fn an_exhausted_chain_dies_naming_every_candidate_it_attempted() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        &format!(
+            concat!(
+                "run_mode = \"fallback\"\n",
+                "harnesses = [\"claude-code\", \"claude-code:alternate\", \"codex\"]\n",
+                "\n[harness.claude-code.variant.alternate]\nbin = {bin}\n",
+            ),
+            // Quoted as TOML quotes it, so a Windows path's backslashes are not
+            // read as escapes by the file this writes.
+            bin = toml_edit::Value::from(fake_harness()),
+        ),
+    );
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env:\n  FAKE_HARNESS_REFUSAL: auth\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, fake_harness()),
+            (UNREACHABLE_HARNESS_KEY, workspace.unreachable_harness()),
+        ],
+    ));
+    let run = workspace.run_task("fake:complete-now: nothing answers");
+    run.expect_code(1);
+
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let payload = &died[0]["payload"];
+    assert_eq!(payload["rule"], serde_json::json!("provider-failure"));
+    assert_eq!(
+        payload["cause"],
+        serde_json::json!("fallback_chain_exhausted"),
+        "{payload}"
+    );
+    let candidates = payload["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("an exhausted chain died naming no candidates: {payload}"));
+    let identities: Vec<&str> = candidates
+        .iter()
+        .filter_map(|candidate| candidate["identity"].as_str())
+        .collect();
+    assert_eq!(
+        identities,
+        vec!["claude-code", "claude-code:alternate", "codex"],
+        "{candidates:?}"
+    );
+    // oneharness's own classification for each, in its own spelling — and
+    // `null`, serialized, for the candidate it could not classify.
+    let kinds: Vec<&serde_json::Value> = candidates
+        .iter()
+        .map(|candidate| &candidate["failure_kind"])
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            &serde_json::json!("auth"),
+            &serde_json::json!("auth"),
+            &serde_json::Value::Null
+        ],
+        "{candidates:?}"
+    );
+    assert!(
+        candidates[2].get("failure_kind").is_some(),
+        "an unclassified candidate omitted its kind rather than writing null: {candidates:?}"
+    );
+    for candidate in candidates {
+        let detail = candidate["detail"].as_str().unwrap_or_default();
+        assert!(
+            !detail.is_empty(),
+            "a candidate with no evidence: {candidate}"
+        );
+        assert!(
+            detail.len() <= 4096,
+            "a candidate's detail outgrew its bound"
+        );
+    }
+    assert!(
+        candidates[2]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("not found")),
+        "the missing binary's own words did not reach the death: {:?}",
+        candidates[2]
+    );
+    // The run's own summary is still the detail, and the chain's death is still
+    // an in-process one: none of a child process's facts.
+    assert!(
+        payload["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("claude-code")),
+        "{payload}"
+    );
+    for absent in ["exit_code", "disposition", "stderr_tail"] {
+        assert!(payload.get(absent).is_none(), "{absent}: {payload}");
+    }
+    // Every step past is still published ahead of the death, one per candidate
+    // in the same order, so a consumer that folds those is unchanged.
+    let advanced = run.of_kind("fallback-advanced");
+    let stepped_past: Vec<&str> = advanced
+        .iter()
+        .filter_map(|event| event["payload"]["reason"].as_str())
+        .collect();
+    assert_eq!(stepped_past, vec!["auth", "auth", "not-installed"]);
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "{:?}",
+        run.kinds()
+    );
+    assert_eq!(
+        workspace.record()["members"]["reporter"],
+        serde_json::json!("died (provider-failure)")
+    );
 }
 
 /// The other half of the same chain: when a later candidate *can* run, the step

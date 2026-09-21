@@ -233,6 +233,9 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
         field!(FallbackReport, ran),
         field!(RunResult, usage),
         field!(RunResult, observed_model),
+        field!(RunResult, harness_id),
+        field!(RunResult, failure_kind),
+        field!(RunResult, error),
     ]
     .into_iter()
     // `RunControls<'_>` stringifies with its lifetime; the document writes the
@@ -456,6 +459,7 @@ fn the_wire_names_the_inventory_restates_are_the_types_this_crate_serializes() {
         exit_code: Some(1),
         disposition: Some(Disposition::Exited),
         stderr_tail: Some(String::new()),
+        candidates: Vec::new(),
     };
     assert!(matches!(library, Runner::Library { .. }));
     assert_eq!(died.exit_code, Some(1));

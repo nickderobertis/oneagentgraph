@@ -136,9 +136,22 @@ The text these events carry is bounded, and the bound is a property of the **liv
 `member-died` describes an in-process failure honestly, and a member that *died* stays distinct from one that *failed its task* — the latter is a `member-settled` with `completed: false`, never this event. Its payload:
 
 - `rule` — the liveness rule that fired: `unstartable`, `signalled`, `provider-failure`, `heartbeat`, `activity`.
-- `cause` — the typed cause. Ten of these are onejudge's `ProviderErrorKind`, which is oneharness's own normalized `failure_kind`, mapped totally: `auth`, `rate_limit`, `model_not_found`, `quota`, `overloaded`, `timeout`, `cancelled`, `spawn`, `protocol`, `other`. Three exist outside that taxonomy: `exited` and `signaled` for a member that was a child process, and `unclassified` for an engine failure that named no kind.
+- `cause` — the typed cause. Ten of these are onejudge's `ProviderErrorKind`, which is oneharness's own normalized `failure_kind`, mapped totally: `auth`, `rate_limit`, `model_not_found`, `quota`, `overloaded`, `timeout`, `cancelled`, `spawn`, `protocol`, `other`. Four exist outside that taxonomy: `exited` and `signaled` for a member that was a child process, `fallback_chain_exhausted` for a single-sided member whose chain stepped past every candidate it named, and `unclassified` for an engine failure that named no kind.
 - `detail` — what that cause said, bounded like every payload text field: the engine's own error for an in-process member, the tail of standard error for a child one. `truncated` when it was cut.
 - `exit_code`, `disposition: exited|signaled`, `stderr_tail` — a **child process's** facts, present only for a member that was one. An in-process member has none of them; `cause` and `detail` are how it says the same thing.
+- `candidates` — present exactly when `cause` is `fallback_chain_exhausted`, and omitted otherwise rather than written empty: one entry per candidate the chain attempted, in attempt order, each carrying the `identity` the chain named it by — the composed harness id, variant included, as `oneharness-session` spells the one that ran — its `failure_kind` in oneharness's own normalized vocabulary (`auth`, `quota`, `model_mismatch`, …), written as `null` for a candidate oneharness could not classify (one not installed, or one that could not be executed) so the shape is the same for every entry, and its `detail`, the candidate's own account — the error oneharness composed for it, or where it composed none the tail of what the candidate itself wrote, standard error first — bounded like every payload text field with `truncated` when it was cut. *Exhausted* is oneharness's own reading: every candidate fell through and none ran, which is when the `fallback-advanced` events name each step past but nothing names the chain's outcome. A chain that **stopped** at a candidate which ran and failed is not this — the candidates behind it were never tried — and that death keeps the cause it always had.
+
+```json member-died
+{
+  "rule": "provider-failure",
+  "cause": "fallback_chain_exhausted",
+  "detail": "claude-code [auth], claude-code:alternate [quota]",
+  "candidates": [
+    {"identity": "claude-code", "failure_kind": "auth", "detail": "claude-code: not logged in"},
+    {"identity": "claude-code:alternate", "failure_kind": "quota", "detail": "the subscription is exhausted"}
+  ]
+}
+```
 
 `fallback-advanced` gains two fields a two-party member can now answer for, and only it: `role: agent|judge` and the `turn`. onejudge's report carries no fallback chain of its own, so while that hop was a subprocess a two-party member published no `fallback-advanced` at all; in-process, its per-invocation telemetry names every candidate each side stepped past — including for a run that failed and produced no report, which is exactly when an operator needs to know which subscription refused. A single-sided member stamps neither field.
 

@@ -21,12 +21,15 @@
 //! Two watchdogs run alongside, both ported from ai-orchestrator with their
 //! defaults and their environment overrides intact:
 //!
-//! * The **heartbeat** is refreshed by this supervisor every
-//!   [`HEARTBEAT_INTERVAL`] while the member is alive. Its deadline is therefore
-//!   not a latency budget — it is the margin by which a *live* member may be
-//!   starved of CPU before it is declared dead. This crate runs many members at
-//!   once, and a threshold near the write cadence reaps healthy ones under
-//!   exactly the load it creates.
+//! * The **heartbeat** is refreshed every [`HEARTBEAT_INTERVAL`] by a thread of
+//!   the member's own — [`Heartbeat`] — while the member is alive, and the turn
+//!   loop that supervises the member condemns it when that beat is older than
+//!   the bound. Its deadline is therefore not a latency budget — it is the
+//!   margin by which a *live* member's supervision may be starved of CPU before
+//!   the member is declared dead. This crate runs many members at once, and a
+//!   threshold near the refresh cadence reaps healthy ones under exactly the
+//!   load it creates; so does a rule that reads the turn loop's own lateness as
+//!   the beat, which is why the beat is not kept there — see [`Heartbeat`].
 //! * The **activity watchdog** is the slow-stall backstop: a member that
 //!   published nothing for [`crate::liveness::DEFAULT_STALL_TIMEOUT`] *while a
 //!   tree that can be found under it did nothing* is not working. Silence alone
@@ -53,6 +56,10 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+#[cfg(feature = "test-doubles")]
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value};
@@ -66,8 +73,253 @@ use crate::liveness::{
     DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV, STALL_TIMEOUT_ENV,
 };
 
-/// How often this supervisor refreshes a live member's heartbeat.
+/// How often a member's [`Heartbeat`] thread refreshes its beat.
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_millis(500);
+
+/// A live member's heartbeat, kept by a thread of its own.
+///
+/// The beat is what the heartbeat rule condemns on, and it is deliberately not
+/// kept by the turn loop that applies the rule. That loop is where a member's
+/// events are published and its tree examined, and both of those wait on things
+/// outside this process — a stream whose reader is behind, a loaded host walking
+/// a process table — so it was delayed past the bound during a live tool call on
+/// exactly the host that running many members produces, and each time it came
+/// back it read its own lateness as a dead member and tore down a healthy
+/// worker's tree. This thread does nothing that waits: it stores one counter,
+/// writes one small file, and sleeps. A turn loop that comes back late reads a
+/// beat that kept going and moves on.
+///
+/// What the rule still catches is the case it exists for: a supervisor that
+/// cannot confirm its member. This thread dead — it could not be started, or it
+/// stopped — or starved past the bound leaves a beat that stops advancing, and
+/// the turn loop condemns on that by the same bound it always applied. The bound
+/// is therefore still the margin by which a *live* member's supervision may be
+/// starved of CPU, and no shorter.
+///
+/// `member-heartbeat` is still published from the turn loop, on its own cadence,
+/// for two reasons: it is a stream write, which is one of the waits this thread
+/// exists to be free of; and it is what an operator-facing view reads `alive N
+/// ago` from, so it should say when the *supervision* last got round to the
+/// member rather than promise more than the loop can vouch for.
+pub struct Heartbeat {
+    /// Milliseconds since `started` at the thread's last refresh — the same clock
+    /// the watchdogs count in, so it needs no `Instant` across threads.
+    beat: Arc<AtomicU64>,
+    /// The origin the beat is counted from.
+    started: Instant,
+    /// Dropping this ends the thread's wait, so a member that is over does not
+    /// keep a thread beating for it.
+    stop: Option<mpsc::Sender<()>>,
+    /// The thread, for a bounded join once it has been told to stop. `None` when
+    /// the host refused the thread, in which case the beat never advances and
+    /// the rule condemns the member for it — which is the honest reading: a
+    /// member nobody can confirm alive.
+    thread: Option<std::thread::JoinHandle<()>>,
+    /// The gate a journey asked this member's turn loop to hold at — see
+    /// [`hold_turn_loop`](Self::hold_turn_loop). Taken on the first pass, so
+    /// the hold happens once.
+    #[cfg(feature = "test-doubles")]
+    hold: Option<FixtureGate>,
+}
+
+impl Heartbeat {
+    /// Start beating for the member whose scratch is `scratch` and whose clock
+    /// began at `started`, for the turn loop that will supervise its `task`.
+    ///
+    /// The task is read for the two fixtures a journey may have asked for and
+    /// nothing else; without the `test-doubles` feature it is not read at all.
+    #[must_use]
+    pub fn start(scratch: &Path, started: Instant, task: &str) -> Self {
+        #[cfg(feature = "test-doubles")]
+        let stop_at = FixtureGate::parse(task, STOP_HEARTBEAT);
+        #[cfg(feature = "test-doubles")]
+        let hold = FixtureGate::parse(task, HOLD_TURN_LOOP);
+        #[cfg(not(feature = "test-doubles"))]
+        let _ = task;
+
+        let beat = Arc::new(AtomicU64::new(0));
+        let (stop, stopped) = mpsc::channel::<()>();
+        let file = scratch.join("member.heartbeat");
+        let thread = {
+            let beat = Arc::clone(&beat);
+            // `Builder`, not `thread::spawn`, for the reason the engine threads
+            // give: a host that will not give this run one more thread is a
+            // refusal to answer, not a panic to take the graph down with.
+            std::thread::Builder::new()
+                .spawn(move || loop {
+                    beat.store(millis(started.elapsed()), Ordering::SeqCst);
+                    let _ = std::fs::write(&file, beat.load(Ordering::SeqCst).to_string());
+                    #[cfg(feature = "test-doubles")]
+                    if let Some(gate) = stop_at.as_ref().filter(|gate| gate.gate.exists()) {
+                        let _ = std::fs::write(&gate.entered, "stopped");
+                        return;
+                    }
+                    // A disconnect is the member ending; a message is never sent.
+                    if !matches!(
+                        stopped.recv_timeout(HEARTBEAT_INTERVAL),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        return;
+                    }
+                })
+                .ok()
+        };
+        Self {
+            beat,
+            started,
+            stop: Some(stop),
+            thread,
+            #[cfg(feature = "test-doubles")]
+            hold,
+        }
+    }
+
+    /// How long ago this member's supervision last confirmed it alive.
+    ///
+    /// Counted from the member's own clock, so a thread that never ran at all
+    /// reads as the whole of the member's life.
+    #[must_use]
+    pub fn since_last(&self) -> Duration {
+        Duration::from_millis(
+            millis(self.started.elapsed()).saturating_sub(self.beat.load(Ordering::SeqCst)),
+        )
+    }
+
+    /// Hold the calling turn loop at the gate the task named, once — the
+    /// journey's lever for a turn loop delayed past the heartbeat bound.
+    ///
+    /// Behind `test-doubles`, and a no-op without it. A journey cannot delay the
+    /// real loop from outside — the delays it stands in for are a stream reader
+    /// that is behind and a process table that is slow to walk, neither of which
+    /// a test can arrange deterministically — so this pauses the real loop at the
+    /// one point the delays it replaces would have, and writes the gate's
+    /// `.entered` sibling so the journey can wait for the hold rather than sleep
+    /// at it. Bounded by `FIXTURE_HOLD` for the same reason every fixture is.
+    pub fn hold_turn_loop(&mut self) {
+        #[cfg(feature = "test-doubles")]
+        if let Some(gate) = self.hold.take() {
+            let _ = std::fs::write(&gate.entered, "entered");
+            let deadline = Instant::now() + FIXTURE_HOLD;
+            while !gate.gate.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+impl Drop for Heartbeat {
+    fn drop(&mut self) {
+        drop(self.stop.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// How long a fixture waits before giving up on the journey that asked for it.
+///
+/// Bounded because a fixture that never returns wedges the suite rather than
+/// failing it: reaching this bound means the journey never released the gate,
+/// which its own assertions then report.
+#[cfg(feature = "test-doubles")]
+pub(crate) const FIXTURE_HOLD: Duration = Duration::from_secs(30);
+
+/// The marker a journey puts in its **task** to have this member's turn loop
+/// held at the gate it names, once, on the loop's next pass — see
+/// [`Heartbeat::hold_turn_loop`].
+///
+/// In the task rather than in this process's environment, so the lever is the
+/// one every other journey already uses: a member is steered by the prose it is
+/// given, and `tests/e2e/note.rs` holds a live turn open with the harness
+/// double's own `fake:` sentinels in exactly the same way. Its own prefix, so no
+/// sentinel of the double's can collide with it.
+#[cfg(feature = "test-doubles")]
+pub(crate) const HOLD_TURN_LOOP: &str = "oneagentgraph-fixture:hold-turn-loop=";
+
+/// The marker a journey puts in its **task** to have this member's heartbeat
+/// thread stop beating once the gate it names exists — a supervisor thread that
+/// is dead, which the rule has to condemn as it always did.
+///
+/// The thread writes the gate's `.entered` sibling as it stops, so a journey can
+/// tell a condemnation caused by the stop from one caused by anything else.
+#[cfg(feature = "test-doubles")]
+pub(crate) const STOP_HEARTBEAT: &str = "oneagentgraph-fixture:stop-heartbeat=";
+
+/// Both files a fixture touches, checked before either is named.
+///
+/// A type rather than a `PathBuf`, because [`Self::parse`] is the only way to
+/// hold one: a path cut out of task text is text until something checks it, and a
+/// newtype is what makes "checked" a property of the value instead of a habit of
+/// each caller. Both members are derived here for the same reason — the sibling
+/// a fixture writes used to be rebuilt at the point of use, which is a second
+/// place the checks would have to be remembered.
+///
+/// Shared by the three fixtures — [`crate::judge`]'s hold between turns, and the
+/// two above — because each is the same lever: a marker in the task naming a
+/// file the journey will create.
+#[cfg(feature = "test-doubles")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FixtureGate {
+    /// The file the journey creates to release the hold. Only ever read.
+    pub(crate) gate: PathBuf,
+    /// The sibling a fixture writes on reaching its boundary, so a journey can
+    /// wait for the hold rather than sleep at it.
+    pub(crate) entered: PathBuf,
+}
+
+#[cfg(feature = "test-doubles")]
+impl FixtureGate {
+    /// The gate `instruction` names after `marker`, if it names one this fixture
+    /// will act on.
+    ///
+    /// `None` covers an instruction that names no gate *and* one whose path is
+    /// refused, which are one answer to the caller: the member runs with no
+    /// hold, exactly as it does for every task that never asked for one. A
+    /// fixture that refused louder than that would fail runs over prose.
+    pub(crate) fn parse(instruction: &str, marker: &str) -> Option<Self> {
+        let at = instruction.find(marker)? + marker.len();
+        let rest = &instruction[at..];
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        Self::at(Path::new(&rest[..end]))
+    }
+
+    /// The checks, over the path [`Self::parse`] cut out of the text.
+    ///
+    /// What is refused, and why each:
+    ///
+    /// * **a relative path**, because this runs on the member's thread of a
+    ///   process whose working directory is deliberately not the journey's — see
+    ///   [`crate::judge::MemberSpawn`], and the journey that pins it — so a
+    ///   relative gate resolves somewhere neither end named;
+    /// * **a `..` component**, which is the traversal a path assembled from text
+    ///   should never carry however it came to be assembled;
+    /// * **a gate with no file name**, which has no sibling to write beside it;
+    /// * **a parent directory that does not already exist**, because a journey
+    ///   names a file in a workspace it has already made, so an absent parent
+    ///   means the text was not the path anything meant. Nothing is created to
+    ///   make it exist: this writes one file beside the gate and no directory.
+    fn at(gate: &Path) -> Option<Self> {
+        if !gate.is_absolute()
+            || gate
+                .components()
+                .any(|part| part == std::path::Component::ParentDir)
+        {
+            return None;
+        }
+        let name = gate.file_name()?;
+        if !gate.parent().is_some_and(Path::is_dir) {
+            return None;
+        }
+        let mut entered = name.to_os_string();
+        entered.push(".entered");
+        Some(Self {
+            // Named against the gate's own parent, which the checks above cleared,
+            // so the sibling cannot land anywhere the gate could not.
+            entered: gate.with_file_name(entered),
+            gate: gate.to_path_buf(),
+        })
+    }
+}
 
 /// Which engine a member is driven by, because the two read their exit codes
 /// differently.
@@ -627,6 +879,7 @@ pub(crate) fn unstartable(reason: &str) -> MemberDied {
         exit_code: None,
         disposition: None,
         stderr_tail: None,
+        candidates: Vec::new(),
     }
 }
 
@@ -1246,5 +1499,99 @@ mod tests {
         assert!(Outcome::Settled.is_success());
         assert!(!Outcome::Incomplete.is_success());
         assert!(!Outcome::Unstartable("no".into()).is_success());
+    }
+
+    /// The beat keeps going however late the loop that reads it is: a reader
+    /// that does nothing for several refresh intervals finds the beat fresh,
+    /// which is what makes a delayed turn loop a delayed loop rather than a dead
+    /// member. The wrapper file the rule was ported with is written beside it.
+    #[test]
+    fn the_beat_stays_fresh_while_its_reader_is_away() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = Instant::now();
+        let heartbeat = Heartbeat::start(dir.path(), started, "write the thing");
+        std::thread::sleep(HEARTBEAT_INTERVAL * 3);
+        let since = heartbeat.since_last();
+        assert!(
+            since < HEARTBEAT_INTERVAL * 2,
+            "the beat went stale while nothing read it: {since:?}"
+        );
+        let written = std::fs::read_to_string(dir.path().join("member.heartbeat"))
+            .expect("the heartbeat file");
+        let at: u64 = written.trim().parse().expect("a millisecond count");
+        assert!(at > 0, "the file never saw a refresh: {written:?}");
+        // Dropping the member's supervision ends the thread rather than leaving
+        // one beating for a member that is over — `Drop` joins it, so a thread
+        // that did not stop would hang this test rather than pass it.
+        drop(heartbeat);
+    }
+
+    /// A thread that stops leaves a beat that stops advancing, so the reader
+    /// sees the whole of the time since as unconfirmed — the same reading a
+    /// thread the host refused gives, and what the rule condemns on.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn a_stopped_thread_leaves_a_beat_that_stops_advancing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gate = dir.path().join("stop");
+        std::fs::write(&gate, "stop").expect("the gate");
+        let started = Instant::now();
+        let heartbeat = Heartbeat::start(
+            dir.path(),
+            started,
+            &format!("fake:hang {STOP_HEARTBEAT}{}", gate.display()),
+        );
+        std::thread::sleep(HEARTBEAT_INTERVAL * 3);
+        let since = heartbeat.since_last();
+        assert!(
+            since >= HEARTBEAT_INTERVAL * 2,
+            "a stopped thread's beat kept advancing: {since:?}"
+        );
+        assert!(
+            dir.path().join("stop.entered").is_file(),
+            "the thread did not say it stopped"
+        );
+    }
+
+    /// The turn loop's hold is the journey's lever and nothing else's: a task
+    /// naming no gate holds nothing, and one naming a gate holds until the gate
+    /// exists and then never again.
+    #[cfg(feature = "test-doubles")]
+    #[test]
+    fn the_turn_loop_holds_at_the_gate_the_task_named_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let started = Instant::now();
+        let mut plain = Heartbeat::start(dir.path(), started, "fake:complete-now: ordinary work");
+        let before = Instant::now();
+        plain.hold_turn_loop();
+        assert!(
+            before.elapsed() < HEARTBEAT_INTERVAL,
+            "an unasked hold held"
+        );
+
+        let gate = dir.path().join("loop");
+        let mut held = Heartbeat::start(
+            dir.path(),
+            started,
+            &format!("fake:complete-now {HOLD_TURN_LOOP}{} go", gate.display()),
+        );
+        let releaser = {
+            let gate = gate.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(HEARTBEAT_INTERVAL);
+                std::fs::write(&gate, "go").expect("release");
+            })
+        };
+        let before = Instant::now();
+        held.hold_turn_loop();
+        assert!(
+            before.elapsed() >= HEARTBEAT_INTERVAL,
+            "the loop was not held until the gate appeared"
+        );
+        assert!(dir.path().join("loop.entered").is_file());
+        releaser.join().expect("releaser");
+        let before = Instant::now();
+        held.hold_turn_loop();
+        assert!(before.elapsed() < HEARTBEAT_INTERVAL, "the loop held twice");
     }
 }

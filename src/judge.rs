@@ -104,9 +104,11 @@ use crate::event::{
 };
 use crate::invoke::JudgeLaunch;
 use crate::member::{
-    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Outcome, Rule, Stall,
-    HEARTBEAT_INTERVAL,
+    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Heartbeat, Outcome,
+    Rule, Stall, HEARTBEAT_INTERVAL,
 };
+#[cfg(feature = "test-doubles")]
+use crate::member::{FixtureGate, FIXTURE_HOLD};
 
 /// How long a condemned member's engine is given to answer the teardown before
 /// its thread is abandoned and the member reported dead regardless.
@@ -526,19 +528,13 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         _ => None,
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
+    // Started once the engine is, and kept by a thread of its own for
+    // `Heartbeat`'s reason. The task is read for the suite's fixtures only.
+    let heartbeat = Heartbeat::start(scratch, started, &launch.task);
     supervise(
-        &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &ended,
+        &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &ended, heartbeat,
     )
 }
-
-/// How long [`hold_between_turns`] waits before giving up on the journey that
-/// asked for it.
-///
-/// Bounded because a fixture that never returns wedges the suite rather than
-/// failing it: reaching this bound means the journey never released the gate,
-/// which its own assertions then report.
-#[cfg(feature = "test-doubles")]
-const FIXTURE_HOLD: Duration = Duration::from_secs(30);
 
 /// The marker a journey puts in its **task** to ask for that pause, naming the
 /// gate file it will release.
@@ -550,77 +546,6 @@ const FIXTURE_HOLD: Duration = Duration::from_secs(30);
 /// sentinel of the double's can collide with it.
 #[cfg(feature = "test-doubles")]
 const HOLD_BETWEEN_TURNS: &str = "oneagentgraph-fixture:hold-between-turns=";
-
-/// Both files this fixture touches, checked before either is named.
-///
-/// A type rather than a `PathBuf`, because [`Self::parse`] is the only way to
-/// hold one: a path cut out of task text is text until something checks it, and a
-/// newtype is what makes "checked" a property of the value instead of a habit of
-/// each caller. Both members are derived here for the same reason — the sibling
-/// this fixture writes used to be rebuilt at the point of use, which is a second
-/// place the checks would have to be remembered.
-#[cfg(feature = "test-doubles")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FixtureGate {
-    /// The file the journey creates to release the hold. Only ever read.
-    gate: PathBuf,
-    /// The sibling this fixture writes on reaching the boundary, so a journey
-    /// can wait for the hold rather than sleep at it.
-    entered: PathBuf,
-}
-
-#[cfg(feature = "test-doubles")]
-impl FixtureGate {
-    /// The gate `instruction` names, if it names one this fixture will act on.
-    ///
-    /// `None` covers an instruction that names no gate *and* one whose path is
-    /// refused, which are one answer to the caller: the conversation runs with no
-    /// hold, exactly as it does for every task that never asked for one. A
-    /// fixture that refused louder than that would fail runs over prose.
-    fn parse(instruction: &str) -> Option<Self> {
-        let at = instruction.find(HOLD_BETWEEN_TURNS)? + HOLD_BETWEEN_TURNS.len();
-        let rest = &instruction[at..];
-        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        Self::at(Path::new(&rest[..end]))
-    }
-
-    /// The checks, over the path [`Self::parse`] cut out of the text.
-    ///
-    /// What is refused, and why each:
-    ///
-    /// * **a relative path**, because this runs on the member's thread of a
-    ///   process whose working directory is deliberately not the journey's — see
-    ///   [`crate::judge::MemberSpawn`], and the journey that pins it — so a
-    ///   relative gate resolves somewhere neither end named;
-    /// * **a `..` component**, which is the traversal a path assembled from text
-    ///   should never carry however it came to be assembled;
-    /// * **a gate with no file name**, which has no sibling to write beside it;
-    /// * **a parent directory that does not already exist**, because a journey
-    ///   names a file in a workspace it has already made, so an absent parent
-    ///   means the text was not the path anything meant. Nothing is created to
-    ///   make it exist: this writes one file beside the gate and no directory.
-    fn at(gate: &Path) -> Option<Self> {
-        if !gate.is_absolute()
-            || gate
-                .components()
-                .any(|part| part == std::path::Component::ParentDir)
-        {
-            return None;
-        }
-        let name = gate.file_name()?;
-        if !gate.parent().is_some_and(Path::is_dir) {
-            return None;
-        }
-        let mut entered = name.to_os_string();
-        entered.push(".entered");
-        Some(Self {
-            // Named against the gate's own parent, which the checks above cleared,
-            // so the sibling cannot land anywhere the gate could not.
-            entered: gate.with_file_name(entered),
-            gate: gate.to_path_buf(),
-        })
-    }
-}
 
 /// A test-only pause at the one conversation boundary a journey cannot otherwise
 /// hold: after a turn has closed and before the next one opens.
@@ -656,7 +581,7 @@ fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<FixtureGa
         // rather than through anything this process was started with.
         Observation::TurnOpened(opened) => {
             if gate.is_none() {
-                *gate = FixtureGate::parse(opened.instruction);
+                *gate = FixtureGate::parse(opened.instruction, HOLD_BETWEEN_TURNS);
             }
         }
         Observation::TurnClosed(closed) if matches!(closed.role, onejudge::Role::User) => {
@@ -679,10 +604,11 @@ fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<FixtureGa
 /// module's too: the panic containment both members rely on can only be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Nine values, none derivable from another: where the answer arrives, the lever
+// Ten values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
 // the two halves of the activity clock, how this member's note seam is closed,
-// and why a hold ended the conversation if one did.
+// why a hold ended the conversation if one did, and the beat the heartbeat rule
+// reads.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -694,10 +620,9 @@ fn supervise(
     activity: &Arc<AtomicU64>,
     ending: Option<crate::note::Ending>,
     ended: &Mutex<Option<Ended>>,
+    mut heartbeat: Heartbeat,
 ) -> Outcome {
-    let heartbeat_file = scratch.join("member.heartbeat");
-    let mut last_heartbeat = Instant::now();
-    // Published far more rarely than it is refreshed, for the reason
+    // Published far more rarely than the beat is refreshed, for the reason
     // `crate::member` gives: a stream that is mostly heartbeats buries the events
     // it exists to carry.
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
@@ -743,7 +668,8 @@ fn supervise(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
+        // The suite's lever for a loop delayed past the bound; a no-op outside it.
+        heartbeat.hold_turn_loop();
         let now = Instant::now();
         // llmlint: ignore-block[changed_behavior_has_e2e] the two `end` calls below
         // add no behaviour of their own: they close the note seam on the paths
@@ -756,7 +682,9 @@ fn supervise(
         // A journey joining the two would have to send a note into a member and
         // then wedge it for a whole watchdog bound — thirty minutes by default —
         // to assert a refusal both halves already assert.
-        if now.duration_since(last_heartbeat) > bounds.heartbeat {
+        // Read off the beat rather than off this loop's own lateness, for
+        // `crate::harness::supervise`'s reason: a late loop is not a dead member.
+        if heartbeat.since_last() > bounds.heartbeat {
             if let Some(ending) = ending.as_ref() {
                 ending.end(&crate::note::Undelivered::MemberSettled {
                     outcome: "the member was condemned by its heartbeat watchdog".to_string(),
@@ -764,7 +692,6 @@ fn supervise(
             }
             return condemn(rx, abort, emitter, Rule::Heartbeat, scratch);
         }
-        last_heartbeat = now;
         if now.duration_since(published) >= publish_every {
             published = now;
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
@@ -1703,6 +1630,10 @@ fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
         exit_code: None,
         disposition: None,
         stderr_tail: None,
+        // A two-party member's chains are per side and per turn, and each
+        // candidate they step past is a `fallback-advanced` of its own; the
+        // aggregate is a single-sided chain's — see `crate::harness`.
+        candidates: Vec::new(),
     };
     emitter.emit(EventKind::MemberDied, as_payload(&payload));
     Outcome::Died(Death { rule, payload })
@@ -1747,7 +1678,8 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let gate = dir.path().join("between-turns");
 
-        let parsed = FixtureGate::parse(&asking_for(&gate)).expect("a gate a journey really names");
+        let parsed = FixtureGate::parse(&asking_for(&gate), HOLD_BETWEEN_TURNS)
+            .expect("a gate a journey really names");
 
         assert_eq!(parsed.gate, gate, "the gate is not the file the task named");
         assert_eq!(
@@ -1767,7 +1699,10 @@ mod tests {
     #[cfg(feature = "test-doubles")]
     #[test]
     fn a_task_that_asks_for_no_hold_names_no_gate() {
-        assert_eq!(FixtureGate::parse("fake:complete-now: ordinary work"), None);
+        assert_eq!(
+            FixtureGate::parse("fake:complete-now: ordinary work", HOLD_BETWEEN_TURNS),
+            None
+        );
     }
 
     /// Each path this refuses, refused — and refused as *no hold* rather than as
@@ -1805,7 +1740,7 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                FixtureGate::parse(&asking_for(&gate)),
+                FixtureGate::parse(&asking_for(&gate), HOLD_BETWEEN_TURNS),
                 None,
                 "{why} was accepted as a gate: {}",
                 gate.display()
@@ -2786,16 +2721,18 @@ mod tests {
         });
         assert!(panicked.join().is_err(), "the engine thread did not panic");
 
+        let started = Instant::now();
         let outcome = supervise(
             &rx,
             &Arc::new(AtomicBool::new(false)),
             &emitter,
             Bounds::default(),
             dir.path(),
-            Instant::now(),
+            started,
             &Arc::new(AtomicU64::new(0)),
             None,
             &Mutex::new(None),
+            Heartbeat::start(dir.path(), started, "write the thing"),
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");

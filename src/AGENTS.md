@@ -75,11 +75,16 @@ run the turn at all, which is a death. `member::Kind` is the one place that
 distinction lives.
 
 **A test chain names bare identities, never variants.** `ONEHARNESS_BIN_*` keys
-on a harness id and no spelling of it reaches a variant, so a chain naming
-`claude-code:alternate` spawns the real paid provider with the double sitting
-unused beside it. That is a money hazard, not a style point. `src/bin/` holds the
-two doubles, behind the non-default `test-doubles` feature; keep them
-deterministic and free of anything the crate does not already depend on.
+on a harness id and, at the pinned CLI, no spelling of it reaches a variant, so
+a chain naming `claude-code:alternate` spawns the real paid provider with the
+double sitting unused beside it. That is a money hazard, not a style point. The
+one sanctioned exception is a variant that names its `bin` in its own config —
+`[harness.claude-code.variant.alternate] bin = …` — which is the layer every
+core falls to when no override names the variant; `tests/e2e/dispatch.rs`'s
+env-file journey and `tests/e2e/selection.rs`'s exhausted-chain journey are the
+two that do it, and each says so at the site. `src/bin/` holds the two doubles,
+behind the non-default `test-doubles` feature; keep them deterministic and free
+of anything the crate does not already depend on.
 
 **Provisioning installs one CLI.** `just bootstrap` pins `oneharness`, and the
 version lives at the top of the `justfile`. `onejudge` has no entry: it is a

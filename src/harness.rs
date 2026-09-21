@@ -24,13 +24,13 @@ use oneharness_core::io::runner::ProcessSupervisor;
 use serde_json::Value;
 
 use crate::event::{
-    bound_text, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied, Origin, Party,
-    TurnCompleted, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
+    bound_text, AttemptedCandidate, Cause, Emitter, EventKind, FallbackAdvanced, MemberDied,
+    Origin, Party, TurnCompleted, TurnStarted, MAX_PAYLOAD_TEXT_BYTES,
 };
 use crate::invoke::HarnessLaunch;
 use crate::member::{
-    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Kind, Outcome, Rule,
-    Stall, HEARTBEAT_INTERVAL,
+    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Heartbeat, Kind,
+    Outcome, Rule, Stall, HEARTBEAT_INTERVAL,
 };
 
 /// How long a condemned member's engine is given to answer the cancellation
@@ -161,8 +161,12 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    // Started once the engine is: the beat is what says this member's
+    // supervision is alive, and it is kept by a thread of its own for
+    // `Heartbeat`'s reason. The task is read for the suite's fixtures only.
+    let heartbeat = Heartbeat::start(scratch, started, &launch.prompt);
     supervise(
-        &rx, &cancel, emitter, bounds, scratch, started, &activity, &turn,
+        &rx, &cancel, emitter, bounds, scratch, started, &activity, &turn, heartbeat,
     )
 }
 
@@ -171,9 +175,10 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
 /// Split from [`run`] so the containment this module promises can be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Eight values, none derivable from another: where the answer arrives, the lever
+// Nine values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
-// the two halves of the activity clock, and the turn a settle closes.
+// the two halves of the activity clock, the turn a settle closes, and the beat
+// the heartbeat rule reads.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -184,10 +189,9 @@ fn supervise(
     started: Instant,
     activity: &Arc<AtomicU64>,
     turn: &TheTurn,
+    mut heartbeat: Heartbeat,
 ) -> Outcome {
-    let heartbeat_file = scratch.join("member.heartbeat");
-    let mut last_heartbeat = Instant::now();
-    // Published far more rarely than it is refreshed, for the reason
+    // Published far more rarely than the beat is refreshed, for the reason
     // `crate::member` gives: a stream that is mostly heartbeats buries the events
     // it exists to carry.
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
@@ -215,12 +219,15 @@ fn supervise(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
-        let now = Instant::now();
-        if now.duration_since(last_heartbeat) > bounds.heartbeat {
+        // The suite's lever for a loop delayed past the bound; a no-op outside it.
+        heartbeat.hold_turn_loop();
+        // Read off the beat rather than off this loop's own lateness: a loop that
+        // comes back late to a beat that kept going has a live member, and one
+        // that comes back to a beat that stopped has the member the rule is for.
+        if heartbeat.since_last() > bounds.heartbeat {
             return condemn(rx, cancel, emitter, Rule::Heartbeat, scratch);
         }
-        last_heartbeat = now;
+        let now = Instant::now();
         if now.duration_since(published) >= publish_every {
             published = now;
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
@@ -515,20 +522,35 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, turn: &TheTurn) -> 
     }
     let document = serde_json::to_value(&outcome.report).unwrap_or(Value::Null);
     if !Kind::Oneharness.settled(outcome.exit_code) {
+        let summary = outcome
+            .failure_summary
+            .unwrap_or_else(|| format!("the turn exited {} without a report", outcome.exit_code));
+        // A chain that reached nothing is the chain's death rather than any one
+        // candidate's, and it is reported as that: the cause names the chain,
+        // and every candidate it stepped past rides the payload with its own
+        // classification and its own words. Reporting the run's summary alone
+        // kept the same facts as free text an operator had to read back apart.
+        if let Some(candidates) = exhausted(&outcome.report) {
+            return died_with(
+                emitter,
+                Rule::ProviderFailure,
+                Cause::FallbackChainExhausted,
+                &summary,
+                candidates,
+            );
+        }
         return died(
             emitter,
             Rule::ProviderFailure,
-            // Five of oneharness's nine `FailureKind`s — `session_not_found`,
+            // Five of oneharness's ten `FailureKind`s — `session_not_found`,
             // `tool_deferred`, `untrusted_directory`, `input_too_large`,
             // `model_mismatch` — have no `cause` in `docs/contract.md`'s closed
             // set, so `unclassified` is the honest answer inside it and the
-            // summary below names the harness. A partial map would report those
-            // five as something they are not. Widening `cause` is a contract
+            // summary names the harness. A partial map would report those five
+            // as something they are not. Widening `cause` is a contract
             // proposal, recorded in `docs/oneharness-library.md`.
             Cause::Unclassified,
-            &outcome.failure_summary.unwrap_or_else(|| {
-                format!("the turn exited {} without a report", outcome.exit_code)
-            }),
+            &summary,
         );
     }
     // The turn closes before the member settles, carrying what this one turn
@@ -536,6 +558,60 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, turn: &TheTurn) -> 
     // report holds is that turn's own rather than a total over several.
     turn.close(emitter, &outcome.report);
     settle_report(emitter, &document, true, scratch)
+}
+
+/// Every candidate an exhausted chain attempted, in attempt order — or `None`
+/// for a run that was not that.
+///
+/// *Exhausted* is oneharness's own reading of its chain: a fallback run whose
+/// `ran` names nobody, because every candidate was stepped past. A chain that
+/// **stopped** at a candidate which ran and failed is deliberately not this —
+/// the candidates behind it were never tried, so it is that candidate's death,
+/// reported by the cause it always had, with the ones stepped past before it on
+/// the stream as `fallback-advanced`.
+///
+/// Read off `results` rather than off the fall-through summary, because on an
+/// exhausted chain the two are the same candidates in the same order and only
+/// the result carries what the aggregate is for: the candidate's normalized
+/// `failure_kind`, its own words, and `harness_id` — the field oneharness
+/// defines as the composed id that selects the same candidate again, where the
+/// summary's `harness` is defined as the canonical one.
+fn exhausted(report: &RunReport) -> Option<Vec<AttemptedCandidate>> {
+    let fallback = report.fallback.as_ref()?;
+    if fallback.ran.is_some() {
+        return None;
+    }
+    Some(report.results.iter().map(attempted).collect())
+}
+
+/// One attempted candidate, as the death of an exhausted chain carries it.
+///
+/// Its words are oneharness's `error` for it where one was composed — a missing
+/// binary's diagnostic, a refusal the provider stated in machine-readable terms
+/// — and otherwise the tail of what the candidate itself wrote, standard error
+/// first: a refusal classified off a stderr line composes no `error`, and the
+/// line is what an operator reads to see which account refused. Standard output
+/// last, for a refusal declared in the terminal record alone.
+fn attempted(result: &RunResult) -> AttemptedCandidate {
+    let account = [
+        result.error.as_deref().unwrap_or_default(),
+        &result.stderr,
+        &result.stdout,
+    ]
+    .into_iter()
+    .map(str::trim)
+    .find(|words| !words.is_empty())
+    .unwrap_or_default();
+    let (detail, truncated) = bound_text(account);
+    AttemptedCandidate {
+        identity: result.harness_id.clone(),
+        // oneharness's own spelling, through its own `as_str` — the same route
+        // `advance` takes for a reason — so a respelling upstream fails a test
+        // here rather than reaching a consumer.
+        failure_kind: result.failure_kind.map(|kind| kind.as_str().to_string()),
+        detail,
+        truncated,
+    }
 }
 
 /// Publish every candidate this member's chain stepped past.
@@ -631,6 +707,20 @@ fn condemn(
 }
 
 fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
+    died_with(emitter, rule, cause, detail, Vec::new())
+}
+
+/// [`died`], carrying the candidates an exhausted chain attempted.
+///
+/// The list is a property of one cause and no other, which is why [`died`]
+/// exists beside this rather than every caller passing an empty one.
+fn died_with(
+    emitter: &Emitter,
+    rule: Rule,
+    cause: Cause,
+    detail: &str,
+    candidates: Vec<AttemptedCandidate>,
+) -> Outcome {
     let (detail, truncated) = bound_text(detail.trim());
     let payload = MemberDied {
         rule: rule.as_str().to_string(),
@@ -643,6 +733,7 @@ fn died(emitter: &Emitter, rule: Rule, cause: Cause, detail: &str) -> Outcome {
         exit_code: None,
         disposition: None,
         stderr_tail: None,
+        candidates,
     };
     emitter.emit(EventKind::MemberDied, as_payload(&payload));
     Outcome::Died(Death { rule, payload })
@@ -976,15 +1067,17 @@ mod tests {
         assert!(panicked.join().is_err(), "the engine thread did not panic");
 
         let cancel = CancelToken::new();
+        let started = Instant::now();
         let outcome = supervise(
             &rx,
             &cancel,
             &emitter,
             Bounds::default(),
             dir.path(),
-            Instant::now(),
+            started,
             &Arc::new(AtomicU64::new(0)),
             &TheTurn::new("write the thing"),
+            Heartbeat::start(dir.path(), started, "write the thing"),
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");
@@ -1091,6 +1184,215 @@ mod tests {
         assert_eq!(
             reasons,
             vec![json!("untrusted-directory"), json!("input-too-large")]
+        );
+    }
+
+    /// One candidate's entry in a report, as oneharness writes it: `identity` is
+    /// the composed id the chain named, `kind` its normalized classification when
+    /// it has one, and `error` its own account.
+    ///
+    /// The composed `error` is what a missing binary and a machine-readable
+    /// refusal carry; a refusal classified off a stderr line carries none, and
+    /// says its piece on `stderr` instead — so the account goes there for a
+    /// classified candidate, and on `error` for the rest.
+    fn result(identity: &str, kind: Option<&str>, error: Option<&str>) -> Value {
+        let (harness, variant) = identity
+            .split_once(':')
+            .map_or((identity, Value::Null), |(base, variant)| {
+                (base, json!(variant))
+            });
+        let (error, stderr) = if kind.is_some() {
+            (Value::Null, error.unwrap_or_default())
+        } else {
+            (json!(error), "")
+        };
+        json!({
+            "harness": harness, "variant": variant, "harness_id": identity,
+            "bin": harness, "available": kind.is_some(),
+            "status": if kind.is_some() { "nonzero" } else { "skipped" },
+            "prompt": null, "model": null, "observed_model": null,
+            "exit_code": kind.map(|_| 1), "duration_ms": null,
+            "command": [harness], "output_format": "stream-json",
+            "text": null, "text_source": null, "usage": {}, "usage_source": null,
+            "session_id": null, "events": null, "events_source": null,
+            "structured": null, "schema_valid": null, "schema_attempts": null,
+            "schema_error": null, "failure_kind": kind, "failure_kind_source": null,
+            "stdout": "", "stderr": stderr, "error": error,
+        })
+    }
+
+    /// A fallback run's report over `results`, whose chain `ran` names — or
+    /// nobody, for a chain that reached nothing.
+    fn report(ran: Option<&str>, results: Vec<Value>) -> RunReport {
+        let fell_through: Vec<Value> = results
+            .iter()
+            .filter(|result| ran != result["harness"].as_str())
+            .map(|result| {
+                json!({"harness": result["harness"], "reason": "auth", "detail": result["error"]})
+            })
+            .collect();
+        serde_json::from_value(json!({
+            "schema_version": "0.8", "oneharness_version": "0.17.0", "prompt": "report in",
+            "model": null, "models": null, "resume": null, "fork": false, "session": null,
+            "permission_mode": "bypass", "bypass_permissions": true, "dry_run": false,
+            "schema": null, "schema_max_retries": null, "batch": null,
+            "fallback": {"ran": ran, "fell_through": fell_through, "stopped_without_work": false},
+            "mock_rules": null, "spy_file": null, "history_file": null, "config_files": [],
+            "control": null, "results": results,
+        }))
+        .expect("a report")
+    }
+
+    fn answer(report: RunReport, exit_code: i32) -> Answer {
+        Answer {
+            outcome: Ok(RunOutcome {
+                report,
+                exit_code,
+                streamed: true,
+                failure_summary: (exit_code != 0).then(|| "claude-code [auth]".to_string()),
+            }),
+            ungrouped: None,
+        }
+    }
+
+    /// A chain that stepped past every candidate dies as the chain's own death,
+    /// carrying each candidate it attempted in attempt order — the identity as
+    /// the chain named it, variant included, oneharness's classification, and
+    /// the candidate's own words, from wherever it said them — so no candidate's
+    /// failure is discarded for another's.
+    #[test]
+    fn an_exhausted_chain_dies_naming_every_candidate_it_attempted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+        let long = format!(
+            "{}the subscription is exhausted",
+            "x".repeat(MAX_PAYLOAD_TEXT_BYTES)
+        );
+        let outcome = finish(
+            answer(
+                report(
+                    None,
+                    vec![
+                        result(
+                            "claude-code",
+                            Some("auth"),
+                            Some("claude-code: not logged in"),
+                        ),
+                        result("claude-code:alternate", Some("quota"), Some(&long)),
+                        result(
+                            "codex",
+                            None,
+                            Some("`codex` not found on PATH; harness skipped"),
+                        ),
+                    ],
+                ),
+                1,
+            ),
+            &emitter,
+            dir.path(),
+            &TheTurn::new("report in"),
+        );
+        let Outcome::Died(death) = outcome else {
+            panic!("an exhausted chain did not kill its member: {outcome:?}");
+        };
+        assert_eq!(death.rule, Rule::ProviderFailure);
+        assert_eq!(death.payload.cause, Cause::FallbackChainExhausted);
+        assert_eq!(death.payload.detail, "claude-code [auth]");
+        let identities: Vec<&str> = death
+            .payload
+            .candidates
+            .iter()
+            .map(|candidate| candidate.identity.as_str())
+            .collect();
+        assert_eq!(
+            identities,
+            vec!["claude-code", "claude-code:alternate", "codex"],
+            "{:?}",
+            death.payload.candidates
+        );
+        let kinds: Vec<Option<&str>> = death
+            .payload
+            .candidates
+            .iter()
+            .map(|candidate| candidate.failure_kind.as_deref())
+            .collect();
+        assert_eq!(kinds, vec![Some("auth"), Some("quota"), None]);
+        assert_eq!(
+            death.payload.candidates[0].detail,
+            "claude-code: not logged in"
+        );
+        assert!(!death.payload.candidates[0].truncated);
+        // A candidate's words are bounded like every payload text field, keeping
+        // the tail that names the refusal.
+        let cut = &death.payload.candidates[1];
+        assert!(cut.truncated, "{cut:?}");
+        assert!(cut.detail.len() <= MAX_PAYLOAD_TEXT_BYTES);
+        assert!(cut.detail.ends_with("the subscription is exhausted"));
+
+        // On the wire: every candidate stepped past is still its own
+        // `fallback-advanced`, before the death; and the death's candidates are
+        // the structured list, with an unclassified kind written as `null`
+        // rather than dropped.
+        let events = recorder.events();
+        let kinds: Vec<_> = events.iter().map(|event| event.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                EventKind::FallbackAdvanced,
+                EventKind::FallbackAdvanced,
+                EventKind::FallbackAdvanced,
+                EventKind::MemberDied,
+            ]
+        );
+        let died = &events[3].payload;
+        assert_eq!(died["cause"], json!("fallback_chain_exhausted"));
+        assert_eq!(died["candidates"][2]["failure_kind"], Value::Null);
+        assert_eq!(died["candidates"][2]["identity"], json!("codex"));
+        assert!(
+            died["candidates"][2].get("truncated").is_none(),
+            "an uncut detail claimed a cut: {died:?}"
+        );
+    }
+
+    /// A chain that **stopped** at a candidate which ran and failed is that
+    /// candidate's death and keeps the cause it always had: the candidates
+    /// behind it were never tried, so there is no exhausted chain to report, and
+    /// the payload carries no candidate list at all rather than an empty one.
+    #[test]
+    fn a_chain_that_stopped_at_a_candidate_which_ran_keeps_its_cause() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (emitter, recorder) = recorded();
+        let outcome = finish(
+            answer(
+                report(
+                    Some("codex"),
+                    vec![
+                        result(
+                            "claude-code",
+                            Some("auth"),
+                            Some("claude-code: not logged in"),
+                        ),
+                        result("codex", None, Some("codex exited 1")),
+                    ],
+                ),
+                1,
+            ),
+            &emitter,
+            dir.path(),
+            &TheTurn::new("report in"),
+        );
+        let Outcome::Died(death) = outcome else {
+            panic!("a stopped chain did not kill its member: {outcome:?}");
+        };
+        assert_eq!(death.payload.cause, Cause::Unclassified);
+        assert!(death.payload.candidates.is_empty());
+        let events = recorder.events();
+        let died = events.last().expect("a death");
+        assert_eq!(died.kind, EventKind::MemberDied);
+        assert!(
+            died.payload.get("candidates").is_none(),
+            "a death that was not the chain's carried a candidate list: {:?}",
+            died.payload
         );
     }
 
