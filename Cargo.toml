@@ -333,7 +333,13 @@ test-doubles = []
 #   2. 0.13.3 links the core that writes a per-run history pointer line, so a
 #      two-party member's sides run on the same core a single-sided member's
 #      in-process turn does — one engine, one pointer contract.
-onejudge = { version = "0.13.3", features = ["cli"] }
+#
+# 0.13.4 is the twentieth raise, and moves in lockstep with the two
+# `onemessagebus` requirements below: its published requirement is `^0.8.0` of
+# both, so the three are edited together or the graph carries two buses. Nothing
+# this crate calls changed — the verdict vocabulary and the note contract are
+# as 0.13.3 had them; what moved is the bus it links.
+onejudge = { version = "0.13.4", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The stack's typed message bus, linked rather than restated. The envelope, its
 # labels and sources, the filter grammar, the payload bounds and redaction, the
@@ -343,11 +349,13 @@ onejudge = { version = "0.13.3", features = ["cli"] }
 # inbox's `Spool` backend. `docs/contract.md` names the bus's own contract as the
 # source of the envelope section it quotes.
 #
-# 0.7.0 of both, and exactly the version `onejudge` 0.13.0 asks for, so one bus
-# serves this crate and the conversation it drives. This is the configured-
-# binding release: the bus no longer owns the onejudge codec.
-onemessagebus = "0.7.0"
-onemessagebus-agent = "0.7.0"
+# 0.8.0 of both, and exactly the version `onejudge` 0.13.4 asks for, so one bus
+# serves this crate and the conversation it drives. 0.8.0 moves onepipeline's
+# planner-channel adapter out of the bus (onemessagebus#126), leaving only the
+# generic contracts; nothing this crate re-exports or binds — the agent
+# profile's envelope and filter types, `note`, the emitter, the spool — changed.
+onemessagebus = "0.8.0"
+onemessagebus-agent = "0.8.0"
 # The payload structs are registered with the bus's schema registry as
 # `Message` types, which is a `schemars` derivation. The same major and feature
 # the bus itself takes, so the one `JsonSchema` trait is the bus's.
@@ -376,7 +384,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `tests/e2e/session.rs` drives a single-sided member through the real graph
 # and reads the line back. 0.17.0 is a breaking minor for the new `RunRequest`
 # field; the literal in `src/harness.rs` spreads `..RunRequest::default()`, so
-# it compiles unchanged. onejudge 0.13.3 asks for the same core release.
+# it compiles unchanged. onejudge 0.13.4 asks for the same core release.
 #
 # The three minors between 0.14.0 and it forced nothing here, each re-read
 # against its CHANGELOG entry: 0.14.1 reads a null Claude rate-limit snapshot
