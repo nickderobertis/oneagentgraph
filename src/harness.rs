@@ -29,8 +29,8 @@ use crate::event::{
 };
 use crate::invoke::HarnessLaunch;
 use crate::member::{
-    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Kind, Outcome, Rule,
-    Stall, HEARTBEAT_INTERVAL,
+    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Heartbeat, Kind,
+    Outcome, Rule, Stall, HEARTBEAT_INTERVAL,
 };
 
 /// How long a condemned member's engine is given to answer the cancellation
@@ -161,8 +161,12 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
 
+    // Started once the engine is: the beat is what says this member's
+    // supervision is alive, and it is kept by a thread of its own for
+    // `Heartbeat`'s reason. The task is read for the suite's fixtures only.
+    let heartbeat = Heartbeat::start(scratch, started, &launch.prompt);
     supervise(
-        &rx, &cancel, emitter, bounds, scratch, started, &activity, &turn,
+        &rx, &cancel, emitter, bounds, scratch, started, &activity, &turn, heartbeat,
     )
 }
 
@@ -171,9 +175,10 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
 /// Split from [`run`] so the containment this module promises can be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Eight values, none derivable from another: where the answer arrives, the lever
+// Nine values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
-// the two halves of the activity clock, and the turn a settle closes.
+// the two halves of the activity clock, the turn a settle closes, and the beat
+// the heartbeat rule reads.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -184,10 +189,9 @@ fn supervise(
     started: Instant,
     activity: &Arc<AtomicU64>,
     turn: &TheTurn,
+    mut heartbeat: Heartbeat,
 ) -> Outcome {
-    let heartbeat_file = scratch.join("member.heartbeat");
-    let mut last_heartbeat = Instant::now();
-    // Published far more rarely than it is refreshed, for the reason
+    // Published far more rarely than the beat is refreshed, for the reason
     // `crate::member` gives: a stream that is mostly heartbeats buries the events
     // it exists to carry.
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
@@ -215,12 +219,15 @@ fn supervise(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        let _ = std::fs::write(&heartbeat_file, elapsed_millis(started).to_string());
-        let now = Instant::now();
-        if now.duration_since(last_heartbeat) > bounds.heartbeat {
+        // The suite's lever for a loop delayed past the bound; a no-op outside it.
+        heartbeat.hold_turn_loop();
+        // Read off the beat rather than off this loop's own lateness: a loop that
+        // comes back late to a beat that kept going has a live member, and one
+        // that comes back to a beat that stopped has the member the rule is for.
+        if heartbeat.since_last() > bounds.heartbeat {
             return condemn(rx, cancel, emitter, Rule::Heartbeat, scratch);
         }
-        last_heartbeat = now;
+        let now = Instant::now();
         if now.duration_since(published) >= publish_every {
             published = now;
             emitter.emit(EventKind::MemberHeartbeat, payload([]));
@@ -1060,15 +1067,17 @@ mod tests {
         assert!(panicked.join().is_err(), "the engine thread did not panic");
 
         let cancel = CancelToken::new();
+        let started = Instant::now();
         let outcome = supervise(
             &rx,
             &cancel,
             &emitter,
             Bounds::default(),
             dir.path(),
-            Instant::now(),
+            started,
             &Arc::new(AtomicU64::new(0)),
             &TheTurn::new("write the thing"),
+            Heartbeat::start(dir.path(), started, "write the thing"),
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");
