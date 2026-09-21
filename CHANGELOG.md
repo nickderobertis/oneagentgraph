@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.7...v0.4.8) - 2026-09-21
+
+### Added
+
+- *(member)* report an exhausted fallback chain with every candidate's error, and heartbeat from a supervisor thread ([#142](https://github.com/nickderobertis/oneagentgraph/pull/142))
+
 ## [0.4.7](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.6...v0.4.7) - 2026-09-20
 
 ### Added
