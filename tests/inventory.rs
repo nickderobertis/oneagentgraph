@@ -418,7 +418,7 @@ fn the_graph_resolves_one_bus_and_it_is_the_one_the_manifest_takes() {
 /// Compiled rather than asserted at run time, because a second copy of the bus
 /// in the graph would make these mismatched types — this test would not build.
 #[test]
-fn a_note_through_onejudge_is_the_note_the_bus_declares() {
+fn a_note_this_crate_re_exports_is_the_note_onejudge_declares() {
     fn judge_note(note: onejudge::note::Note) -> onejudge::note::Note {
         note
     }
