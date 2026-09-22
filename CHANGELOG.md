@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.10](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.9...v0.4.10) - 2026-09-22
+
+### Added
+
+- *(deps)* link the oneharness core that resolves an extends chain ([#150](https://github.com/nickderobertis/oneagentgraph/pull/150))
+
 ## [0.4.9](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.8...v0.4.9) - 2026-09-21
 
 ### Fixed
