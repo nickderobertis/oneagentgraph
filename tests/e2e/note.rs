@@ -63,11 +63,22 @@ use oneagentgraph::run::{self, MemberName, Request};
 
 #[cfg(unix)]
 use crate::support::until;
-use crate::support::{oneharness_bin, two_party_graph, Workspace, BASE};
+use crate::support::{
+    oneharness_bin, shed_inherited_environment, two_party_graph, Workspace, BASE,
+};
 
 /// Journeys here start real runs with real session stores; one at a time, as the
 /// library journeys next door are, so two runs never race for the same host.
 static NOTE_RUN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Hold [`NOTE_RUN`] for one journey, having shed what this process must not
+/// hand the in-process turn: these journeys' graphs run in this process, so its
+/// environment is the one the core reads.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    let guard = NOTE_RUN.lock().expect("note journey lock");
+    shed_inherited_environment();
+    guard
+}
 
 /// One started run and everything a journey addresses it by.
 struct Running {
@@ -217,7 +228,7 @@ fn offering(
 #[cfg(unix)]
 #[test]
 fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_with_the_response() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let agent_prompts = workspace.at("agent-prompts");
     let judge_prompts = workspace.at("judge-prompts");
@@ -313,7 +324,7 @@ fn a_note_during_a_live_worker_turn_reaches_the_worker_and_the_judge_reads_it_wi
 #[cfg(unix)]
 #[test]
 fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_the_worker() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let agent_prompts = workspace.at("agent-prompts");
     let judge_prompts = workspace.at("judge-prompts");
@@ -391,7 +402,7 @@ fn a_note_during_a_live_judge_turn_reaches_the_judge_and_rides_its_response_to_t
 #[cfg(unix)]
 #[test]
 fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let judge_prompts = workspace.at("judge-prompts");
     let judging = workspace.at("judge-gate");
@@ -458,7 +469,7 @@ fn a_note_the_judge_passed_the_work_with_is_accepted_as_judged_with() {
 /// which is the journey below.
 #[test]
 fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let running = start(&workspace, "", "fake:complete-now: a member that finishes");
     let Running { run, id, member } = running;
@@ -515,7 +526,7 @@ fn a_note_that_cannot_be_delivered_says_so_rather_than_being_accepted() {
 #[cfg(unix)]
 #[test]
 fn a_note_after_the_conversation_completed_names_that_rather_than_the_member_settling() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let began = workspace.at("holder-began");
     let release = workspace.at("holder-release");
@@ -616,7 +627,7 @@ fn a_note_after_the_conversation_completed_names_that_rather_than_the_member_set
 #[cfg(unix)]
 #[test]
 fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     workspace.graph(&crate::support::single_sided_graph(
         &crate::support::fake_harness(),
@@ -703,7 +714,7 @@ fn a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has() {
 #[cfg(unix)]
 #[test]
 fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_its_role() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let agent_prompts = workspace.at("agent-prompts");
     let between = workspace.at("between-turns");
@@ -772,7 +783,7 @@ fn a_note_offered_between_turns_is_held_for_the_next_one_and_arrives_carrying_it
 #[cfg(unix)]
 #[test]
 fn a_gate_named_relatively_is_refused_and_the_conversation_runs_unheld() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     // Its own name, so what this asserts the absence of is this journey's alone.
     let relative = "oneagentgraph-relative-gate-check";
@@ -840,7 +851,7 @@ fn origin(event: &serde_json::Value) -> Option<String> {
 #[cfg(unix)]
 #[test]
 fn every_turn_of_a_conversation_names_who_authored_what_it_carries() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let began = workspace.at("worker-began");
     let release = workspace.at("worker-release");
@@ -1001,7 +1012,7 @@ fn every_turn_of_a_conversation_names_who_authored_what_it_carries() {
 #[cfg(unix)]
 #[test]
 fn a_delivery_is_attributed_by_the_conversations_record_and_never_by_its_text() {
-    let _serial = NOTE_RUN.lock().expect("note journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let began = workspace.at("worker-began");
     let release = workspace.at("worker-release");

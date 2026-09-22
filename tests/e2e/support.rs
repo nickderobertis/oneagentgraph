@@ -239,14 +239,7 @@ impl Workspace {
             // it resolve the same one: `run --session-dir` has no config or
             // environment layer, so this variable is what moves both.
             .env("XDG_STATE_HOME", self.session_store.path())
-            // A journey must never inherit an enclosing dispatch's selection:
-            // this suite runs inside one, and a leaked value would put the run
-            // on an identity — and a bill — nobody in this test chose.
-            .env_remove("ONEHARNESS_HARNESSES")
-            .env_remove("ONEHARNESS_MODEL")
-            .env_remove("ONEHARNESS_MODELS")
-            .env_remove("ONEHARNESS_MODE")
-            .env_remove("ONEHARNESS_TIMEOUT");
+            .hermetic();
         for (key, value) in env {
             command.env(key, value);
         }
@@ -337,6 +330,54 @@ fn session_store() -> tempfile::TempDir {
         builder.tempdir()
     }
     .expect("a session store")
+}
+
+/// The oneharness variables a journey never inherits from whatever runs the
+/// suite, which is often a dispatch that exports every one of them.
+///
+/// The selection five, because a leaked value would put the run on an identity —
+/// and a bill — nobody in this test chose. The history four, because with
+/// history on every turn records into the caller's store and appends a pointer
+/// line to the caller's pointer file: an inherited pair once wrote a journey's
+/// throwaway sessions into a live dispatch's own record, and — where the journey
+/// had not moved `XDG_STATE_HOME` — into the host's whole store, slowly enough
+/// that four scheduled-member journeys missed their deadline. A journey that
+/// means history on says so in its own graph's `env:` block, as
+/// `tests/e2e/session.rs` does.
+pub const NEVER_INHERITED: [&str; 9] = [
+    "ONEHARNESS_HARNESSES",
+    "ONEHARNESS_MODEL",
+    "ONEHARNESS_MODELS",
+    "ONEHARNESS_MODE",
+    "ONEHARNESS_TIMEOUT",
+    "ONEHARNESS_HISTORY",
+    "ONEHARNESS_HISTORY_DIR",
+    "ONEHARNESS_HISTORY_LABELS",
+    "ONEHARNESS_HISTORY_POINTER_FILE",
+];
+
+/// Every spawn of the binary under test sheds [`NEVER_INHERITED`].
+pub trait Hermetic {
+    /// Drop every [`NEVER_INHERITED`] variable from the child's environment.
+    fn hermetic(&mut self) -> &mut Self;
+}
+
+impl Hermetic for Command {
+    fn hermetic(&mut self) -> &mut Self {
+        for key in NEVER_INHERITED {
+            self.env_remove(key);
+        }
+        self
+    }
+}
+
+/// The same for a journey that drives the library in this process, where the
+/// in-process turn reads this process's own environment: called while holding
+/// the lock that keeps such journeys from running side by side.
+pub fn shed_inherited_environment() {
+    for key in NEVER_INHERITED {
+        std::env::remove_var(key);
+    }
 }
 
 /// A one-identity `claude-code` fallback chain — the only shape that keeps the

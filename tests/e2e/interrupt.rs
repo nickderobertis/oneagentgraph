@@ -29,7 +29,7 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 use crate::support::assert_session_labels;
-use crate::support::{graph_with, until, Workspace};
+use crate::support::{graph_with, until, Hermetic, Workspace};
 
 /// One run whose member is parked on a controllable turn, and the run id an
 /// operator addresses it by.
@@ -77,8 +77,7 @@ fn parked(workspace: &Workspace, task: &str) -> Parked {
                     crate::support::oneharness_bin(),
                 )
                 .env("XDG_STATE_HOME", &xdg)
-                .env_remove("ONEHARNESS_HARNESSES")
-                .env_remove("ONEHARNESS_MODEL")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })
