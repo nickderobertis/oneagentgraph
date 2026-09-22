@@ -524,8 +524,10 @@ fn reporting(config: &str, origin: &str) -> Result<Reporting, Error> {
 }
 
 /// The keys of an oneharness config whose value is a **path**, and which
-/// oneharness resolves against the directory the harnesses run in rather than
-/// against the file that named them.
+/// oneharness resolves somewhere other than the file the operator wrote: the
+/// directory the harnesses run in, or — for `extends`, the parent config — the
+/// directory of the file it reads, which for a member is the stamped copy in
+/// its scratch.
 ///
 /// `docs/contract.md` names this set, and `tests/contract.rs` checks the two
 /// against each other, so a key added here without the document — or the other
@@ -533,7 +535,7 @@ fn reporting(config: &str, origin: &str) -> Result<Reporting, Error> {
 /// could be a path": `[harness.<id>] bin` is a program looked up on `PATH` and a
 /// `[[hooks]] command` is a command line, so anchoring either would turn a name
 /// that resolves into a path that does not exist.
-pub const ANCHORED_PATHS: [&str; 2] = ["schema_file", "history_dir"];
+pub const ANCHORED_PATHS: [&str; 3] = ["schema_file", "history_dir", "extends"];
 
 /// The same, one level down: `[harness.<id>.variant.<name>] env_file`, the file
 /// an identity's environment is read out of.

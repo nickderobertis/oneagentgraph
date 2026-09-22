@@ -8,7 +8,7 @@
 > where it lives. `src/harness.rs` is the module; `src/judge.rs` is its twin for
 > the other member kind, and the two are deliberately the same shape.
 >
-> **What provides it** is `oneharness-core` **0.17.0**, the release this crate
+> **What provides it** is `oneharness-core` **0.18.0**, the release this crate
 > links today: a
 > [`ProcessSupervisor`](#grouping-the-seam-this-whole-document-was-written-to-get)
 > trait with a `spawning(&mut Command)` / `spawned(&Child)` pair, and
@@ -16,7 +16,7 @@
 > this document proposed, added upstream as proposed — a second entry point
 > rather than a field on `RunControls`, so the exhaustive literals embedders had
 > already written kept compiling. Both names arrived in **0.10.1** and are
-> unchanged here, re-measured against 0.17.0 rather than assumed; the floor is a
+> unchanged here, re-measured against 0.18.0 rather than assumed; the floor is a
 > **compile floor**, not a preference, because below 0.10.1 neither exists and
 > `src/harness.rs` does not build, which is what stops a future edit from quietly
 > falling back to unsupervised `run`. The version emphasised above is the linked
@@ -362,7 +362,7 @@ its owner rather than an edit.
 
 1. **`cause` could name five more failure kinds.** `oneharness_core`'s
    `FailureKind` is a wider set than the closed `cause` vocabulary — ten kinds
-   at 0.17.0: `session_not_found`, `tool_deferred`, `untrusted_directory`,
+   at 0.18.0: `session_not_found`, `tool_deferred`, `untrusted_directory`,
    `input_too_large` and `model_mismatch` have no spelling there. The last is
    0.13.0's: the harness reported it would run the turn under a model other than
    the one requested, and oneharness refused before a token was spent, naming
