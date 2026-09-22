@@ -872,10 +872,15 @@ fn a_member_whose_parent_config_is_missing_is_refused_by_name() {
         "{:?}",
         run.kinds()
     );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let detail = died[0]["payload"]["detail"].as_str().unwrap_or_default();
+    // The core reports the parent as the absolute path it resolved and failed to
+    // read, so the refusal spells it with the separator the platform uses and
+    // the missing-file error in that platform's words. The parent it names is
+    // the same file either way, which is what this reads.
     assert!(
-        run.stdout.contains("shared/gone.toml") || run.stderr.contains("shared/gone.toml"),
-        "the refusal does not name the parent it could not read:\n{}\n{}",
-        run.stdout,
-        run.stderr
+        detail.replace('\\', "/").contains("shared/gone.toml"),
+        "the refusal does not name the parent it could not read: {detail}"
     );
 }
