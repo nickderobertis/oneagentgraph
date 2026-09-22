@@ -24,12 +24,12 @@ use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
 use oneagentgraph::event::{
-    session_label, Artifact, AttemptedCandidate, Cause, Disposition, Envelope, EventFilter,
-    EventKind, FallbackAdvanced, Labels, MatchFields, Matcher, MemberDied, MemberStarted,
-    OneharnessSession, Origin, Party, PreTurnContext, PreTurnOutcome, Role, Runner, Source,
-    TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
+    session_label, Artifact, AttemptedCandidate, Cause, Dimensions, Disposition, Envelope,
+    EventFilter, EventKind, FallbackAdvanced, Labels, MatchFields, Matcher, MemberDied,
+    MemberStarted, OneharnessSession, Origin, Party, PreTurnContext, PreTurnOutcome, Role, Runner,
+    Source, TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
     ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
-    ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL,
+    ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL, SOURCE_WORD,
 };
 use oneagentgraph::liveness::{
     BACKGROUND_ENV, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV,
@@ -40,7 +40,6 @@ use oneagentgraph::scratch::WORKING_PERCENT_OF_A_CORE;
 use oneagentgraph::sweep::{
     families, Document, DOCUMENT_SCHEMA_VERSION, RUNS_FAMILY, TEMP_FAMILY, VERB,
 };
-use onemessagebus_agent::AgentFilter;
 use serde_json::{json, Value};
 
 /// The approved contract itself.
@@ -167,8 +166,8 @@ fn envelope_example() -> Value {
     substitute(
         &mut example,
         "source",
-        "agentgraph|vcs|pipeline",
-        json!("agentgraph"),
+        "<producing library>",
+        json!(SOURCE_WORD),
     );
     substitute(
         &mut example,
@@ -188,7 +187,7 @@ fn the_documented_envelope_round_trips_through_the_public_type() {
 
     assert_eq!(envelope.v, ENVELOPE_VERSION);
     assert_eq!(envelope.seq, 42);
-    assert_eq!(envelope.source, Source::Agentgraph);
+    assert_eq!(envelope.source, Source::from(SOURCE_WORD));
     assert_eq!(envelope.kind, EventKind::MemberStarted);
     assert_eq!(envelope.labels.run_id.as_deref(), Some("R"));
     assert_eq!(envelope.labels.round, Some(2));
@@ -250,31 +249,24 @@ fn an_envelope_with_an_unknown_field_is_rejected() {
 }
 
 #[test]
-fn the_source_alternation_names_exactly_the_source_variants() {
-    let documented: BTreeSet<String> = "agentgraph|vcs|pipeline"
-        .split('|')
-        .map(str::to_string)
-        .collect();
+fn the_documented_source_is_the_open_word_this_crate_stamps_one_of() {
     assert!(
-        CONTRACT.contains("\"source\": \"agentgraph|vcs|pipeline\""),
-        "the contract no longer alternates the sources where this test reads them"
+        CONTRACT
+            .contains("this crate stamps exactly one of them, `agentgraph` (`event::SOURCE_WORD`)"),
+        "the contract no longer says which word this crate stamps where this test reads it"
     );
+    assert_eq!(SOURCE_WORD, "agentgraph");
 
-    let implemented: BTreeSet<String> = [Source::Agentgraph, Source::Vcs, Source::Pipeline]
-        .into_iter()
-        .map(|source| {
-            serde_json::to_value(source)
-                .expect("serializes")
-                .as_str()
-                .expect("a string")
-                .to_string()
-        })
-        .collect();
-
-    assert_eq!(documented, implemented);
-    for name in &documented {
-        serde_json::from_value::<Source>(json!(name))
-            .unwrap_or_else(|_| panic!("documented source `{name}` does not parse"));
+    // Open: a sibling's word reads back as itself rather than being refused,
+    // which is what lets a filter naming one cross into this crate untouched.
+    for name in ["agentgraph", "vcs", "pipeline", "a-library-not-yet-written"] {
+        let source: Source = serde_json::from_value(json!(name))
+            .unwrap_or_else(|_| panic!("source `{name}` does not parse"));
+        assert_eq!(source.as_str(), name);
+        assert_eq!(
+            serde_json::to_value(&source).expect("serializes"),
+            json!(name)
+        );
     }
 }
 
@@ -1734,22 +1726,25 @@ fn the_documented_event_filter_is_the_grammar_the_crate_applies() {
         persona: Some("engineer".to_string()),
         ..Labels::default()
     };
+    let admits = |kind: &str, labels: &Labels| {
+        filter.allows(
+            &Source::from(SOURCE_WORD),
+            kind,
+            &Dimensions::default(),
+            labels,
+        )
+    };
     // The glob admits every kind it spans, the labels admit the member's own
     // turns, and the exclusion beats both.
-    assert!(filter.admits(Source::Agentgraph, "member-started", &worker, None));
-    assert!(filter.admits(Source::Agentgraph, "member-settled", &worker, None));
-    assert!(filter.admits(Source::Agentgraph, "turn-completed", &worker, None));
-    assert!(!filter.admits(Source::Agentgraph, "turn-activity", &worker, None));
+    assert!(admits("member-started", &worker));
+    assert!(admits("member-settled", &worker));
+    assert!(admits("turn-completed", &worker));
+    assert!(!admits("turn-activity", &worker));
     // A `member-*` kind still passes on an envelope carrying neither label,
     // because a matcher list is a disjunction...
-    assert!(filter.admits(Source::Agentgraph, "member-died", &Labels::default(), None));
+    assert!(admits("member-died", &Labels::default()));
     // ...and the graph's own events, which match no matcher, do not.
-    assert!(!filter.admits(
-        Source::Agentgraph,
-        "graph-started",
-        &Labels::default(),
-        None
-    ));
+    assert!(!admits("graph-started", &Labels::default()));
 }
 
 /// A graph that names no `events` block serializes without one, so a document

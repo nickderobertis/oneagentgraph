@@ -1,37 +1,217 @@
 //! The shared event envelope, as this crate publishes it.
 //!
-//! The envelope, its labels and sources, the artifact reference, the filter
-//! grammar, the payload bounds, and the emitter that stamps and numbers a stream
-//! are `onemessagebus-agent`'s, over the `onemessagebus` core, and are
-//! re-exported here at the paths this crate has always published them at.
-//! `docs/contract.md` quotes the bus's own contract for them rather than stating
-//! a second one.
+//! The envelope's *shape* — the version, the stamp, the stream, the sequence
+//! number, the source, the kind, the dimensions, the labels, the payload, the
+//! artifacts — is the `onemessagebus` core's, and so are the filter grammar, the
+//! payload bounds, the redaction, and the emitter that stamps and numbers a
+//! stream. The *words* that go in it are this crate's: [`Agentgraph`] is the
+//! [`Vocabulary`] it declares, and [`Envelope`], [`EventFilter`] and [`Matcher`]
+//! are the core's generic types over it, at the paths this crate has always
+//! published them at. `docs/contract.md` names the core's contract as the source
+//! of the shape and this crate as the source of the words.
 //!
-//! What stays this crate's is its vocabulary: the closed set of kinds it emits
-//! ([`EventKind`]), the conversation a turn belongs to ([`session_label`]), and
-//! the payload each kind carries — every one a registered [`Message`], so the
-//! merged stream's kinds are declared in the same registry as the envelope that
-//! carries them ([`registry`]).
+//! Those words are: the one source word it stamps ([`SOURCE_WORD`]) over the
+//! core's open [`Source`], the six reserved [`Labels`] in wire order, the one
+//! top-level dimension ([`Dimensions`]) — a [`Phase`] this crate carries in a
+//! filter and never enumerates, because it stamps none — the closed set of kinds
+//! it emits ([`EventKind`]), the conversation a turn belongs to
+//! ([`session_label`]), and the payload each kind carries, every one a registered
+//! [`Message`] ([`registry`]).
+//!
+//! A stream written before the words moved here still reads back through them
+//! unchanged: `tests/recorded.rs` re-serializes a recorded run byte for byte.
 
 // llmlint: ignore-file[invalid_states_unrepresentable] one of the shapes below is
 // fixed by `docs/contract.md` rather than chosen: `member-died` is specified as
 // sibling fields (`rule`, `cause`, `detail`, and the three a child process adds), so
 // folding the exit code into an `exited` variant would change what this stack emits.
 
-use onemessagebus::{Message, SchemaId};
+use std::fmt;
+
+use onemessagebus::{Message, Reserved, SchemaId, Vocabulary};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 pub use onemessagebus::ArtifactRef as Artifact;
+/// The word naming what produced an event, open as the core declares it.
+///
+/// Open rather than a closed set of the stack's libraries, because this crate
+/// links none of its siblings: it stamps [`SOURCE_WORD`] and nothing else, and a
+/// filter naming a sibling's word is carried and matches none of its envelopes.
+pub use onemessagebus::Source;
 pub use onemessagebus::{
     bound_detail, bound_text, Kind, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES,
 };
-pub use onemessagebus_agent::{Envelope, EventFilter, Labels, MatchFields, Matcher, Source};
 
-/// The envelope version this crate writes: the one the agent profile names for
-/// the `agentgraph` source.
+/// One event this crate writes: the core's envelope over [`Agentgraph`].
+pub type Envelope = onemessagebus::Envelope<Agentgraph>;
+
+/// Which envelopes pass: the core's filter over [`Agentgraph`].
+pub type EventFilter = onemessagebus::Filter<Agentgraph>;
+
+/// One matcher of an [`EventFilter`]: `source`, `kind`, and the [`MatchFields`]
+/// — `phase` and the five reserved labels a matcher may name.
+pub type Matcher = onemessagebus::Matcher<Agentgraph>;
+
+/// The source word this crate stamps on every envelope it writes.
+///
+/// Read by consumers that cross this crate's envelopes into a vocabulary of
+/// their own, so it is exported rather than spelled at the emitter.
+pub const SOURCE_WORD: &str = "agentgraph";
+
+/// The envelope version this crate writes.
 pub const ENVELOPE_VERSION: u32 = 1;
+
+/// This crate's vocabulary over the bus: its source word, its reserved labels,
+/// and the one top-level dimension its envelopes may carry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Agentgraph;
+
+/// The reserved label keys, in the order the wire lists them.
+pub const RESERVED: &[Reserved] = &[
+    Reserved::text("run_id"),
+    Reserved::integer("round"),
+    Reserved::text("node"),
+    Reserved::text("step"),
+    Reserved::text("member"),
+    Reserved::text("persona"),
+];
+
+/// The reserved top-level dimensions: `phase` alone.
+pub const DIMENSIONS: &[Reserved] = &[Reserved::word("phase")];
+
+impl Vocabulary for Agentgraph {
+    type Source = Source;
+    type Dimensions = Dimensions;
+    type Labels = Labels;
+    type Fields = MatchFields;
+
+    const NAME: &'static str = "agentgraph";
+    const RESERVED: &'static [Reserved] = RESERVED;
+    const DIMENSIONS: &'static [Reserved] = DIMENSIONS;
+    const DEFAULT_SOURCE: &'static str = SOURCE_WORD;
+
+    /// One version, because one producer writes this vocabulary: this crate.
+    fn write_version(_: &Self::Source) -> u32 {
+        ENVELOPE_VERSION
+    }
+}
+
+/// Which part of a change's life an event belongs to, as an **open word**.
+///
+/// A dimension this crate carries and never stamps. The stack's phases are
+/// `onevcs`'s to enumerate and this crate does not link it at runtime, so the
+/// word is taken as written: a filter a sibling hands over — a graph config's
+/// `filter:`, `--event-filter`, or a whole run filter relayed as JSON — is
+/// accepted whatever phase it names, and matches none of this crate's envelopes,
+/// which carry no `phase` at all.
+// llmlint: ignore[invalid_states_unrepresentable] the set of phases belongs to
+// `onevcs`, which this crate deliberately does not link (the plan's fixed
+// dependency directions); enumerating it here would be a second declaration that
+// drifts, and would refuse a filter naming a phase a newer `onevcs` added.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(transparent)]
+pub struct Phase(pub String);
+
+impl Phase {
+    /// The word as it travels.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Phase {
+    fn from(phase: &str) -> Self {
+        Self(phase.to_owned())
+    }
+}
+
+impl From<String> for Phase {
+    fn from(phase: String) -> Self {
+        Self(phase)
+    }
+}
+
+impl fmt::Display for Phase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The reserved top-level dimensions: [`Phase`], optional and omitted from the
+/// wire when absent — which is always, for an envelope this crate writes.
+///
+/// Carried between `kind` and `labels` on the wire. Refuses any other top-level
+/// key, which is what makes one of this crate's envelopes reject an unknown
+/// field by name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Dimensions {
+    /// Which part of a change's life the event belongs to, as its producer
+    /// classified it. This crate classifies none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
+}
+
+/// The reserved label keys, plus whatever else a producer stamped.
+///
+/// Reserved keys are absent rather than empty when unknown, so an enricher can
+/// tell "not stamped" from "stamped empty". The extras are flattened after them,
+/// in the order they were stamped.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Labels {
+    /// The run this event belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The round within the run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<u64>,
+    /// The graph node being executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// The step within a node that runs several in sequence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// Which member of a conversation produced the event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    /// The persona that member is running under.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    /// Free-form extras beyond the reserved keys above, carried untouched.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+/// What a [`Matcher`] may name beside `source` and `kind`: `phase` and the
+/// reserved labels, each by exact equality against what the envelope carries.
+/// `round` is deliberately not among them, as the contract's grammar says.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MatchFields {
+    /// The phase the envelope was stamped at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<Phase>,
+    /// The `run_id` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// The `node` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// The `step` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    /// The `member` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub member: Option<String>,
+    /// The `persona` label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+}
 
 /// The free-form label key naming the conversation a turn belongs to.
 ///
@@ -1049,8 +1229,15 @@ macro_rules! payload_messages {
             vec![$((EventKind::$kind, <$payload as Message>::SCHEMA)),*]
         }
 
-        /// The agent profile's registry, with every payload this crate emits
-        /// registered beside the envelope that carries it.
+        /// This crate's registry: every payload it emits, and nothing else.
+        ///
+        /// The envelope that carries them, the filter, the artifact reference
+        /// and the label set are shapes the stack shares rather than this
+        /// crate's own — `onepipeline` is the one crate that names every
+        /// producer, and it publishes them under `agent.event-envelope@{1,2}`,
+        /// `agent.event-filter@1`, `agent.artifact-ref@1` and `agent.labels@1`.
+        /// Registering a second copy of one here would be a document that
+        /// drifts from the one a consumer validates against.
         ///
         /// # Panics
         ///
@@ -1058,7 +1245,7 @@ macro_rules! payload_messages {
         /// type it names, and each id is distinct.
         #[must_use]
         pub fn registry() -> onemessagebus::Registry {
-            let mut registry = onemessagebus_agent::registry();
+            let mut registry = onemessagebus::Registry::new();
             $(
                 registry
                     .register::<$payload>()
@@ -1086,7 +1273,7 @@ payload_messages! {
 /// Stamps this process's events and writes them where the run said, through the
 /// bus's own emitter.
 ///
-/// A thin layer over [`onemessagebus_agent::Emitter`], which does the numbering,
+/// A thin layer over the core's [`onemessagebus::Emitter`], which does the numbering,
 /// the filtering, the redaction, the payload bound, and the write. What this
 /// adds is this crate's vocabulary: the closed [`EventKind`] an emit takes, and
 /// the [`SESSION_LABEL`] rule — the label is on the five kinds that name a turn
@@ -1098,18 +1285,18 @@ payload_messages! {
 pub struct Emitter {
     /// The bus's emitter, labelled with nothing: the labels are stamped per
     /// envelope, because which of them an envelope carries depends on its kind.
-    bus: onemessagebus_agent::Emitter,
+    bus: onemessagebus::Emitter<Agentgraph>,
     /// The labels every envelope this emitter writes carries, before the
     /// session rule is applied to them.
     labels: Labels,
 }
 
 impl Emitter {
-    /// An emitter for `stream`, writing to `sink` as the `agentgraph` source.
+    /// An emitter for `stream`, writing to `sink` as the [`SOURCE_WORD`] source.
     #[must_use]
     pub fn new(stream: impl Into<String>, sink: Box<dyn std::io::Write + Send>) -> Self {
         Self {
-            bus: onemessagebus_agent::Emitter::new(stream, Source::Agentgraph, sink),
+            bus: onemessagebus::Emitter::new(stream, Source::from(SOURCE_WORD), sink),
             labels: Labels::default(),
         }
     }
@@ -1279,8 +1466,11 @@ mod tests {
         );
         assert!(written.iter().all(|e| e.stream == "run-1"
             && e.v == ENVELOPE_VERSION
-            && e.source == Source::Agentgraph));
-        assert_eq!(ENVELOPE_VERSION, Source::Agentgraph.write_version());
+            && e.source.as_str() == SOURCE_WORD));
+        assert_eq!(
+            ENVELOPE_VERSION,
+            Agentgraph::write_version(&Source::from(SOURCE_WORD))
+        );
         assert_eq!(written[1].labels.member.as_deref(), Some("worker"));
         assert_eq!(written[1].kind, EventKind::MemberStarted);
         assert_eq!(written[0].labels.member, None);
@@ -1605,25 +1795,119 @@ mod tests {
         let emitter = Emitter::new("s", Box::new(Broken));
         assert_eq!(emitter.emit(EventKind::GraphStarted, Map::new()).seq, 1);
         assert_eq!(emitter.emit(EventKind::GraphSettled, Map::new()).seq, 2);
-        assert!(format!("{emitter:?}").contains("Agentgraph"));
+        assert!(format!("{emitter:?}").contains(SOURCE_WORD));
     }
 
-    /// Every payload this crate declares is registered in the bus's registry
-    /// under `agent.agentgraph.<kind>@1`, beside the envelope that carries it.
+    /// The `phase` dimension is an **open word** this crate carries and never
+    /// stamps: a matcher naming any word at all is read back as that word, an
+    /// envelope this crate writes carries no `phase` key, and so a matcher
+    /// naming one holds of nothing it writes.
+    ///
+    /// Both halves matter, and they fail differently. A closed set would refuse
+    /// a sibling's filter outright; a `phase` the matcher dropped instead of
+    /// carrying would leave the matcher naming *nothing*, which holds of
+    /// **every** envelope — silencing an `exclude` and admitting an `include`,
+    /// the opposite of the decisions below. `tests/e2e/events.rs` drives the same
+    /// two decisions through the real binary, from a graph config and from
+    /// `--event-filter`.
+    #[test]
+    fn a_matcher_naming_any_phase_is_carried_and_holds_of_nothing_this_crate_writes() {
+        for word in ["review", "development", "a-phase-no-onevcs-has-yet"] {
+            let matcher: Matcher = serde_json::from_str(&format!(r#"{{"phase": "{word}"}}"#))
+                .unwrap_or_else(|err| panic!("a matcher naming `{word}` is refused: {err}"));
+            let phase = matcher.fields.phase.clone().expect("the word is carried");
+            assert_eq!(phase.as_str(), word);
+            assert_eq!(phase.to_string(), word);
+            assert_eq!(phase, Phase::from(word.to_owned()));
+            EventFilter {
+                include: vec![matcher],
+                exclude: Vec::new(),
+            }
+            .validate()
+            .expect("a matcher naming a phase is usable");
+        }
+
+        // An envelope this crate writes carries no `phase` key at all...
+        let recorder = Recorder::default();
+        Emitter::new("s", Box::new(recorder.clone())).emit(EventKind::GraphStarted, Map::new());
+        let written =
+            String::from_utf8(recorder.0.lock().expect("the sink").clone()).expect("utf-8");
+        assert!(!written.contains("phase"), "{written}");
+
+        // ...so an include of only such matchers admits none of them, and an
+        // exclude of only such matchers admits all of them. A source word this
+        // crate never stamps decides the same way, for the same reason.
+        let matchers = || {
+            vec![
+                Matcher {
+                    fields: MatchFields {
+                        phase: Some(Phase::from("review")),
+                        ..MatchFields::default()
+                    },
+                    ..Matcher::default()
+                },
+                Matcher {
+                    source: Some(Source::from("vcs")),
+                    ..Matcher::default()
+                },
+            ]
+        };
+        let admits = |filter: &EventFilter| {
+            filter.allows(
+                &Source::from(SOURCE_WORD),
+                "graph-started",
+                &Dimensions::default(),
+                &Labels::default(),
+            )
+        };
+        assert!(!admits(&EventFilter {
+            include: matchers(),
+            exclude: Vec::new(),
+        }));
+        assert!(admits(&EventFilter {
+            include: Vec::new(),
+            exclude: matchers(),
+        }));
+    }
+
+    /// Every payload this crate declares is registered under
+    /// `agent.agentgraph.<kind>@1` — and the registry holds those and nothing
+    /// else.
+    ///
+    /// The second half is the point of the list below. The envelope, the filter,
+    /// the artifact reference and the label set are shapes the stack shares, and
+    /// `onepipeline` — the one library that names every producer — publishes
+    /// them. A copy registered here would be a second document under an id a
+    /// consumer already validates against, and the two would drift.
     #[test]
     fn every_payload_is_a_registered_message_named_for_its_kind() {
         let registry = registry();
         let ids: Vec<String> = registry.ids().iter().map(ToString::to_string).collect();
         let declared = payload_schemas();
         assert_eq!(declared.len(), 11);
-        for (kind, schema) in declared {
+        for (kind, schema) in &declared {
             let expected = format!("agent.agentgraph.{}@1", kind.as_str());
             assert_eq!(schema.to_string(), expected);
             assert!(ids.contains(&expected), "{expected} is not registered");
-            assert!(registry.schema(&schema).is_some());
+            assert!(registry.schema(schema).is_some());
         }
-        // And the envelope itself is in the same registry.
-        assert!(ids.iter().any(|id| id.starts_with("agent.event-envelope@")));
+        assert_eq!(
+            ids.len(),
+            declared.len(),
+            "this registry is those and no more: {ids:?}"
+        );
+        for shared in [
+            "agent.event-envelope@1",
+            "agent.event-envelope@2",
+            "agent.event-filter@1",
+            "agent.artifact-ref@1",
+            "agent.labels@1",
+        ] {
+            assert!(
+                !ids.contains(&shared.to_owned()),
+                "{shared} is `onepipeline`'s to publish, not this crate's"
+            );
+        }
     }
 
     /// A payload the emitter cut reads back through the type that describes it:

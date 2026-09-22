@@ -559,3 +559,70 @@ fn a_filtered_stream_still_names_the_conversation_of_the_turns_it_kept() {
     );
     assert_gapless(&without);
 }
+
+/// A matcher naming a `phase`, or a `source` this crate never stamps, is carried
+/// by both surfaces that accept a filter and matches none of this crate's
+/// envelopes — so an `include` of only such matchers empties the stream and an
+/// `exclude` of only such matchers leaves it whole.
+///
+/// This is what keeps a sibling's filter usable here. `phase` is `onevcs`'s
+/// vocabulary and `vcs`/`pipeline` are other libraries' source words; this crate
+/// links neither at runtime and stamps neither, but a pipeline that composes it
+/// hands its *whole* run filter down as JSON. A build that refused such a matcher
+/// would fail the run outright, and one that silently dropped the field would
+/// turn `{"phase": "review"}` into the matcher that names nothing — which admits
+/// **every** envelope in an `include` and silences the stream in an `exclude`,
+/// the exact opposite of both decisions below.
+#[test]
+fn a_matcher_naming_a_phase_or_a_siblings_source_is_carried_and_matches_nothing() {
+    let workspace = Workspace::new();
+    // Heartbeats are published on a clock rather than on the conversation, so
+    // two runs of the same task need not carry the same number of them.
+    let lifecycle = |run: &Run| -> Vec<String> {
+        distinct(run)
+            .into_iter()
+            .filter(|kind| kind != "member-heartbeat")
+            .collect()
+    };
+    let whole = lifecycle(&run_filtered(&workspace, &[]));
+
+    // Both spellings, in one filter, on each surface. YAML inside the graph;
+    // JSON on the command line, which is what a composing caller writes.
+    let in_graph =
+        |list: &str| format!("    {list}:\n      - {{phase: review}}\n      - {{source: vcs}}\n");
+    let on_argv =
+        |list: &str| format!(r#"{{"{list}": [{{"phase": "review"}}, {{"source": "vcs"}}]}}"#);
+
+    for list in ["include", "exclude"] {
+        workspace.graph(&graph_filtering(&in_graph(list)));
+        let by_graph = run_filtered(&workspace, &[]);
+        by_graph.expect_code(0);
+
+        // The graph's own filter is displaced by the flag, so this run reads the
+        // flag's copy of the same filter rather than the graph's.
+        let by_flag = run_filtered(&workspace, &["--event-filter", &on_argv(list)]);
+        by_flag.expect_code(0);
+
+        for (surface, run) in [
+            ("the graph's filter", by_graph),
+            ("--event-filter", by_flag),
+        ] {
+            if list == "include" {
+                assert!(
+                    run.events().is_empty(),
+                    "{surface}: an include naming only a phase and a sibling's source \
+                     admitted one of this crate's envelopes: {:?}",
+                    run.kinds()
+                );
+            } else {
+                assert_eq!(
+                    lifecycle(&run),
+                    whole,
+                    "{surface}: an exclude naming only a phase and a sibling's source \
+                     took something off the stream"
+                );
+                assert_gapless(&run);
+            }
+        }
+    }
+}

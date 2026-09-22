@@ -9,14 +9,14 @@
 //! reviewing against a task that never mentioned it contradicts the ruling it was
 //! never shown.
 //!
-//! # The shapes are the bus's, not this crate's
+//! # The shapes are onejudge's, not this crate's
 //!
 //! [`Addressee`], [`Note`], [`Accepted`] and [`Undelivered`] are **re-exports** of
-//! [`onejudge::note`], which re-exports them in turn from
-//! `onemessagebus_agent::note` — the agent profile's note contract, the message
-//! `agent.note@1`. Nothing about them is declared here, and that is deliberate — a
-//! second declaration is a shape that drifts, and a note that satisfies the copy
-//! is still refused by the conversation it was written for.
+//! [`onejudge::note`], which declares them — the note contract of the two-party
+//! conversation that receives them, the message `agent.note@1`. Nothing about
+//! them is declared here, and that is deliberate — a second declaration is a
+//! shape that drifts, and a note that satisfies the copy is still refused by the
+//! conversation it was written for.
 //!
 //! # The routing is onejudge's
 //!
@@ -41,7 +41,7 @@
 //!   acceptance: a note taken into a member nothing will read it out of looks, to
 //!   the caller, exactly like one that landed.
 //!
-//! # The transport is the bus's too
+//! # The transport is the bus core's
 //!
 //! A note is offered by a *different process* from the one running the member —
 //! `oneagentgraph`'s own API, against a run's state directory. The transport

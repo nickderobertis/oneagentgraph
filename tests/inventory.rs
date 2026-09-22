@@ -378,38 +378,48 @@ fn locked(package: &str) -> Vec<&'static str> {
         .collect()
 }
 
-/// The graph resolves **one** `onemessagebus` and **one** `onemessagebus-agent`,
-/// each the one the manifest takes — the same bus `onejudge` links.
+/// The graph resolves **one** `onemessagebus`, the one the manifest takes — the
+/// same bus `onejudge` links — and **no** `onemessagebus-agent` at all.
 ///
-/// A second copy of either is two sets of bus types that look alike and are not
-/// the same type: a note this crate re-exports from `onejudge` and one it builds
-/// from the bus would stop being interchangeable, and an envelope one side
-/// emits would be a different `Envelope` from the one the other reads.
+/// A second copy is two sets of bus types that look alike and are not the same
+/// type: a note this crate re-exports from `onejudge` and one it builds from the
+/// bus would stop being interchangeable, and an envelope one side emits would be
+/// a different `Envelope` from the one the other reads. The agent profile is the
+/// same hazard by another route — its envelope and note were the ones this crate
+/// used to re-export, and the vocabulary is this crate's own now — so a graph
+/// that carried it again would carry two of each.
 #[test]
 fn the_graph_resolves_one_bus_and_it_is_the_one_the_manifest_takes() {
-    for package in ["onemessagebus", "onemessagebus-agent"] {
-        let (_, rest) = MANIFEST
-            .split_once(&format!("\n{package} = \""))
-            .unwrap_or_else(|| panic!("the manifest still takes `{package}` by version"));
-        let (required, _) = rest.split_once('"').expect("the requirement is quoted");
-        assert_eq!(
-            locked(package),
-            [required],
-            "the graph should carry exactly one `{package}`, the one the manifest takes"
-        );
-    }
+    let (_, rest) = MANIFEST
+        .split_once("\nonemessagebus = \"")
+        .expect("the manifest still takes `onemessagebus` by version");
+    let (required, _) = rest.split_once('"').expect("the requirement is quoted");
+    assert_eq!(
+        locked("onemessagebus"),
+        [required],
+        "the graph should carry exactly one `onemessagebus`, the one the manifest takes"
+    );
+    assert!(
+        !MANIFEST.contains("\nonemessagebus-agent = "),
+        "the agent profile is retired; the vocabulary is this crate's own"
+    );
+    assert_eq!(
+        locked("onemessagebus-agent"),
+        Vec::<&str>::new(),
+        "nothing in the graph may pull the retired agent profile back in"
+    );
 }
 
-/// The note this crate re-exports from `onejudge` *is* the bus's note: a value
+/// The note this crate re-exports *is* the note `onejudge` declares: a value
 /// obtained through one path is accepted by a function typed by the other, in
 /// both directions, and the in-process channel `onejudge` hands its engine is
-/// the bus's own sender and inbox.
+/// the bus core's own sender and inbox over those types.
 ///
 /// Compiled rather than asserted at run time, because a second copy of the bus
 /// in the graph would make these mismatched types — this test would not build.
 #[test]
-fn a_note_through_onejudge_is_the_note_the_bus_declares() {
-    fn bus_note(note: onemessagebus_agent::note::Note) -> onemessagebus_agent::note::Note {
+fn a_note_this_crate_re_exports_is_the_note_onejudge_declares() {
+    fn judge_note(note: onejudge::note::Note) -> onejudge::note::Note {
         note
     }
     fn crate_note(note: oneagentgraph::note::Note) -> oneagentgraph::note::Note {
@@ -419,12 +429,12 @@ fn a_note_through_onejudge_is_the_note_the_bus_declares() {
     let through_onejudge =
         oneagentgraph::note::Note::new(oneagentgraph::note::Addressee::Worker, "one note type")
             .expect("a note");
-    let through_the_bus = bus_note(through_onejudge.clone());
-    assert_eq!(crate_note(through_the_bus), through_onejudge);
+    let through_the_library = judge_note(through_onejudge.clone());
+    assert_eq!(crate_note(through_the_library), through_onejudge);
 
     let (notes, inbox): (
-        onemessagebus::Sender<onemessagebus_agent::note::Note, onemessagebus_agent::note::Accepted>,
-        onemessagebus::Inbox<onemessagebus_agent::note::Note, onemessagebus_agent::note::Accepted>,
+        onemessagebus::Sender<onejudge::note::Note, onejudge::note::Accepted>,
+        onemessagebus::Inbox<onejudge::note::Note, onejudge::note::Accepted>,
     ) = onejudge::note::Notes::channel();
     let sending = std::thread::spawn(move || notes.send(through_onejudge));
     inbox
@@ -433,7 +443,7 @@ fn a_note_through_onejudge_is_the_note_the_bus_declares() {
         .answer(oneagentgraph::note::Accepted::Queued);
     assert_eq!(
         sending.join().expect("the sender"),
-        Ok(onemessagebus_agent::note::Accepted::Queued)
+        Ok(onejudge::note::Accepted::Queued)
     );
 }
 
