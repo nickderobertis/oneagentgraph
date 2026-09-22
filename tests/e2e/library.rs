@@ -11,7 +11,10 @@ use oneagentgraph::config::ConfigRef;
 use oneagentgraph::event::{Envelope, EventFilter, EventKind, Matcher};
 use oneagentgraph::run::{self, MemberName, Request, Signal};
 
-use crate::support::{fake_harness, graph_with, oneharness_bin, Workspace, FAKE_HARNESS_KEY};
+use crate::support::{
+    fake_harness, graph_with, oneharness_bin, shed_inherited_environment, Workspace,
+    FAKE_HARNESS_KEY,
+};
 // The one Unix-only journey's own surface and helper: on a platform without a
 // unix domain socket it compiles away, and an import left behind is a
 // `-D warnings` build failure rather than dead weight.
@@ -22,13 +25,22 @@ use oneagentgraph::control::{self, Delivery};
 
 static LIBRARY_RUN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Hold [`LIBRARY_RUN`] for one journey, having shed what this process must not
+/// hand the in-process turn: these journeys' graphs run in this process, so its
+/// environment is the one the core reads.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    let guard = LIBRARY_RUN.lock().expect("library journey lock");
+    shed_inherited_environment();
+    guard
+}
+
 /// A caller receives an event while its member is observably still running,
 /// cancels that real member tree, then learns the same failed-run exit status.
 /// Comparing the channel to `events.jsonl` also pins content and ordering to the
 /// merged stream the CLI consumes.
 #[test]
 fn a_library_caller_watches_cancels_and_waits_for_a_live_graph() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let began = workspace.at("began");
     let release = workspace.at("release");
@@ -148,7 +160,7 @@ fn running_path(workspace: &Workspace) -> std::path::PathBuf {
 
 #[test]
 fn starting_an_invalid_graph_returns_the_scheduler_error() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     workspace.graph("version: 1\nname: invalid\nmembers: {}\n");
     let request = Request {
@@ -177,7 +189,7 @@ fn starting_an_invalid_graph_returns_the_scheduler_error() {
 /// with no way to tell.
 #[test]
 fn a_library_callers_own_filter_narrows_the_stream_it_receives() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     workspace.graph(&crate::support::two_party_graph(
         &fake_harness(),
@@ -272,7 +284,7 @@ fn a_library_callers_own_filter_narrows_the_stream_it_receives() {
 /// unfiltered by construction, which the settlement and the record prove.
 #[test]
 fn a_run_whose_filter_omits_graph_started_still_starts_and_settles() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     workspace.graph(&crate::support::two_party_graph(
         &fake_harness(),
@@ -366,7 +378,7 @@ fn a_run_whose_filter_omits_graph_started_still_starts_and_settles() {
 
 #[test]
 fn a_successful_live_run_returns_the_blocking_exit_status() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     workspace.graph(&crate::support::two_party_graph(
         &fake_harness(),
@@ -405,7 +417,7 @@ fn a_successful_live_run_returns_the_blocking_exit_status() {
 #[cfg(unix)]
 #[test]
 fn a_library_caller_redirects_a_members_in_flight_turn() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     workspace.graph(&crate::support::two_party_graph(
         &fake_harness(),
@@ -528,7 +540,7 @@ fn a_library_caller_redirects_a_members_in_flight_turn() {
 /// where a name this run never declared is refused and leaves no file behind.
 #[test]
 fn a_library_caller_resets_a_scheduled_members_timer() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     // The `keeper` holds the run open while the reset is delivered and picked
     // up: a graph of nothing but the scheduled member settles every non-cron
@@ -633,7 +645,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
 /// `src/harness_process.rs`, which carries that boundary inventory.
 #[test]
 fn the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let own = workspace.dir().join("api");
     std::fs::create_dir_all(&own).expect("the member's own directory");
@@ -722,7 +734,7 @@ fn the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere()
 /// and it is only observable from inside the hosting process.
 #[test]
 fn a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put() {
-    let _serial = LIBRARY_RUN.lock().expect("library journey lock");
+    let _serial = serial();
     let workspace = Workspace::new();
     let where_it_ran = workspace.at("reporter.cwd");
 

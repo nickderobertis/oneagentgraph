@@ -31,7 +31,8 @@
 use std::path::Path;
 
 use crate::support::{
-    as_env, bounds, fake_harness, graph_with, labels, until, Run, Workspace, FAKE_HARNESS_KEY,
+    as_env, bounds, fake_harness, graph_with, labels, until, Hermetic, Run, Workspace,
+    FAKE_HARNESS_KEY,
 };
 // The one Unix-only journey's own helper: on a platform without `SIGTERM` it
 // compiles away, and an import left behind is a `-D warnings` build failure
@@ -883,7 +884,7 @@ fn a_live_run_holds_its_scratch_against_a_sweep() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES");
+                .hermetic();
             command.output().expect("the run finishes")
         })
     };
@@ -960,7 +961,7 @@ fn a_sweep_leaves_a_live_run_s_scratch_alone() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })
@@ -1170,7 +1171,7 @@ fn a_whole_run_cancel_reaps_every_member_stamped_for_it() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })
@@ -1241,7 +1242,7 @@ fn a_cancelled_run_reaps_the_processes_stamped_for_it() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })

@@ -11,8 +11,8 @@
 use oneagentgraph::config::{FIRST_SCHEMA_VERSION, SCHEMA_VERSION};
 
 use crate::support::{
-    fake_harness, graph_with, single_sided_graph, two_party_graph, until, Workspace, CHAIN,
-    FAKE_HARNESS_KEY, NO_ENV,
+    fake_harness, graph_with, single_sided_graph, two_party_graph, until, Hermetic, Workspace,
+    CHAIN, FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// `validate` reads every ref the graph names, so a pass means the graph could
@@ -1944,7 +1944,7 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })
@@ -2041,7 +2041,7 @@ fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })
@@ -2246,7 +2246,7 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })
@@ -2484,7 +2484,7 @@ fn reset_timer_leaves_a_non_resettable_schedule_counting() {
                     "ONEAGENTGRAPH_ONEHARNESS_BIN",
                     crate::support::oneharness_bin(),
                 )
-                .env_remove("ONEHARNESS_HARNESSES")
+                .hermetic()
                 .output()
                 .expect("the run finishes")
         })

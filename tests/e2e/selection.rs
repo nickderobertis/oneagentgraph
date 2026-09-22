@@ -20,8 +20,8 @@
 #[cfg(unix)]
 use crate::support::make_executable;
 use crate::support::{
-    fake_harness, graph_with, two_party_graph, Workspace, CHAIN, FAKE_HARNESS_KEY, FALLBACK_CHAIN,
-    MIXED_CHAIN, NO_ENV, UNREACHABLE_HARNESS_KEY,
+    fake_harness, graph_with, single_sided_graph, two_party_graph, Workspace, CHAIN,
+    FAKE_HARNESS_KEY, FALLBACK_CHAIN, MIXED_CHAIN, NO_ENV, UNREACHABLE_HARNESS_KEY,
 };
 
 // llmlint: ignore-block[tests_mirror_real_usage] the assertions in this block read a
@@ -808,5 +808,79 @@ fn a_chain_of_one_candidate_serving_the_wrong_model_dies_naming_the_refusal() {
         run.of_kind("member-settled").is_empty(),
         "{:?}",
         run.kinds()
+    );
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] the first journey below reads the
+// argv the doubled harness recorded, for the reason the blocks above give: which
+// model a harness was handed is not on the stream, and it is the one thing that
+// says the parent's `[harness.claude-code]` table is the one the turn ran under.
+// The exit code, the event kinds, and the refusal are all read through the CLI.
+/// A single-sided member whose `oneharness_config` names nothing but a parent
+/// runs under the chain and the model only that parent names.
+///
+/// The parent sits in a directory of its own and is named relatively, as a
+/// config on disk names one: the core resolves `extends` against the declaring
+/// file's directory, so this is what proves the member's turn reads the chain
+/// the operator wrote rather than a copy that has lost where it came from.
+#[test]
+fn a_member_whose_config_extends_a_parent_runs_under_the_harness_the_parent_names() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "shared/parent.toml",
+        &format!("{CHAIN}\n[harness.claude-code]\nmodel = \"parent-pinned-model\"\n"),
+    );
+    workspace.write("oneharness.toml", "extends = \"shared/parent.toml\"\n");
+    workspace.graph(&single_sided_graph(&fake_harness()));
+
+    let argv = workspace.at("argv.txt");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now: inherited chain fake:record-argv={}",
+        argv.display()
+    ));
+    run.expect_code(0);
+    assert_eq!(
+        run.of_kind("member-settled").len(),
+        1,
+        "the member did not settle: {:?}",
+        run.kinds()
+    );
+    assert!(run.of_kind("member-failed").is_empty(), "{:?}", run.kinds());
+
+    let spawned = std::fs::read_to_string(&argv).expect("the harness recorded its argv");
+    assert_eq!(spawned.lines().count(), 1, "one turn, one spawn: {spawned}");
+    assert!(
+        spawned.contains("--model parent-pinned-model"),
+        "the turn did not run under the model only the parent names: {spawned}"
+    );
+}
+
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A parent that is not there refuses the member rather than running it under
+/// whatever the child alone would select.
+#[test]
+fn a_member_whose_parent_config_is_missing_is_refused_by_name() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", "extends = \"shared/gone.toml\"\n");
+    workspace.graph(&single_sided_graph(&fake_harness()));
+
+    let run = workspace.run_task("fake:complete-now: never runs");
+    assert_ne!(run.code, 0, "a missing parent ran: {:?}", run.kinds());
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "{:?}",
+        run.kinds()
+    );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let detail = died[0]["payload"]["detail"].as_str().unwrap_or_default();
+    // The core reports the parent as the absolute path it resolved and failed to
+    // read, so the refusal spells it with the separator the platform uses and
+    // the missing-file error in that platform's words. The parent it names is
+    // the same file either way, which is what this reads.
+    assert!(
+        detail.replace('\\', "/").contains("shared/gone.toml"),
+        "the refusal does not name the parent it could not read: {detail}"
     );
 }
