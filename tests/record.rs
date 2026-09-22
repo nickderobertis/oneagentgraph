@@ -60,7 +60,7 @@ use oneagentgraph::config::{
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
     AttemptedCandidate, Cause, Disposition, EventFilter, MatchFields, Matcher, MemberDied,
-    MemberStarted, Runner, Source, ENVELOPE_VERSION,
+    MemberStarted, Runner, Source, ENVELOPE_VERSION, SOURCE_WORD,
 };
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
@@ -93,7 +93,7 @@ fn golden_graph() -> GraphConfig {
                         ..Matcher::default()
                     },
                     Matcher {
-                        source: Some(Source::Agentgraph),
+                        source: Some(Source::from(SOURCE_WORD)),
                         fields: MatchFields {
                             member: Some("worker".into()),
                             persona: Some("engineer".into()),

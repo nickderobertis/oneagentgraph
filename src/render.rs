@@ -277,7 +277,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::event::{Labels, Source, ENVELOPE_VERSION};
+    use crate::event::{Labels, Source, ENVELOPE_VERSION, SOURCE_WORD};
 
     fn envelope(kind: EventKind, payload: Value) -> Envelope {
         Envelope {
@@ -285,7 +285,7 @@ mod tests {
             ts: "2026-08-08T06:12:22.847Z".into(),
             stream: "run-1".into(),
             seq: 0,
-            source: Source::Agentgraph,
+            source: Source::from(SOURCE_WORD),
             kind: kind.into(),
             dimensions: Default::default(),
             labels: Labels {
