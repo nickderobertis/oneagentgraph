@@ -21,3 +21,9 @@ REPO_PLAN.md
 # Local sync bookkeeping for gh-secrets (per-machine; the manifest itself is
 # tracked).
 .gh-secrets-state.json
+# screencomp: commit the digest baseline (shots/baseline/*.json) and the README
+# images (docs/screenshots/), but never the regenerated capture trees or the
+# review gallery the pre-push guard builds.
+/shots/current/
+/shots/verify/
+/shots/review/

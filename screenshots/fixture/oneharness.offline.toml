@@ -1,0 +1,6 @@
+# A one-identity `codex` chain, paired with the `ONEHARNESS_BIN_CODEX` override in
+# `offline.yaml`. A second identity rather than `claude-code`, because the
+# override keys on the harness id: aiming `claude-code` at nothing would take the
+# working members' double down with it.
+run_mode = "fallback"
+harnesses = ["codex"]

@@ -15,6 +15,11 @@
       "command": "bash scripts/llmlint-judge.sh",
       "outputs": ["{workspaceRoot}/.logs/llmlint-diff.report"]
     },
+    "screenshots": {
+      "command": "just _crate-screenshots",
+      "inputs": ["screenshotSource"],
+      "outputs": ["{workspaceRoot}/shots/current", "{workspaceRoot}/docs/screenshots/*.svg"]
+    },
     "check": {
       "executor": "nx:noop",
       "dependsOn": ["format-check", "lint", "test", "doc"]

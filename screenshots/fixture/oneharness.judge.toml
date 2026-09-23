@@ -1,0 +1,7 @@
+# A one-identity `claude-code` chain. The bare identity, never a variant:
+# `ONEHARNESS_BIN_<ID>` keys on a harness id, so a chain naming
+# `claude-code:alternate` would spawn the real paid provider with the double
+# sitting unused beside it. That is a money hazard rather than a style point, and
+# it is the one way this capture could cost anything.
+run_mode = "fallback"
+harnesses = ["claude-code"]

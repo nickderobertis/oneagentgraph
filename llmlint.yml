@@ -15,6 +15,17 @@ files:
     - "Cargo.lock"
     - "package-lock.json"
     - "CHANGELOG.md"
+    # The terminal captures and their digest baseline: `scripts/screenshots.sh`
+    # writes both from the real binary's own output, and screencomp gates them on
+    # content hash, so there is nothing here for a judge to hold an opinion about.
+    # They are also megabytes of base64 font data per file, which is the practical
+    # half: handed to a judge they exhaust the context before a verdict and the
+    # whole batch errors out with no JSON to extract.
+    - "docs/screenshots/**"
+    - "shots/baseline/*.json"
+    # A vendored third-party binary (JetBrains Mono, OFL). Not this project's code
+    # and not text.
+    - "screenshots/fonts/**"
 rationales: true
 # No `agents` block: the harness/model are NOT pinned here. `oneharness.toml`
 # (composed alongside this file) selects them in fallback mode — codex + gpt-5.5

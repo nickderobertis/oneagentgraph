@@ -1,0 +1,21 @@
+# The graph the `validate` shot checks and the demo GIF drives.
+#
+# Every path in it is relative and the harness override is a bare program name
+# resolved from `PATH`, so the document's bytes are the same in every checkout —
+# which is what keeps the `sha256` a run records for it, and therefore the
+# `history show` shot, byte-identical.
+version: 9
+name: node-scope
+env:
+  ONEHARNESS_BIN_CLAUDE_CODE: oneagentgraph-fake-harness
+members:
+  worker:
+    kind: onejudge
+    base_config: ./base.yaml
+    persona: engineer
+    agent:
+      oneharness_config: ./oneharness.toml
+    judge:
+      - oneharness_config: ./oneharness.judge.toml
+        label: reviewer
+    mode: bypass

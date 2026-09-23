@@ -1,0 +1,8 @@
+# The onejudge base the graph's two-party member layers its persona onto.
+provider:
+  kind: oneharness
+system_prompt: |
+  Standing bar: verify before you claim done.
+user:
+  done_when: "the retry is in place and `just check` is green"
+  max_turns: 4

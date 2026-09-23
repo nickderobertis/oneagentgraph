@@ -11,6 +11,17 @@
     ],
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
     "wholeWorkspace": ["{workspaceRoot}/**/*"],
+    "screenshotSource": [
+      "{workspaceRoot}/src/**/*",
+      "{workspaceRoot}/personas/**/*",
+      "{workspaceRoot}/screenshots/**/*",
+      "{workspaceRoot}/scripts/screenshots.sh",
+      "{workspaceRoot}/screencomp.toml",
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "sharedGlobals"
+    ],
     "crateSource": [
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/tests/**/*",
@@ -38,6 +49,7 @@
       "cache": false,
       "dependsOn": ["format-check", "lint", "test"]
     },
+    "screenshots": { "cache": true, "inputs": ["screenshotSource"] },
     "lint-llm-diff": {
       "cache": true,
       "inputs": [
