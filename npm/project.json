@@ -22,6 +22,8 @@
         "{workspaceRoot}/pyproject.toml",
         "{workspaceRoot}/.github/workflows/release.yml",
         "{workspaceRoot}/.github/workflows/published-smoke.yml",
+        "{workspaceRoot}/.github/workflows/visual-docs.yml",
+        "{workspaceRoot}/screenshots/tools.env",
         "{workspaceRoot}/scripts/report-workflow-failure.sh",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",

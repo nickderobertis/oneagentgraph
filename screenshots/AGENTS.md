@@ -306,6 +306,18 @@ the pre-push guard builds on drift and `.gitignore` keeps out of the tree. A
 published one, and the badge for it, are the repository owner's to add once a
 Pages site exists.
 
+### The two halves run under different shells
+
+The local guard hands `scripts/screenshots.sh` to **bash**; CI's `capture-command`
+is a step inside a `container:`, which GitHub runs under **`sh -e {0}`** — dash on
+this image. So the workflow's block is POSIX sh and the script it calls is bash,
+and only the first of those constraints is invisible locally: a bashism in that
+block ends the step at its first line with nothing captured, which is what
+`set -euo pipefail` did on every run of the workflow from its adoption until it
+was dropped. `.github/workflows/visual-docs.yml` says so at the block, and
+`npm/test/visual-docs-capture.test.mjs` drives that block under a strict `sh -e`
+so the next one fails in `just check` rather than in a workflow nobody requires.
+
 ## Outputs
 
 - `shots/current/<lane>/captures.json` and the SVGs — the capture screencomp reads
