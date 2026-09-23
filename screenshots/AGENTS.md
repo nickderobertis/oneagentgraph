@@ -233,9 +233,13 @@ Two things the gate is **not**, so nobody reads more into it than is there. Unti
 the repository owner adds the workflow's check to branch protection, a pull
 request whose capture drifted still merges — the workflow fails, but the context
 is not required, so the strict gate is advisory on the merge path. And there is no
-gallery link or badge anywhere in this repository, in the README, here, or in the
-workflow's comments, because Pages is not enabled and a link that 404s on the day
-it merges is wrong on the day it merges.
+gallery link or badge anywhere in this repository — not in the README, not here,
+not in the workflow's comments — because this repository has no published gallery
+to link to, and a link that 404s on the day it merges is wrong on the day it
+merges. The gallery this capture does produce locally is `shots/review/`, which
+the pre-push guard builds on drift and `.gitignore` keeps out of the tree. A
+published one, and the badge for it, are the repository owner's to add once a
+Pages site exists.
 
 ## Outputs
 
