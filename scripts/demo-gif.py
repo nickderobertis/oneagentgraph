@@ -5,25 +5,28 @@ Like `scripts/screenshots.sh`, this drives the **real release `oneagentgraph`
 binary** against this crate's own paid-harness double at oneharness's own
 `ONEHARNESS_BIN_<ID>` seam — so every line it draws is a line the binary really
 wrote, and there is no model call, no paid turn, no network, and no credential.
-Unlike the stills it drives the graph's **two-party** member, whose sides onejudge
-spawns `oneharness run` for, so it also wants that CLI on `PATH` at the release the
-justfile pins; that is why this is the one part of the capture that does.
+Like the stills, it needs **no `oneharness` CLI at all**: the graph it drives is
+two single-sided `kind: oneharness` members, whose turns run on the linked
+`oneharness-core` in this process. `ONEAGENTGRAPH_ONEHARNESS_BIN` is pointed at a
+path inside the throwaway workspace that nothing ever creates, so a run that
+reached for that CLI would die naming it rather than quietly find one on the host.
 
 `run --output text` is append-only — nothing redraws, nothing is cleared — so
 rendering it faithfully is simply replaying the lines in the order they arrived,
 at the pace they arrived. There is no view to reconstruct, which is what makes
 this simpler than `llmlint`'s equivalent (its live view redraws in place). Each
 frame's duration comes from the gap between the two event timestamps it sits
-between, clamped, so the animation carries the real rhythm of a run — a tool call
-landing, then a wait, then the reply — rather than a uniform tick.
+between, clamped, so the animation carries the real rhythm of a run — a member
+waiting, then its tool call landing, then the graph moving on to the member that
+was gated on it — rather than a uniform tick.
 
-The agent's first turn is deliberately held in flight for [`HOLD_SECONDS`], with
-the double's own `fake:hold` sentinel, and released by this process. Without it the
-double answers in microseconds and the whole run settles inside one millisecond:
-true, and a picture of nothing, because the liveness supervision a reader most
-needs to see — the member heartbeat that says a turn is still alive — only has
-something to say while a turn is actually running. A held turn is not a staged one;
-it is the ordinary case, since a real turn takes minutes.
+The first member is deliberately held for [`HOLD_SECONDS`], with the double's own
+`fake:hold` sentinel, and released by this process. Without it the double answers
+in microseconds and the whole run settles inside one millisecond: true, and a
+picture of nothing, because the liveness supervision a reader most needs to see —
+the `member-heartbeat` that says a member is still alive — only has something to
+say while something is actually taking time. Holding is not staging; it is the
+ordinary case, since a real turn takes minutes.
 
 The output is monochrome because the output **is** monochrome: this tool emits no
 ANSI escape anywhere, and colouring the frames here would be inventing a feature
@@ -55,7 +58,8 @@ BAR = (22, 27, 34)
 FG = (201, 209, 217)
 DOTS = [(255, 95, 86), (255, 189, 46), (39, 201, 63)]  # traffic-light window dots
 
-COLS = 112           # clears the widest line a settling run writes
+COLS = 118           # clears the widest line this run writes (a `turn-completed`
+                     # with its usage, for the longer of the two member names)
 FONT_SIZE = 18
 PAD = 24
 BAR_H = 40
@@ -64,9 +68,11 @@ MIN_MS = 160         # floor on a gap, so back-to-back events stay readable
 MAX_MS = 1100        # ceiling on a gap, so a real wait does not stall the loop
 HOLD_MS = 3000       # hold on the settled stream before looping
 
-# How long the agent's first turn is held in flight. Past the 15-second heartbeat
-# bound the contract gives a member, so exactly one `member-heartbeat` lands inside
-# the turn — enough to show that liveness is supervised, without a wall of them.
+# How long the first member is held. Past the 15-second heartbeat bound the
+# contract gives a member, so exactly one `member-heartbeat` lands before that
+# member's turn opens — enough to show that liveness is supervised, without a wall
+# of them. The double blocks before it publishes anything, which is why the beat
+# sits between `member-started` and `turn-started` rather than inside the turn.
 HOLD_SECONDS = 18
 
 # The sentinel steering the double, and the task the run is given. `fake:hold=`
@@ -83,30 +89,6 @@ def pin(name: str) -> str:
         if line.startswith(f"{name}="):
             return line.split("=", 1)[1].strip()
     raise SystemExit(f"demo-gif: screenshots/tools.env declares no {name}")
-
-
-def oneharness_version() -> str:
-    """The `oneharness` release the justfile pins, read from it rather than copied."""
-    root = Path(__file__).resolve().parent.parent
-    text = (root / "justfile").read_text()
-    marker = '\noneharness-version := "'
-    return text.split(marker, 1)[1].split('"', 1)[0]
-
-
-def oneharness_bin() -> str:
-    """The `oneharness` CLI onejudge spawns per side, resolved as the e2e suite does.
-
-    `PATH` first, then the directory `just bootstrap` installs into, which `PATH`
-    need not reach first.
-    """
-    named = os.environ.get("ONEAGENTGRAPH_TEST_ONEHARNESS")
-    if named:
-        return named
-    found = shutil.which("oneharness")
-    if found:
-        return found
-    cargo_home = os.environ.get("CARGO_HOME") or str(Path.home() / ".cargo")
-    return str(Path(cargo_home) / "bin/oneharness")
 
 
 def stream(root: Path, binary: str, fake: str) -> list[str]:
@@ -131,10 +113,14 @@ def stream(root: Path, binary: str, fake: str) -> list[str]:
         "HOME": str(work / "home"),
         "TMPDIR": str(work / "tmp"),
         "PATH": f"{binaries}:/usr/bin:/bin",
-        "ONEAGENTGRAPH_ONEHARNESS_BIN": oneharness_bin(),
+        # Absolute, and inside a directory this process just made, so it is absent
+        # on every host rather than absent on the hosts that happen to lack the
+        # CLI. Nothing here should reach it; this is what makes that a fact the run
+        # would report rather than an assumption.
+        "ONEAGENTGRAPH_ONEHARNESS_BIN": str(work / "no-such-oneharness"),
     }
     running = subprocess.Popen(
-        [binary, "run", "./graph.yaml", "--task", TASK.format(release=release),
+        [binary, "run", "./review.yaml", "--task", TASK.format(release=release),
          "--dir", str(work / "dir"), "--output", "text"],
         cwd=fixture, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         text=True,
@@ -149,11 +135,9 @@ def stream(root: Path, binary: str, fake: str) -> list[str]:
         freeing.cancel()
     lines = [line for line in out.splitlines() if line.strip()]
     if not lines:
-        print("demo-gif: the run published nothing. This hero drives the graph's "
-              "two-party member, whose sides onejudge spawns `oneharness run` for, "
-              f"so it needs `oneharness {oneharness_version()}` (the justfile's pin) "
-              "on PATH or in the cargo bin directory — `just bootstrap` installs it.",
-              file=sys.stderr)
+        print("demo-gif: the run published nothing. Build the release binaries "
+              "with `just screenshots-gif`, which is what puts the paid-harness "
+              "double beside the CLI this drives.", file=sys.stderr)
         print(err, file=sys.stderr)
         raise SystemExit(1)
     shutil.rmtree(work, ignore_errors=True)

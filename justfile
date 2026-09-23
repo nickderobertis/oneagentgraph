@@ -281,13 +281,12 @@ screenshots-tools:
 screenshots:
     @bash scripts/screenshots.sh
 
-# Regenerate the animated hero GIF (docs/screenshots/demo.gif — the event stream
-# of a two-party member's run filling line by line). Like the stills it drives the
-# REAL release binary against the paid-harness double; unlike them it also needs
-# the pinned `oneharness` CLI, because onejudge spawns `oneharness run` per side.
-# It is informational and NOT hash-gated (a GIF is not byte-reproducible across
-# Pillow versions), so regenerate on demand and commit the result. Needs Python 3
-# with Pillow.
+# Regenerate the animated hero GIF (docs/screenshots/demo.gif — a two-member
+# graph's event stream filling line by line). Like the stills it drives the REAL
+# release binary against the paid-harness double, on the linked oneharness-core in
+# process, so it needs no `oneharness` CLI either. It is informational and NOT
+# hash-gated (a GIF is not byte-reproducible across Pillow versions), so regenerate
+# on demand and commit the result. Needs Python 3 with Pillow.
 screenshots-gif:
     @command -v python3 >/dev/null || { echo "python3 not found: needed to render the demo GIF" >&2; exit 1; }
     @python3 -c "import PIL" 2>/dev/null || { echo "Pillow not installed: pip install Pillow" >&2; exit 1; }

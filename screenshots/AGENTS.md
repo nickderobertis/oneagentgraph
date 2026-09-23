@@ -27,7 +27,7 @@ come apart.
 | `history` (`view=list`) | the listing of two real runs | Two rows, two exit codes, one of them a run that died for want of a harness — the listing is how an operator finds the run they want. |
 | `history` (`view=record`) | `history show ID` | The whole record: the members, the declared members, the config refs with their digests, and where the merged stream went. It is the only place the record's shape is visible at all. |
 | `persona` | the shipped `personas/` catalogue validating, then a refused fragment | The catalogue line says the verb takes a directory and that what this crate ships really passes it; the refusal under it is the `agent:` block earlier persona versions defined, refused with its migration in the message — which is a claim the README already makes and could not previously show. |
-| `demo.gif` | `run --output text`, the stream filling | The hero. See below. |
+| `demo.gif` | `run --output text`, the stream of a two-member graph filling | The hero. See below. |
 
 **What is deliberately absent.** A still of `run --output text` sits nowhere in
 the README: the hero GIF directly above it is that surface, moving, and a frozen
@@ -80,11 +80,16 @@ is a substring of `change`, which once parked every turn of the e2e suite.
 anything after it, including the `:` that separates the other sentinels, is read
 as part of the path and the turn waits on a file nobody writes.
 
-**The hash-gated scenes need no `oneharness` CLI.** The two runs behind the
-`history` shots use single-sided `kind: oneharness` members, which run on the
-linked `oneharness-core` in this process. Only `scripts/demo-gif.py` wants the
-CLI, because it drives the **two-party** member and onejudge spawns `oneharness
-run` per side; `just bootstrap` installs the release the justfile pins.
+**Nothing here needs an `oneharness` CLI.** Every run behind a scene — the two
+the `history` shots list, and the one the hero replays — uses single-sided
+`kind: oneharness` members, whose turns run on the linked `oneharness-core` in
+this process. Both callers point `ONEAGENTGRAPH_ONEHARNESS_BIN` at a path inside
+their own throwaway workspace that nothing ever creates, so a run that reached for
+that CLI would die naming it instead of quietly finding one on the host. (A
+`kind: onejudge` member is the one that would want it: onejudge spawns
+`oneharness run` per side. The `validate` scene reads such a member's graph
+without launching it, which is why that graph is in the fixture and no scene runs
+it.)
 
 ## Why it is byte-reproducible (and needs no container)
 
@@ -160,7 +165,6 @@ when the copies part. Each of them, and which it is:
 | the vendored font | `screenshots/tools.env` (`FONT_FILE`) | derived. `scripts/screenshots.sh` and `scripts/demo-gif.py` read it from there. |
 | the arch lane | `screencomp.toml` (`[capture].arches`) | derived. `scripts/screenshots.sh` and `.githooks/pre-push` each parse that line, and both refuse loudly rather than guess if it ever names more than one lane. |
 | the Rust toolchain | `rust-toolchain.toml` | derived. The workflow's container is deliberately *unversioned* (`rust:bookworm`) and sets no `RUSTUP_TOOLCHAIN`, so rustup installs the pinned toolchain from that file. Nothing about a shot depends on the compiler anyway. |
-| the `oneharness` CLI the GIF wants | the justfile (`oneharness-version`) | derived. `scripts/demo-gif.py` reads the pin out of the justfile for its diagnostic, exactly as `tests/e2e/support.rs` does. |
 | the screencomp version | `.github/workflows/visual-docs.yml` (the `uses:` ref and `screencomp-version:`) | **checked**, not derived: the two copies are screencomp's own contract, and `screencomp doctor --env` reports a workflow pin that has drifted from the installed CLI as a problem. |
 
 Nothing in this tree is an Nx input that renders a shot, and that is by design:
@@ -172,20 +176,32 @@ these files like any other.
 
 The stills are static; the README **hero** is the event stream filling line by
 line, because that is what using this tool looks like and a still of the same text
-says strictly less. `scripts/demo-gif.py` drives one real run of the fixture
-graph's two-party member and replays its `--output text` lines in the order they
-arrived, at the pace its own timestamps give them (clamped at both ends, so a
-burst does not flash past and a genuine wait does not stall the loop). There is no
+says strictly less. `scripts/demo-gif.py` drives one real run of `review.yaml` —
+two single-sided members, the second gated on the first, so the one stream carries
+both in order — and replays its `--output text` lines as they arrived, at the pace
+its own timestamps give them (clamped at both ends, so a burst does not flash past
+and a genuine wait does not stall the loop). There is no
 view to reconstruct: this stream is append-only, nothing redraws, so rendering it
 faithfully is simply replaying it — which is what makes this renderer much
 simpler than the `llmlint` one it was adapted from, whose live view redraws in
 place.
 
-The agent's first turn is **held in flight** past the heartbeat bound, with the
-double's own `fake:hold` sentinel, and released by the renderer. Without it the
-double answers in microseconds and the whole run settles inside one millisecond:
-true, and a picture of nothing, because the `member-heartbeat` that says a turn is
-still alive only has something to say while a turn is running.
+The first member is **held** past the heartbeat bound, with the double's own
+`fake:hold` sentinel, and released by the renderer. Without it the double answers
+in microseconds and the whole run settles inside one millisecond: true, and a
+picture of nothing, because the `member-heartbeat` that says a member is still
+alive only has something to say while something is taking time. The double blocks
+before it publishes anything, so the beat lands between `member-started` and
+`turn-started` rather than inside the turn.
+
+**One event the two-party stream has is absent here, and it is absent by
+construction**: `turn-message` — a party's own words for a turn — is published
+only by `src/judge.rs`, so a single-sided member never emits one. Making the hero
+show it would mean either making this crate publish that kind for a member that
+has no second party, which is a change to the event stream `docs/contract.md`
+approves, or driving the hero through a member that needs the `oneharness` CLI.
+Neither is worth a line of a demo, so the hero shows the stream a
+`kind: oneharness` member really produces.
 
 The frames are drawn with the same vendored font, with Pillow and nothing else —
 no `ttyd`, no `ffmpeg`. Like the stills it is informational; **unlike** them it is
@@ -204,7 +220,7 @@ than documenting one.
 - `just screenshots` — capture. Builds the release binaries, writes the shots and
   the README copies. Quiet on success.
 - `just screenshots-gif` — regenerate the animated hero (needs Python 3 with
-  Pillow, and the pinned `oneharness` CLI).
+  Pillow; like the stills, it needs nothing else installed).
 - `just screenshots-bless` — **after an intended output change**: recapture and
   refresh `shots/baseline/<lane>.json`. Commit it alongside `docs/screenshots/`.
 
