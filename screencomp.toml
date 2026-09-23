@@ -1,0 +1,47 @@
+# screencomp configuration. See https://github.com/nickderobertis/screencomp.
+
+[capture]
+# Captures are deterministic SVGs — a vendored, pinned font embedded into each
+# file — so the bytes are identical on every arch and runner. One arch lane is
+# therefore enough; its committed baseline is shots/baseline/x86_64.json, and it
+# is the lane the local guard classifies on every host. This line is the one
+# source for the lane: scripts/screenshots.sh and .githooks/pre-push both read it
+# from here rather than carrying a copy.
+arches = ["x86_64"]
+
+[comment]
+title = "Terminal screenshots"
+marker = "screencomp"        # [A-Za-z0-9_-]; one sticky comment per marker
+embed_limit = 10             # embed images inline when <= N shots differ (0 disables)
+
+# One card per surface — `help`, `validate`, `health`, `sweep`, `history`,
+# `persona` — all scripted in scripts/screenshots.sh. Only `history` carries a
+# toggle: the same verb answers with a listing of every run and with one run's
+# whole record, and the gallery flips between them. Every other card has none.
+[[toggle]]
+key = "view"
+label = "View"
+values = ["list", "record"]
+
+[guard]
+# Local pre-push guard (.githooks/pre-push): re-capture only when something that
+# can change a rendered shot changes — the verbs' own reporting, the argument
+# surface `--help` renders, the diagnostics a refusal carries, the shipped persona
+# catalogue the `persona` shot validates, or the capture machinery itself.
+paths = [
+  "src/main.rs",
+  "src/cli.rs",
+  "src/config.rs",
+  "src/health.rs",
+  "src/history.rs",
+  "src/persona.rs",
+  "src/run.rs",
+  "src/sweep.rs",
+  "src/scratch.rs",
+  "personas/**",
+  "scripts/screenshots.sh",
+  "screenshots/**",
+  "Cargo.toml",
+  "Cargo.lock",
+]
+gallery = "shots/review"

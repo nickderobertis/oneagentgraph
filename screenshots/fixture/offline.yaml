@@ -1,0 +1,13 @@
+# The graph whose run is the failing row in the `history` shots. Its chain names
+# `codex` and its `ONEHARNESS_BIN_CODEX` override names a program that exists
+# nowhere, so the member dies for want of a harness on every host rather than on
+# the hosts that happen not to have one — and it never reaches a paid provider,
+# because the override is what `which` resolves.
+version: 9
+name: offline-probe
+env:
+  ONEHARNESS_BIN_CODEX: oneagentgraph-no-such-harness
+members:
+  prober:
+    kind: oneharness
+    oneharness_config: ./oneharness.offline.toml

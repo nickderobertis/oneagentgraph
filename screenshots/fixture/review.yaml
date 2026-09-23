@@ -1,0 +1,16 @@
+# The graph whose runs the `history` shots list: two single-sided members, the
+# second waiting on the first, so one stream carries both in order. Driven
+# in-process on the linked `oneharness-core`, so these runs need no `oneharness`
+# CLI at all.
+version: 9
+name: review-panel
+env:
+  ONEHARNESS_BIN_CLAUDE_CODE: oneagentgraph-fake-harness
+members:
+  implementer:
+    kind: oneharness
+    oneharness_config: ./oneharness.toml
+  reviewer:
+    kind: oneharness
+    oneharness_config: ./oneharness.toml
+    deps: [implementer]

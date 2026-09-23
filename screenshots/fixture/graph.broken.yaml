@@ -1,0 +1,17 @@
+# The graph the `validate` shot is refused over: one character wrong in a judge's
+# label, which is a value the run would later write a file name out of.
+version: 9
+name: node-scope
+env:
+  ONEHARNESS_BIN_CLAUDE_CODE: oneagentgraph-fake-harness
+members:
+  worker:
+    kind: onejudge
+    base_config: ./base.yaml
+    persona: engineer
+    agent:
+      oneharness_config: ./oneharness.toml
+    judge:
+      - oneharness_config: ./oneharness.judge.toml
+        label: "code reviewer"
+    mode: bypass

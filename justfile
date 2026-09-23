@@ -57,8 +57,15 @@ default:
 # Every project's `bootstrap` target, so one clean-clone command provisions the
 # whole graph rather than the crate alone. Serialized: the projects share
 # installers, and two of those running at once race the same directory.
+#
+# The one step above the fan-out is the committed git hooks directory, because a
+# hook is per-clone state rather than anything a project owns: `core.hooksPath` is
+# never committed, so a `.githooks/pre-push` nothing points git at is a guard that
+# runs nothing. That directory holds the screencomp visual guard and nothing else
+# — `just gate` stays unhooked (screenshots/AGENTS.md says why).
 # Set up the project from a clean clone.
 bootstrap:
+    @bash scripts/activate-hooks.sh
     @bash scripts/nx.sh run-many -t bootstrap --parallel=1
 
 # The Rust crate's own provisioning (the `oneagentgraph:bootstrap` target).
@@ -253,6 +260,46 @@ lint-windows:
       || { echo "no cross compiler for the Windows target — install mingw-w64 (a dependency's build script needs one)" >&2; exit 1; }
     @cargo clippy --target x86_64-pc-windows-gnu --all-targets --all-features --locked -- -D warnings
 # llmlint: ignore-end[changed_behavior_has_e2e]
+
+# --- Terminal screenshots (informational; never part of `check` or CI's gate) --
+# Deterministic SVGs of the real CLI output, rendered by `freeze` from a vendored
+# pinned font, gated/galleried/PR-commented by screencomp. screenshots/AGENTS.md
+# is the durable explanation: what each scene documents, why it is reproducible,
+# and what to do when a verb's output legitimately changes. Regenerating is out of
+# the gate for the reason `deps-check` and `msrv` are — CI's Visual docs workflow
+# owns the comparison, and the pre-push guard refreshes the baseline locally on
+# drift.
+
+# Install the pinned screenshot renderer (`freeze`) on demand. Needs Go.
+screenshots-tools:
+    @command -v go >/dev/null || { echo "go not found: needed to install freeze; see https://go.dev/dl" >&2; exit 1; }
+    @. screenshots/tools.env && go install github.com/charmbracelet/freeze@v"$FREEZE_VERSION"
+    @echo "installed freeze to $(go env GOPATH)/bin (ensure it is on PATH)"
+
+# Capture the screenshots: drive the real binary against the paid-harness double,
+# render each scene to shots/current/<lane>/ and docs/screenshots/. Needs `freeze`.
+screenshots:
+    @bash scripts/screenshots.sh
+
+# Regenerate the animated hero GIF (docs/screenshots/demo.gif — the event stream
+# of a two-party member's run filling line by line). Like the stills it drives the
+# REAL release binary against the paid-harness double; unlike them it also needs
+# the pinned `oneharness` CLI, because onejudge spawns `oneharness run` per side.
+# It is informational and NOT hash-gated (a GIF is not byte-reproducible across
+# Pillow versions), so regenerate on demand and commit the result. Needs Python 3
+# with Pillow.
+screenshots-gif:
+    @command -v python3 >/dev/null || { echo "python3 not found: needed to render the demo GIF" >&2; exit 1; }
+    @python3 -c "import PIL" 2>/dev/null || { echo "Pillow not installed: pip install Pillow" >&2; exit 1; }
+    cargo build --release --locked --features test-doubles --bin oneagentgraph --bin oneagentgraph-fake-harness
+    python3 scripts/demo-gif.py
+
+# Refresh the committed baseline from a fresh capture, after an INTENDED output
+# change. Commit shots/baseline/ and docs/screenshots/ together.
+screenshots-bless: screenshots
+    @command -v screencomp >/dev/null || { echo "screencomp not installed: https://github.com/nickderobertis/screencomp#install" >&2; exit 1; }
+    @lane=$(sed -n 's/^arches *= *\[ *"\([^"]*\)" *\].*/\1/p' screencomp.toml); screencomp manifest --input shots/current --arch "$lane" --output shots/baseline/"$lane".json
+    @echo "baseline refreshed; commit shots/baseline/ + docs/screenshots/"
 
 # Ensures `just`, verifies the rest, then runs setup-llmlint. Runs automatically
 # via the Claude Code SessionStart hook; this is the manual entry point.
