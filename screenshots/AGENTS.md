@@ -317,6 +317,9 @@ block ends the step at its first line with nothing captured, which is what
 was dropped. `.github/workflows/visual-docs.yml` says so at the block, and
 `npm/test/visual-docs-capture.test.mjs` drives that block under a strict `sh -e`
 so the next one fails in `just check` rather than in a workflow nobody requires.
+That suite captures **nothing** — every tool the block reaches for is stubbed,
+`bash` included — so what the gate gained is the portability of those six lines,
+and the capture itself stays outside `just check` exactly as before.
 
 ## Outputs
 
