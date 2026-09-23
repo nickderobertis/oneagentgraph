@@ -278,7 +278,21 @@ screenshots-tools:
 
 # Capture the screenshots: drive the real binary against the paid-harness double,
 # render each scene to shots/current/<lane>/ and docs/screenshots/. Needs `freeze`.
+#
+# Through Nx like every other repo-wide verb, so the capture is a declared node of
+# the graph rather than a script outside it: `screenshotSource` in nx.json names
+# everything that can change a rendered shot, and a tree that has not touched any
+# of it replays the shots it already produced instead of rebuilding a release
+# binary to draw them again. The target is reachable ONLY by name — nothing in
+# `check`, `gate`, or CI's gate job depends on it, which is the property the
+# `Visual docs` workflow exists to keep.
 screenshots:
+    @bash scripts/nx.sh run oneagentgraph:screenshots
+
+# The crate's own capture (the `oneagentgraph:screenshots` target). The pre-push
+# guard calls the script directly rather than coming through here: it is deciding
+# whether to block a push, and a replayed capture cannot answer that.
+_crate-screenshots:
     @bash scripts/screenshots.sh
 
 # Regenerate the animated hero GIF (docs/screenshots/demo.gif — a two-party
@@ -297,9 +311,18 @@ screenshots-gif:
     cargo build --release --locked --features test-doubles --bin oneagentgraph --bin oneagentgraph-fake-harness
     python3 scripts/demo-gif.py
 
-# Refresh the committed baseline from a fresh capture, after an INTENDED output
+# Refresh the committed baseline from a FRESH capture, after an INTENDED output
 # change. Commit shots/baseline/ and docs/screenshots/ together.
-screenshots-bless: screenshots
+#
+# `--skip-nx-cache` rather than the plain target, and that is the whole point of
+# the recipe: blessing is the one call whose answer must come from a capture taken
+# now. A cache hit would restore the shots of the tree that was last captured and
+# then write a baseline over them — which, on a re-bless whose inputs happened not
+# to move, blesses an output nobody re-drew. Nx neither reads nor writes the cache
+# under the flag, so the next ordinary `just screenshots` still judges the tree on
+# its own merits.
+screenshots-bless:
+    @bash scripts/nx.sh run oneagentgraph:screenshots --skip-nx-cache
     @command -v screencomp >/dev/null || { echo "screencomp not installed: https://github.com/nickderobertis/screencomp#install" >&2; exit 1; }
     @lane=$(sed -n 's/^arches *= *\[ *"\([^"]*\)" *\].*/\1/p' screencomp.toml); screencomp manifest --input shots/current --arch "$lane" --output shots/baseline/"$lane".json
     @echo "baseline refreshed; commit shots/baseline/ + docs/screenshots/"

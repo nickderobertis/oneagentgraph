@@ -168,10 +168,39 @@ when the copies part. Each of them, and which it is:
 | the `oneharness` CLI the GIF wants | the justfile (`oneharness-version`) | derived. `scripts/demo-gif.py` reads the pin out of the justfile for its diagnostic, exactly as `tests/e2e/support.rs` does, so this note names *which* pin rather than restating the number. |
 | the screencomp version | `.github/workflows/visual-docs.yml` (the `uses:` ref and `screencomp-version:`) | **checked**, not derived: the two copies are screencomp's own contract, and `screencomp doctor --env` reports a workflow pin that has drifted from the installed CLI as a problem. |
 
-Nothing in this tree is an Nx input that renders a shot, and that is by design:
-the capture is not an Nx target at all, so no cached target can go stale against
-it. `lint-llm-diff` already hashes the whole workspace, so the judged tier sees
-these files like any other.
+## The capture is a node of the Nx graph
+
+`just screenshots` runs `oneagentgraph:screenshots`, like every other repo-wide
+verb here, with the work in the private `_crate-screenshots` recipe beside the
+other `_crate-*` tools. Two things follow, and both are the point.
+
+**Its inputs are declared, so the cache cannot lie.** `screenshotSource` in
+`nx.json` names everything that can change a rendered shot: the whole of `src/**`
+and the manifests, lockfile and toolchain pin the capture builds the binary from;
+`personas/**`, which the `persona` scene validates; `screenshots/**`, the fixture,
+the vendored font and the tool pins; `scripts/screenshots.sh`; and
+`screencomp.toml`, which the script reads the lane out of. Touch one and the next
+capture runs; touch none and it replays the shots it already produced instead of
+rebuilding a release binary to draw them again.
+
+It is deliberately **wider** than `[guard].paths` above, and the two are not two
+statements of one thing. The guard list is a cheap pre-filter answering "is this
+push worth a slow capture?", so it names the handful of source files a shot
+usually comes from. A cache key has to be conservative or it is wrong, so this one
+takes `src/**` whole — every file the guard names is inside it, and an
+over-approximation only costs a re-capture nobody needed.
+
+**It is reachable only by name.** Nothing in `check`, `gate`, the `check` target's
+`dependsOn`, or CI's gate job refers to it, and `nx show project oneagentgraph`
+is where to confirm that after touching the graph. The `Visual docs` workflow
+stays the only gate for these images.
+
+Two callers deliberately do not come through the target. The pre-push guard runs
+`scripts/screenshots.sh` directly, because it is deciding whether to block a push
+and a replayed capture cannot answer that; and `just screenshots-bless` passes
+`--skip-nx-cache`, because blessing is the one call whose answer must come from a
+capture taken now — a hit would restore the last captured tree's shots and then
+write a baseline over them.
 
 ## The animated hero (`docs/screenshots/demo.gif`)
 
@@ -230,8 +259,9 @@ than documenting one.
 
 - `just screenshots-tools` — install the pinned `freeze` (needs Go). screencomp is
   installed separately (see its README); CI installs both itself.
-- `just screenshots` — capture. Builds the release binaries, writes the shots and
-  the README copies. Quiet on success.
+- `just screenshots` — capture, through the `oneagentgraph:screenshots` Nx target.
+  Builds the release binaries, writes the shots and the README copies. Quiet on
+  success, and a replay on a tree that touched none of `screenshotSource`.
 - `just screenshots-gif` — regenerate the animated hero. Needs Python 3 with
   Pillow, **and** the `oneharness` CLI on `PATH` at the release the justfile pins
   as `oneharness-version`, which `just bootstrap` installs. That CLI is a
@@ -239,8 +269,9 @@ than documenting one.
   the pre-push guard and the CI capture never reach it, and the number is not
   restated here because the justfile is its one source (see "One source per
   version"). Why only this one needs it is above.
-- `just screenshots-bless` — **after an intended output change**: recapture and
-  refresh `shots/baseline/<lane>.json`. Commit it alongside `docs/screenshots/`.
+- `just screenshots-bless` — **after an intended output change**: recapture, past
+  the cache, and refresh `shots/baseline/<lane>.json`. Commit it alongside
+  `docs/screenshots/`.
 
 ## The strict gate, and how it is activated
 
