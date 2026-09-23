@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.0...v0.5.1) - 2026-09-23
+
+### Added
+
+- *(docs)* capture the CLI surface as hash-gated terminal screenshots ([#155](https://github.com/nickderobertis/oneagentgraph/pull/155))
+
 ## [0.5.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.4.10...v0.5.0) - 2026-09-22
 
 ### Added
