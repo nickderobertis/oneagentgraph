@@ -2406,7 +2406,6 @@ mod tests {
         buffer.extend([0; 64]);
 
         assert_eq!(listed_pids(&buffer), filled.to_vec());
-        // A listing with nothing filled names nothing.
         assert!(listed_pids(&[0; 64]).is_empty());
     }
 
