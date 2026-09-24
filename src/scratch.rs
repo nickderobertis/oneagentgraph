@@ -443,6 +443,25 @@ fn recorded_identity(lock_path: &Path) -> Option<ProcessIdentity> {
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
+/// Which slots of a zeroed `proc_listallpids` buffer hold pids: every non-zero
+/// one, read to the buffer's end.
+///
+/// This is the decision Darwin's listing needs made, separated from the call so
+/// it is proven on every host rather than only on the one that can make it. No
+/// length from the call's return value reaches it — see `platform::all_pids` for
+/// why. A slot the kernel did not fill still holds the `0` it was zeroed to, and
+/// `0` is no process any signal may name, so dropping it drops nothing real.
+#[cfg_attr(
+    not(target_vendor = "apple"),
+    allow(
+        dead_code,
+        reason = "only Darwin's listing calls this outside its tests"
+    )
+)]
+fn listed_pids(buffer: &[std::ffi::c_int]) -> Vec<i32> {
+    buffer.iter().copied().filter(|pid| *pid > 0).collect()
+}
+
 #[cfg(unix)]
 mod platform {
     #[cfg(target_vendor = "apple")]
@@ -684,32 +703,41 @@ mod platform {
     }
 
     /// Every pid on the host, as `libproc` reports them.
+    ///
+    /// The answer's *length* is deliberately not taken from what the call
+    /// returns. Apple's `libproc.c` (xnu, `libsyscall/wrappers/libproc/libproc.c`)
+    /// returns `numpids / sizeof(int)` — a count of pids — yet both that reading
+    /// and "the bytes those pids fill" are in circulation, as `onevcs` notes on
+    /// its own `live_pids` (`crates/onevcs/src/processes.rs`). The two differ by
+    /// four: dividing the count by `size_of::<i32>()` again is what kept only the
+    /// newest quarter of a listing the kernel writes newest first, so a
+    /// long-lived stamped tree fell out of sight once enough newer processes
+    /// existed, and `launchd` never appeared at all. Neither reading is settled
+    /// here: the buffer is sized from the larger one, zeroed before the call, and
+    /// handed whole to [`super::listed_pids`], which keeps the slots the kernel
+    /// filled.
     #[cfg(target_vendor = "apple")]
     fn all_pids() -> Vec<i32> {
         // SAFETY: a null buffer asks `proc_listallpids` for the size it needs
         // rather than writing anything.
-        let bytes = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
-        let Ok(count) = usize::try_from(bytes) else {
+        let needed = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+        let Ok(needed) = usize::try_from(needed) else {
             return Vec::new();
         };
-        if count == 0 {
-            return Vec::new();
-        }
-        // Room to spare, because processes start between the two calls and a
-        // full buffer is indistinguishable from a truncated one.
-        let mut pids = vec![0i32; count + 64];
+        // One slot per unit of the larger reading, and room to spare, because
+        // processes start between the two calls and the kernel silently leaves
+        // out what does not fit.
+        let mut pids = vec![0 as c_int; needed + 64];
         let Ok(size) = c_int::try_from(std::mem::size_of_val(pids.as_slice())) else {
             return Vec::new();
         };
-        // SAFETY: the buffer is `size` bytes of live, owned, initialised memory,
-        // and the call reports how many bytes it filled.
-        let written = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
-        let Ok(written) = usize::try_from(written) else {
+        // SAFETY: the buffer is `size` bytes of live, owned, zeroed memory, and
+        // the call borrows it for its duration alone.
+        let filled = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), size) };
+        if filled < 0 {
             return Vec::new();
-        };
-        pids.truncate(written / std::mem::size_of::<i32>());
-        pids.retain(|pid| *pid > 0);
-        pids
+        }
+        super::listed_pids(&pids)
     }
 
     /// One process's `KERN_PROCARGS2` block, when this process may read it.
@@ -941,6 +969,69 @@ mod platform {
             assert!(
                 !crate::member::condemns_a_silent_member(dir.path()),
                 "a member with no tree to ask was condemned for the answer nobody gave"
+            );
+        }
+
+        /// The live listing names `launchd`, pid 1: the oldest process on every
+        /// Darwin host, and so the last one `allproc` lists.
+        ///
+        /// Load-independent on purpose. Keeping only a quarter of the listing
+        /// drops its oldest three quarters however few processes a host runs, so
+        /// this is red for that defect on an idle machine as much as a busy one.
+        #[cfg(target_vendor = "apple")]
+        #[test]
+        fn the_live_listing_names_launchd() {
+            let pids = super::all_pids();
+            assert!(
+                pids.contains(&1),
+                "launchd is missing from a listing of {} pids",
+                pids.len()
+            );
+        }
+
+        /// A stamped long-lived child stays visible to the activity rule after
+        /// the host has started a batch of processes newer than it.
+        ///
+        /// A listing that kept only its newest part would lose the child once
+        /// enough newer processes existed; how many that takes depends on the
+        /// host, which is why [`the_live_listing_names_launchd`] is the gate and
+        /// this is its companion.
+        #[cfg(target_vendor = "apple")]
+        #[test]
+        fn a_stamped_child_stays_visible_behind_newer_processes() {
+            use std::process::{Child, Command};
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let stamp = dir.path().display().to_string();
+            let mut stamped = Command::new("sleep")
+                .arg("600")
+                .env(crate::scratch::SCRATCH_ENV, &stamp)
+                .spawn()
+                .expect("spawn the stamped child");
+            let mut newer: Vec<Child> = (0..256)
+                .map(|_| {
+                    Command::new("sleep")
+                        .arg("600")
+                        .spawn()
+                        .expect("spawn a newer process")
+                })
+                .collect();
+
+            let found = super::stamped_for(&stamp);
+            let work = crate::scratch::work(dir.path());
+
+            for child in newer.iter_mut().chain(std::iter::once(&mut stamped)) {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            let pid = i32::try_from(stamped.id()).expect("a pid fits an i32");
+            assert!(
+                found.iter().any(|identity| identity.pid == pid),
+                "the stamped child {pid} was not found behind 256 newer processes: {found:?}"
+            );
+            assert!(
+                work.is_some(),
+                "the stamped tree was invisible to the activity rule"
             );
         }
 
@@ -2299,6 +2390,23 @@ mod tests {
         std::fs::write(&blocked, "").expect("write");
         let err = Owned::claim(blocked.join("child")).unwrap_err();
         assert!(err.to_string().contains("cannot create scratch"), "{err}");
+    }
+
+    /// Darwin's listing, recorded in the kernel's shape: `allproc` walked newest
+    /// first, so `launchd` (pid 1, the oldest process) is the last pid filled,
+    /// followed by the zeroed slots the kernel had no process for.
+    ///
+    /// Every filled pid is kept, the oldest included, and no spare slot is —
+    /// read from the buffer alone, because the call's return value is a count
+    /// that was once divided by four again and kept only the newest quarter.
+    #[test]
+    fn every_pid_darwin_filled_is_listed_down_to_launchd_and_no_spare_slot_is() {
+        let filled: [std::ffi::c_int; 9] = [7311, 7309, 6002, 4410, 812, 377, 96, 88, 1];
+        let mut buffer = filled.to_vec();
+        buffer.extend([0; 64]);
+
+        assert_eq!(listed_pids(&buffer), filled.to_vec());
+        assert!(listed_pids(&[0; 64]).is_empty());
     }
 
     /// This process is stamped for nothing, so a sweep of an unstamped scratch
