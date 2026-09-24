@@ -58,8 +58,20 @@ jobs:
       # screenshots/tools.env, which is the one place either is declared. The
       # reusable workflow exports $SHOTS_OUT as shots/current/<arch>; the script
       # writes captures.json and the SVGs there.
+      #
+      # THIS BLOCK IS POSIX sh, AND HAS TO BE. The reusable workflow's capture step
+      # sets no `shell:`, and a step that runs inside a `container:` gets
+      # `sh -e {0}` — not the `bash -e {0}` a host-runner step gets. On this image
+      # `/bin/sh` is dash, so a bashism here ends the step at the line that uses
+      # it, before anything is captured: `set -euo pipefail` did exactly that on
+      # every run of this workflow until it was dropped (`set: Illegal option -o
+      # pipefail`, exit 2, run 35885673423). `-e` is already on from `sh -e`; `-u`
+      # is the part worth keeping, and `pipefail` guarded no pipeline here.
+      # Anything that wants bash goes in a script invoked with `bash`, the way the
+      # last line hands the capture itself to scripts/screenshots.sh — which keeps
+      # its own `set -euo pipefail` because bash is what runs it.
       capture-command: |
-        set -euo pipefail
+        set -eu
         . screenshots/tools.env
         curl -fsSL -o /tmp/freeze.tgz \
           "https://github.com/charmbracelet/freeze/releases/download/v${FREEZE_VERSION}/freeze_${FREEZE_VERSION}_Linux_x86_64.tar.gz"
