@@ -462,6 +462,64 @@ fn listed_pids(buffer: &[std::ffi::c_int]) -> Vec<i32> {
     buffer.iter().copied().filter(|pid| *pid > 0).collect()
 }
 
+/// How long one tick of Darwin's CPU counters is: `numer / denom` nanoseconds,
+/// the shape `mach_timebase_info` reports it in.
+///
+/// `proc_taskinfo` charges CPU in Mach absolute-time ticks rather than in
+/// nanoseconds. The two agree on Intel, where a tick is one nanosecond, and
+/// nowhere else: at Apple Silicon's 24 MHz a tick is 125/3 ns, and reading it as
+/// one nanosecond charged a worker spinning a whole core about 2.4% of one. That
+/// is what classed it idle (see `platform::timebase` for where it comes from).
+#[cfg_attr(
+    not(target_vendor = "apple"),
+    allow(
+        dead_code,
+        reason = "only Darwin's CPU reading calls this outside its tests"
+    )
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Timebase {
+    numer: u64,
+    denom: u64,
+}
+
+#[cfg_attr(
+    not(target_vendor = "apple"),
+    allow(
+        dead_code,
+        reason = "only Darwin's CPU reading calls this outside its tests"
+    )
+)]
+impl Timebase {
+    /// The timebase of a counter that ticks `hz` times a second, in lowest
+    /// terms, or `None` for a frequency no counter can have.
+    fn of_frequency(hz: u64) -> Option<Self> {
+        const NANOS_PER_SECOND: u64 = 1_000_000_000;
+        if hz == 0 {
+            return None;
+        }
+        let (mut a, mut b) = (NANOS_PER_SECOND, hz);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        Some(Self {
+            numer: NANOS_PER_SECOND / a,
+            denom: hz / a,
+        })
+    }
+
+    /// `ticks` of this timebase, in whole microseconds.
+    ///
+    /// Widened before multiplying, because a lifetime's CPU total times a
+    /// numerator overflows a `u64` long before the microseconds it stands for
+    /// do. A total too large for a `u64` even as microseconds saturates, as every
+    /// other sum in this reading does.
+    fn micros(self, ticks: u64) -> u64 {
+        let micros = u128::from(ticks) * u128::from(self.numer) / (u128::from(self.denom) * 1_000);
+        u64::try_from(micros).unwrap_or(u64::MAX)
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     #[cfg(target_vendor = "apple")]
@@ -581,8 +639,9 @@ mod platform {
     /// The same reading from `libproc`, for the platform with no `/proc` to read
     /// it out of.
     ///
-    /// `proc_taskinfo` counts in nanoseconds, which is precise enough to see the
-    /// bookkeeping wake-ups of an otherwise parked harness — a resolution the
+    /// `proc_taskinfo` counts in Mach absolute-time ticks, converted here
+    /// through the host's timebase — see [`timebase`]. A tick is at most tens of
+    /// nanoseconds, which is precise enough to see the bookkeeping wake-ups of an otherwise parked harness — a resolution the
     /// Linux counter does not have. That difference is why this reading is no
     /// longer compared for *equality* anywhere: a rule that asked whether the
     /// number moved at all read the same idle member as busy here and idle
@@ -608,9 +667,59 @@ mod platform {
         if written != size {
             return None;
         }
-        const NANOS_PER_MICRO: u64 = 1_000;
-        Some(info.pti_total_user.saturating_add(info.pti_total_system) / NANOS_PER_MICRO)
+        Some(timebase()?.micros(info.pti_total_user.saturating_add(info.pti_total_system)))
     }
+
+    /// The rate `proc_taskinfo`'s counters tick at, read once per process.
+    ///
+    /// Read from `hw.tbfrequency` rather than from `mach_timebase_info`, because
+    /// only the first describes those counters in every process that can read
+    /// them. The counters are the kernel's own: XNU fills `pti_total_user` and
+    /// `pti_total_system` from its recount totals in native absolute-time units
+    /// (`fill_taskprocinfo`, `osfmk/kern/bsd_kern.c`), whatever architecture the
+    /// asking process was built for. `mach_timebase_info` describes the asking
+    /// process's *own* clock, and under Rosetta that clock is translated: Apple's
+    /// "Addressing architectural differences in your macOS code" says the value
+    /// `mach_absolute_time` returns "is different for native and translated
+    /// processes", so an x86_64 build there would be handed a timebase for a
+    /// clock the counters do not tick in. `hw.tbfrequency` is answered by
+    /// `sysctl_tbfrequency` (`bsd/kern/kern_mib.c`), which returns the hardware
+    /// timebase frequency with no branch on the caller — 24 MHz on Apple
+    /// Silicon, native or translated, and 1 GHz on Intel, where a tick is a
+    /// nanosecond.
+    ///
+    /// A host that will not answer yields no reading rather than one in a unit
+    /// nobody checked, for the reason `micros_per_tick` gives on Linux.
+    // llmlint: ignore-block[changed_behavior_has_e2e] no journey can reach the
+    // refusal below: `hw.tbfrequency` is a constant of any Darwin host that can
+    // run this suite. It degrades to the reading-less path a failed
+    // `proc_pidinfo` already takes.
+    #[cfg(target_vendor = "apple")]
+    fn timebase() -> Option<super::Timebase> {
+        static TIMEBASE: std::sync::OnceLock<Option<super::Timebase>> = std::sync::OnceLock::new();
+        *TIMEBASE.get_or_init(|| {
+            let mut hz: u64 = 0;
+            let mut size = std::mem::size_of::<u64>();
+            // SAFETY: `sysctlbyname` writes at most `size` bytes into `hz`, a
+            // live `u64` this frame owns, and reports how many it wrote in
+            // `size`; a short write is rejected below rather than read. The name
+            // is a NUL-terminated literal, and nothing is written to the kernel.
+            let status = unsafe {
+                libc::sysctlbyname(
+                    c"hw.tbfrequency".as_ptr(),
+                    std::ptr::from_mut(&mut hz).cast(),
+                    &mut size,
+                    std::ptr::null_mut(),
+                    0,
+                )
+            };
+            if status != 0 || size != std::mem::size_of::<u64>() {
+                return None;
+            }
+            super::Timebase::of_frequency(hz)
+        })
+    }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     /// No CPU accounting to be had here, so a member's silence is judged by its
     /// stream alone — the behaviour every platform had before this reading
@@ -1032,6 +1141,42 @@ mod platform {
             assert!(
                 work.is_some(),
                 "the stamped tree was invisible to the activity rule"
+            );
+        }
+
+        /// A child spinning a whole core for a measured wall interval is charged
+        /// at least half that interval in CPU.
+        ///
+        /// Half, because a shared runner may deschedule the spin for some of the
+        /// interval, and because the defect this guards against is nowhere near
+        /// it: reading Apple Silicon's 24 MHz ticks as nanoseconds charged a full
+        /// spin about 2.4% of its wall time, which fails this by a factor of
+        /// twenty. Gated to arm64 because that is the only Mac whose tick is not
+        /// a nanosecond — on Intel the old reading was already right.
+        #[cfg(all(target_vendor = "apple", target_arch = "aarch64"))]
+        #[test]
+        fn a_spinning_child_is_charged_at_least_half_its_wall_time_in_cpu() {
+            use std::process::Command;
+            use std::time::{Duration, Instant};
+
+            let started = Instant::now();
+            let mut spinning = Command::new("/bin/sh")
+                .args(["-c", "while :; do :; done"])
+                .spawn()
+                .expect("spawn the spinning child");
+            std::thread::sleep(Duration::from_secs(2));
+            let pid = i32::try_from(spinning.id()).expect("a pid fits an i32");
+            let charged = super::consumed(pid);
+            let wall = started.elapsed();
+            let _ = spinning.kill();
+            let _ = spinning.wait();
+
+            let charged = charged.expect("the spinning child's CPU could not be read");
+            let wall = u64::try_from(wall.as_micros()).expect("the interval fits a u64");
+            assert!(
+                charged >= wall / 2,
+                "a child spinning for {wall}µs was charged {charged}µs of CPU, under half — \
+                 the counters were not converted through the host's timebase"
             );
         }
 
@@ -2407,6 +2552,61 @@ mod tests {
 
         assert_eq!(listed_pids(&buffer), filled.to_vec());
         assert!(listed_pids(&[0; 64]).is_empty());
+    }
+
+    /// One second of CPU on an Intel Mac: `hw.tbfrequency` is 1 GHz, a tick is
+    /// a nanosecond, and the timebase is the 1/1 the old reading assumed.
+    #[test]
+    fn an_intel_timebase_reads_a_tick_as_a_nanosecond() {
+        let intel = Timebase::of_frequency(1_000_000_000).expect("a 1 GHz timebase");
+        assert_eq!(intel, Timebase { numer: 1, denom: 1 });
+        assert_eq!(intel.micros(1_000_000_000), 1_000_000);
+        assert_eq!(intel.micros(1_999), 1);
+    }
+
+    /// One second of CPU on Apple Silicon is 24 million ticks of its 24 MHz
+    /// timebase, 125/3 ns each — and has to read as one second, not the 24 ms
+    /// (2.4% of a core) that treating a tick as a nanosecond produced.
+    #[test]
+    fn an_apple_silicon_timebase_reads_a_second_of_ticks_as_a_second() {
+        let apple = Timebase::of_frequency(24_000_000).expect("a 24 MHz timebase");
+        assert_eq!(
+            apple,
+            Timebase {
+                numer: 125,
+                denom: 3
+            }
+        );
+        assert_eq!(apple.micros(24_000_000), 1_000_000);
+        assert_eq!(apple.micros(24), 1);
+        assert_eq!(apple.micros(23), 0);
+    }
+
+    /// An x86_64 build under Rosetta reads the same kernel counters a native
+    /// one does, so its second of CPU is still 24 million native ticks. Its own
+    /// `mach_timebase_info` describes the translated clock instead, and reading
+    /// the counters through that would be the 1/1 defect again; the host's
+    /// `hw.tbfrequency` is not translated, and converts them correctly.
+    #[test]
+    fn a_rosetta_process_converts_native_ticks_by_the_host_frequency() {
+        let native_ticks_in_a_second = 24_000_000;
+        let translated_view = Timebase { numer: 1, denom: 1 };
+        let host = Timebase::of_frequency(24_000_000).expect("a 24 MHz timebase");
+
+        assert_eq!(host.micros(native_ticks_in_a_second), 1_000_000);
+        assert_eq!(translated_view.micros(native_ticks_in_a_second), 24_000);
+    }
+
+    /// A lifetime's total times the numerator is past `u64::MAX` long before
+    /// the microseconds are, and neither may wrap: the product is exact, and
+    /// a total that does not fit even as microseconds saturates.
+    #[test]
+    fn a_large_tick_total_neither_wraps_nor_loses_its_value() {
+        let apple = Timebase::of_frequency(24_000_000).expect("a 24 MHz timebase");
+        assert_eq!(apple.micros(u64::MAX), u64::MAX / 24);
+        let one_hertz = Timebase::of_frequency(1).expect("a 1 Hz timebase");
+        assert_eq!(one_hertz.micros(u64::MAX), u64::MAX);
+        assert_eq!(Timebase::of_frequency(0), None);
     }
 
     /// This process is stamped for nothing, so a sweep of an unstamped scratch
