@@ -68,6 +68,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::Duration;
@@ -479,8 +480,8 @@ fn listed_pids(buffer: &[std::ffi::c_int]) -> Vec<i32> {
 )]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Timebase {
-    numer: u64,
-    denom: u64,
+    numer: NonZeroU64,
+    denom: NonZeroU64,
 }
 
 #[cfg_attr(
@@ -495,16 +496,14 @@ impl Timebase {
     /// terms, or `None` for a frequency no counter can have.
     fn of_frequency(hz: u64) -> Option<Self> {
         const NANOS_PER_SECOND: u64 = 1_000_000_000;
-        if hz == 0 {
-            return None;
-        }
         let (mut a, mut b) = (NANOS_PER_SECOND, hz);
         while b != 0 {
             (a, b) = (b, a % b);
         }
+        // `a` divides both, so neither quotient is zero unless `hz` was.
         Some(Self {
-            numer: NANOS_PER_SECOND / a,
-            denom: hz / a,
+            numer: NonZeroU64::new(NANOS_PER_SECOND / a)?,
+            denom: NonZeroU64::new(hz / a)?,
         })
     }
 
@@ -515,7 +514,8 @@ impl Timebase {
     /// do. A total too large for a `u64` even as microseconds saturates, as every
     /// other sum in this reading does.
     fn micros(self, ticks: u64) -> u64 {
-        let micros = u128::from(ticks) * u128::from(self.numer) / (u128::from(self.denom) * 1_000);
+        let micros = u128::from(ticks) * u128::from(self.numer.get())
+            / (u128::from(self.denom.get()) * 1_000);
         u64::try_from(micros).unwrap_or(u64::MAX)
     }
 }
@@ -2554,12 +2554,21 @@ mod tests {
         assert!(listed_pids(&[0; 64]).is_empty());
     }
 
+    /// A `numer / denom` ns timebase, spelled the way `mach_timebase_info`
+    /// reports one.
+    fn timebase(numer: u64, denom: u64) -> Timebase {
+        Timebase {
+            numer: NonZeroU64::new(numer).expect("a non-zero numerator"),
+            denom: NonZeroU64::new(denom).expect("a non-zero denominator"),
+        }
+    }
+
     /// One second of CPU on an Intel Mac: `hw.tbfrequency` is 1 GHz, a tick is
     /// a nanosecond, and the timebase is the 1/1 the old reading assumed.
     #[test]
     fn an_intel_timebase_reads_a_tick_as_a_nanosecond() {
         let intel = Timebase::of_frequency(1_000_000_000).expect("a 1 GHz timebase");
-        assert_eq!(intel, Timebase { numer: 1, denom: 1 });
+        assert_eq!(intel, timebase(1, 1));
         assert_eq!(intel.micros(1_000_000_000), 1_000_000);
         assert_eq!(intel.micros(1_999), 1);
     }
@@ -2570,13 +2579,7 @@ mod tests {
     #[test]
     fn an_apple_silicon_timebase_reads_a_second_of_ticks_as_a_second() {
         let apple = Timebase::of_frequency(24_000_000).expect("a 24 MHz timebase");
-        assert_eq!(
-            apple,
-            Timebase {
-                numer: 125,
-                denom: 3
-            }
-        );
+        assert_eq!(apple, timebase(125, 3));
         assert_eq!(apple.micros(24_000_000), 1_000_000);
         assert_eq!(apple.micros(24), 1);
         assert_eq!(apple.micros(23), 0);
@@ -2590,7 +2593,7 @@ mod tests {
     #[test]
     fn a_rosetta_process_converts_native_ticks_by_the_host_frequency() {
         let native_ticks_in_a_second = 24_000_000;
-        let translated_view = Timebase { numer: 1, denom: 1 };
+        let translated_view = timebase(1, 1);
         let host = Timebase::of_frequency(24_000_000).expect("a 24 MHz timebase");
 
         assert_eq!(host.micros(native_ticks_in_a_second), 1_000_000);
