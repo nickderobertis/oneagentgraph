@@ -228,6 +228,7 @@ deps-check:
 # Prove scripts/release-probe.sh against the public registries.
 release-probe-check:
     @command -v node >/dev/null || { echo "node not installed: this drives the probe from a node test — run 'just bootstrap'" >&2; exit 1; }
+    @[ -d node_modules/smol-toml ] || { echo "npm workspace not installed: the probe test reads the declaration through smol-toml — run 'just bootstrap'" >&2; exit 1; }
     @node --test npm/test/live/release-probe.test.mjs
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
