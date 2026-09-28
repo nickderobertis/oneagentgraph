@@ -167,6 +167,13 @@ jobs:
         with:
           node-version: "22"
       - uses: ./.github/actions/setup-just
+      # The live test reads the declaration through `smol-toml`, a workspace
+      # devDependency. Running the npm project's no-op bootstrap through Nx
+      # (`just nx` heals through scripts/nx.sh) installs the locked workspace by the
+      # repository's one install path, without the crate toolchain `just bootstrap`
+      # also brings.
+      - name: Install the locked npm workspace
+        run: just nx run oneagentgraph-npm:bootstrap
       - run: just release-probe-check
 
   # Prove the end-user install path on every platform: install the binary the
