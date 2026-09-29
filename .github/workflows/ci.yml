@@ -78,13 +78,19 @@ jobs:
 
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
+  #
+  # The macOS leg names an arm64 image outright rather than `macos-latest`,
+  # whose architecture is GitHub's to change: Apple Silicon's CPU counters tick
+  # in something other than nanoseconds, and the test that proves they are
+  # converted (`src/scratch.rs`) runs only on arm64. `macos-26` is arm64; its
+  # Intel twin is `macos-26-intel`.
   cross:
     needs: changes
     if: needs.changes.outputs.crate == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        os: [macos-26, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
