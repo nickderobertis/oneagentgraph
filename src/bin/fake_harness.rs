@@ -1020,13 +1020,11 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
 /// last-line rendering exist for.
 const TOOL_RESULT: &str = "running the gate\n2 passed; 0 failed";
 
-/// What a `fake:narrate` turn reasons before its call.
+// `fake:narrate`'s text, each distinct so a journey reading the relayed stream
+// can tell which item landed where — `tests/e2e/dispatch.rs` asserts all three
+// verbatim, in order.
 const NARRATED_REASONING: &str = "The gate is the quickest proof; run it first.";
-
-/// What a `fake:narrate` turn says before its call.
 const NARRATED_MESSAGE: &str = "Running the gate before I change anything.";
-
-/// What a `fake:narrate` turn says once its call has returned.
 const NARRATED_CONCLUSION: &str = "The gate passed.";
 
 /// How much startup chatter `fake:noisy-tool` puts in front of that, in bytes.
