@@ -845,7 +845,8 @@ fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
 
 /// Turn one live observation into the envelope that carries it.
 ///
-/// Total over the seam: every observation onejudge produces is published, and
+/// Total over the seam: every observation onejudge produces is either published
+/// or, for a judge's own tool event, deliberately not — see its arm — and
 /// nothing is dropped for being unnamed. The turn index no longer has to be
 /// inferred from an event that moved past it — the engine opens and closes each
 /// turn itself, so what a consumer reads is the conversation's own structure
@@ -894,6 +895,33 @@ fn ingest(
                 )),
             );
         }
+        Observation::Action(action) => {
+            // The worker's harness reports every normalized event here, a tool
+            // event included — and that one already went out as `Tool` above,
+            // so only the agent's own `message` and `reasoning` items are
+            // relayed from here: as `turn-activity` under their own kind,
+            // exactly as a single-sided member relays them, never as a tool
+            // call.
+            let event = action.event;
+            if !event.is_tool_activity() {
+                emitter.emit(
+                    EventKind::TurnActivity,
+                    as_payload(&activity(
+                        &event.kind,
+                        event.name.as_deref(),
+                        event.input.as_ref(),
+                        event.output.as_deref(),
+                        event.tool_call_id.as_deref(),
+                        event.index,
+                    )),
+                );
+            }
+        }
+        // A judge's own tool events are not relayed: `turn-activity` names no
+        // party, so a consumer would read the judge's work as the worker's.
+        // They still stamp the activity clock, at the sink, like every other
+        // observation.
+        Observation::JudgeTool(_) => {}
         Observation::Message(message) => {
             // Head-bounded, on the same terms as the instruction above.
             let mut head = MAX_PAYLOAD_TEXT_BYTES.min(message.text.len());
@@ -1909,6 +1937,98 @@ mod tests {
         }
     }
 
+    /// The worker's own reasoning and words reach the stream live, as
+    /// `turn-activity` under their own kinds, while a tool event the engine hands
+    /// over twice — as `Tool` and again as `Action` — is published once, and a
+    /// judge's own tool event, which `turn-activity` could only misattribute to
+    /// the worker, not at all.
+    #[test]
+    fn a_workers_words_are_relayed_as_themselves_and_a_tool_only_once() {
+        let (emitter, recorder) = recorded();
+        let said = onejudge::ActionEvent {
+            kind: "message".into(),
+            name: None,
+            input: None,
+            output: Some("Running the gate first.".into()),
+            index: 0,
+            tool_call_id: None,
+            started_at: None,
+            finished_at: None,
+            duration_ms: None,
+            status: None,
+            timing_source: None,
+        };
+        let reasoned = onejudge::ActionEvent {
+            kind: "reasoning".into(),
+            output: Some("The gate is the quickest proof.".into()),
+            index: 1,
+            ..said.clone()
+        };
+        let called = onejudge::ActionEvent {
+            kind: "tool_call".into(),
+            name: Some("bash".into()),
+            input: Some(json!({"command": "just check"})),
+            output: None,
+            index: 2,
+            tool_call_id: Some("t1".into()),
+            ..said.clone()
+        };
+        let tool = call();
+        let mut deliveries = crate::note::Deliveries::of(None);
+        for observation in [
+            Observation::Action(onejudge::TurnAction {
+                turn: 1,
+                event: &reasoned,
+            }),
+            Observation::Action(onejudge::TurnAction {
+                turn: 1,
+                event: &said,
+            }),
+            Observation::Tool(StreamEvent {
+                turn: 1,
+                event: &tool,
+            }),
+            Observation::Action(onejudge::TurnAction {
+                turn: 1,
+                event: &called,
+            }),
+            Observation::JudgeTool(onejudge::JudgeTool {
+                turn: 1,
+                judge: "reviewer",
+                event: &tool,
+            }),
+        ] {
+            ingest(&observation, &emitter, &mut deliveries);
+        }
+
+        let events = recorder.events();
+        assert!(
+            events
+                .iter()
+                .all(|event| event.kind == EventKind::TurnActivity),
+            "{events:?}"
+        );
+        let kinds: Vec<_> = events
+            .iter()
+            .map(|event| event.payload["kind"].clone())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![json!("reasoning"), json!("message"), json!("tool_call")],
+            "{events:?}"
+        );
+        for words in &events[..2] {
+            assert_eq!(words.payload["name"], Value::Null);
+            assert_eq!(words.payload["detail"], json!(""));
+            assert!(!words.payload.contains_key("tool_call_id"), "{words:?}");
+        }
+        assert_eq!(
+            events[1].payload["output"],
+            json!("Running the gate first.")
+        );
+        assert_eq!(events[2].payload["name"], json!("bash"));
+    }
+
     /// The whole of a turn reaches the stream: its opening and what it was asked,
     /// each tool call, the party's own reply, and the turn's own cost and bounds.
     ///
@@ -1948,6 +2068,8 @@ mod tests {
                 usage: Some(&usage),
                 started_at: "2026-08-21T09:15:02.847Z".into(),
                 finished_at: "2026-08-21T09:16:11.002Z".into(),
+                harness: None,
+                model: None,
             }),
         ] {
             ingest(
@@ -2023,6 +2145,8 @@ mod tests {
                 usage: None,
                 started_at: "2026-08-21T09:16:11.002Z".into(),
                 finished_at: "2026-08-21T09:16:12.500Z".into(),
+                harness: None,
+                model: None,
             }),
             &emitter,
             &mut crate::note::Deliveries::of(None),

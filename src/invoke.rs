@@ -42,7 +42,9 @@
 //!   carries both — `mode` at the top level, and `[env]` as the environment every
 //!   harness process it starts is given — so the stamp reaches the harness the
 //!   same way it always did: fixed at `exec`, on a process no walk from this one
-//!   would find once its parent is gone.
+//!   would find once its parent is gone. The stamp goes on every side; the
+//!   `mode` on the agent side alone, because a judge's posture is its own
+//!   config's over onejudge's read-only default — see `judge_config`.
 //!
 //! Writing the operator's config somewhere else is also why `anchor_paths`
 //! below exists: a path written relative to that file has to be made absolute
@@ -345,13 +347,7 @@ fn onejudge(
     let agent_path = context.scratch.join(AGENT_CONFIG_FILE);
     write(&agent_path, &agent_config)?;
 
-    let provider = provider_block(
-        &member.judge,
-        &member.agent,
-        Some(member.mode.as_str()),
-        context,
-        resolver,
-    )?;
+    let provider = provider_block(&member.judge, &member.agent, context, resolver)?;
     let map = effective.as_object_mut().expect("merge returns a mapping");
     anchor_skill(map, base.base_dir.as_deref());
     map.insert("provider".into(), provider);
@@ -654,12 +650,11 @@ const ASK_FOR_CONTROL: bool = true;
 fn provider_block(
     judges: &[JudgeSide],
     agent: &AgentSide,
-    mode: Option<&str>,
     context: &Context<'_>,
     resolver: &mut Resolver,
 ) -> Result<Value, Error> {
     if let [JudgeSide::Harness(harness)] = judges {
-        let (config, _) = judge_config(harness, mode, context, resolver)?;
+        let (config, _) = judge_config(harness, context, resolver)?;
         let path = context.scratch.join(JUDGE_CONFIG_FILE);
         write(&path, &config)?;
         return Ok(serde_json::json!({
@@ -686,7 +681,7 @@ fn provider_block(
         let mut block = match judge {
             JudgeSide::Harness(harness) => {
                 let (config, _) =
-                    judge_config(harness, mode, context, resolver).map_err(|err| match err {
+                    judge_config(harness, context, resolver).map_err(|err| match err {
                         Error::InvalidConfig(why) => {
                             Error::InvalidConfig(format!("judge entry {entry}: {why}"))
                         }
@@ -753,10 +748,17 @@ fn provider_block(
 }
 
 /// Resolve one harness judge's oneharness config, stamped with this member's
-/// own values exactly as the agent side's is.
+/// own ownership evidence and its judge's `model` exactly as the agent side's
+/// is — and **not** with the member's `mode`.
+///
+/// A member's `mode` is the posture its *agent* works under. onejudge runs every
+/// judge-side call over its own read-only default, layered beneath the judge's
+/// config, so the judge's posture is the operator's judge config's to choose
+/// and onejudge's to default. Stamping the member's `mode` here would grant every
+/// judge the agent's write access by accident — and a panel of more than one
+/// writable judge is refused outright, because they race on one worktree.
 fn judge_config(
     harness: &crate::config::JudgeHarness,
-    mode: Option<&str>,
     context: &Context<'_>,
     resolver: &mut Resolver,
 ) -> Result<(String, Option<String>), Error> {
@@ -765,7 +767,7 @@ fn judge_config(
         None,
         Side {
             model: harness.model.as_deref(),
-            mode,
+            mode: None,
             scratch: Some(context.scratch),
         },
         context,
@@ -1408,8 +1410,9 @@ mod tests {
             std::fs::read_to_string(scratch.join(ONEJUDGE_CONFIG_FILE)).expect("config");
         assert!(effective.contains("max_turns: 9"), "{effective}");
         assert!(effective.contains("system_prompt"), "{effective}");
-        // Both sides carry the member's mode and its ownership stamp, which is
-        // what replaces exporting them.
+        // Both sides carry the member's ownership stamp, which is what replaces
+        // exporting it; only the agent side carries the member's mode, because a
+        // judge's posture is its own config's over onejudge's read-only default.
         //
         // Read back as TOML, not searched for as text: oneharness *parses* this
         // file, and a path decides how it is spelled. A Windows scratch carries
@@ -1420,9 +1423,10 @@ mod tests {
         for side in [AGENT_CONFIG_FILE, JUDGE_CONFIG_FILE] {
             let config = std::fs::read_to_string(scratch.join(side)).expect(side);
             let document: DocumentMut = config.parse().expect(side);
+            let mode = (side == AGENT_CONFIG_FILE).then_some("bypass");
             assert_eq!(
-                document["mode"].as_str(),
-                Some("bypass"),
+                document.get("mode").and_then(Item::as_str),
+                mode,
                 "{side}: {config}"
             );
             assert_eq!(
@@ -1926,7 +1930,6 @@ mod tests {
         provider_block(
             &judges(document),
             &agent,
-            Some("bypass"),
             &context(dir, scratch),
             &mut Resolver::new(),
         )
@@ -1957,9 +1960,13 @@ mod tests {
         ] {
             let block = compose(dir.path(), &scratch, spelling).expect("a provider");
             assert_eq!(block, before, "{spelling}");
+            // Carrying the member's ownership stamp and not its `mode`: a judge's
+            // posture is its own config's, over onejudge's read-only default.
             let written = std::fs::read_to_string(scratch.join(JUDGE_CONFIG_FILE)).expect("config");
+            let document: DocumentMut = written.parse().expect("the judge config");
+            assert!(document.get("mode").is_none(), "{spelling}: {written}");
             assert!(
-                written.contains("mode = \"bypass\""),
+                document["env"].get(crate::scratch::SCRATCH_ENV).is_some(),
                 "{spelling}: {written}"
             );
         }
@@ -2046,12 +2053,20 @@ mod tests {
                 {"kind": "llmlint", "bin": "/opt/llmlint", "label": "lint"},
             ])
         );
-        // Each harness side's own file, stamped as the agent side's is, and the
-        // single-judge file untouched: nothing composed here is that block.
+        // Each harness side's own file, carrying the member's ownership stamp
+        // and no `mode` — so a stacked panel's judges keep onejudge's read-only
+        // default rather than the agent's posture — and the single-judge file
+        // untouched: nothing composed here is that block.
         for path in [&reviewer, &second] {
             let written = std::fs::read_to_string(path).expect("config");
+            let document: DocumentMut = written.parse().expect("a judge config");
             assert!(
-                written.contains("mode = \"bypass\""),
+                document.get("mode").is_none(),
+                "{}: {written}",
+                path.display()
+            );
+            assert!(
+                document["env"].get(crate::scratch::SCRATCH_ENV).is_some(),
                 "{}: {written}",
                 path.display()
             );

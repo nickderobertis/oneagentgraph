@@ -8,8 +8,9 @@
 //!
 //! A member's events arrive typed, at the moment they occur, and both modules
 //! turn them into the same pair of envelopes: the first event of a turn is
-//! preceded by a [`EventKind::TurnStarted`] and each becomes a
-//! [`EventKind::TurnActivity`]; the engine's own report becomes a
+//! preceded by a [`EventKind::TurnStarted`] and each — a tool call or result,
+//! or the agent's own `message` or `reasoning` item — becomes a
+//! [`EventKind::TurnActivity`] under its own kind; the engine's own report becomes a
 //! [`EventKind::TurnCompleted`] and a [`EventKind::MemberSettled`].
 //!
 //! Whether a member publishes events at all is **its own config's** decision —
@@ -42,9 +43,10 @@
 //!   single call died — same persona, same graph, opposite verdicts, on a choice
 //!   the agent makes freely turn by turn. [`Stall`] is the rule now, and what it
 //!   adds is the evidence the old one threw away. Its bound is half an hour and
-//!   its clock is cleared by published events and by live work, never by
-//!   streamed provider output — [`Stall`] records why that signal is not
-//!   available to count, and against which engine versions that was read.
+//!   its clock is cleared by published events — the agent's own finished
+//!   `message` and `reasoning` items among them — and by live work, never by a
+//!   token-level stream nothing delivers here; [`Stall`] records which events
+//!   reach it, and against which engine versions that was read.
 //!
 //! Either firing is a [`EventKind::MemberDied`], carrying the `rule` that fired,
 //! the classified `cause`, and a bounded `detail`. `docs/contract.md` scopes
@@ -520,41 +522,45 @@ impl Bounds {
 /// # What clears this clock, and what deliberately does not
 ///
 /// Two things clear it, and the second is the paragraphs above: live work under
-/// the member. The first is the member's own published events — every tool call
-/// and every tool result, and on a two-party member each turn boundary as well,
-/// because [`crate::judge`]'s sink stamps the clock for every `Observation` it
-/// is handed while [`crate::harness`]'s stamps it for every `ActionEvent`.
+/// the member. The first is the member's own published events — every tool call,
+/// every tool result, **every finished `message` and `reasoning` item the
+/// agent's harness reports**, and on a two-party member each turn boundary as
+/// well — because [`crate::judge`]'s sink stamps the clock for every
+/// `Observation` it is handed while [`crate::harness`]'s stamps it for every
+/// `ActionEvent`. Each of those events is relayed as `turn-activity` under its
+/// own `kind` — `tool_call`, `tool_result`, `message`, `reasoning` — so an item
+/// that clears this clock is also a line an operator reads, and never a tool
+/// call it is dressed up as.
 ///
-/// **Streamed provider output does not clear it, because at this crate's pins
-/// nothing delivers it here.** Re-read on 2026-09-22 against the two engines
-/// this crate links — both bullets survived the bump unchanged: the core's
-/// `EventSink` and `ActionEvent` are the same tokens at 0.18.0 as at 0.14.0,
-/// and the `onejudge` engine loop is byte-identical from 0.13.1 to 0.14.0,
-/// panel included — 0.14.0 changed `note.rs` and `sdk_schema.rs` and nothing
-/// else, taking the note contract's declaration back from the retired bus
-/// profile without touching what publishes an `Observation`. Neither provider
-/// call publishes one while it is in flight. The stamp is a date rather than a release of this crate on
+/// **A message event resets this clock; a token-level stream does not, because
+/// nothing delivers one here.** Re-read on 2026-09-29 against the two engines
+/// this crate links. The stamp is a date rather than a release of this crate on
 /// purpose: it records when the upstream channels were last actually read,
 /// which a version bumped by the release automation would silently claim on
-/// its behalf. The two versions
-/// named below are not stamps but live claims about what is linked, so this
-/// module's `the_engines_this_rule_was_read_against_are_the_ones_the_manifest_links`
+/// its behalf. The two versions named below are not stamps but live claims
+/// about what is linked, so this module's
+/// `the_engines_this_rule_was_read_against_are_the_ones_the_manifest_links`
 /// holds each against `Cargo.toml`. It is named in prose rather than linked
 /// because it is a `#[cfg(test)]` item, which rustdoc cannot resolve:
 ///
-/// * `oneharness_core` 0.18.0 delivers a streaming run's events to an
-///   `EventSink` as `ActionEvent`s, whose `kind` is `tool_call` or
-///   `tool_result`. A turn's prose is not on that channel at all, so a
-///   single-sided member spending ten minutes generating a report hands this
-///   clock nothing to stamp.
-/// * `onejudge` 0.14.0 publishes `Observation::Message` **after**
-///   `respond_streaming` has returned — the turn's finished text, as it is
-///   appended to the transcript. That is a turn boundary rather than progress
-///   within a turn, so it clears the clock only once the report it would have
-///   vouched for already exists. The panel's `Observation::JudgeDecided` is the
-///   same shape on the other side: one per judge, delivered only once the whole
-///   supervisor call has returned, so a stacked panel deliberating is as silent
-///   here as a single judge is.
+/// * `oneharness_core` 0.21.0 delivers a streaming run's events to an
+///   `EventSink` as `ActionEvent`s whose `kind` is `tool_call`, `tool_result`,
+///   `message` (the agent's own text, in `output`) or `reasoning`. A `message`
+///   or `reasoning` event is one finished item, never a token delta, so a
+///   single-sided member that talks as it works stamps this clock at each item
+///   it finishes — while one spending ten minutes generating a single reply,
+///   with no tool call and no finished item in between, still hands it nothing.
+/// * `onejudge` 0.17.0 delivers the worker's same normalized events **live**,
+///   from inside `respond_observing`, as `Observation::Action` — a tool event as
+///   `Observation::Tool` first and then as `Action`, the agent's words as
+///   `Action` alone — so a two-party member's worker turn stamps this clock at
+///   each finished item exactly as a single-sided member's does.
+///   `Observation::Message` is still the turn's finished text, published after
+///   the call has returned, and so still a turn boundary rather than progress
+///   within one. A judge's own tool events arrive live too, as
+///   `Observation::JudgeTool`, and stamp the clock like any observation, though
+///   they are not relayed; the panel's `Observation::JudgeDecided` is still one
+///   per judge, delivered only once its supervisor call has returned.
 /// * The `alive N ago` an operator-facing view prints is `member-heartbeat`,
 ///   which [`crate::harness`] and [`crate::judge`] emit on their supervisor's
 ///   own timer whatever the member is doing. It is this process saying it is
@@ -563,19 +569,19 @@ impl Bounds {
 ///   rule exists inside — what the supervisor reports and what is true coming
 ///   apart.
 ///
-/// That per-kind asymmetry is worth keeping in view, because it is what makes
-/// the same silence read two ways: a two-party member whose round is several
-/// turns is stamped at each of them and survives a long quiet stretch, while a
-/// single-sided member inside one long turn is stamped by tool events alone and
-/// its report is invisible until it lands. A member observed surviving ten
-/// minutes of quiet is therefore no evidence that a silent member is safe.
+/// `tests/e2e/liveness.rs`'s
+/// `a_member_whose_agent_is_talking_is_not_condemned_though_its_tree_is_idle`
+/// holds the message half of this: an idle tree kept alive past several bounds
+/// on its words alone, on both member kinds.
 ///
-/// So for a member that is genuinely quiet, the bound is the whole of the
-/// judgement, which is why it is set where
+/// A member observed surviving ten minutes of quiet is still no evidence that a
+/// silent member is safe: an agent that neither calls a tool nor finishes an
+/// item publishes nothing, on either kind. So for a member that is genuinely
+/// quiet, the bound is the whole of the judgement, which is why it is set where
 /// [`crate::liveness::DEFAULT_STALL_TIMEOUT`] sets it. The narrower fix stays
-/// available and is the one to take the moment either engine grows an
-/// incremental text observation: stamp the clock at the sink that receives it,
-/// and this bound goes back to being a backstop rather than the judgement.
+/// available and is the one to take the moment either engine delivers text
+/// *within* an item: stamp the clock at the sink that receives it, and this
+/// bound goes back to being a backstop rather than the judgement.
 #[derive(Debug)]
 pub struct Stall {
     /// When the member started, which is the origin of the only clock this rule
@@ -889,7 +895,8 @@ fn millis(span: Duration) -> u64 {
     u64::try_from(span.as_millis()).unwrap_or(u64::MAX)
 }
 
-/// One live tool event as the contract's activity payload, whichever engine
+/// One live event — a tool call or result, or the agent's own `message` or
+/// `reasoning` item — as the contract's activity payload, whichever engine
 /// produced it.
 ///
 /// Takes the six fields rather than the event around them, because each engine
@@ -903,7 +910,9 @@ fn millis(span: Duration) -> u64 {
 /// A `tool_result` is published like any other event. It names no tool because it
 /// *answers* a call already named, and `tool_call_id` is what joins it back —
 /// skipping it for having no name is what discarded every observation a member's
-/// tools returned.
+/// tools returned. A `message` or `reasoning` item is published the same way,
+/// under its own `kind`: no `name`, no `tool_call_id`, an empty `detail`, and its
+/// text in `output` — the agent's words, never a call to a tool.
 // llmlint: ignore-block[invalid_states_unrepresentable] `kind` stays the open
 // string both upstreams deliberately publish — oneharness's `ActionEvent` says so
 // at the field ("Left open for future kinds rather than an enum, so a new shape

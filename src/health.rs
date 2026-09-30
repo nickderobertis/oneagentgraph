@@ -92,7 +92,7 @@ mod tests {
         std::fs::write(&config, "harnesses = [\n").expect("write");
 
         let err = report(&UsageRequest {
-            config: Some(config.clone()),
+            config: vec![config.clone()],
             ..request()
         })
         .map(|_| ())

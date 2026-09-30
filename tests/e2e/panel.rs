@@ -200,8 +200,19 @@ fn a_stacked_panel_is_launched_as_split_and_every_judge_decides_on_the_stream() 
         "{config}"
     );
     assert_eq!(reviewer.parent(), launched.parent(), "{config}");
+    // Stamped with the member's ownership evidence and **not** with its `mode`:
+    // a judge's posture is its own config's, over onejudge's read-only default,
+    // and a panel of judges each handed the agent's `bypass` is one onejudge
+    // refuses outright.
     let stamped = std::fs::read_to_string(reviewer).expect("the reviewer's config");
-    assert!(stamped.contains("mode = \"bypass\""), "{stamped}");
+    let document: toml_edit::DocumentMut = stamped.parse().expect("the reviewer's config");
+    assert!(document.get("mode").is_none(), "{stamped}");
+    assert!(
+        document["env"]
+            .get(oneagentgraph::scratch::SCRATCH_ENV)
+            .is_some(),
+        "{stamped}"
+    );
     assert!(
         beside(&launched, "oneharness.judge.toml").is_none(),
         "the single-judge file must not be written for a stack"

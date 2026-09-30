@@ -8,7 +8,7 @@
 > where it lives. `src/harness.rs` is the module; `src/judge.rs` is its twin for
 > the other member kind, and the two are deliberately the same shape.
 >
-> **What provides it** is `oneharness-core` **0.18.0**, the release this crate
+> **What provides it** is `oneharness-core` **0.21.0**, the release this crate
 > links today: a
 > [`ProcessSupervisor`](#grouping-the-seam-this-whole-document-was-written-to-get)
 > trait with a `spawning(&mut Command)` / `spawned(&Child)` pair, and
@@ -16,7 +16,7 @@
 > this document proposed, added upstream as proposed — a second entry point
 > rather than a field on `RunControls`, so the exhaustive literals embedders had
 > already written kept compiling. Both names arrived in **0.10.1** and are
-> unchanged here, re-measured against 0.18.0 rather than assumed; the floor is a
+> unchanged here, re-measured against 0.21.0 rather than assumed; the floor is a
 > **compile floor**, not a preference, because below 0.10.1 neither exists and
 > `src/harness.rs` does not build, which is what stops a future edit from quietly
 > falling back to unsupervised `run`. The version emphasised above is the linked
@@ -47,7 +47,7 @@ single-sided member maps onto a `RunRequest` field, and
 
 | argument | field |
 |---|---|
-| `--config <p>` | `config` |
+| `--config <p>` | `config: vec![p]` — a list of one, the member's resolved config, since oneharness layers a list of config files (0.20.0) and an empty one would mean discovery |
 | `--cwd <d>` | `cwd` |
 | `--events` | `events` |
 | `--stream` | `stream: Some(true)`, and only for a member whose own resolved config leaves its run streaming |

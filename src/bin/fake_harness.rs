@@ -39,6 +39,7 @@
 //! | `fake:complete-now` | the agent finishes on its first turn |
 //! | `fake:noisy-tool` | bury this turn's tool observation under kilobytes of startup chatter |
 //! | `fake:bare-tool` | take a first tool whose trace exposes neither a call identity nor an observation |
+//! | `fake:narrate` | say what it is doing around its tool call: a `thinking` block and a `text` block before the call, and a `text` block after its result — the agent's own reasoning and words on the stream, as oneharness normalizes them to `reasoning` and `message` events |
 //! | `fake:no-tool` | take the turn having called no tool at all — the toolless half of a quiet exchange |
 //! | `fake:answer-file=<path>` | answer with that file's contents — the document a structured-output run validates, or the text the *next* side is meant to read |
 //! | `fake:project-skill=<name>` | answer with the body of `.claude/skills/<name>/SKILL.md` under the directory this process was started in — the project skill Claude Code discovers from its working directory, so a journey reads off the transcript *which* directory's skills reached the conversation |
@@ -54,6 +55,7 @@
 //! | `FAKE_HARNESS_FAIL_ONCE_MARKER` | crash an `exec`-shaped provider once, then allow later launches |
 //! | `fake:hang` | never answer at all, for the watchdogs |
 //! | `fake:work=<path>` | publish nothing and *consume CPU* until `<path>` exists, then take the turn |
+//! | `fake:murmur=<path>` | consume **no** CPU and publish only the agent's own finished `text` items, one every [`MURMUR_EVERY`], until `<path>` exists, then take the turn |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
 //! | `fake:supervisor-hold=<path>` | *judge side only:* write `<path>.entered` as the supervisor's turn begins, then block until `<path>` exists |
@@ -550,6 +552,35 @@ fn main() -> std::process::ExitCode {
     exit(0)
 }
 
+/// How often a murmuring turn says something.
+///
+/// Well inside the shortened stall bound the liveness journeys supervise under,
+/// so a member that survives has been cleared by these lines again and again
+/// rather than by one lucky one.
+const MURMUR_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Sleep, publishing one finished assistant `text` item every [`MURMUR_EVERY`],
+/// until `release` exists — or until [`WORK_FOR`] runs out.
+///
+/// Answers whether it was released, for [`work_until_released`]'s reason.
+fn murmur_until_released(release: &std::path::Path, session: &str) -> bool {
+    let deadline = std::time::Instant::now() + WORK_FOR;
+    let mut said = 0_u32;
+    while std::time::Instant::now() < deadline {
+        if release.exists() {
+            return true;
+        }
+        said += 1;
+        emit(&json!({
+            "type": "assistant", "session_id": session,
+            "message": {"role": "assistant", "content": [
+                {"type": "text", "text": format!("still thinking it through ({said})")}]},
+        }));
+        std::thread::sleep(MURMUR_EVERY);
+    }
+    false
+}
+
 /// Everything a journey can ask this launch to write down about itself.
 ///
 /// One function for both paths, because what a journey asserts on must not depend
@@ -869,6 +900,19 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     if shape == Shape::Stream {
         emit(&json!({"type": "system", "subtype": "init", "session_id": session}));
     }
+    // A turn that is *talking* rather than working: its tree sleeps, so the only
+    // evidence it is alive is the words it streams. The pair with `fake:hang`
+    // under a live child is the point — both are idle trees, and only one of them
+    // publishes anything. Here rather than in `main`, so a controlled turn — a
+    // two-party member's agent side — murmurs exactly as a plain one does.
+    // A turn reached once the release exists — the judge side, whose prompt
+    // embeds the task — has nothing left to say and takes its turn at once.
+    if let Some(release) = sentinel_path(prompt, "murmur").filter(|release| !release.exists()) {
+        if shape != Shape::Stream || !murmur_until_released(&release, &session) {
+            eprintln!("fake-harness: a murmuring turn was never released, or had no stream");
+            return Answered::No;
+        }
+    }
     if stopped() {
         if let Some(flag) = interrupted {
             flag.store(false, Ordering::SeqCst);
@@ -911,10 +955,23 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
                 "message": {"role": "user", "content": [{"type": "tool_result"}]},
             }));
         }
+        // The agent's own reasoning and words, in the one assistant message
+        // that carries its call, the way Claude Code interleaves them.
+        let narration = if steers(prompt, "narrate") {
+            vec![
+                json!({"type": "thinking", "thinking": NARRATED_REASONING}),
+                json!({"type": "text", "text": NARRATED_MESSAGE}),
+            ]
+        } else {
+            Vec::new()
+        };
+        let mut content = narration;
+        content.push(
+            json!({"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}),
+        );
         emit(&json!({
             "type": "assistant", "session_id": session,
-            "message": {"id": "m1", "type": "message", "role": "assistant", "content": [
-                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "just check"}}]},
+            "message": {"id": "m1", "type": "message", "role": "assistant", "content": content},
         }));
         // And the observation that call returned, which is how Claude Code
         // reports one: a `user` message carrying a `tool_result` block joined to
@@ -927,6 +984,13 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
                 {"type": "tool_result", "tool_use_id": "t1",
                  "content": tool_result(prompt)}]},
         }));
+        if steers(prompt, "narrate") {
+            emit(&json!({
+                "type": "assistant", "session_id": session,
+                "message": {"id": "m2", "type": "message", "role": "assistant", "content": [
+                    {"type": "text", "text": NARRATED_CONCLUSION}]},
+            }));
+        }
     }
     // Resolved before the terminal line rather than inside it: a turn this
     // process cannot answer publishes no `result` at all, which is what a
@@ -955,6 +1019,13 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
 /// pasted the whole of one into a log line is what the tail bound and the
 /// last-line rendering exist for.
 const TOOL_RESULT: &str = "running the gate\n2 passed; 0 failed";
+
+// `fake:narrate`'s text, each distinct so a journey reading the relayed stream
+// can tell which item landed where — `tests/e2e/dispatch.rs` asserts all three
+// verbatim, in order.
+const NARRATED_REASONING: &str = "The gate is the quickest proof; run it first.";
+const NARRATED_MESSAGE: &str = "Running the gate before I change anything.";
+const NARRATED_CONCLUSION: &str = "The gate passed.";
 
 /// How much startup chatter `fake:noisy-tool` puts in front of that, in bytes.
 ///
