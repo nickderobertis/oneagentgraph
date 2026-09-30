@@ -59,6 +59,10 @@ struct Call {
     path: Option<PathBuf>,
     /// The call's return value, when it returned a number.
     returned: Option<i64>,
+    /// The descriptor number the call's first argument names, if it names one.
+    fd: Option<i64>,
+    /// Which trace file — one per traced thread, in call order — it came from.
+    trace: usize,
 }
 
 /// Every call recorded under `<trace>.<pid>`, across every process traced.
@@ -72,6 +76,7 @@ fn calls(trace: &Path) -> Vec<Call> {
             .expect("a plain trace name")
     );
     let mut found = Vec::new();
+    let mut files = 0;
     for entry in std::fs::read_dir(dir).expect("the trace directory lists") {
         let path = entry.expect("a trace entry").path();
         if !path
@@ -82,7 +87,9 @@ fn calls(trace: &Path) -> Vec<Call> {
             continue;
         }
         let text = std::fs::read_to_string(&path).expect("a trace file reads");
-        found.extend(text.lines().filter_map(parse));
+        let trace = files;
+        files += 1;
+        found.extend(text.lines().filter_map(|line| parse(line, trace)));
     }
     assert!(
         !found.is_empty(),
@@ -93,7 +100,7 @@ fn calls(trace: &Path) -> Vec<Call> {
 }
 
 /// One strace line, `name(args) = result`, with `-y` descriptor annotations.
-fn parse(line: &str) -> Option<Call> {
+fn parse(line: &str, trace: usize) -> Option<Call> {
     let (syscall, rest) = line.split_once('(')?;
     let syscall = syscall.trim().to_string();
     if syscall.is_empty()
@@ -121,11 +128,18 @@ fn parse(line: &str) -> Option<Call> {
         }
         _ => annotated(args),
     };
+    let fd = args
+        .split(", ")
+        .next()
+        .and_then(|first| first.split('<').next())
+        .and_then(|it| it.parse().ok());
     Some(Call {
         line: line.to_string(),
         syscall,
         path,
         returned,
+        fd,
+        trace,
     })
 }
 
@@ -151,6 +165,39 @@ fn is_open(call: &Call) -> bool {
 
 fn is_listing(call: &Call) -> bool {
     matches!(call.syscall.as_str(), "getdents" | "getdents64")
+}
+
+/// How many bytes of `path` each open of it read, one entry per open, in the
+/// order each traced thread made them.
+///
+/// A read is counted against the open whose descriptor it used, from the call
+/// that returned that descriptor to the `close` that released it, within the
+/// thread's own trace. A read of `path` through a descriptor no open in that
+/// thread accounts for is reported as an open of its own, so it is never
+/// averaged away.
+fn bytes_read_per_open<'a>(calls: &[&'a Call], path: &Path) -> Vec<(&'a str, i64)> {
+    let mut per_open: Vec<(&'a str, i64)> = Vec::new();
+    let mut live: BTreeMap<(usize, i64), usize> = BTreeMap::new();
+    for call in calls {
+        let names_path = call.path.as_deref() == Some(path);
+        if is_open(call) && names_path {
+            if let Some(fd) = call.returned.filter(|fd| *fd >= 0) {
+                live.insert((call.trace, fd), per_open.len());
+                per_open.push((call.line.as_str(), 0));
+            }
+        } else if is_read(call) && names_path {
+            let bytes = call.returned.unwrap_or(0).max(0);
+            match call.fd.and_then(|fd| live.get(&(call.trace, fd))) {
+                Some(&open) => per_open[open].1 += bytes,
+                None => per_open.push((call.line.as_str(), bytes)),
+            }
+        } else if call.syscall == "close" {
+            if let Some(fd) = call.fd {
+                live.remove(&(call.trace, fd));
+            }
+        }
+    }
+    per_open
 }
 
 fn is_read(call: &Call) -> bool {
@@ -335,21 +382,14 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
         );
     }
     for path in segments {
-        let opened = touched
-            .iter()
-            .filter(|call| is_open(call) && call.path.as_deref() == Some(path))
-            .count();
-        let read: i64 = touched
-            .iter()
-            .filter(|call| is_read(call) && call.path.as_deref() == Some(path))
-            .map(|call| call.returned.unwrap_or(0).max(0))
-            .sum();
-        assert!(
-            read <= SEGMENT_TAIL_BYTES * i64::try_from(opened).expect("a count"),
-            "recording read {read} bytes of {} over {opened} appends, past one trailing \
-             byte each",
-            path.display()
-        );
+        for (open, read) in bytes_read_per_open(&touched, path) {
+            assert!(
+                read <= SEGMENT_TAIL_BYTES,
+                "recording read {read} bytes of {} through one open, past its one trailing \
+                 byte: {open}",
+                path.display()
+            );
+        }
     }
     assert!(
         touched.iter().any(|call| is_open(call)
