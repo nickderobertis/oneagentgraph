@@ -355,9 +355,11 @@ fn the_event_kinds_paragraph_names_exactly_the_event_kind_variants() {
 fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     assert!(
         CONTRACT.contains(
-            "one tool call or the observation answering one: kind, name, 160-char detail, the \
-             `output` a result returned, the `tool_call_id` joining the two, and the `index` \
-             within the turn"
+            "one tool call, the observation answering one, or one of the agent's own finished \
+             `message` or `reasoning` items: kind, name, 160-char detail, the `output` a result \
+             returned — or, for a `message` or `reasoning` item, its text, with no `name` and no \
+             `tool_call_id` — the `tool_call_id` joining a call and its result, and the `index`, \
+             which counts every kind, so tool calls are counted by `kind` rather than by `index`"
         ),
         "the contract no longer describes the turn-activity payload this test pins"
     );
@@ -420,6 +422,30 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     assert!(
         carries_name(&anonymous) && carries_name(&result),
         "`name` must stay on the wire whether or not the event has one"
+    );
+
+    // The agent's own words: their own kind, their text in `output`, no name and
+    // no call identity — never a tool call — and an `index` that counts them, so
+    // the call after them is not at the next index a count of calls would give.
+    let words = TurnActivity {
+        kind: "message".to_string(),
+        name: None,
+        detail: String::new(),
+        output: Some("Running the gate first.".to_string()),
+        tool_call_id: None,
+        index: 1,
+        ..call.clone()
+    };
+    let serialized = serde_json::to_value(&words).expect("serializes");
+    assert_eq!(
+        serialized,
+        json!({"kind": "message", "name": Value::Null, "detail": "",
+               "output": "Running the gate first.", "index": 1}),
+        "the agent's words must read as themselves, not as a call"
+    );
+    assert_eq!(
+        serde_json::from_value::<TurnActivity>(serialized).expect("parses"),
+        words
     );
 
     let cut = TurnActivity {
