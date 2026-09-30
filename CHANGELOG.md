@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.4](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.3...v0.5.4) - 2026-09-30
+
+### Added
+
+- *(deps)* adopt layered oneharness config, message events, and onejudge's judge posture and text output ([#171](https://github.com/nickderobertis/oneagentgraph/pull/171))
+
+### Fixed
+
+- *(scratch)* convert Apple CPU ticks through the Mach timebase ([#166](https://github.com/nickderobertis/oneagentgraph/pull/166))
+
 ## [0.5.2](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.1...v0.5.2) - 2026-09-24
 
 ### Fixed
