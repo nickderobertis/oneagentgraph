@@ -219,6 +219,37 @@ impl Workspace {
         }
     }
 
+    /// `program` with these arguments, armed exactly as [`run`](Workspace::run)
+    /// arms the binary, under `strace` following every process it starts: each
+    /// process's file-system, descriptor and directory-listing calls land in
+    /// `<trace>.<pid>`, with every descriptor annotated by the path it names.
+    /// A host without `strace` fails the journey rather than skipping it.
+    #[cfg(target_os = "linux")]
+    pub fn run_traced(&self, trace: &Path, program: &str, args: &[&str]) -> Run {
+        assert!(
+            Command::new("strace")
+                .arg("-V")
+                .output()
+                .is_ok_and(|it| it.status.success()),
+            "no `strace` on PATH: this journey records the file-system calls a run makes \
+             with it — install it (`apt-get install strace`)"
+        );
+        let trace = trace.display().to_string();
+        let mut argv = vec![
+            "-ff",
+            "-y",
+            "-qq",
+            "-e",
+            "trace=%file,%desc,getdents64",
+            "-o",
+            &trace,
+            "--",
+            program,
+        ];
+        argv.extend_from_slice(args);
+        self.run_as("strace", &argv)
+    }
+
     /// The binary, armed with this workspace's directories and environment.
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
         self.command_for(env!("CARGO_BIN_EXE_oneagentgraph"), args, env)

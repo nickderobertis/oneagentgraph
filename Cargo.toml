@@ -101,6 +101,14 @@ name = "oneagentgraph-fake-view"
 path = "src/bin/fake_view.rs"
 required-features = ["test-doubles"]
 
+# The reader a consumer of a member's history pointer is, as a process of its
+# own so `tests/e2e/history_store.rs` can trace the file-system calls its read
+# makes — not a stand-in for anything; see the binary's own documentation.
+[[bin]]
+name = "oneagentgraph-history-reader"
+path = "src/bin/history_reader.rs"
+required-features = ["test-doubles"]
+
 [lib]
 name = "oneagentgraph"
 path = "src/lib.rs"
@@ -361,12 +369,19 @@ test-doubles = []
 # the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
 # still `^0.18.0`.
 #
-# **0.17.0 is what is linked**, and it moves in lockstep with oneharness-core
-# 0.21.0 below: its published requirement is `^0.21.0`, a pre-1.0 minor every
+# **0.17.1 is what is linked**, and it moves in lockstep with oneharness-core
+# 0.24.0 below: its published requirement is `^0.24.0`, a pre-1.0 minor every
 # earlier core requirement here excludes, so the two are edited together or the
-# graph carries two cores. It is also a compile floor: `Observation` gained
-# `Action` — every normalized event the worker's harness reports, delivered
-# live, the agent's own `message` and `reasoning` items among them — and
+# graph carries two cores — and with two, the engine that takes this crate as a
+# library would keep the old history writer beside the new one. It changes
+# nothing but the core it links, which is the one whose history recording never
+# scans: a two-party member's sides record through the `oneharness` CLI the
+# `justfile` pins, which links that same core.
+#
+# 0.17.0 moved in lockstep with oneharness-core 0.21.0 and is a compile floor:
+# `Observation` gained `Action` — every normalized event the worker's harness
+# reports, delivered live, the agent's own `message` and `reasoning` items among
+# them — and
 # `JudgeTool`, and `TurnClosed` gained `harness` and `model`, so `src/judge.rs`
 # matches the enum it is handed only from this release. `src/judge.rs` relays
 # an `Action` that is not tool activity as `turn-activity` under its own kind,
@@ -386,7 +401,7 @@ test-doubles = []
 #      stacked-panel journeys in `tests/e2e/panel.rs` are what that holds.
 #   3. 0.17.0's readable `--format text` is the onejudge CLI's; this crate links
 #      the engine and reads no CLI output.
-onejudge = { version = "0.17.0", features = ["cli"] }
+onejudge = { version = "0.17.1", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -418,11 +433,35 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.21.0; that was re-measured for this bump rather than assumed, and
+# 0.24.0; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.21.0 is what is linked, and it is linked exactly once**, in lockstep with
-# onejudge 0.17.0 above, which asks for `^0.21.0`. The two releases it crosses
+# **0.24.0 is what is linked, and it is linked exactly once**, in lockstep with
+# onejudge 0.17.1 above, which asks for `^0.24.0`. It is the release whose
+# history recording never scans, per oneharness's `docs/history-index.md`: a run
+# is indexed by one appended entry per line in dated segments under
+# `<history_dir>/.index.d/` (`runs-YYYY-MM-DD.ndjson` for its closing line,
+# `events-YYYY-MM-DD.ndjson` for each event), and recording reads no index,
+# takes no `.index.lock`, and lists no directory — where every earlier core
+# re-read the whole `.index.jsonl` and walked every session file on each run.
+# A `kind: oneharness` member's turn records through this writer in-process, so
+# the fix reaches such a turn only through this requirement.
+# `tests/e2e/history_store.rs` traces a turn recording into a store of a
+# thousand other sessions whose legacy index cannot be opened, and the read
+# back through the pointer the graph published. What it adds and nothing here
+# calls: `list_sessions` takes a `HistoryWindow`, and the CLI's `history list`,
+# `history show <name>`, `--last` and `history watch` look back only over a
+# default window (the last 7 UTC days; `watch` without `--after` the current
+# UTC day) unless given `--since` or `--all-time`; `history reindex` indexes a
+# store an older core wrote. A pointer-path read — `read_pointers`,
+# `find_session_path` with a project, `read_session_display` — reaches a
+# session of any age. The two releases before it are carried along: 0.22.0's
+# break is the CLI's stream view (readable text unless `--format json`, which
+# `src/smoke.rs` and `src/control.rs` pass), and 0.23.0's is that
+# `read_session_display` returns the typed `HistoryShowEntry` rather than JSON
+# values — `tests/e2e/session.rs` reads it through that type's serialization.
+#
+# 0.21.0 moved in lockstep with onejudge 0.17.0. The two releases it crossed
 # that this crate calls into change two things, and both are adopted here:
 #
 #   1. 0.20.0 layers configuration: `RunRequest::config` (and every sibling
@@ -516,7 +555,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # requirement. The rule that went with the split is retired with it, because
 # there is no longer a second set of types to confuse this one with; what remains
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.21.0"
+oneharness-core = "0.24.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

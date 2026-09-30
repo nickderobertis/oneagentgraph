@@ -22,6 +22,8 @@ mod background;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod dispatch;
 mod events;
+#[cfg(target_os = "linux")]
+mod history_store;
 mod interrupt;
 mod library;
 mod liveness;
