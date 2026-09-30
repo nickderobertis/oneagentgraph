@@ -39,13 +39,14 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # A two-party member's turns run through this CLI, so the `oneharness-core` it
 # links is the one those journeys prove — the model-mismatch and overload
 # journeys in `tests/e2e/selection.rs` need the behaviour core 0.13.0 introduced,
-# which the core this release links still has. That is a newer version than the
-# `oneharness-core` `Cargo.toml` takes, and deliberately separate: the linked
-# engine answers what a `kind: oneharness` member does, and this CLI answers what
-# `smoke`, `interrupt`, and onejudge's per-side turns do
-# (`docs/oneharness-library.md`). The e2e suite reads this number
-# (`tests/e2e/support.rs`) and drives only a CLI at it.
-oneharness-version := "0.14.0"
+# which the core this release links still has. It is pinned separately from the
+# `oneharness-core` `Cargo.toml` takes: the linked engine answers what a
+# `kind: oneharness` member does, and this CLI answers what `smoke`, `interrupt`,
+# and onejudge's per-side turns do (`docs/oneharness-library.md`). 0.19.1 is the
+# CLI released beside the core 0.21.0 `Cargo.toml` links, so both halves run the
+# same core. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
+# only a CLI at it.
+oneharness-version := "0.19.1"
 
 # Keep the gate's own output to signal: successes are silent, failures are not.
 export CARGO_TERM_QUIET := "true"

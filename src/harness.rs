@@ -479,8 +479,14 @@ fn usage(result: &RunResult) -> crate::event::Usage {
     }
 }
 
-/// Publish one live tool event, through the payload builder both member kinds
-/// share — see [`crate::member::activity`].
+/// Publish one live event, through the payload builder both member kinds share —
+/// see [`crate::member::activity`].
+///
+/// Every kind the sink is handed is relayed as `turn-activity` under its own
+/// `kind`: a tool call or result as it always was, and the agent's `message` and
+/// `reasoning` items as themselves — their text in `output`, with no `name` and
+/// no `tool_call_id` — never dressed as a tool call. A consumer counting tool
+/// calls filters on `kind`, not on `index`, which counts every kind.
 fn ingest(event: &ActionEvent, emitter: &Emitter) {
     emitter.emit(
         EventKind::TurnActivity,
@@ -759,7 +765,10 @@ impl HarnessLaunch {
     /// [`HarnessLaunch::prompt`] exactly.
     pub(crate) fn request(&self, prompt: &str) -> RunRequest {
         RunRequest {
-            config: Some(self.config.clone()),
+            // The member's one resolved config, as oneharness's layered list of
+            // one. Never empty: a `kind: oneharness` member must name
+            // `oneharness_config`, so this crate never asks for discovery.
+            config: vec![self.config.clone()],
             // A parameter, never `set_current_dir`: one process hosts every
             // member, so a member that moved the process's own directory would
             // move the members that never asked, and move them mid-run.
@@ -887,6 +896,45 @@ mod tests {
             sink.activity.load(Ordering::SeqCst) < u64::MAX,
             "the watchdog clock was never touched"
         );
+    }
+
+    /// The agent's own `message` and `reasoning` items are relayed as themselves:
+    /// `turn-activity` under their own kind, their text in `output`, with no tool
+    /// name, no call identity and nothing summarized as a tool's input.
+    #[test]
+    fn an_agents_words_are_relayed_under_their_own_kind_never_as_a_tool_call() {
+        let (emitter, recorder) = recorded();
+        for (kind, text, index) in [
+            ("reasoning", "The gate is the quickest proof.", 0),
+            ("message", "Running the gate first.", 1),
+        ] {
+            ingest(
+                &ActionEvent {
+                    kind: kind.into(),
+                    name: None,
+                    input: None,
+                    output: Some(text.into()),
+                    index,
+                    tool_call_id: None,
+                    ..call(None)
+                },
+                &emitter,
+            );
+        }
+        let events = recorder.events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        for (event, (kind, text)) in events.iter().zip([
+            ("reasoning", "The gate is the quickest proof."),
+            ("message", "Running the gate first."),
+        ]) {
+            assert_eq!(event.kind, EventKind::TurnActivity);
+            assert_eq!(event.payload["kind"], json!(kind));
+            assert_eq!(event.payload["output"], json!(text));
+            assert_eq!(event.payload["name"], Value::Null);
+            assert_eq!(event.payload["detail"], json!(""));
+            assert!(!event.payload.contains_key("tool_call_id"), "{event:?}");
+        }
+        assert_eq!(events[1].payload["index"], json!(1));
     }
 
     /// A `tool_result` names no tool because it answers one already named, and it
@@ -1409,8 +1457,8 @@ mod tests {
         };
         let request = launch.request(&launch.prompt);
         assert_eq!(
-            request.config.as_deref(),
-            Some(Path::new("/scratch/oneharness.toml"))
+            request.config,
+            vec![std::path::PathBuf::from("/scratch/oneharness.toml")]
         );
         assert_eq!(request.cwd.as_deref(), Some(Path::new("/work/api")));
         assert!(request.events, "the turn asked for no tool events");

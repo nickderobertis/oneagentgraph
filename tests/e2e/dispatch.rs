@@ -3597,6 +3597,91 @@ fn a_single_sided_member_closes_its_turn_with_that_turns_own_accounting() {
     }
 }
 
+/// The agent's own reasoning and words are relayed live as `turn-activity`
+/// under their own kinds — `reasoning` and `message`, their text in `output` —
+/// and never as a tool call, while the tool call and result beside them are
+/// relayed exactly as they always were.
+///
+/// Both member kinds, because each relays through its own engine's seam — a
+/// single-sided member's oneharness `EventSink`, a two-party member's onejudge
+/// observer — and what a consumer reads must not depend on which one it was.
+#[test]
+fn an_agents_reasoning_and_words_are_relayed_as_themselves_and_never_as_tools() {
+    for (kind, graph) in [
+        ("single-sided", single_sided_graph(&fake_harness())),
+        ("two-party", two_party_graph(&fake_harness(), NO_ENV)),
+    ] {
+        let workspace = Workspace::new();
+        workspace.graph(&graph);
+        let run = workspace.run_task("fake:complete-now: fake:narrate check the tree");
+        run.expect_code(0);
+
+        let activity: Vec<Value> = run
+            .of_kind("turn-activity")
+            .into_iter()
+            .map(|event| event["payload"].clone())
+            .collect();
+        let kinds: Vec<&str> = activity
+            .iter()
+            .map(|payload| payload["kind"].as_str().unwrap_or_default())
+            .collect();
+        // In the order the harness reported them: it reasoned, said what it was
+        // about to do, called the tool, read the result, and said how it went.
+        assert_eq!(
+            kinds,
+            [
+                "reasoning",
+                "message",
+                "tool_call",
+                "tool_result",
+                "message"
+            ],
+            "{kind}: {activity:?}"
+        );
+
+        // The words are the agent's, carried as text rather than as a call:
+        // no tool name, no call identity, nothing summarized as a tool's input.
+        let texts: Vec<&str> = activity
+            .iter()
+            .filter(|payload| payload["kind"] != "tool_call" && payload["kind"] != "tool_result")
+            .map(|payload| {
+                assert_eq!(payload["name"], Value::Null, "{kind}: {payload}");
+                assert_eq!(payload["detail"], "", "{kind}: {payload}");
+                assert!(
+                    payload.get("tool_call_id").is_none(),
+                    "{kind}: the agent's words carried a call identity: {payload}"
+                );
+                payload["output"].as_str().expect("the text")
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "The gate is the quickest proof; run it first.",
+                "Running the gate before I change anything.",
+                "The gate passed.",
+            ],
+            "{kind}"
+        );
+
+        // And the tool half is what it always was: one call, named, summarized
+        // and identified, and one result joined back to it.
+        let call = &activity[2];
+        assert_eq!(call["name"], "Bash", "{kind}: {call}");
+        assert_eq!(call["detail"], "just check", "{kind}: {call}");
+        assert_eq!(call["tool_call_id"], "t1", "{kind}: {call}");
+        let result = &activity[3];
+        assert_eq!(result["name"], Value::Null, "{kind}: {result}");
+        assert_eq!(result["tool_call_id"], "t1", "{kind}: {result}");
+        assert!(
+            result["output"]
+                .as_str()
+                .is_some_and(|output| output.ends_with("2 passed; 0 failed")),
+            "{kind}: {result}"
+        );
+    }
+}
+
 /// A tool whose trace exposed neither a call identity nor an observation still
 /// reaches the journal, and says which facts it does not have by leaving them
 /// out — rather than by an empty string that reads as an answer.

@@ -25,7 +25,12 @@
 //!
 //! `--version` answers on every verdict, because that is the probe onejudge
 //! makes before any turn: a `bin` that does not answer it is refused at plan
-//! build, and that refusal is one of the journeys.
+//! build, and that refusal is one of the journeys. It answers onejudge's own
+//! floor — `LLMLINT_MIN_VERSION` in its `src/llmlint.rs`, 0.4.3, the first llmlint
+//! whose `lint` takes the `--label` pairs onejudge 0.15.0 began passing — because
+//! a probe that reads an older release refuses the judge before the journey
+//! reaches what it is about. The version is the line's last word, which is
+//! where onejudge reads it.
 
 // The report IS stdout and a diagnostic IS stderr: onejudge hands the first to
 // the worker verbatim and classifies a failed run off the second.
@@ -87,7 +92,7 @@ fn main() -> std::process::ExitCode {
         }
     }
     if argv.first().map(String::as_str) == Some("--version") {
-        println!("llmlint 0.0.0 (oneagentgraph double)");
+        println!("llmlint 0.4.3");
         return std::process::ExitCode::SUCCESS;
     }
     if argv.first().map(String::as_str) != Some("lint") {

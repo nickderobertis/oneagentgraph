@@ -360,7 +360,33 @@ test-doubles = []
 # is `^0.9.0`, so the two are edited together or the graph carries two buses —
 # the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
 # still `^0.18.0`.
-onejudge = { version = "0.14.0", features = ["cli"] }
+#
+# **0.17.0 is what is linked**, and it moves in lockstep with oneharness-core
+# 0.21.0 below: its published requirement is `^0.21.0`, a pre-1.0 minor every
+# earlier core requirement here excludes, so the two are edited together or the
+# graph carries two cores. It is also a compile floor: `Observation` gained
+# `Action` — every normalized event the worker's harness reports, delivered
+# live, the agent's own `message` and `reasoning` items among them — and
+# `JudgeTool`, and `TurnClosed` gained `harness` and `model`, so `src/judge.rs`
+# matches the enum it is handed only from this release. `src/judge.rs` relays
+# an `Action` that is not tool activity as `turn-activity` under its own kind,
+# as `src/harness.rs` does for a single-sided member, and relays no
+# `JudgeTool`, whose judge `turn-activity` has no field to name. The releases
+# it crosses:
+#
+#   1. 0.15.0 labels every llmlint judge run and names judge-side history after
+#      the run's session — onejudge's own records, nothing this crate reads.
+#   2. 0.16.0 makes the judge-side posture a *default* a judge's config can
+#      override: onejudge layers a read-only config beneath the judge's own,
+#      where it used to pass read-only on the request and so beat any `mode` the
+#      judge's config named, and it refuses a panel of more than one writable
+#      judge. The member `mode` `src/invoke.rs` used to stamp into every judge
+#      config was inert below this release and would grant every judge `bypass`
+#      at it, so the judge side no longer carries it (`docs/contract.md`); the
+#      stacked-panel journeys in `tests/e2e/panel.rs` are what that holds.
+#   3. 0.17.0's readable `--format text` is the onejudge CLI's; this crate links
+#      the engine and reads no CLI output.
+onejudge = { version = "0.17.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -392,13 +418,36 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.18.0; that was re-measured for this bump rather than assumed, and
+# 0.21.0; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.18.0 is what is linked, and it is linked exactly once.** It is taken for
-# `extends`: a config may name a parent config it inherits from, resolved
-# against the declaring file's own directory, and the parent's values sit under
-# the child's. Below it the key is a `deny_unknown_fields` refusal, so a member
+# **0.21.0 is what is linked, and it is linked exactly once**, in lockstep with
+# onejudge 0.17.0 above, which asks for `^0.21.0`. The two releases it crosses
+# that this crate calls into change two things, and both are adopted here:
+#
+#   1. 0.20.0 layers configuration: `RunRequest::config` (and every sibling
+#      request's) is a list of files, each later one overriding the earlier, and
+#      an empty list is discovery. A `kind: oneharness` member must name its
+#      `oneharness_config`, so `src/harness.rs` always hands the one resolved
+#      config in the member's scratch as a list of one and never asks for
+#      discovery; `src/health.rs`'s usage sweep, which always discovered, passes
+#      the empty list `UsageRequest::default()` already holds.
+#   2. 0.21.0 streams the agent's own words: the `EventSink` and the report's
+#      `events` carry `message` and `reasoning` items beside tool calls and
+#      results, one finished item each, never a token delta, and
+#      `ActionEvent::index` numbers every kind. `src/harness.rs` relays each as
+#      `turn-activity` under its own kind, never as a tool call, and
+#      `src/member.rs`'s `Stall` states that such an item now resets the idle
+#      clock — `tests/e2e/dispatch.rs` and `tests/e2e/liveness.rs` drive both.
+#      A codex tool call now reaches the sink once, when it completes, rather
+#      than once per lifecycle record.
+#
+# 0.19.0 (Codex execpolicy sync) and 0.19.1 (a resumed Codex exec turn keeps
+# its sandbox mode) are carried along; neither is a path this crate calls.
+#
+# 0.18.0, carried along, was taken for `extends`: a config may name a parent
+# config it inherits from, resolved against the declaring file's own directory,
+# and the parent's values sit under the child's. Below it the key is a `deny_unknown_fields` refusal, so a member
 # whose config declares a parent dies at start. Because this crate hands the
 # core a stamped copy in the member's scratch rather than the file the operator
 # wrote, a relative parent would resolve against that scratch; `extends` is
@@ -467,7 +516,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # requirement. The rule that went with the split is retired with it, because
 # there is no longer a second set of types to confuse this one with; what remains
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.18.0"
+oneharness-core = "0.21.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

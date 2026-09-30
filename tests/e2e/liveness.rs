@@ -211,6 +211,91 @@ fn a_member_whose_child_is_alive_but_idle_is_still_condemned() {
     );
 }
 
+/// A member whose tree is idle but whose agent is **talking** is not condemned:
+/// each finished `message` item its harness streams clears the activity clock,
+/// exactly as a tool event does — the rule `oneagentgraph::member::Stall`
+/// states.
+///
+/// The pair is [`a_member_whose_child_is_alive_but_idle_is_still_condemned`]:
+/// both providers sleep, charging their tree nothing, and the only difference is
+/// that this one publishes the agent's own words every half second. Both member
+/// kinds, because each has its own sink stamping the clock — a single-sided
+/// member's `EventSink` and a two-party member's onejudge observer.
+#[test]
+fn a_member_whose_agent_is_talking_is_not_condemned_though_its_tree_is_idle() {
+    for (kind, graph) in [
+        ("single-sided", Some(single_sided_graph())),
+        ("two-party", None),
+    ] {
+        let workspace = Workspace::new();
+        if let Some(graph) = &graph {
+            workspace.graph(graph);
+        }
+        let release = workspace.at("release");
+        let env = bounds("60", &STALL.as_secs_f64().to_string());
+
+        let releaser = {
+            let release = release.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(SILENT_FOR);
+                std::fs::write(&release, "go").expect("release");
+            })
+        };
+        let started = std::time::Instant::now();
+        let run = workspace.run_with(
+            &[
+                "run",
+                "./graph.yaml",
+                "--task",
+                &format!(
+                    "fake:complete-now think out loud fake:murmur={}",
+                    release.display()
+                ),
+                "--dir",
+                &workspace.dir().display().to_string(),
+            ],
+            &as_env(&env),
+        );
+        releaser.join().expect("releaser");
+        run.expect_code(0);
+
+        assert!(
+            run.of_kind("member-died").is_empty(),
+            "a {kind} member whose agent was talking was condemned anyway: {:?}",
+            run.of_kind("member-died")
+        );
+        assert!(
+            started.elapsed() > SILENT_FOR,
+            "the {kind} member answered before its idle tree outlasted the bound"
+        );
+        // What kept it alive was its words, relayed live as themselves: several
+        // stall bounds' worth of `message` activity, and not one of them a tool.
+        let said: Vec<_> = run
+            .of_kind("turn-activity")
+            .into_iter()
+            .filter(|event| {
+                event["payload"]["output"]
+                    .as_str()
+                    .is_some_and(|text| text.starts_with("still thinking it through"))
+            })
+            .collect();
+        assert!(
+            said.len() >= 2 * (SILENT_FOR.as_millis() / STALL.as_millis()) as usize,
+            "the {kind} member's words did not reach the stream while it was idle: {:?}",
+            run.kinds()
+        );
+        for event in &said {
+            assert_eq!(event["payload"]["kind"], "message", "{event}");
+            assert_eq!(event["payload"]["name"], serde_json::Value::Null, "{event}");
+        }
+        assert_eq!(
+            workspace.record()["members"]["worker"],
+            serde_json::json!("settled"),
+            "{kind}"
+        );
+    }
+}
+
 /// One member across the whole startup window: spared while nothing is stamped
 /// for it, and condemned once its tree is there to ask and does nothing.
 ///
