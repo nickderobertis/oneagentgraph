@@ -219,7 +219,7 @@ fn assert_untouched(written: &BTreeMap<PathBuf, Vec<u8>>) {
                 "{} was re-permissioned",
                 path.display()
             );
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o400))
                 .expect("the legacy index made readable for the comparison");
         }
         let now = std::fs::read(path)

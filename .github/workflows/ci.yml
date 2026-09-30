@@ -65,6 +65,9 @@ jobs:
           tool: just,nextest,cargo-llvm-cov
       - name: Bootstrap
         run: just bootstrap
+      # tests/e2e/history_store.rs records a run's file-system calls with it.
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
       - name: Quality gate (affected projects)
         if: github.event_name == 'pull_request'
         run: just check-affected

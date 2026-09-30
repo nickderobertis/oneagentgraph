@@ -438,28 +438,17 @@ schemars = { version = "1", features = ["preserve_order"] }
 #
 # **0.24.0 is what is linked, and it is linked exactly once**, in lockstep with
 # onejudge 0.17.1 above, which asks for `^0.24.0`. It is the release whose
-# history recording never scans, per oneharness's `docs/history-index.md`: a run
-# is indexed by one appended entry per line in dated segments under
-# `<history_dir>/.index.d/` (`runs-YYYY-MM-DD.ndjson` for its closing line,
-# `events-YYYY-MM-DD.ndjson` for each event), and recording reads no index,
-# takes no `.index.lock`, and lists no directory — where every earlier core
-# re-read the whole `.index.jsonl` and walked every session file on each run.
-# A `kind: oneharness` member's turn records through this writer in-process, so
-# the fix reaches such a turn only through this requirement.
-# `tests/e2e/history_store.rs` traces a turn recording into a store of a
-# thousand other sessions whose legacy index cannot be opened, and the read
-# back through the pointer the graph published. What it adds and nothing here
-# calls: `list_sessions` takes a `HistoryWindow`, and the CLI's `history list`,
-# `history show <name>`, `--last` and `history watch` look back only over a
-# default window (the last 7 UTC days; `watch` without `--after` the current
-# UTC day) unless given `--since` or `--all-time`; `history reindex` indexes a
-# store an older core wrote. A pointer-path read — `read_pointers`,
-# `find_session_path` with a project, `read_session_display` — reaches a
-# session of any age. The two releases before it are carried along: 0.22.0's
-# break is the CLI's stream view (readable text unless `--format json`, which
-# `src/smoke.rs` and `src/control.rs` pass), and 0.23.0's is that
-# `read_session_display` returns the typed `HistoryShowEntry` rather than JSON
-# values — `tests/e2e/session.rs` reads it through that type's serialization.
+# history recording reads no index and lists no directory (oneharness's
+# `docs/history-index.md`), where every earlier core re-read the whole index and
+# walked the store on each run. A `kind: oneharness` member's turn records
+# through this writer in-process, so the fix reaches such a turn only through
+# this requirement; `tests/e2e/history_store.rs` traces that turn and the read
+# back through the pointer the graph published. The two releases before it are
+# carried along: 0.22.0's break is the CLI's stream view (readable text unless
+# `--format json`, which `src/smoke.rs` and `src/control.rs` pass), and 0.23.0's
+# is that `read_session_display` returns the typed `HistoryShowEntry` rather
+# than JSON values — `tests/e2e/session.rs` reads it through that type's
+# serialization.
 #
 # 0.21.0 moved in lockstep with onejudge 0.17.0. The two releases it crossed
 # that this crate calls into change two things, and both are adopted here:

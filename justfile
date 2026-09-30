@@ -43,9 +43,9 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # `oneharness-core` `Cargo.toml` takes: the linked engine answers what a
 # `kind: oneharness` member does, and this CLI answers what `smoke`, `interrupt`,
 # and onejudge's per-side turns do (`docs/oneharness-library.md`). 0.21.1 is the
-# CLI released beside the core 0.24.0 `Cargo.toml` links — the one that records
-# history into dated index segments without reading the index or walking the
-# store — so both halves run the same core. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
+# CLI released beside the core 0.24.0 `Cargo.toml` links, so both halves run the
+# same core and a two-party member's sides record history as a single-sided
+# member's turn does. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
 # only a CLI at it.
 oneharness-version := "0.21.1"
 
@@ -78,19 +78,7 @@ _crate-bootstrap:
     @just _ensure-tool cargo-nextest
     @just _ensure-tool cargo-llvm-cov
     @just _ensure-oneharness
-    @just _ensure-strace
     @cargo fetch --locked --quiet
-
-# `tests/e2e/history_store.rs` records the file-system calls a member's turn
-# makes into its history store with `strace`, on Linux only, and fails rather
-# than skips without it. Nothing to do where it is already installed or off
-# Linux; elsewhere it is the distribution's package, which needs root.
-# Install `strace` on Linux. Quiet when already present.
-_ensure-strace:
-    @if [ "$(uname -s)" != Linux ] || command -v strace >/dev/null 2>&1; then exit 0; fi; \
-     if [ "$(id -u)" = 0 ]; then sudo=""; else sudo="sudo -n"; fi; \
-     { $sudo apt-get update -qq && $sudo apt-get install -y -qq strace; } \
-      || { echo "cannot install strace — install it with your package manager and re-run" >&2; exit 1; }
 
 # The e2e suite drives this for real, as a subprocess, so it is part of
 # provisioning rather than something a developer is expected to have. It is

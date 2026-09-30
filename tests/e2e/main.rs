@@ -22,8 +22,13 @@ mod background;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod dispatch;
 mod events;
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] on the terms
+// the declaration above `background` states: this crate has exactly one e2e
+// target, and this journey costs what its siblings do — one short run of the
+// same doubled harness under a trace, about half a second.
 #[cfg(target_os = "linux")]
 mod history_store;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod interrupt;
 mod library;
 mod liveness;
