@@ -42,11 +42,12 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # which the core this release links still has. It is pinned separately from the
 # `oneharness-core` `Cargo.toml` takes: the linked engine answers what a
 # `kind: oneharness` member does, and this CLI answers what `smoke`, `interrupt`,
-# and onejudge's per-side turns do (`docs/oneharness-library.md`). 0.19.1 is the
-# CLI released beside the core 0.21.0 `Cargo.toml` links, so both halves run the
-# same core. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
+# and onejudge's per-side turns do (`docs/oneharness-library.md`). 0.21.1 is the
+# CLI released beside the core 0.24.0 `Cargo.toml` links, so both halves run the
+# same core and a two-party member's sides record history as a single-sided
+# member's turn does. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
 # only a CLI at it.
-oneharness-version := "0.19.1"
+oneharness-version := "0.21.1"
 
 # Keep the gate's own output to signal: successes are silent, failures are not.
 export CARGO_TERM_QUIET := "true"

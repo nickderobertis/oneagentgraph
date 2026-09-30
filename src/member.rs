@@ -533,7 +533,7 @@ impl Bounds {
 /// call it is dressed up as.
 ///
 /// **A message event resets this clock; a token-level stream does not, because
-/// nothing delivers one here.** Re-read on 2026-09-29 against the two engines
+/// nothing delivers one here.** Re-read on 2026-09-30 against the two engines
 /// this crate links. The stamp is a date rather than a release of this crate on
 /// purpose: it records when the upstream channels were last actually read,
 /// which a version bumped by the release automation would silently claim on
@@ -543,14 +543,14 @@ impl Bounds {
 /// holds each against `Cargo.toml`. It is named in prose rather than linked
 /// because it is a `#[cfg(test)]` item, which rustdoc cannot resolve:
 ///
-/// * `oneharness_core` 0.21.0 delivers a streaming run's events to an
+/// * `oneharness_core` 0.24.0 delivers a streaming run's events to an
 ///   `EventSink` as `ActionEvent`s whose `kind` is `tool_call`, `tool_result`,
 ///   `message` (the agent's own text, in `output`) or `reasoning`. A `message`
 ///   or `reasoning` event is one finished item, never a token delta, so a
 ///   single-sided member that talks as it works stamps this clock at each item
 ///   it finishes — while one spending ten minutes generating a single reply,
 ///   with no tool call and no finished item in between, still hands it nothing.
-/// * `onejudge` 0.17.0 delivers the worker's same normalized events **live**,
+/// * `onejudge` 0.17.1 delivers the worker's same normalized events **live**,
 ///   from inside `respond_observing`, as `Observation::Action` — a tool event as
 ///   `Observation::Tool` first and then as `Action`, the agent's words as
 ///   `Action` alone — so a two-party member's worker turn stamps this clock at

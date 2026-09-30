@@ -70,10 +70,21 @@ fn resolve(payload: &Value) -> PathBuf {
     path
 }
 
+/// A session file's display entries, as the wire shape `oneharness history show`
+/// prints them: since core 0.23.0 `read_session_display` hands back the typed
+/// `HistoryShowEntry`, whose untagged serialization is the record a completed
+/// run landed, so the journeys below keep reading the fields a consumer reads.
+fn display(path: &Path) -> Vec<Value> {
+    history::read_session_display(path)
+        .expect("the session file reads back")
+        .into_iter()
+        .map(|entry| serde_json::to_value(entry).expect("a display entry serializes"))
+        .collect()
+}
+
 /// One record out of a session file, by the id the artifact names.
 fn read_record(path: &Path, id: &Value) -> Value {
-    let records = history::read_session_display(path).expect("the session file reads back");
-    records
+    display(path)
         .into_iter()
         .find(|record| &record["history_id"] == id)
         .unwrap_or_else(|| panic!("{} holds no record {id}", path.display()))
@@ -645,8 +656,7 @@ fn a_single_sided_members_turn_appends_one_pointer_line_to_the_file_the_environm
     let history_file = report["history_file"]
         .as_str()
         .expect("with history on, the report names its session file");
-    let records = history::read_session_display(Path::new(history_file))
-        .expect("the session file the report names reads back");
+    let records = display(Path::new(history_file));
     assert_eq!(
         records.len(),
         1,
