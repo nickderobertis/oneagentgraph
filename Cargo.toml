@@ -101,9 +101,15 @@ name = "oneagentgraph-fake-view"
 path = "src/bin/fake_view.rs"
 required-features = ["test-doubles"]
 
-# The reader a consumer of a member's history pointer is, as a process of its
+# The reader a consumer of a member's history pointers is, as a process of its
 # own so `tests/e2e/history_store.rs` can trace the file-system calls its read
 # makes — not a stand-in for anything; see the binary's own documentation.
+# llmlint: ignore[new_command_or_client_gets_its_own_project] not a command the
+# tool exposes: a test fixture the e2e suite spawns, built only under
+# `test-doubles` (a `cargo install oneagentgraph` never has it), declared the way
+# the fake `llmlint` above is. Its own project would split one journey's fixture
+# from that journey for no `nx affected` gain — every change to it is a change
+# to `tests/e2e/history_store.rs`.
 [[bin]]
 name = "oneagentgraph-history-reader"
 path = "src/bin/history_reader.rs"

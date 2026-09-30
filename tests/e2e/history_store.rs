@@ -18,7 +18,7 @@
 // history store it records into, and the reader that follows the pointer are
 // all real.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
@@ -26,7 +26,9 @@ use oneharness_core::domain::history_index::{SegmentKind, UtcDate};
 use oneharness_core::io::history;
 use serde_json::Value;
 
-use crate::support::{fake_harness, graph_with, single_sided_graph, Workspace};
+use crate::support::{
+    fake_harness, graph_with, single_sided_graph, two_party_graph, Workspace, NO_ENV,
+};
 
 /// One turn, completed, so the member's run writes its closing record.
 const TASK: &str = "fake:complete-now: say something worth reading back";
@@ -275,12 +277,14 @@ fn assert_untouched(written: &BTreeMap<PathBuf, Vec<u8>>) {
     }
 }
 
-/// A `kind: oneharness` member's turn records into a large store whose legacy
-/// index cannot be opened, touching only its own session file and the dated
-/// segments it appends to; the session the graph's published pointer names then
-/// reads back by that pointer alone, without the index or any listing.
-#[test]
-fn recording_a_turn_and_reading_it_back_scan_no_history() {
+/// Run `skeleton`'s graph against a store that already holds a thousand and
+/// more other sessions and whose legacy indexes cannot be opened, tracing the
+/// recording, then follow every pointer the graph published back to its session
+/// under a trace of its own, and hold both traces to what the history contract
+/// allows. `spawned` names each program the recording must be seen to run —
+/// the processes whose writes the trace is there to catch. Returns how many
+/// sessions the run recorded.
+fn records_and_reads_back_without_scanning(skeleton: &str, spawned: &[&str]) -> usize {
     let workspace = Workspace::new();
     let store_dir = workspace.at("history");
     std::fs::create_dir_all(&store_dir).expect("the history store");
@@ -289,7 +293,7 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
     assert!(written.len() > 1000, "{} files", written.len());
     let pointer_file = workspace.at("pointers.jsonl");
     workspace.graph(&graph_with(
-        &single_sided_graph(&fake_harness()),
+        skeleton,
         &[
             ("env.ONEHARNESS_HISTORY", "1".to_string()),
             ("env.ONEHARNESS_HISTORY_DIR", store.display().to_string()),
@@ -301,7 +305,7 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
     ));
     let traces = tempfile::tempdir().expect("a trace directory");
 
-    // Recording: the graph runs its member's turn under the trace.
+    // Recording: the graph runs its member's turns under the trace.
     let record_trace = traces.path().join("record");
     let dir = workspace.dir().display().to_string();
     let run = workspace.run_traced(
@@ -317,60 +321,79 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
         run.kinds()
     );
 
-    // The pointer the graph published, and the entry its run left in the one
-    // segment named for its id's UTC date.
+    // The pointers the graph published, one per harness run, and the entry each
+    // run left in the runs segment named for its id's UTC date.
     let read = history::read_pointers(&pointer_file).expect("the pointer file reads");
-    assert_eq!((read.pointers.len(), read.skipped), (1, 0), "{read:?}");
-    let pointer = &read.pointers[0];
-    let history_id = pointer.history_id();
-    let date = UtcDate::of_history_id(history_id).expect("a run's id carries its date");
-    let segment = store
-        .join(".index.d")
-        .join(SegmentKind::Runs.file_name(date));
-    let entries = std::fs::read_to_string(&segment)
-        .unwrap_or_else(|err| panic!("no segment {}: {err}", segment.display()));
+    assert!(!read.pointers.is_empty() && read.skipped == 0, "{read:?}");
+    let mut sessions = BTreeSet::new();
+    let mut segments = BTreeSet::new();
+    let mut runs_segments = BTreeSet::new();
+    let mut evented = false;
+    for pointer in &read.pointers {
+        let history_id = pointer.history_id();
+        let date = UtcDate::of_history_id(history_id).expect("a run's id carries its date");
+        let segment = store
+            .join(".index.d")
+            .join(SegmentKind::Runs.file_name(date));
+        let entries = std::fs::read_to_string(&segment)
+            .unwrap_or_else(|err| panic!("no segment {}: {err}", segment.display()));
+        assert!(
+            entries
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(
+                    |entry| entry["kind"] == "run" && entry["history_id"] == history_id.to_string()
+                ),
+            "{} holds no run entry for {history_id}:\n{entries}",
+            segment.display()
+        );
+        let session_file = store
+            .join(pointer.history_project())
+            .join(format!("{}.jsonl", pointer.history_session()));
+        assert!(
+            session_file.is_file(),
+            "{} was not written",
+            session_file.display()
+        );
+        // A run's events go to the other segment for the same date: each event
+        // line is one entry there, as each closing run line is one entry here.
+        let events_segment = store
+            .join(".index.d")
+            .join(SegmentKind::Events.file_name(date));
+        evented |= std::fs::read_to_string(&events_segment).is_ok_and(|events| {
+            events
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|entry| entry["kind"] == "event" && entry["run_id"] == history_id.to_string())
+        });
+        sessions.insert(session_file);
+        runs_segments.insert(segment.clone());
+        segments.insert(segment);
+        segments.insert(events_segment);
+    }
     assert!(
-        entries
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|entry| entry["kind"] == "run" && entry["history_id"] == history_id.to_string()),
-        "{} holds no run entry for {history_id}:\n{entries}",
-        segment.display()
+        evented,
+        "no turn published an event into its date's events segment, so the per-event \
+         write went unproven"
     );
-    let session_file = store
-        .join(pointer.history_project())
-        .join(format!("{}.jsonl", pointer.history_session()));
-    assert!(
-        session_file.is_file(),
-        "{} was not written",
-        session_file.display()
-    );
-
-    // The run's events went to the other segment for the same date: each event
-    // line is one entry there, as each closing run line is one entry here.
-    let events_segment = store
-        .join(".index.d")
-        .join(SegmentKind::Events.file_name(date));
-    let events = std::fs::read_to_string(&events_segment)
-        .unwrap_or_else(|err| panic!("no segment {}: {err}", events_segment.display()));
-    assert!(
-        events
-            .lines()
-            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-            .any(|entry| entry["kind"] == "event" && entry["run_id"] == history_id.to_string()),
-        "the turn published no event into {}, so its per-event write went unproven:\n{events}",
-        events_segment.display()
-    );
-    let segments = [segment.as_path(), events_segment.as_path()];
 
     let recorded = calls(&record_trace);
+    for program in spawned {
+        assert!(
+            recorded.iter().any(|call| call.syscall == "execve"
+                && call.returned == Some(0)
+                && quoted(&call.line)
+                    .is_some_and(|path| path.rsplit('/').next() == Some(*program))),
+            "the trace never saw `{program}` start, so its writes went untraced"
+        );
+    }
     let touched = in_store(&recorded, &store);
     for call in &touched {
         if is_open(call) {
             let path = call.path.as_deref().expect("an open names a path");
             assert!(
-                path == session_file || segments.contains(&path),
-                "recording opened a store file other than its session and its date's \
+                sessions.contains(path) || segments.contains(path),
+                "recording opened a store file other than its sessions and their dates' \
                  segments: {}",
                 call.line
             );
@@ -381,7 +404,7 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
             call.line
         );
     }
-    for path in segments {
+    for path in &segments {
         for (open, read) in bytes_read_per_open(&touched, path) {
             assert!(
                 read <= SEGMENT_TAIL_BYTES,
@@ -391,15 +414,17 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
             );
         }
     }
-    assert!(
-        touched.iter().any(|call| is_open(call)
-            && call.path.as_deref() == Some(segment.as_path())
-            && call.returned.is_some_and(|fd| fd >= 0)),
-        "the trace saw no append to {} — it is not tracing the writer",
-        segment.display()
-    );
+    for segment in &runs_segments {
+        assert!(
+            touched.iter().any(|call| is_open(call)
+                && call.path.as_deref() == Some(segment.as_path())
+                && call.returned.is_some_and(|fd| fd >= 0)),
+            "the trace saw no append to {} — it is not tracing the writer",
+            segment.display()
+        );
+    }
 
-    // Reading: the consumer follows the published pointer under the trace.
+    // Reading: the consumer follows every published pointer under the trace.
     let read_trace = traces.path().join("read");
     let reader = workspace.run_traced(
         &read_trace,
@@ -407,22 +432,40 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
         &[&pointer_file.display().to_string()],
     );
     reader.expect_code(0);
-    let found: Value = serde_json::from_str(reader.stdout.trim())
-        .unwrap_or_else(|err| panic!("the reader printed no record ({err}): {}", reader.stdout));
-    assert_eq!(found["history_id"], history_id.to_string());
-    assert_eq!(found["session_file"], session_file.display().to_string());
+    let found: Vec<Value> = reader
+        .stdout
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|err| panic!("the reader printed no record ({err}): {line}"))
+        })
+        .collect();
+    assert_eq!(found.len(), read.pointers.len(), "{}", reader.stdout);
+    for (pointer, found) in read.pointers.iter().zip(&found) {
+        assert_eq!(found["history_id"], pointer.history_id().to_string());
+        let session_file = store
+            .join(pointer.history_project())
+            .join(format!("{}.jsonl", pointer.history_session()));
+        assert_eq!(found["session_file"], session_file.display().to_string());
+        assert!(
+            found["prompt"].as_str().is_some_and(|it| !it.is_empty()),
+            "the record read back carries no conversation: {found}"
+        );
+    }
     assert!(
-        found["prompt"].as_str().is_some_and(|it| it.contains(TASK)),
-        "the record read back is not this turn's: {found}"
+        found
+            .iter()
+            .any(|found| found["prompt"].as_str().is_some_and(|it| it.contains(TASK))),
+        "no record read back is this run's task: {found:?}"
     );
     let read_calls = calls(&read_trace);
     let read_touched = in_store(&read_calls, &store);
     for call in &read_touched {
         if is_open(call) {
-            assert_eq!(
-                call.path.as_deref(),
-                Some(session_file.as_path()),
-                "the read opened a store file other than the session its pointer names: {}",
+            let path = call.path.as_deref().expect("an open names a path");
+            assert!(
+                sessions.contains(path),
+                "the read opened a store file other than the sessions its pointers name: {}",
                 call.line
             );
         }
@@ -442,4 +485,33 @@ fn recording_a_turn_and_reading_it_back_scan_no_history() {
     // not), and every other session's file and both legacy indexes hold the
     // bytes they held before.
     assert_untouched(&written);
+    sessions.len()
+}
+
+/// A `kind: oneharness` member's turn runs on the linked core in this process:
+/// it records into a large store whose legacy index cannot be opened, touching
+/// only its own session file and the dated segments it appends to, and the
+/// session the graph's published pointer names reads back by that pointer
+/// alone, without the index or any listing.
+#[test]
+fn recording_a_turn_and_reading_it_back_scan_no_history() {
+    let recorded =
+        records_and_reads_back_without_scanning(&single_sided_graph(&fake_harness()), &[]);
+    assert_eq!(recorded, 1, "one turn, so one session");
+}
+
+/// A two-party member's sides run their turns through the pinned `oneharness`
+/// CLI rather than the linked core, so the same holds for the core that CLI
+/// links: both sides record into the same large store without scanning it, and
+/// each side's session reads back by the pointer it published.
+#[test]
+fn a_two_party_members_sides_record_and_read_back_scanning_no_history() {
+    let recorded = records_and_reads_back_without_scanning(
+        &two_party_graph(&fake_harness(), NO_ENV),
+        &["oneharness"],
+    );
+    assert!(
+        recorded >= 2,
+        "the agent and the judge each record a session"
+    );
 }
