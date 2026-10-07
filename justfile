@@ -63,7 +63,7 @@ export CARGO_TERM_QUIET := "true"
 # than silently dropping out of every run.
 contract-tests := "contract inventory packaging persona_bar persona_format record recorded release_declaration"
 e2e-tests := "e2e"
-repo-tooling-tests := "llmlint_cache affected_selection tier_partition workflow_contract"
+repo-tooling-tests := "llmlint_cache affected_selection tier_partition workflow_contract recipe_arguments"
 
 # Where the instrumented tiers write their raw profiles. Each tier names its own
 # files (`LLVM_PROFILE_FILE_NAME`), so one tier's run never clears another's, and
@@ -213,6 +213,14 @@ _tier-sources tier:
     esac
 
 # One tier's test binaries as cargo target selectors.
+#
+# The recipes below take the tier as an argument (`"$1"`) rather than splicing
+# `{{tier}}` into their shell line, and assign this lookup before using it.
+# Spliced, a tier named `x$(cmd)` ran `cmd` before the `case` could refuse it;
+# used inline as `cargo … $(just _tier-selectors …)`, a refused tier left cargo
+# running with no selectors — every test target. `bash -e` stops at a failed
+# assignment, never at a failed substitution inside another command's arguments.
+# `tests/repo-tooling/recipe_arguments.rs` drives both.
 _tier-selectors tier:
     @case "$1" in \
       contract) tests="{{contract-tests}}" ;; \
@@ -223,25 +231,25 @@ _tier-selectors tier:
 
 # Verify one test tier's formatting without modifying files.
 _tier-fmt-check tier:
-    @rustfmt --check $(just _tier-sources "$1") || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
+    @sources="$(just _tier-sources "$1")"; rustfmt --check $sources || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
 
 # Format one test tier in place.
 _tier-format tier:
-    @rustfmt $(just _tier-sources "$1")
+    @sources="$(just _tier-sources "$1")"; rustfmt $sources
 
 # Lint one test tier's own targets with clippy; any warning is an error.
 _tier-lint tier:
-    @cargo clippy $(just _tier-selectors "$1") --all-features --locked --quiet -- -D warnings
+    @selectors="$(just _tier-selectors "$1")"; cargo clippy $selectors --all-features --locked --quiet -- -D warnings
 
 # One test tier, instrumented, with the report deferred to `coverage`.
 _tier-test tier:
-    @just _instrumented "$1" $(just _tier-selectors "$1")
+    @selectors="$(just _tier-selectors "$1")"; just _instrumented "$1" $selectors
 
 # One test tier without instrumentation: the cross-platform legs, and the
 # repo-tooling tier, whose journeys exercise the justfile, `scripts/`, and Nx
 # rather than any line of the crate, so there is nothing of theirs to measure.
 _tier-test-quick tier:
-    @just _uninstrumented $(just _tier-selectors "$1")
+    @selectors="$(just _tier-selectors "$1")"; just _uninstrumented $selectors
 
 # llmlint: ignore-block[diagnostics_error_or_absent] these recipes run tests rather
 # than judge warnings, and every target they compile is already held to

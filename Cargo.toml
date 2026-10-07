@@ -665,6 +665,10 @@ path = "tests/repo-tooling/tier_partition.rs"
 name = "workflow_contract"
 path = "tests/repo-tooling/workflow_contract.rs"
 
+[[test]]
+name = "recipe_arguments"
+path = "tests/repo-tooling/recipe_arguments.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true
