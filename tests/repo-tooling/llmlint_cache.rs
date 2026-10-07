@@ -395,6 +395,54 @@ fn a_changed_tree_is_judged_again() {
     assert_eq!(workspace.judge_runs(), 2);
 }
 
+/// One edit to a throwaway checkout's work tree.
+type TreeChange = fn(&Path);
+
+/// The key is the tree git would show, not only its tracked contents: a new
+/// untracked file, a tracked file deleted from the work tree, and a symlink
+/// pointed somewhere else each re-judge, while a file git ignores does not.
+#[test]
+fn every_change_git_would_show_re_judges_and_an_ignored_one_replays() {
+    let workspace = Workspace::new();
+    let base = workspace.head();
+    workspace
+        .lint(&base, &[], &[])
+        .assert_green("the first run");
+
+    let root = &workspace.root;
+    let changes: [(&str, TreeChange); 3] = [
+        ("an untracked file", |root| {
+            std::fs::write(root.join("untracked-note.md"), "new\n").expect("add an untracked file");
+        }),
+        ("a deleted tracked file", |root| {
+            std::fs::remove_file(root.join("LICENSE")).expect("delete a tracked file");
+        }),
+        ("a retargeted symlink", |root| {
+            let link = root.join("CLAUDE.md");
+            std::fs::remove_file(&link).expect("remove the symlink");
+            std::os::unix::fs::symlink("README.md", &link).expect("point it elsewhere");
+        }),
+    ];
+    for (runs, (what, change)) in (2..).zip(changes) {
+        change(root);
+        workspace
+            .lint(&base, &[], &[])
+            .assert_green(what)
+            .assert_says(JUDGED);
+        assert_eq!(workspace.judge_runs(), runs, "{what} did not re-judge");
+    }
+
+    // `target/` is ignored, so nothing written there is part of the tree.
+    std::fs::create_dir_all(root.join("target")).expect("create the ignored directory");
+    std::fs::write(root.join("target").join("scratch"), "ignored\n")
+        .expect("write an ignored file");
+    workspace
+        .lint(&base, &[], &[])
+        .assert_green("the run after an ignored write")
+        .assert_says(REPLAYED);
+    assert_eq!(workspace.judge_runs(), 4, "an ignored file re-judged");
+}
+
 /// An identical tree judged against a different comparison is a different
 /// question, and a base that advanced under a branch is the ordinary way to get
 /// one.

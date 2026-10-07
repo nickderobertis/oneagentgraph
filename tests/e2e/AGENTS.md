@@ -1,5 +1,9 @@
 # The binary journeys (`oneagentgraph-e2e`)
 
+<!-- llmlint: ignore[e2e_not_mocked, tests_mirror_real_usage] the paid harness
+process is the one seam the root AGENTS.md invariants permit to be faked: it is a
+billed, non-deterministic model process, and every other boundary a journey
+crosses here — this binary, `oneharness`, onejudge — is real. -->
 Every journey here drives the compiled `oneagentgraph` binary as a subprocess and
 asserts on its exit code, stdout, stderr, and the files it leaves — never an
 in-process `main()`. The paid harness process is the one seam that is faked, at

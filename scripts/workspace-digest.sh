@@ -21,19 +21,20 @@
 set -uo pipefail
 
 unmatched() {
-  echo "workspace-digest: $1 — keying this run on a value that matches no recorded verdict" >&2
+  echo "workspace-digest: $1 — keying this run on a value that matches no recorded verdict, so the judged tier re-judges" >&2
+  echo "ACTION: $2, then rerun 'just lint-llm-diff' to cache its verdict again" >&2
   printf 'undigested-%s-%s\n' "$(date +%s%N)" "$$"
   exit 0
 }
 
-root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || unmatched "cannot locate the repository root"
-cd "$root" || unmatched "cannot enter $root"
+root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || unmatched "cannot locate the repository root" "run it from a checkout whose directories are readable"
+cd "$root" || unmatched "cannot enter $root" "make $root readable and searchable by this user"
 
 # Paths NUL-separated end to end, so no file name can be read as two.
-listing="$(mktemp)" || unmatched "cannot open temporary storage"
+listing="$(mktemp)" || unmatched "cannot open temporary storage" "free disk space under ${TMPDIR:-/tmp} (df -h)"
 trap 'rm -f "$listing"' EXIT
 git ls-files -z --cached --others --exclude-standard --deduplicate >"$listing" ||
-  unmatched "git cannot list the tree"
+  unmatched "git cannot list the tree" "run 'git status' in $root and fix what it reports"
 
 # A tracked file deleted in the work tree is still in the index listing; its
 # absence is the change, so it is hashed as a marker rather than as content.
@@ -47,5 +48,5 @@ digest="$(
       printf 'gone %s\0' "$path"
     fi
   done <"$listing" | sha256sum
-)" || unmatched "cannot hash the tree"
+)" || unmatched "cannot hash the tree" "run 'git status' in $root and make every file it lists readable"
 printf '%s\n' "${digest%% *}"

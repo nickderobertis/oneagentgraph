@@ -126,7 +126,7 @@ impl Repo {
     }
 
     /// CI's `changes` answer for the Rust jobs, and what the script said about it.
-    fn affects_the_crate(&self, env: &[(&str, &str)]) -> (bool, String) {
+    fn reaches_a_rust_project(&self, env: &[(&str, &str)]) -> (bool, String) {
         let run = self.script(&["--affects", "oneagentgraph"], env);
         let answer = match run.stdout.trim() {
             "true" => true,
@@ -227,7 +227,7 @@ fn a_change_confined_to_one_split_tier_still_runs_the_rust_jobs() {
     ] {
         let repo = Repo::new();
         repo.change(file);
-        let (answer, stderr) = repo.affects_the_crate(AGAINST_MAIN);
+        let (answer, stderr) = repo.reaches_a_rust_project(AGAINST_MAIN);
         assert!(
             answer,
             "a change confined to {file} skipped the Rust jobs:\n{stderr}"
@@ -240,7 +240,7 @@ fn a_change_reaching_no_rust_project_skips_the_rust_jobs() {
     let repo = Repo::new();
     repo.change("npm/oneagentgraph-cli/bin/oneagentgraph.js");
 
-    let (answer, stderr) = repo.affects_the_crate(AGAINST_MAIN);
+    let (answer, stderr) = repo.reaches_a_rust_project(AGAINST_MAIN);
     assert!(!answer, "an npm-only change ran the Rust jobs:\n{stderr}");
 }
 
@@ -251,7 +251,7 @@ fn a_change_to_root_configuration_still_runs_the_rust_jobs() {
     let repo = Repo::new();
     repo.change("deny.toml");
 
-    let (answer, stderr) = repo.affects_the_crate(AGAINST_MAIN);
+    let (answer, stderr) = repo.reaches_a_rust_project(AGAINST_MAIN);
     assert!(
         answer,
         "a deny.toml-only change skipped the Rust jobs:\n{stderr}"
@@ -265,7 +265,7 @@ fn a_named_base_commit_takes_precedence_over_the_base_branch() {
     repo.change("npm/oneagentgraph-cli/bin/oneagentgraph.js");
 
     // Against the branch, the crate change is in range.
-    let (by_branch, stderr) = repo.affects_the_crate(AGAINST_MAIN);
+    let (by_branch, stderr) = repo.reaches_a_rust_project(AGAINST_MAIN);
     assert!(
         by_branch,
         "the crate change was out of range of main:\n{stderr}"
@@ -273,7 +273,7 @@ fn a_named_base_commit_takes_precedence_over_the_base_branch() {
 
     // Against the commit after it, only the npm change is — and the branch,
     // still set, is not what the script used.
-    let (by_commit, stderr) = repo.affects_the_crate(&[
+    let (by_commit, stderr) = repo.reaches_a_rust_project(&[
         ("ONEAGENTGRAPH_NX_BASE_REF", "main"),
         ("ONEAGENTGRAPH_NX_BASE_SHA", &crate_change),
     ]);
@@ -293,7 +293,7 @@ fn an_unresolvable_base_commit_fails_closed_and_names_the_variable() {
             ("ONEAGENTGRAPH_NX_BASE_REF", "main"),
             ("ONEAGENTGRAPH_NX_BASE_SHA", sha),
         ];
-        let (answer, stderr) = repo.affects_the_crate(&env);
+        let (answer, stderr) = repo.reaches_a_rust_project(&env);
         assert!(
             answer,
             "base {sha:?} scoped the answer instead of failing closed:\n{stderr}"
@@ -366,7 +366,7 @@ fn a_push_build_scopes_to_the_commit_it_replaced_and_fails_closed_without_one() 
         !stderr.contains("running every project"),
         "a push with a usable base failed closed:\n{stderr}"
     );
-    let (answer, stderr) = repo.affects_the_crate(&after_before);
+    let (answer, stderr) = repo.reaches_a_rust_project(&after_before);
     assert!(answer, "the repo-tooling tier is a Rust project:\n{stderr}");
 
     // A first push names no commit at all, and a build that passes no base has

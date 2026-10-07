@@ -26,6 +26,7 @@ const REPO: &str = env!("CARGO_MANIFEST_DIR");
 /// The contexts main's branch protection requires, as read when this was
 /// written. The governance step reconciles the live settings against the
 /// workflows; this holds the workflows to the list.
+// llmlint: ignore[contracts_have_one_source_or_a_drift_gate] this is the fixed context list the workflows are held to, not a mirror of the live settings: those live in GitHub, which `just check` cannot read offline, and the create-repo skill's `setup_github_governance.py --verify` is the drift gate that reconciles them against the workflows whenever a job or leg is added or renamed.
 const REQUIRED: &[&str] = &[
     "gate",
     "pr-title",
@@ -46,8 +47,6 @@ const REQUIRED: &[&str] = &[
 const REPOSITORY: &str = "nickderobertis/oneagentgraph";
 /// The commit a synthetic push replaced.
 const BEFORE: &str = "1111111111111111111111111111111111111111";
-
-// --- the subset of GitHub's expression language the workflows use ----------
 
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
@@ -274,8 +273,6 @@ fn render(field: &str, context: &BTreeMap<String, String>) -> String {
     }
 }
 
-// --- the workflows ----------------------------------------------------------
-
 struct Workflow {
     file: String,
     doc: Value,
@@ -461,20 +458,18 @@ impl Workflow {
     }
 }
 
-// --- the events -------------------------------------------------------------
-
 fn event(
     name: &str,
     head_ref: &str,
     head_repo: &str,
-    crate_affected: bool,
+    rust_affected: bool,
 ) -> BTreeMap<String, String> {
     let mut context = BTreeMap::from([
         ("github.event_name".to_string(), name.to_string()),
         ("github.repository".to_string(), REPOSITORY.to_string()),
         (
             "needs.changes.outputs.crate".to_string(),
-            crate_affected.to_string(),
+            rust_affected.to_string(),
         ),
     ]);
     if name == "pull_request" {
@@ -491,21 +486,21 @@ fn event(
     context
 }
 
-fn pull_request(crate_affected: bool) -> BTreeMap<String, String> {
+fn pull_request(rust_affected: bool) -> BTreeMap<String, String> {
     event(
         "pull_request",
         "feature/some-change",
         REPOSITORY,
-        crate_affected,
+        rust_affected,
     )
 }
 
-fn release_pr(crate_affected: bool) -> BTreeMap<String, String> {
+fn release_pr(rust_affected: bool) -> BTreeMap<String, String> {
     event(
         "pull_request",
         "release-plz-2026-10-06T00-00-00Z",
         REPOSITORY,
-        crate_affected,
+        rust_affected,
     )
 }
 
@@ -513,14 +508,14 @@ fn fork_pr() -> BTreeMap<String, String> {
     event("pull_request", "patch-1", "someone/oneagentgraph", true)
 }
 
-fn push(crate_affected: bool) -> BTreeMap<String, String> {
-    event("push", "", "", crate_affected)
+fn push(rust_affected: bool) -> BTreeMap<String, String> {
+    event("push", "", "", rust_affected)
 }
 
 fn every_pull_request() -> Vec<(&'static str, BTreeMap<String, String>)> {
     vec![
         (
-            "an ordinary pull request reaching the crate",
+            "an ordinary pull request reaching a Rust project",
             pull_request(true),
         ),
         (
@@ -532,8 +527,6 @@ fn every_pull_request() -> Vec<(&'static str, BTreeMap<String, String>)> {
         ("a fork's pull request", fork_pr()),
     ]
 }
-
-// --- the journeys -----------------------------------------------------------
 
 #[test]
 fn every_required_context_is_reported_on_every_pull_request() {
@@ -595,12 +588,12 @@ fn a_leg_with_nothing_to_prove_reports_on_ubuntu_and_one_with_work_runs_it() {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         for os in &os_values {
-            for crate_affected in [true, false] {
-                let mut context = pull_request(crate_affected);
+            for rust_affected in [true, false] {
+                let mut context = pull_request(rust_affected);
                 context.insert("matrix.os".into(), os.clone());
                 let runner = render(job["runs-on"].as_str().expect("a runs-on"), &context);
                 let runs = ci.runs(id, &context);
-                if crate_affected {
+                if rust_affected {
                     assert_eq!(&runner, os, "{id} ({os}) with work to do left its platform");
                     assert!(
                         runs.iter().all(|run| !run.contains("Nothing to prove")

@@ -159,6 +159,7 @@ jobs:
       - name: Bootstrap
         if: needs.changes.outputs.crate == 'true'
         run: just bootstrap
+      # llmlint: ignore-block[ci_invokes_gate_recipe_not_inline_stages] these are the gate's own recipes, each fanned out through Nx, and the leg calls them rather than `just check` because the gate's coverage floor is measured on Linux only (`gate`); the cross legs run the same tiers uninstrumented, which is what `test-quick` is.
       - name: Format + lint
         if: needs.changes.outputs.crate == 'true'
         run: just fmt-check && just lint
@@ -166,6 +167,7 @@ jobs:
       - name: Tests (unit + contract + e2e + repo tooling)
         if: needs.changes.outputs.crate == 'true'
         run: just test-quick
+      # llmlint: ignore-end[ci_invokes_gate_recipe_not_inline_stages]
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency

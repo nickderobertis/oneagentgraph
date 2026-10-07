@@ -17,6 +17,6 @@ uninstrumented and counts toward no coverage floor.
 - **The required contexts are written down once, here.** `workflow_contract.rs`
   holds the workflows to the status-check contexts main's branch protection
   requires; when a job or matrix leg is added or renamed, that list moves with it
-  and protection is re-applied (root `AGENTS.md`).
+  and branch protection is re-applied.
 - Unix-only where the subject is bash: the Windows leg reaches those scripts
   through a shell these journeys cannot assume.
