@@ -243,6 +243,13 @@ _tier-test tier:
 _tier-test-quick tier:
     @just _uninstrumented $(just _tier-selectors {{tier}})
 
+# llmlint: ignore-block[diagnostics_error_or_absent] these recipes run tests rather
+# than judge warnings, and every target they compile is already held to
+# `-D warnings` by its own project's `lint` target: `_crate-lint` covers the
+# library and binaries under both the build and the `test` profile, and
+# `_tier-lint` covers each tier's test targets as tests. `check` depends on that
+# target and each cross leg runs `just lint` before `just test-quick`, so a
+# warning is already an error on every path that reaches these recipes.
 # Run one tier's tests under coverage instrumentation, writing its raw profiles
 # under its own name and nothing else. The tier's earlier profiles go first: a
 # profile left from a test that has since been deleted would otherwise still be
@@ -283,6 +290,7 @@ _coverage:
     @rm -f {{profraw-dir}}/oneagentgraph-objects-*.profraw
     @cargo llvm-cov report --fail-under-lines 95 \
       || { echo "coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
+# llmlint: ignore-end[diagnostics_error_or_absent]
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
 # legs run every tier's suite through this instead of `test`: each Rust
