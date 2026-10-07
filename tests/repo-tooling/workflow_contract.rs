@@ -48,6 +48,12 @@ const REPOSITORY: &str = "nickderobertis/oneagentgraph";
 /// The commit a synthetic push replaced.
 const BEFORE: &str = "1111111111111111111111111111111111111111";
 
+/// What a synthetic event sets, by expression path. Every path a scheduling
+/// field reads must be here, with GitHub's own `null` written as [`Val::Null`]
+/// where the event leaves it unset: a path missing from the map fails the
+/// test rather than reading as null.
+type Context = BTreeMap<String, Val>;
+
 #[derive(Debug, Clone, PartialEq)]
 enum Val {
     Null,
@@ -137,7 +143,7 @@ fn tokenize(expression: &str) -> Vec<Token> {
 struct Parser<'a> {
     tokens: Vec<Token>,
     at: usize,
-    context: &'a BTreeMap<String, String>,
+    context: &'a Context,
     expression: &'a str,
 }
 
@@ -207,10 +213,14 @@ impl Parser<'_> {
             Some(Token::Name(name)) if name == "false" => Val::Bool(false),
             Some(Token::Name(name)) if name == "null" => Val::Null,
             Some(Token::Name(name)) if self.peek_op("(") => self.call(&name),
-            Some(Token::Name(path)) => self
-                .context
-                .get(&path)
-                .map_or(Val::Null, |value| Val::Str(value.clone())),
+            Some(Token::Name(path)) => self.context.get(&path).cloned().unwrap_or_else(|| {
+                panic!(
+                    "`{path}` has no value in this synthetic event, so `{}` cannot be \
+                     evaluated; set what GitHub sets for it (`Val::Null` where it is unset) \
+                     rather than letting it read as null",
+                    self.expression
+                )
+            }),
             other => panic!("unexpected {other:?} in: {}", self.expression),
         }
     }
@@ -243,7 +253,7 @@ impl Parser<'_> {
 
 /// Evaluate a field GitHub reads as an expression: an `if:` written with or
 /// without `${{ }}`, or a value that is wholly one `${{ }}`.
-fn evaluate(field: &str, context: &BTreeMap<String, String>) -> Val {
+fn evaluate(field: &str, context: &Context) -> Val {
     let trimmed = field.trim();
     let expression = trimmed
         .strip_prefix("${{")
@@ -265,7 +275,7 @@ fn evaluate(field: &str, context: &BTreeMap<String, String>) -> Val {
 }
 
 /// Evaluate a value field: literal text, or text that is wholly one expression.
-fn render(field: &str, context: &BTreeMap<String, String>) -> String {
+fn render(field: &str, context: &Context) -> String {
     if field.trim().starts_with("${{") {
         evaluate(field, context).text()
     } else {
@@ -401,12 +411,79 @@ impl Workflow {
         }
     }
 
-    /// Whether GitHub schedules a job for an event: every job it needs is
-    /// scheduled, and its own `if` holds.
-    fn scheduled(&self, id: &str, context: &BTreeMap<String, String>) -> bool {
-        self.needs(id)
-            .iter()
-            .all(|need| self.scheduled(need, context))
+    /// Whether the workflow's `on:` takes an event: the event is listed, and the
+    /// branch it targets (a pull request's base, a push's ref) passes any
+    /// `branches` filter. A filter this cannot evaluate against a synthetic
+    /// event — a glob, a path or tag filter — fails the test rather than being
+    /// read as either answer.
+    fn triggered(&self, context: &Context) -> bool {
+        let event = context["github.event_name"].text();
+        let on = &self.doc["on"];
+        let trigger = match on {
+            Value::String(listed) => return *listed == event,
+            Value::Sequence(listed) => return listed.iter().any(|e| *e == *event),
+            Value::Mapping(_) => match on.get(event.as_str()) {
+                Some(trigger) => trigger,
+                None => return false,
+            },
+            other => panic!("{}'s `on` is unreadable: {other:?}", self.file),
+        };
+        let branch = if event == "pull_request" {
+            context["github.base_ref"].text()
+        } else {
+            let reference = context["github.ref"].text();
+            match reference.strip_prefix("refs/heads/") {
+                Some(branch) => branch.to_string(),
+                None => panic!("a synthetic {event} names no branch: {reference}"),
+            }
+        };
+        let Some(filters) = trigger.as_mapping() else {
+            assert!(
+                trigger.is_null(),
+                "{}'s `{event}` trigger is unreadable: {trigger:?}",
+                self.file
+            );
+            return true;
+        };
+        let mut taken = true;
+        for (key, value) in filters {
+            let key = key.as_str().expect("a trigger filter name");
+            let listed: Vec<&str> = value
+                .as_sequence()
+                .unwrap_or_else(|| panic!("{}'s `{event}.{key}` is not a list", self.file))
+                .iter()
+                .map(|v| v.as_str().expect("a trigger filter value"))
+                .collect();
+            match key {
+                "branches" => {
+                    assert!(
+                        listed.iter().all(|b| !b.contains(['*', '?', '[', '!'])),
+                        "{}'s `{event}.branches` carries a pattern this cannot evaluate: \
+                         {listed:?}",
+                        self.file
+                    );
+                    taken &= listed.contains(&branch.as_str());
+                }
+                // The synthetic pull request is a push to an open one.
+                "types" if event == "pull_request" => taken &= listed.contains(&"synchronize"),
+                _ => panic!(
+                    "{}'s `{event}` trigger filters on `{key}`, which a synthetic event \
+                     cannot evaluate",
+                    self.file
+                ),
+            }
+        }
+        taken
+    }
+
+    /// Whether GitHub schedules a job for an event: the workflow's `on:` takes
+    /// it, every job it needs is scheduled, and its own `if` holds.
+    fn scheduled(&self, id: &str, context: &Context) -> bool {
+        self.triggered(context)
+            && self
+                .needs(id)
+                .iter()
+                .all(|need| self.scheduled(need, context))
             && self.job(id)["if"]
                 .as_str()
                 .is_none_or(|cond| evaluate(cond, context).truthy())
@@ -423,7 +500,7 @@ impl Workflow {
     }
 
     /// The `run:` text of every step a job runs for an event.
-    fn runs(&self, id: &str, context: &BTreeMap<String, String>) -> Vec<String> {
+    fn runs(&self, id: &str, context: &Context) -> Vec<String> {
         self.job(id)["steps"]
             .as_sequence()
             .expect("a job has steps")
@@ -438,13 +515,7 @@ impl Workflow {
     }
 
     /// An env value a step sees for an event, by the step's `run:` text.
-    fn step_env(
-        &self,
-        id: &str,
-        run: &str,
-        var: &str,
-        context: &BTreeMap<String, String>,
-    ) -> String {
+    fn step_env(&self, id: &str, run: &str, var: &str, context: &Context) -> String {
         let step = self.job(id)["steps"]
             .as_sequence()
             .expect("a job has steps")
@@ -458,35 +529,46 @@ impl Workflow {
     }
 }
 
-fn event(
-    name: &str,
-    head_ref: &str,
-    head_repo: &str,
-    rust_affected: bool,
-) -> BTreeMap<String, String> {
-    let mut context = BTreeMap::from([
-        ("github.event_name".to_string(), name.to_string()),
-        ("github.repository".to_string(), REPOSITORY.to_string()),
+fn event(name: &str, head_ref: &str, head_repo: &str, rust_affected: bool) -> Context {
+    let text = |value: &str| Val::Str(value.to_string());
+    let mut context = Context::from([
+        ("github.event_name".to_string(), text(name)),
+        ("github.repository".to_string(), text(REPOSITORY)),
         (
             "needs.changes.outputs.rust".to_string(),
-            rust_affected.to_string(),
+            text(&rust_affected.to_string()),
         ),
     ]);
-    if name == "pull_request" {
-        context.insert("github.head_ref".into(), head_ref.into());
-        context.insert("github.base_ref".into(), "main".into());
-        context.insert(
-            "github.event.pull_request.head.repo.full_name".into(),
-            head_repo.into(),
-        );
+    // What GitHub sets for each event, and what it leaves unset: a pull request
+    // has no `before` and no head commit in its payload, and a push has no head
+    // or base branch (GitHub sets both to the empty string) and no pull request.
+    let fields = if name == "pull_request" {
+        [
+            ("github.head_ref", text(head_ref)),
+            ("github.base_ref", text("main")),
+            ("github.ref", text("refs/pull/1/merge")),
+            (
+                "github.event.pull_request.head.repo.full_name",
+                text(head_repo),
+            ),
+            ("github.event.before", Val::Null),
+            ("github.event.head_commit.message", Val::Null),
+        ]
     } else {
-        context.insert("github.ref".into(), "refs/heads/main".into());
-        context.insert("github.event.before".into(), BEFORE.into());
-    }
+        [
+            ("github.head_ref", text("")),
+            ("github.base_ref", text("")),
+            ("github.ref", text(&format!("refs/heads/{head_ref}"))),
+            ("github.event.pull_request.head.repo.full_name", Val::Null),
+            ("github.event.before", text(BEFORE)),
+            ("github.event.head_commit.message", text("a merged change")),
+        ]
+    };
+    context.extend(fields.map(|(path, value)| (path.to_string(), value)));
     context
 }
 
-fn pull_request(rust_affected: bool) -> BTreeMap<String, String> {
+fn pull_request(rust_affected: bool) -> Context {
     event(
         "pull_request",
         "feature/some-change",
@@ -495,7 +577,7 @@ fn pull_request(rust_affected: bool) -> BTreeMap<String, String> {
     )
 }
 
-fn release_pr(rust_affected: bool) -> BTreeMap<String, String> {
+fn release_pr(rust_affected: bool) -> Context {
     event(
         "pull_request",
         "release-plz-2026-10-06T00-00-00Z",
@@ -504,15 +586,20 @@ fn release_pr(rust_affected: bool) -> BTreeMap<String, String> {
     )
 }
 
-fn fork_pr() -> BTreeMap<String, String> {
+fn fork_pr() -> Context {
     event("pull_request", "patch-1", "someone/oneagentgraph", true)
 }
 
-fn push(rust_affected: bool) -> BTreeMap<String, String> {
-    event("push", "", "", rust_affected)
+fn push(rust_affected: bool) -> Context {
+    event("push", "main", "", rust_affected)
 }
 
-fn every_pull_request() -> Vec<(&'static str, BTreeMap<String, String>)> {
+/// A push to a branch other than main, which ci.yml's trigger does not take.
+fn push_elsewhere() -> Context {
+    event("push", "feature/some-change", "", true)
+}
+
+fn every_pull_request() -> Vec<(&'static str, Context)> {
     vec![
         (
             "an ordinary pull request reaching a Rust project",
@@ -590,7 +677,7 @@ fn a_leg_with_nothing_to_prove_reports_on_ubuntu_and_one_with_work_runs_it() {
         for os in &os_values {
             for rust_affected in [true, false] {
                 let mut context = pull_request(rust_affected);
-                context.insert("matrix.os".into(), os.clone());
+                context.insert("matrix.os".into(), Val::Str(os.clone()));
                 let runner = render(job["runs-on"].as_str().expect("a runs-on"), &context);
                 let runs = ci.runs(id, &context);
                 if rust_affected {
@@ -642,6 +729,14 @@ fn the_release_pr_runs_the_full_sweep_and_every_other_build_the_affected_tier() 
         sweep.iter().any(|run| run.trim() == "just check"),
         "the sweep job does not run the full `just check`: {sweep:?}"
     );
+
+    // A push anywhere but main is not a build ci.yml takes at all.
+    for id in ["gate", "sweep"] {
+        assert!(
+            !ci.scheduled(id, &push_elsewhere()),
+            "a push to a feature branch scheduled `{id}`"
+        );
+    }
 
     // The gate: the affected tier, for every build it runs on, never the sweep.
     for (what, context) in [
@@ -757,4 +852,12 @@ fn a_release_is_gated_by_its_own_test_job_before_anything_publishes() {
             "release.yml's `{id}` can publish without waiting for `test`"
         );
     }
+}
+
+#[test]
+#[should_panic(expected = "has no value in this synthetic event")]
+fn an_expression_naming_a_value_the_event_does_not_set_fails_instead_of_reading_null() {
+    // A misspelt context path must not quietly read as null, which would
+    // schedule or skip a job by accident rather than by the workflow's logic.
+    evaluate("github.head_reff == 'main'", &pull_request(true));
 }
