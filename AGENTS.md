@@ -146,7 +146,10 @@ able to override. Apply it with the create-repo skill's
 `setup_github_governance.py`, passing every context, and **re-apply it whenever a
 job or a matrix is added or renamed** — GitHub holds the required set, nothing
 reconciles it against the workflow, and a leg nobody required is advisory, which
-auto-merge lands straight past.
+auto-merge lands straight past. Three jobs are deliberately **not** required:
+`sweep` (it runs on the release PR alone), `install-documented` (it runs on
+`main` alone), and `notignored.yml`'s suppression comment (advisory by design,
+and skipped on fork pull requests, which cannot write a comment).
 
 **Releases are fully automated; the only human action is merging a PR.**
 `release-plz` is the single version driver: it opens a release PR, and merging it
