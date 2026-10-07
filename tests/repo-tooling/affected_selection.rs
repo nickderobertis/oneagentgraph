@@ -325,6 +325,46 @@ fn an_unresolvable_base_commit_fails_closed_and_names_the_variable() {
 }
 
 #[test]
+fn a_base_branch_git_would_refuse_fails_closed_and_names_it() {
+    let repo = Repo::new();
+    repo.change("npm/oneagentgraph-cli/bin/oneagentgraph.js");
+
+    // Each passes the character set and fails git's ref-name rules, so only the
+    // second check stands between it and the fetch refspec.
+    for branch in ["main..evil", "main.lock", "main/"] {
+        let env = [("ONEAGENTGRAPH_NX_BASE_REF", branch)];
+        let (answer, stderr) = repo.reaches_a_rust_project(&env);
+        assert!(
+            answer,
+            "base branch {branch:?} scoped the answer instead of failing closed:\n{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("'{branch}' is not a usable branch name")),
+            "base branch {branch:?} failed closed without naming it:\n{stderr}"
+        );
+
+        let (tasks, stderr) = repo.gate_tasks(&env);
+        assert_selects(
+            &tasks,
+            &[
+                UNIT,
+                COVERAGE,
+                CONTRACT,
+                E2E,
+                REPO_TOOLING,
+                "oneagentgraph-npm:test",
+            ],
+            &[],
+            &format!("base branch {branch:?} must run every project"),
+        );
+        assert!(
+            stderr.contains("running every project"),
+            "base branch {branch:?} widened the run without saying so:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn with_neither_base_a_local_run_scopes_against_main() {
     let repo = Repo::new();
     repo.change("scripts/llmlint-judge.sh");

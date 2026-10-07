@@ -34,7 +34,9 @@ cd "$ROOT" || {
 #
 # `GITHUB_BASE_REF` is workflow-controlled rather than attacker-controlled, but it
 # reaches `git fetch` as a refspec, so its shape is validated at the boundary
-# instead of trusted: a branch name is what a branch name may look like.
+# instead of trusted: a branch name is what a branch name may look like — a
+# conservative character set, and then git's own ref-name rules, which the set
+# alone does not hold (`main..evil` and `main.lock` pass it).
 #
 # In CI its absence is meaningful rather than missing: a push build is *on* the
 # base branch, so scoping against it would find nothing changed and skip every
@@ -50,7 +52,8 @@ base_branch() {
     printf 'main'
     return 0
   fi
-  if ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$'; then
+  if ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._/-]*$' ||
+    ! git check-ref-format --branch "$ref" >/dev/null 2>&1; then
     echo "nx-affected: '$ref' is not a usable branch name" >&2
     return 1
   fi
