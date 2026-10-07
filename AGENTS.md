@@ -96,7 +96,7 @@ consuming `project.json` — an undeclared one silently drops that project out o
 `nx affected`, so a pull request runs a gate that never touched it. The crate's
 suite is split into Nx test-tier projects (unit, contract, e2e, repo tooling)
 under one Cargo package, with one 95% coverage floor merged across the
-instrumented tiers by `oneagentgraph:coverage`; `tests/AGENTS.md` owns the split.
+instrumented tiers by `oneagentgraph:coverage`.
 `msrv` and `deps-check` run through repo-level Nx targets
 (`oneagentgraph-workspace:msrv`, `:deps-check`) that no `check` depends on.
 

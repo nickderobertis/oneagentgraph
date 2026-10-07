@@ -119,12 +119,19 @@ case "${1:-}" in
   fi
   # Matched as parsed JSON array elements rather than by grepping the text: a
   # project whose name is a substring of another's would otherwise answer for it.
-  if node -e 'const [affected,family,name]=[JSON.parse(process.argv[1]),JSON.parse(process.argv[2]),process.argv[3]];process.exit(affected.some((p)=>p===name||family.includes(p))?0:1)' \
-    "$projects" "$family" "$project"; then
+  # Exit 1 is the one "not affected" answer; a list that is not a JSON array of
+  # names exits 2 and fails closed, like every other answer Nx could not give.
+  match=0
+  node -e 'let affected,family;try{[affected,family]=[JSON.parse(process.argv[1]),JSON.parse(process.argv[2])];if(!Array.isArray(affected)||!Array.isArray(family))throw new Error("not an array")}catch{process.exit(2)}const name=process.argv[3];process.exit(affected.some((p)=>p===name||family.includes(p))?0:1)' \
+    "$projects" "$family" "$project" || match=$?
+  case "$match" in
+  0) printf 'true\n' ;;
+  1) printf 'false\n' ;;
+  *)
+    echo "nx-affected: Nx's project lists were not JSON arrays of names — treating '$project' as affected" >&2
     printf 'true\n'
-  else
-    printf 'false\n'
-  fi
+    ;;
+  esac
   ;;
 *)
   [ "$#" -gt 0 ] || {
