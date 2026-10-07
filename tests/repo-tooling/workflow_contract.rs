@@ -3,11 +3,12 @@
 //! Main's branch protection requires a fixed set of status-check contexts by
 //! name, and the staged gate decides which tier runs where: the affected tier on
 //! every pull request and every push to main, the full sweep once, on the
-//! release-plz release PR. Both are properties of the `on`, `if`, `needs`,
-//! `strategy`, and `runs-on` fields GitHub reads, so this parses every workflow
-//! and evaluates those fields the way GitHub does for synthetic events — an
-//! ordinary pull request, a release-plz release PR, a fork's pull request, a push
-//! to main — with the `changes` job answering either way.
+//! release-plz release PR; and a push to main must never cancel the run gating
+//! the push before it. All three are properties of the `on`, `if`, `needs`,
+//! `strategy`, `runs-on`, and `concurrency` fields GitHub reads, so this parses
+//! every workflow and evaluates those fields the way GitHub does for synthetic
+//! events — an ordinary pull request, a release-plz release PR, a fork's pull
+//! request, a push to main — with the `changes` job answering either way.
 //!
 //! That is a structural check rather than an end-to-end one, on purpose: the
 //! behaviour is GitHub's scheduling of hosted runners, whose only end-to-end
@@ -47,6 +48,8 @@ const REQUIRED: &[&str] = &[
 const REPOSITORY: &str = "nickderobertis/oneagentgraph";
 /// The commit a synthetic push replaced.
 const BEFORE: &str = "1111111111111111111111111111111111111111";
+/// The commit a synthetic event builds.
+const SHA: &str = "2222222222222222222222222222222222222222";
 
 /// What a synthetic event sets, by expression path. Every path a scheduling
 /// field reads must be here, with GitHub's own `null` written as [`Val::Null`]
@@ -281,6 +284,25 @@ fn render(field: &str, context: &Context) -> String {
     } else {
         field.to_string()
     }
+}
+
+/// Evaluate a value field with any number of `${{ }}` spliced into its text,
+/// as GitHub does for a field such as a concurrency group.
+fn interpolate(field: &str, context: &Context) -> String {
+    let mut out = String::new();
+    let mut rest = field;
+    while let Some(start) = rest.find("${{") {
+        out.push_str(&rest[..start]);
+        let end = start
+            + rest[start..]
+                .find("}}")
+                .unwrap_or_else(|| panic!("an unclosed expression in: {field}"))
+            + 2;
+        out.push_str(&evaluate(&rest[start..end], context).text());
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 struct Workflow {
@@ -534,6 +556,7 @@ fn event(name: &str, head_ref: &str, head_repo: &str, rust_affected: bool) -> Co
     let mut context = Context::from([
         ("github.event_name".to_string(), text(name)),
         ("github.repository".to_string(), text(REPOSITORY)),
+        ("github.sha".to_string(), text(SHA)),
         (
             "needs.changes.outputs.rust".to_string(),
             text(&rust_affected.to_string()),
@@ -852,6 +875,78 @@ fn a_release_is_gated_by_its_own_test_job_before_anything_publishes() {
             "release.yml's `{id}` can publish without waiting for `test`"
         );
     }
+}
+
+/// The run group a workflow's `concurrency` puts `context` in, and whether a
+/// newer run in that group cancels this one.
+fn concurrency(w: &Workflow, context: &Context) -> (String, bool) {
+    let block = &w.doc["concurrency"];
+    let group = block["group"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{} names no concurrency group", w.file));
+    (
+        interpolate(group, context),
+        block["cancel-in-progress"] == Value::Bool(true),
+    )
+}
+
+/// `context` with `path` set to `value`: the same event, one field apart.
+fn with(mut context: Context, path: &str, value: &str) -> Context {
+    context.insert(path.to_string(), Val::Str(value.to_string()));
+    context
+}
+
+#[test]
+fn a_newer_pull_request_push_supersedes_its_run_and_a_push_to_main_never_does() {
+    let ci = workflow("ci.yml");
+    let next = "3333333333333333333333333333333333333333";
+
+    // Two pushes to one pull request share a group, so the newer cancels the
+    // older; another pull request's runs are untouched.
+    let (first, cancels) = concurrency(&ci, &pull_request(true));
+    assert!(cancels, "ci.yml no longer cancels superseded runs");
+    assert_eq!(
+        first,
+        concurrency(&ci, &with(pull_request(true), "github.sha", next)).0,
+        "a pull request's newer push does not supersede its older run"
+    );
+    assert_ne!(
+        first,
+        concurrency(
+            &ci,
+            &with(pull_request(true), "github.ref", "refs/pull/2/merge")
+        )
+        .0,
+        "one pull request's push cancels another pull request's run"
+    );
+
+    // Each push to main gates only the commits it added, so a cancelled one
+    // would leave its changes ungated: no two pushes may share a group.
+    let main = concurrency(&ci, &push(true)).0;
+    assert_ne!(
+        main,
+        concurrency(&ci, &with(push(true), "github.sha", next)).0,
+        "a newer push to main cancels the run gating the push before it"
+    );
+    assert_ne!(main, first, "a push to main shares a pull request's group");
+
+    // Only the newest suppression comment is wanted, per pull request.
+    let notignored = workflow("notignored.yml");
+    let (comment, cancels) = concurrency(&notignored, &pull_request(true));
+    assert!(cancels, "notignored.yml no longer cancels superseded runs");
+    assert_eq!(
+        comment,
+        concurrency(&notignored, &with(pull_request(true), "github.sha", next)).0
+    );
+    assert_ne!(
+        comment,
+        concurrency(
+            &notignored,
+            &with(pull_request(true), "github.ref", "refs/pull/2/merge")
+        )
+        .0,
+        "one pull request's suppression comment cancels another's"
+    );
 }
 
 #[test]
