@@ -87,6 +87,7 @@ resolve_base() {
 }
 
 case "${1:-}" in
+# llmlint: ignore[names_match_behavior] `--affects NAME` is the flag CI's `changes` job and this repository's acceptance contract call by that name, and NAME is the project whose jobs are asked about; the header states that the answer covers NAME's toolchain, which is the question those jobs need answered.
 --affects)
   project="${2:-}"
   [ -n "$project" ] || {

@@ -689,6 +689,60 @@ fn the_re_judge_lever_is_per_invocation_and_a_global_cache_skip_is_ignored() {
     );
 }
 
+/// A digest that cannot be taken must never be a key a recorded verdict could
+/// match: Nx would read a failing runtime input as no contribution and replay.
+/// So outside a git checkout the real script still succeeds, prints a key that
+/// differs on every run, and says on stderr what failed and what to do — while
+/// over a real tree it prints one stable digest.
+#[test]
+fn a_digest_that_cannot_be_taken_keys_on_a_value_that_matches_nothing() {
+    let digest = |root: &Path| {
+        let output = Command::new("bash")
+            .arg(root.join("scripts/workspace-digest.sh"))
+            .env("GIT_CEILING_DIRECTORIES", root.parent().expect("a parent"))
+            .output()
+            .expect("run scripts/workspace-digest.sh");
+        assert!(
+            output.status.success(),
+            "the digest failed instead of keying on an unmatched value: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8(output.stdout).expect("UTF-8 key"),
+            String::from_utf8(output.stderr).expect("UTF-8 diagnostics"),
+        )
+    };
+
+    let workspace = Workspace::new();
+    let (first, _) = digest(&workspace.root);
+    let (second, _) = digest(&workspace.root);
+    assert_eq!(first, second, "one tree keyed two ways");
+    assert!(
+        first.trim().len() == 64 && first.trim().chars().all(|c| c.is_ascii_hexdigit()),
+        "a real tree did not key on a sha256 digest: {first:?}"
+    );
+
+    // The same script, in a directory git does not track.
+    let outside = tempfile::tempdir().expect("a directory outside any checkout");
+    let root = outside.path().join("not-a-checkout");
+    std::fs::create_dir_all(root.join("scripts")).expect("create the scripts directory");
+    std::fs::copy(
+        workspace.root.join("scripts/workspace-digest.sh"),
+        root.join("scripts/workspace-digest.sh"),
+    )
+    .expect("copy the digest script");
+    let (one, stderr) = digest(&root);
+    let (other, _) = digest(&root);
+    assert!(
+        one.starts_with("undigested-") && one != other,
+        "an untakeable digest keyed on a value a verdict could match: {one:?} then {other:?}"
+    );
+    assert!(
+        stderr.contains("git cannot list the tree") && stderr.contains("ACTION:"),
+        "the fallback did not say what failed and what to do:\n{stderr}"
+    );
+}
+
 /// A base ref that does not resolve is refused before the judge is paid.
 #[test]
 fn an_unresolvable_base_is_refused_before_the_judge_is_paid() {
