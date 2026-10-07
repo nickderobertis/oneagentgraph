@@ -28,8 +28,16 @@ const TIER_RECIPES: &[&str] = &[
 ];
 
 /// A tier name that, spliced into a shell line, creates `sentinel`.
+///
+/// The path is written with forward slashes: the recipes run under bash, which
+/// on Windows reads `D:\a\_temp\…` as escapes and would `touch` some other file,
+/// so the spliced form would seem not to run it and the argv form's refusal
+/// would prove nothing. Git Bash resolves `D:/a/_temp/…` to the sentinel itself.
 fn hostile_tier(sentinel: &Path) -> String {
-    format!("x$(touch {})", sentinel.display())
+    format!(
+        "x$(touch {})",
+        sentinel.display().to_string().replace('\\', "/")
+    )
 }
 
 /// Run `recipe tier` from `justfile`, in this checkout, with no stdin to read.
