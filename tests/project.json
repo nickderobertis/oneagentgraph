@@ -26,7 +26,16 @@
         "format-check",
         "lint",
         "test",
+        // llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] this edge
+        // is the 95% floor, not a dependency on unrelated code. A change confined to
+        // this tier can lower the merged coverage (a deleted or narrowed test), so
+        // the floor is re-measured, and measuring a union needs every counted
+        // tier's profiles: e2e's replay from the Nx cache where its inputs are
+        // unchanged and run otherwise. Dropping the edge would let such a change
+        // merge unmeasured. Changes that cannot move the floor — repo-tooling and
+        // npm — never reach it (tests/AGENTS.md, "Coverage is one floor").
         { "projects": ["oneagentgraph"], "target": "coverage" }
+        // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
       ]
     }
   }

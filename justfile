@@ -205,43 +205,43 @@ _crate-test-quick:
 
 # The crate roots one tier's files hang from, for rustfmt.
 _tier-sources tier:
-    @case "{{tier}}" in \
+    @case "$1" in \
       contract) echo tests/*.rs ;; \
       e2e) echo tests/e2e/main.rs ;; \
       repo-tooling) echo tests/repo-tooling/*.rs ;; \
-      *) echo "no test tier named '{{tier}}'" >&2; exit 2 ;; \
+      *) echo "no test tier named '$1'" >&2; exit 2 ;; \
     esac
 
 # One tier's test binaries as cargo target selectors.
 _tier-selectors tier:
-    @case "{{tier}}" in \
+    @case "$1" in \
       contract) tests="{{contract-tests}}" ;; \
       e2e) tests="{{e2e-tests}}" ;; \
       repo-tooling) tests="{{repo-tooling-tests}}" ;; \
-      *) echo "no test tier named '{{tier}}'" >&2; exit 2 ;; \
+      *) echo "no test tier named '$1'" >&2; exit 2 ;; \
     esac; printf -- '--test %s ' $tests
 
 # Verify one test tier's formatting without modifying files.
 _tier-fmt-check tier:
-    @rustfmt --check $(just _tier-sources {{tier}}) || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
+    @rustfmt --check $(just _tier-sources "$1") || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
 
 # Format one test tier in place.
 _tier-format tier:
-    @rustfmt $(just _tier-sources {{tier}})
+    @rustfmt $(just _tier-sources "$1")
 
 # Lint one test tier's own targets with clippy; any warning is an error.
 _tier-lint tier:
-    @cargo clippy $(just _tier-selectors {{tier}}) --all-features --locked --quiet -- -D warnings
+    @cargo clippy $(just _tier-selectors "$1") --all-features --locked --quiet -- -D warnings
 
 # One test tier, instrumented, with the report deferred to `coverage`.
 _tier-test tier:
-    @just _instrumented {{tier}} $(just _tier-selectors {{tier}})
+    @just _instrumented "$1" $(just _tier-selectors "$1")
 
 # One test tier without instrumentation: the cross-platform legs, and the
 # repo-tooling tier, whose journeys exercise the justfile, `scripts/`, and Nx
 # rather than any line of the crate, so there is nothing of theirs to measure.
 _tier-test-quick tier:
-    @just _uninstrumented $(just _tier-selectors {{tier}})
+    @just _uninstrumented $(just _tier-selectors "$1")
 
 # llmlint: ignore-block[diagnostics_error_or_absent] these recipes run tests rather
 # than judge warnings, and every target they compile is already held to
@@ -256,18 +256,21 @@ _tier-test-quick tier:
 # counted. `--no-report` also keeps cargo-llvm-cov from cleaning the shared
 # build, so the tiers reuse one instrumented compile.
 _instrumented tier *selectors:
-    @rm -f {{profraw-dir}}/oneagentgraph-{{tier}}-*.profraw
-    @LLVM_PROFILE_FILE_NAME="oneagentgraph-{{tier}}-%p-%m.profraw" \
-      cargo llvm-cov --no-report nextest --locked --all-features {{selectors}} \
+    @case "$1" in unit|contract|e2e) ;; \
+      *) echo "no instrumented tier named '$1' — coverage counts unit, contract, and e2e" >&2; exit 2 ;; \
+    esac
+    @rm -f "{{profraw-dir}}/oneagentgraph-$1-"*.profraw
+    @LLVM_PROFILE_FILE_NAME="oneagentgraph-$1-%p-%m.profraw" \
+      cargo llvm-cov --no-report nextest --locked --all-features "${@:2}" \
       --status-level fail --final-status-level fail \
-      || { echo "{{tier}}: tests failed — fix the failures named above" >&2; exit 1; }
+      || { echo "$1: tests failed — fix the failures named above" >&2; exit 1; }
 
 # `--no-fail-fast` because this is what the cross-platform legs run, and their
 # failures are the hardest to reproduce: a round trip to a hosted macOS or
 # Windows runner. Stopping at the first failure cancelled 54 of 224 tests once and
 # reported four, which reads as "four broke" when the honest answer was unknown.
 _uninstrumented *selectors:
-    @cargo nextest run --locked --all-features {{selectors}} --status-level fail --no-fail-fast
+    @cargo nextest run --locked --all-features "$@" --status-level fail --no-fail-fast
 
 # 95% line coverage is the gate; lower it only with a documented reason in
 # AGENTS.md. Measured over the same code as ever — the crate's library and
