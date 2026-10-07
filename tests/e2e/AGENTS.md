@@ -1,9 +1,9 @@
 # The binary journeys (`oneagentgraph-e2e`)
 
-<!-- llmlint: ignore[e2e_not_mocked, tests_mirror_real_usage] the paid harness
-process is the one seam the root AGENTS.md invariants permit to be faked: it is a
-billed, non-deterministic model process, and every other boundary a journey
-crosses here — this binary, `oneharness`, onejudge — is real. -->
+<!-- llmlint: ignore-block[e2e_not_mocked, tests_mirror_real_usage] the paid
+harness process is the one seam the root AGENTS.md invariants permit to be faked:
+it is a billed, non-deterministic model process, and every other boundary a
+journey crosses here — this binary, `oneharness`, onejudge — is real. -->
 Every journey here drives the compiled `oneagentgraph` binary as a subprocess and
 asserts on its exit code, stdout, stderr, and the files it leaves — never an
 in-process `main()`. The paid harness process is the one seam that is faked, at
@@ -11,6 +11,7 @@ oneharness's own `ONEHARNESS_BIN_<ID>` override (`support.rs`); everything else
 is real, including the pinned `oneharness` CLI the justfile's `oneharness-version`
 names, which `just bootstrap` installs and `support.rs` reads from the justfile
 rather than restating.
+<!-- llmlint: ignore-end[e2e_not_mocked, tests_mirror_real_usage] -->
 
 - **What this tier reads is its Nx input.** `e2eSource` and `e2eReads` in
   `nx.json` name it: these sources, the crate, `README.md`, and

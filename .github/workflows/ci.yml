@@ -26,13 +26,13 @@ jobs:
   # base; a push to main with the commit the push replaced.
   #
   # `nx-affected.sh` fails closed: with no derivable base — a shallow clone, a
-  # missing base branch, a first push — it says the crate is affected and the
+  # missing base branch, a first push — it says a Rust project is affected and the
   # matrices run. Affected selection is a speed optimisation, and one that can
   # silently skip a check is a correctness hole.
   changes:
     runs-on: ubuntu-latest
     outputs:
-      crate: ${{ steps.affected.outputs.crate }}
+      rust: ${{ steps.affected.outputs.rust }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,7 +46,7 @@ jobs:
         id: affected
         env:
           ONEAGENTGRAPH_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
-        run: echo "crate=$(bash scripts/nx-affected.sh --affects oneagentgraph)" >> "$GITHUB_OUTPUT"
+        run: echo "rust=$(bash scripts/nx-affected.sh --affects oneagentgraph)" >> "$GITHUB_OUTPUT"
 
   # The gate on a clean checkout: bootstrap from scratch, then the deterministic
   # gate (format, clippy, every test tier incl. the contract and binary e2e, the
@@ -136,36 +136,36 @@ jobs:
       fail-fast: false
       matrix:
         os: [macos-26, windows-latest]
-    runs-on: ${{ needs.changes.outputs.crate == 'true' && matrix.os || 'ubuntu-latest' }}
+    runs-on: ${{ needs.changes.outputs.rust == 'true' && matrix.os || 'ubuntu-latest' }}
     defaults:
       run:
         shell: bash
     steps:
       - name: Nothing to prove (the change reaches no Rust project)
-        if: needs.changes.outputs.crate != 'true'
+        if: needs.changes.outputs.rust != 'true'
         run: echo "the change reaches no Rust project, so cross has nothing to build or test for ${{ matrix.os }}"
       - uses: actions/checkout@v4
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
       - uses: Swatinem/rust-cache@v2
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
       - uses: actions/setup-node@v4
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
         with:
           node-version: "22"
       - uses: taiki-e/install-action@v2
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
         with:
           tool: just,nextest
       - name: Bootstrap
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
         run: just bootstrap
       # llmlint: ignore-block[ci_invokes_gate_recipe_not_inline_stages] these are the gate's own recipes, each fanned out through Nx, and the leg calls them rather than `just check` because the gate's coverage floor is measured on Linux only (`gate`); the cross legs run the same tiers uninstrumented, which is what `test-quick` is.
       - name: Format + lint
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
         run: just fmt-check && just lint
       # Every Rust project's `test-quick` target, through Nx.
       - name: Tests (unit + contract + e2e + repo tooling)
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
         run: just test-quick
       # llmlint: ignore-end[ci_invokes_gate_recipe_not_inline_stages]
 
@@ -174,7 +174,7 @@ jobs:
   # raises its own.
   msrv:
     needs: changes
-    if: needs.changes.outputs.crate == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -206,7 +206,7 @@ jobs:
   # it needs a network advisory DB and must not be duplicated across the matrix.
   deny:
     needs: changes
-    if: needs.changes.outputs.crate == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -260,25 +260,25 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ needs.changes.outputs.crate == 'true' && matrix.os || 'ubuntu-latest' }}
+    runs-on: ${{ needs.changes.outputs.rust == 'true' && matrix.os || 'ubuntu-latest' }}
     defaults:
       run:
         shell: bash
     steps:
       - name: Nothing to prove (the change reaches no Rust project)
-        if: needs.changes.outputs.crate != 'true'
+        if: needs.changes.outputs.rust != 'true'
         run: echo "the change reaches no Rust project, so there is no new binary to install on ${{ matrix.os }}"
       - uses: actions/checkout@v4
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
       - uses: Swatinem/rust-cache@v2
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
       # On a PR the change is not on the registry yet, so `--path .` is the only
       # way to install *this* revision.
       - name: Install (this revision)
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
         run: cargo install --path . --locked
       - name: Smoke-test the installed binary
-        if: needs.changes.outputs.crate == 'true'
+        if: needs.changes.outputs.rust == 'true'
         run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
 
   # The README's from-source one-liner, read out of README.md and run verbatim.
@@ -328,7 +328,7 @@ jobs:
   # where a broken wheel is already public.
   wheel:
     needs: changes
-    if: needs.changes.outputs.crate == 'true'
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

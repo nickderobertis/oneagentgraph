@@ -468,7 +468,7 @@ fn event(
         ("github.event_name".to_string(), name.to_string()),
         ("github.repository".to_string(), REPOSITORY.to_string()),
         (
-            "needs.changes.outputs.crate".to_string(),
+            "needs.changes.outputs.rust".to_string(),
             rust_affected.to_string(),
         ),
     ]);

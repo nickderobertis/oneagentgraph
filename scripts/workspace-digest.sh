@@ -20,12 +20,14 @@
 # unchanged tree replays, a changed one re-judges.
 set -uo pipefail
 
+# llmlint: ignore-block[tool_output_is_signal] exiting 0 is the fail-safe, not a swallowed failure: Nx reads a runtime input that exits non-zero as no contribution and would replay a recorded verdict for a tree nobody judged, while a key that matches nothing forces a fresh judgement; the failure is still named on stderr with its next action.
 unmatched() {
   echo "workspace-digest: $1 — keying this run on a value that matches no recorded verdict, so the judged tier re-judges" >&2
   echo "ACTION: $2, then rerun 'just lint-llm-diff' to cache its verdict again" >&2
   printf 'undigested-%s-%s\n' "$(date +%s%N)" "$$"
   exit 0
 }
+# llmlint: ignore-end[tool_output_is_signal]
 
 root="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)" || unmatched "cannot locate the repository root" "run it from a checkout whose directories are readable"
 cd "$root" || unmatched "cannot enter $root" "make $root readable and searchable by this user"
