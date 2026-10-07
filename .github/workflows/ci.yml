@@ -276,6 +276,7 @@ jobs:
       # way to install *this* revision.
       - name: Install (this revision)
         if: needs.changes.outputs.rust == 'true'
+        # llmlint: ignore[diagnostics_error_or_absent] this job proves the shipped artifact builds and runs the way a user's install builds it, and a user's build does not deny warnings; this revision's warnings are already errors in `gate` (clippy and rustdoc under -D warnings) and in `msrv` (RUSTFLAGS=-D warnings), so denying them here again would only make the proof differ from the install it proves.
         run: cargo install --path . --locked
       - name: Smoke-test the installed binary
         if: needs.changes.outputs.rust == 'true'
@@ -339,6 +340,7 @@ jobs:
       - name: Build the wheel
         uses: PyO3/maturin-action@v1
         with:
+          # llmlint: ignore[diagnostics_error_or_absent] this job proves the shipped artifact builds and runs the way a user's install builds it, and a user's build does not deny warnings; this revision's warnings are already errors in `gate` (clippy and rustdoc under -D warnings) and in `msrv` (RUSTFLAGS=-D warnings), so denying them here again would only make the proof differ from the install it proves.
           args: --release --locked --out dist
           maturin-version: v1.14.1
       - name: Install it and smoke-test what it put on PATH
