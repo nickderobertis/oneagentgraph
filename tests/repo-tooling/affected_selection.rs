@@ -8,6 +8,12 @@
 //! would run (`--graph=stdout`, which plans without executing) and the
 //! `--affects oneagentgraph` answer CI's `changes` job publishes.
 //!
+//! Selection is half of it; the other half is the cache. The last journeys warm
+//! a split tier's real `test` target through `scripts/nx.sh` and show that a
+//! change to one of its declared inputs reruns it while a change outside them
+//! replays it. The test body is a stand-in there, so cargo is never the subject;
+//! the `inputs` deciding are the project's own, untouched.
+//!
 //! Unix-only for the reason the judged tier's cache journeys are: the scripts
 //! under test are bash, and the Windows CI leg reaches them through a shell this
 //! test cannot assume.
@@ -433,4 +439,147 @@ fn a_push_build_scopes_to_the_commit_it_replaced_and_fails_closed_without_one() 
             "{what} widened the run without saying so:\n{stderr}"
         );
     }
+}
+
+/// What one `nx run` of a stand-in test target reported, and whether it ran.
+struct TargetRun {
+    executed: bool,
+    output: String,
+}
+
+impl Repo {
+    /// Swap one tier's `test` command for a stand-in that records each execution
+    /// outside the workspace, leaving the target's `inputs` and `outputs` exactly
+    /// as the real `project.json` declares them: those, not the stand-in, are what
+    /// Nx keys the cache on. The stand-in buys a test target that costs nothing to
+    /// run, so the journey reads Nx's caching decision rather than cargo's.
+    fn stand_in_test_body(&self, project_json: &str, runs: &Path) {
+        let path = self.root.join(project_json);
+        let mut project: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {project_json} in the copy: {err}")),
+        )
+        .unwrap_or_else(|err| panic!("{project_json} is not plain JSON: {err}"));
+        let test = &mut project["targets"]["test"];
+        assert!(
+            test["inputs"].as_array().is_some_and(|i| !i.is_empty()),
+            "{project_json}'s test target declares no inputs: {test}"
+        );
+        test["command"] = format!("echo ran >> '{}'", runs.display()).into();
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&project).expect("serialize"),
+        )
+        .unwrap_or_else(|err| panic!("write {project_json} in the copy: {err}"));
+        self.commit(&format!("stand in for {project_json}'s test body"));
+    }
+
+    /// Run one target through the real `scripts/nx.sh`, as a gate recipe does,
+    /// and read off whether the stand-in body actually executed.
+    fn run_target(&self, task: &str, runs: &Path) -> TargetRun {
+        let before = execution_count(runs);
+        let mut command = Command::new("bash");
+        command.current_dir(&self.root).arg("scripts/nx.sh").args([
+            "run",
+            task,
+            "--outputStyle=static",
+        ]);
+        for name in ["CI", "NX_SKIP_NX_CACHE", "NX_DISABLE_NX_CACHE"] {
+            command.env_remove(name);
+        }
+        command
+            .env("XDG_CACHE_HOME", &self.cache)
+            .env("ONEAGENTGRAPH_NX_SHOW_OUTPUT", "1");
+        let output = command.output().expect("bash runs scripts/nx.sh");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.status.success(), "nx run {task} failed:\n{text}");
+        let executed = match execution_count(runs) - before {
+            0 => false,
+            1 => true,
+            more => panic!("nx run {task} executed its body {more} times:\n{text}"),
+        };
+        // Nx's own account has to agree with what the stand-in recorded, or the
+        // journey would be reading a body that ran for some other reason.
+        let says_cached = text.contains("existing outputs match the cache")
+            || text.contains("[local cache]")
+            || text.contains("read the output from the cache");
+        assert_eq!(
+            says_cached, !executed,
+            "Nx's report disagrees with whether {task} ran (executed: {executed}):\n{text}"
+        );
+        TargetRun {
+            executed,
+            output: text,
+        }
+    }
+}
+
+fn execution_count(runs: &Path) -> usize {
+    std::fs::read_to_string(runs).map_or(0, |log| log.lines().count())
+}
+
+/// Warm one tier's `test` cache, then show that a change to a file it declares
+/// as an input reruns it while a change to a file outside its inputs replays it.
+fn assert_test_target_keys_on_its_inputs(
+    project_json: &str,
+    task: &str,
+    declared_input: &str,
+    outside_inputs: &str,
+) {
+    let repo = Repo::new();
+    let runs = repo.cache.with_file_name("runs.log");
+    repo.stand_in_test_body(project_json, &runs);
+
+    let cold = repo.run_target(task, &runs);
+    assert!(
+        cold.executed,
+        "{task} replayed on a cold cache:\n{}",
+        cold.output
+    );
+    let warm = repo.run_target(task, &runs);
+    assert!(
+        !warm.executed,
+        "{task} reran with nothing changed:\n{}",
+        warm.output
+    );
+
+    repo.change(outside_inputs);
+    let unrelated = repo.run_target(task, &runs);
+    assert!(
+        !unrelated.executed,
+        "{task} reran after a change to {outside_inputs}, which it does not read:\n{}",
+        unrelated.output
+    );
+
+    repo.change(declared_input);
+    let related = repo.run_target(task, &runs);
+    assert!(
+        related.executed,
+        "{task} replayed a stale result after a change to its input {declared_input}:\n{}",
+        related.output
+    );
+}
+
+#[test]
+fn the_repo_tooling_test_cache_reruns_on_a_script_and_replays_over_crate_source() {
+    assert_test_target_keys_on_its_inputs(
+        "tests/repo-tooling/project.json",
+        REPO_TOOLING,
+        "scripts/llmlint-judge.sh",
+        "src/lib.rs",
+    );
+}
+
+#[test]
+fn the_e2e_test_cache_reruns_on_a_journey_and_replays_over_a_tooling_script() {
+    assert_test_target_keys_on_its_inputs(
+        "tests/e2e/project.json",
+        E2E,
+        "tests/e2e/verbs.rs",
+        "scripts/llmlint-judge.sh",
+    );
 }
