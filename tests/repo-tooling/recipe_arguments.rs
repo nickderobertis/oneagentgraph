@@ -45,6 +45,13 @@ fn just(justfile: &Path, recipe: &str, tier: &str) -> Output {
         .unwrap_or_else(|err| panic!("run `just {recipe}` (is `just` installed?): {err}"))
 }
 
+/// `just`'s own report that a recipe exited non-zero. Its wording is not
+/// pinned: CI installs the latest `just`, which writes `error: recipe `x`
+/// failed …` where 1.42 wrote `error: Recipe `x` failed …`.
+fn is_just_recipe_failure(line: &str) -> bool {
+    line.to_ascii_lowercase().starts_with("error: recipe `") && line.contains("` failed ")
+}
+
 fn sentinel_in(dir: &tempfile::TempDir, recipe: &str) -> PathBuf {
     dir.path().join(format!("ran-{recipe}"))
 }
@@ -74,7 +81,7 @@ fn every_tier_recipe_refuses_a_hostile_tier_without_running_it_or_cargo() {
         assert!(
             stderr
                 .lines()
-                .all(|line| line.contains("tier named") || line.starts_with("error: Recipe `")),
+                .all(|line| line.contains("tier named") || is_just_recipe_failure(line)),
             "`just {recipe}` did more than refuse the tier: {stderr}"
         );
         assert!(
