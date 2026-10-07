@@ -85,7 +85,7 @@ different reason — they are informational, and `.github/workflows/visual-docs.
 is the gate for them. Their local half is the **one** git hook this repository
 installs: `just bootstrap` points `core.hooksPath` at `.githooks`, which carries
 the screencomp pre-push guard and nothing else, so `just gate` stays unhooked and
-is still run by hand. Holding `release-targets.toml` to its schema is
+is still run by hand. `screenshots/AGENTS.md` owns the rest. Holding `release-targets.toml` to its schema is
 *not* one of them: `onevcs` is a dev-dependency, so its reader is linked into
 `tests/release_declaration.rs` and runs inside `check`, offline, on every leg.
 
