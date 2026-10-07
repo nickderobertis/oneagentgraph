@@ -1,0 +1,30 @@
+{
+  "name": "oneagentgraph-repo-tooling",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/repo-tooling",
+  "tags": ["scope:repo", "lang:rust"],
+  "implicitDependencies": [],
+  "targets": {
+    "bootstrap": { "executor": "nx:noop" },
+    "format": { "command": "just _tier-format repo-tooling" },
+    "format-check": {
+      "command": "just _tier-fmt-check repo-tooling",
+      "inputs": ["repoToolingSource", "{workspaceRoot}/rustfmt.toml"]
+    },
+    "lint": {
+      "command": "just _tier-lint repo-tooling",
+      "inputs": ["repoToolingSource", "{workspaceRoot}/clippy.toml"]
+    },
+    "test": {
+      "command": "just _tier-test-quick repo-tooling",
+      "inputs": ["repoToolingSource", "repoToolingReads"],
+      "parallelism": false
+    },
+    "test-quick": { "command": "just _tier-test-quick repo-tooling", "parallelism": false },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "oneagentgraph",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "src",
+  "tags": ["scope:cli", "lang:rust"],
+  "targets": {
+    "bootstrap": { "command": "just _crate-bootstrap" },
+    "format": { "command": "just _crate-format" },
+    "format-check": { "command": "just _crate-fmt-check", "inputs": ["crateFormat"] },
+    "lint": { "command": "just _crate-lint", "inputs": ["crateSource", "{workspaceRoot}/clippy.toml"] },
+    "test": {
+      "command": "just _crate-test",
+      "inputs": ["crateSource"],
+      "outputs": ["{workspaceRoot}/target/llvm-cov-target/oneagentgraph-unit-*.profraw"],
+      "parallelism": false
+    },
+    "test-quick": { "command": "just _crate-test-quick", "parallelism": false },
+    "doc": { "command": "just _crate-doc", "inputs": ["crateSource"] },
+    "coverage": {
+      "command": "just _coverage",
+      "dependsOn": [
+        "test",
+        { "projects": ["oneagentgraph-contract", "oneagentgraph-e2e"], "target": "test" }
+      ],
+      "inputs": ["crateSource", { "dependentTasksOutputFiles": "**/*.profraw" }]
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test", "doc", "coverage"]
+    }
+  }
+}

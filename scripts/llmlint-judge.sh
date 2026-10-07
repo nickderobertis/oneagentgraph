@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Body of the cached Nx `oneagentgraph:lint-llm-diff` target: judge the branch diff
+# Body of the cached Nx `oneagentgraph-workspace:lint-llm-diff` target: judge the branch diff
 # against one resolved base commit. Run it through `just lint-llm-diff <base>`,
 # which resolves the base ref to the commit this reads and keys the cache on.
 #
@@ -26,7 +26,7 @@
 # llmlint: ignore-file[changed_behavior_has_e2e] Every journey this script has — a
 # judged and a replayed clean run, findings and a broken toolchain re-judging, each
 # invalidation case, and a refused base — runs end to end in
-# tests/llmlint_cache.rs. What remains are host-failure guards on the checkout
+# tests/repo-tooling/llmlint_cache.rs. What remains are host-failure guards on the checkout
 # layout; simulating a broken filesystem is the guard's job, not a journey's.
 set -euo pipefail
 

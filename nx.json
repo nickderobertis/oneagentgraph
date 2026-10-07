@@ -10,7 +10,6 @@
       "{workspaceRoot}/justfile"
     ],
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
-    "wholeWorkspace": ["{workspaceRoot}/**/*"],
     "screenshotSource": [
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/personas/**/*",
@@ -24,18 +23,40 @@
     ],
     "crateSource": [
       "{workspaceRoot}/src/**/*",
-      "{workspaceRoot}/tests/**/*",
-      "{workspaceRoot}/docs/contract.md",
-      "{workspaceRoot}/docs/persona-format.md",
-      "{workspaceRoot}/release-targets.toml",
-      "{workspaceRoot}/scripts/**/*",
       "{workspaceRoot}/personas/**/*",
       "{workspaceRoot}/Cargo.toml",
       "{workspaceRoot}/Cargo.lock",
       "{workspaceRoot}/rust-toolchain.toml",
-      "{workspaceRoot}/clippy.toml",
-      "{workspaceRoot}/rustfmt.toml",
+      "{workspaceRoot}/.cargo/config.toml",
       "sharedGlobals"
+    ],
+    "crateFormat": ["{workspaceRoot}/src/**/*.rs", "{workspaceRoot}/rustfmt.toml", "sharedGlobals"],
+    "contractSource": ["{workspaceRoot}/tests/*.rs", "sharedGlobals"],
+    "contractReads": [
+      "{workspaceRoot}/tests/golden/**/*",
+      "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/docs/contract.md",
+      "{workspaceRoot}/docs/persona-format.md",
+      "{workspaceRoot}/docs/oneharness-library.md",
+      "{workspaceRoot}/README.md",
+      "{workspaceRoot}/release-targets.toml",
+      "{workspaceRoot}/scripts/smoke-published.sh",
+      "{workspaceRoot}/scripts/release-probe.sh"
+    ],
+    "e2eSource": ["{workspaceRoot}/tests/e2e/**/*.rs", "sharedGlobals"],
+    "e2eReads": ["{workspaceRoot}/README.md", "{workspaceRoot}/scripts/smoke-published.sh"],
+    "repoToolingSource": [
+      "{workspaceRoot}/tests/repo-tooling/**/*.rs",
+      "{workspaceRoot}/Cargo.toml",
+      "{workspaceRoot}/Cargo.lock",
+      "{workspaceRoot}/rust-toolchain.toml",
+      "sharedGlobals"
+    ],
+    "repoToolingReads": [
+      "{workspaceRoot}/scripts/**/*",
+      "{workspaceRoot}/**/project.json",
+      "{workspaceRoot}/.github/workflows/**/*",
+      "{workspaceRoot}/.gitignore"
     ]
   },
   "targetDefaults": {
@@ -44,7 +65,9 @@
     "format-check": { "cache": true, "inputs": ["default"] },
     "lint": { "cache": true, "inputs": ["default"] },
     "test": { "cache": true, "inputs": ["default"] },
+    "test-quick": { "cache": false },
     "doc": { "cache": true, "inputs": ["default"] },
+    "coverage": { "cache": true },
     "check": {
       "cache": false,
       "dependsOn": ["format-check", "lint", "test"]
@@ -53,7 +76,7 @@
     "lint-llm-diff": {
       "cache": true,
       "inputs": [
-        "wholeWorkspace",
+        { "runtime": "bash scripts/workspace-digest.sh" },
         { "env": "LLMLINT_DIFF_BASE_SHA" },
         { "runtime": "./scripts/llmlint-fingerprint.sh" }
       ]

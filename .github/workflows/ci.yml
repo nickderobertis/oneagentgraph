@@ -9,22 +9,26 @@ on:
 permissions:
   contents: read
 
+# A pull request's newer push supersedes its older one. A push to main never
+# does: each is gated on the affected tier from the commit it replaced, so a push
+# whose run was cancelled would leave its own changes ungated on main.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Which projects this pull request's diff can reach, derived once so every
-  # Rust-artifact job below can skip on a packaging-only change instead of paying
-  # the full matrix. On a push to main it answers `true` for everything.
+  # Which projects this change can reach, derived once so every Rust-artifact job
+  # below can skip on a change that reaches no Rust project (an npm-only change)
+  # instead of paying the full matrix. A pull request is compared with its merge
+  # base; a push to main with the commit the push replaced.
   #
-  # `nx-affected.sh` fails closed: with no derivable merge base — a shallow
-  # clone, a missing base branch — it says the crate is affected and the matrices
-  # run. Affected selection is a speed optimisation, and one that can silently
-  # skip a check is a correctness hole.
+  # `nx-affected.sh` fails closed: with no derivable base — a shallow clone, a
+  # missing base branch, a first push — it says the crate is affected and the
+  # matrices run. Affected selection is a speed optimisation, and one that can
+  # silently skip a check is a correctness hole.
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -40,13 +44,17 @@ jobs:
           node-version: "22"
       - name: Which projects the diff reaches
         id: affected
+        env:
+          ONEAGENTGRAPH_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: echo "crate=$(bash scripts/nx-affected.sh --affects oneagentgraph)" >> "$GITHUB_OUTPUT"
 
-  # The full gate on a clean checkout: bootstrap from scratch, then the
-  # deterministic gate (format, clippy, tests incl. the contract and binary e2e
-  # with the coverage threshold, docs) over every project. A pull request runs it
-  # over the affected projects only; main runs the whole graph, so nothing
-  # affected-detection or a stale cache could miss survives past the merge.
+  # The gate on a clean checkout: bootstrap from scratch, then the deterministic
+  # gate (format, clippy, every test tier incl. the contract and binary e2e, the
+  # merged coverage threshold, docs) over the projects this change can reach —
+  # the affected tier, on a pull request and on a push to main alike. The full
+  # sweep of every project runs once, on the release PR (the `sweep` job below),
+  # because release-plz batches merges behind it and its commit is the one that
+  # ships; AGENTS.md ("Commits, releases, and merging") records why.
   #
   # Linux-only because coverage is measured here; macOS/Windows prove the
   # artifact via the `cross` job below.
@@ -69,15 +77,41 @@ jobs:
       - name: Install strace
         run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
       - name: Quality gate (affected projects)
-        if: github.event_name == 'pull_request'
+        env:
+          ONEAGENTGRAPH_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: just check-affected
-      - name: Quality gate (every project)
-        if: github.event_name != 'pull_request'
-        run: just check
       # A committed lockfile that `just bootstrap`/`just check` had to change is
       # a stale generated file; fail rather than let it drift.
       - name: Committed generated files are up to date
         run: git diff --exit-code -- Cargo.lock package-lock.json
+
+  # The broader tier: one full `run-many` sweep of every project, on the release
+  # PR only. release-plz batches every merge since the last release behind that
+  # PR, so its commit is one no merge job swept; this is where whatever affected
+  # selection or a stale cache could miss gets caught, once, before it ships.
+  #
+  # Not a required check, and nothing required `needs` it: release-plz turns on
+  # auto-merge for the release PR, and the required `gate` is what holds it. What
+  # holds publication is release.yml's own `test` job.
+  sweep:
+    if: github.event_name == 'pull_request' && startsWith(github.head_ref, 'release-plz-')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest,cargo-llvm-cov
+      - name: Bootstrap
+        run: just bootstrap
+      # tests/e2e/history_store.rs records a run's file-system calls with it.
+      - name: Install strace
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+      - name: Quality gate (every project)
+        run: just check
 
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
@@ -87,31 +121,50 @@ jobs:
   # in something other than nanoseconds, and the test that proves they are
   # converted (`src/scratch.rs`) runs only on arm64. `macos-26` is arm64; its
   # Intel twin is `macos-26-intel`.
+  #
+  # No job-level condition on the `changes` output, on purpose: each leg's
+  # context (`cross (macos-26)`, `cross (windows-latest)`) is required by name,
+  # and a matrix job skipped at job level reports only a bare skipped `cross`.
+  # So every leg is scheduled on every change and its skip lives on its steps:
+  # on a change that reaches no Rust project, a leg succeeds through the one step
+  # that says so — on ubuntu-latest, because the context name comes from the
+  # matrix rather than the runner. tests/repo-tooling/workflow_contract.rs holds
+  # that scheduling.
   cross:
     needs: changes
-    if: needs.changes.outputs.crate == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [macos-26, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ needs.changes.outputs.crate == 'true' && matrix.os || 'ubuntu-latest' }}
     defaults:
       run:
         shell: bash
     steps:
+      - name: Nothing to prove (the change reaches no Rust project)
+        if: needs.changes.outputs.crate != 'true'
+        run: echo "the change reaches no Rust project, so cross has nothing to build or test for ${{ matrix.os }}"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.crate == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.crate == 'true'
       - uses: actions/setup-node@v4
+        if: needs.changes.outputs.crate == 'true'
         with:
           node-version: "22"
       - uses: taiki-e/install-action@v2
+        if: needs.changes.outputs.crate == 'true'
         with:
           tool: just,nextest
       - name: Bootstrap
+        if: needs.changes.outputs.crate == 'true'
         run: just bootstrap
       - name: Format + lint
+        if: needs.changes.outputs.crate == 'true'
         run: just fmt-check && just lint
-      - name: Tests (unit + contract + e2e)
+      # Every Rust project's `test-quick` target, through Nx.
+      - name: Tests (unit + contract + e2e + repo tooling)
+        if: needs.changes.outputs.crate == 'true'
         run: just test-quick
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
@@ -133,6 +186,11 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - uses: Swatinem/rust-cache@v2
+      # `just msrv` runs the build through its Nx target, and Nx is installed from
+      # the committed lockfile by scripts/nx.sh, which needs Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       # Installed from crates.io behind this repository's own cache, not through
       # the GitHub release-download path a marketplace setup action uses: that
       # path can be down without blocking a required check, and a gate nobody can
@@ -150,6 +208,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `just deps-check` runs through its Nx target; scripts/nx.sh installs Nx
+      # from the committed lockfile, which needs Node.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
       - uses: taiki-e/install-action@v2
         with:
           tool: just,cargo-deny,cargo-machete
@@ -185,25 +248,35 @@ jobs:
   # against PyPI and npm, so what a release checks cannot drift from what a pull
   # request checks. `cargo install --path .` is the same code path as the
   # documented `cargo install oneagentgraph`, minus the registry fetch.
+  #
+  # Every leg is scheduled on every change, for the reason `cross`'s are: each
+  # leg's context is required by name, and a job-level skip would report none of
+  # them.
   install:
     needs: [changes, gate]
-    if: needs.changes.outputs.crate == 'true'
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ needs.changes.outputs.crate == 'true' && matrix.os || 'ubuntu-latest' }}
     defaults:
       run:
         shell: bash
     steps:
+      - name: Nothing to prove (the change reaches no Rust project)
+        if: needs.changes.outputs.crate != 'true'
+        run: echo "the change reaches no Rust project, so there is no new binary to install on ${{ matrix.os }}"
       - uses: actions/checkout@v4
+        if: needs.changes.outputs.crate == 'true'
       - uses: Swatinem/rust-cache@v2
+        if: needs.changes.outputs.crate == 'true'
       # On a PR the change is not on the registry yet, so `--path .` is the only
       # way to install *this* revision.
       - name: Install (this revision)
+        if: needs.changes.outputs.crate == 'true'
         run: cargo install --path . --locked
       - name: Smoke-test the installed binary
+        if: needs.changes.outputs.crate == 'true'
         run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
 
   # The README's from-source one-liner, read out of README.md and run verbatim.

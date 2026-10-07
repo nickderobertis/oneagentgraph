@@ -1,0 +1,33 @@
+{
+  "name": "oneagentgraph-contract",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests",
+  "tags": ["scope:tests", "lang:rust"],
+  "implicitDependencies": ["oneagentgraph"],
+  "targets": {
+    "bootstrap": { "executor": "nx:noop" },
+    "format": { "command": "just _tier-format contract" },
+    "format-check": { "command": "just _tier-fmt-check contract", "inputs": ["contractSource", "{workspaceRoot}/rustfmt.toml"] },
+    "lint": {
+      "command": "just _tier-lint contract",
+      "inputs": ["contractSource", "crateSource", "{workspaceRoot}/clippy.toml"]
+    },
+    "test": {
+      "command": "just _tier-test contract",
+      "inputs": ["contractSource", "crateSource", "contractReads"],
+      "outputs": ["{workspaceRoot}/target/llvm-cov-target/oneagentgraph-contract-*.profraw"],
+      "parallelism": false
+    },
+    "test-quick": { "command": "just _tier-test-quick contract", "parallelism": false },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test",
+        { "projects": ["oneagentgraph"], "target": "coverage" }
+      ]
+    }
+  }
+}

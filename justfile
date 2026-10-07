@@ -7,7 +7,9 @@
 # This is a monorepo: the repo-wide verbs delegate to Nx, which fans the
 # uniformly-named target out across every project. They never loop over projects
 # by hand. What a target *does* stays with its project — the `_crate-*` recipes
-# below are the Rust crate's own tools, and packaging/project.json names its.
+# below are the Rust crate's own tools, the `_tier-*` recipes are the split test
+# tiers' (tests/project.json, tests/e2e/project.json,
+# tests/repo-tooling/project.json), and npm/project.json names its own.
 
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
@@ -51,6 +53,22 @@ oneharness-version := "0.21.1"
 
 # Keep the gate's own output to signal: successes are silent, failures are not.
 export CARGO_TERM_QUIET := "true"
+
+# Which integration-test binaries each split test tier runs — the one place a
+# test target is assigned to a tier. The crate's own tier is its library and
+# binaries' unit tests (`--lib --bins`). Every recipe below reads these lists, so
+# a tier's format, lint, and test cannot disagree about what it holds, and
+# `tests/repo-tooling/tier_partition.rs` holds them to the test targets Cargo
+# actually builds: a test target in no tier, or in two, fails the gate rather
+# than silently dropping out of every run.
+contract-tests := "contract inventory packaging persona_bar persona_format record recorded release_declaration"
+e2e-tests := "e2e"
+repo-tooling-tests := "llmlint_cache affected_selection tier_partition workflow_contract"
+
+# Where the instrumented tiers write their raw profiles. Each tier names its own
+# files (`LLVM_PROFILE_FILE_NAME`), so one tier's run never clears another's, and
+# `coverage` merges exactly the tiers it counts.
+profraw-dir := "target/llvm-cov-target"
 
 # List available recipes.
 default:
@@ -106,16 +124,19 @@ _ensure-tool tool:
 
 # The tiers run in fail-fast order as dependencies, each fanned across every
 # project by Nx. The body then runs the per-project `check` aggregate — the same
-# target `just check-affected` uses — which replays from the cache in a second
-# and is what stops the full sweep and the affected sweep from covering
-# different tiers.
+# target `just check-affected` uses, and the one that carries the merged
+# `oneagentgraph:coverage` floor — which replays from the cache in a second and
+# is what stops the full sweep and the affected sweep from covering different
+# tiers.
 # Deterministic quality gate, every project.
 check: fmt-check lint test doc
     @bash scripts/nx.sh run-many -t check
     @echo "check: ok"
 
-# What PR CI runs: the same gate, scoped to the projects this branch's diff can
-# reach. Fails closed — with no derivable merge base it runs everything.
+# What PR CI and a push to main run: the same gate, scoped to the projects the
+# diff can reach — from the merge base on a pull request, from the commit the push
+# replaced on main (`ONEAGENTGRAPH_NX_BASE_SHA`). Fails closed — with no derivable
+# base it runs everything.
 # Deterministic quality gate, affected projects only.
 check-affected:
     @bash scripts/nx-affected.sh -t check
@@ -146,58 +167,135 @@ format:
 lint:
     @bash scripts/nx.sh run-many -t lint
 
-# Every project's test suite; the crate's enforces its coverage floor.
+# Every project's test suite, and the coverage floor merged across the
+# instrumented tiers.
 test:
-    @bash scripts/nx.sh run-many -t test
+    @bash scripts/nx.sh run-many -t test coverage
 
 # Build the docs with warnings denied (kept in the gate so doc links don't rot).
 doc:
     @bash scripts/nx.sh run-many -t doc
 
+# Formatting is per project: rustfmt is handed each project's own crate roots
+# and follows their `mod`s, so a test tier's files never reach the crate's
+# target and the other way round. `rustfmt.toml` carries the edition.
 # Verify the crate's formatting without modifying files.
 _crate-fmt-check:
-    @cargo fmt --all -- --check || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
+    @rustfmt --check src/lib.rs src/main.rs src/bin/*.rs || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
 
 # Format the crate in place.
 _crate-format:
-    @cargo fmt --all
+    @rustfmt src/lib.rs src/main.rs src/bin/*.rs
 
+# The library and binaries twice: as built, and under the `test` profile, which
+# is what compiles their `#[cfg(test)]` modules. The test tiers lint their own
+# targets (`_tier-lint`).
 # Lint the crate with clippy; any warning is an error.
 _crate-lint:
-    @cargo clippy --all-targets --all-features --locked --quiet -- -D warnings
+    @cargo clippy --lib --bins --all-features --locked --quiet -- -D warnings
+    @cargo clippy --lib --bins --all-features --locked --quiet --profile test -- -D warnings
+
+# The unit tier, instrumented, with the report deferred to `coverage`.
+_crate-test:
+    @just _instrumented unit --lib --bins
+
+# The unit tier without instrumentation, for the cross-platform legs.
+_crate-test-quick:
+    @just _uninstrumented --lib --bins
+
+# The crate roots one tier's files hang from, for rustfmt.
+_tier-sources tier:
+    @case "{{tier}}" in \
+      contract) echo tests/*.rs ;; \
+      e2e) echo tests/e2e/main.rs ;; \
+      repo-tooling) echo tests/repo-tooling/*.rs ;; \
+      *) echo "no test tier named '{{tier}}'" >&2; exit 2 ;; \
+    esac
+
+# One tier's test binaries as cargo target selectors.
+_tier-selectors tier:
+    @case "{{tier}}" in \
+      contract) tests="{{contract-tests}}" ;; \
+      e2e) tests="{{e2e-tests}}" ;; \
+      repo-tooling) tests="{{repo-tooling-tests}}" ;; \
+      *) echo "no test tier named '{{tier}}'" >&2; exit 2 ;; \
+    esac; printf -- '--test %s ' $tests
+
+# Verify one test tier's formatting without modifying files.
+_tier-fmt-check tier:
+    @rustfmt --check $(just _tier-sources {{tier}}) || { echo "formatting drift above — run 'just format'" >&2; exit 1; }
+
+# Format one test tier in place.
+_tier-format tier:
+    @rustfmt $(just _tier-sources {{tier}})
+
+# Lint one test tier's own targets with clippy; any warning is an error.
+_tier-lint tier:
+    @cargo clippy $(just _tier-selectors {{tier}}) --all-features --locked --quiet -- -D warnings
+
+# One test tier, instrumented, with the report deferred to `coverage`.
+_tier-test tier:
+    @just _instrumented {{tier}} $(just _tier-selectors {{tier}})
+
+# One test tier without instrumentation: the cross-platform legs, and the
+# repo-tooling tier, whose journeys exercise the justfile, `scripts/`, and Nx
+# rather than any line of the crate, so there is nothing of theirs to measure.
+_tier-test-quick tier:
+    @just _uninstrumented $(just _tier-selectors {{tier}})
+
+# Run one tier's tests under coverage instrumentation, writing its raw profiles
+# under its own name and nothing else. The tier's earlier profiles go first: a
+# profile left from a test that has since been deleted would otherwise still be
+# counted. `--no-report` also keeps cargo-llvm-cov from cleaning the shared
+# build, so the tiers reuse one instrumented compile.
+_instrumented tier *selectors:
+    @rm -f {{profraw-dir}}/oneagentgraph-{{tier}}-*.profraw
+    @LLVM_PROFILE_FILE_NAME="oneagentgraph-{{tier}}-%p-%m.profraw" \
+      cargo llvm-cov --no-report nextest --locked --all-features {{selectors}} \
+      --status-level fail --final-status-level fail \
+      || { echo "{{tier}}: tests failed — fix the failures named above" >&2; exit 1; }
+
+# `--no-fail-fast` because this is what the cross-platform legs run, and their
+# failures are the hardest to reproduce: a round trip to a hosted macOS or
+# Windows runner. Stopping at the first failure cancelled 54 of 224 tests once and
+# reported four, which reads as "four broke" when the honest answer was unknown.
+_uninstrumented *selectors:
+    @cargo nextest run --locked --all-features {{selectors}} --status-level fail --no-fail-fast
 
 # 95% line coverage is the gate; lower it only with a documented reason in
-# AGENTS.md.
-# The crate's full test suite (unit + contract + e2e) with coverage enforced.
-_crate-test:
-    @cargo llvm-cov nextest --locked --all-features --fail-under-lines 95 \
-      --status-level fail --final-status-level fail \
-      || { echo "tests failed, or coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
+# AGENTS.md. Measured over the same code as ever — the crate's library and
+# binaries — from the union of the three instrumented tiers' profiles, which the
+# `coverage` target's `dependsOn` has just produced or restored from the cache.
+#
+# Before reporting it drops any profile no counted tier wrote (a stray
+# `cargo llvm-cov` run's), and rebuilds the instrumented binaries for this tree
+# without running a test: a tier replayed from the cache restores its profiles
+# but not the binaries they were recorded against, and a report over binaries
+# from a different tree would count against the wrong lines.
+# The coverage floor, over every instrumented tier's profiles merged.
+_coverage:
+    @find {{profraw-dir}} -maxdepth 1 -name '*.profraw' ! -name 'oneagentgraph-unit-*' \
+      ! -name 'oneagentgraph-contract-*' ! -name 'oneagentgraph-e2e-*' -delete
+    @LLVM_PROFILE_FILE_NAME="oneagentgraph-objects-%p-%m.profraw" \
+      cargo llvm-cov --no-report nextest --locked --all-features --lib --bins \
+      $(just _tier-selectors contract) $(just _tier-selectors e2e) \
+      -E 'none()' --no-tests=pass --status-level none --final-status-level none
+    @rm -f {{profraw-dir}}/oneagentgraph-objects-*.profraw
+    @cargo llvm-cov report --fail-under-lines 95 \
+      || { echo "coverage fell below 95% — cover the lines the table above counts as missed" >&2; exit 1; }
 
 # Coverage instrumentation is measured on Linux only, so the cross-platform CI
-# legs run the same suite through this instead of `test`.
-#
-# `--no-fail-fast` because this is the leg whose failures are hardest to
-# reproduce: a round trip to a hosted macOS or Windows runner. Stopping at the
-# first failure cancelled 54 of 224 tests once and reported four, which reads as
-# "four broke" when the honest answer was unknown. The whole picture costs one
-# run's wall clock and saves a round trip per hidden failure.
-#
-# llmlint: ignore-block[changed_behavior_has_e2e] this recipe has no test because
-# it *is* the test run. What `--no-fail-fast` changes is how much of the suite
-# reports when part of it fails, and a journey for it would have to make the
-# suite fail on purpose and then read its own runner's summary — a test whose
-# subject is the harness executing it. The product behaviour under this recipe is
-# covered by every journey the recipe runs.
+# legs run every tier's suite through this instead of `test`: each Rust
+# project's `test-quick` target, fanned out by Nx, every tier run to completion
+# (`_uninstrumented` says why) and the recipe failing if any tier did.
 # Full test suite without coverage instrumentation.
 test-quick:
-    @cargo nextest run --locked --all-features --status-level fail --no-fail-fast
-# llmlint: ignore-end[changed_behavior_has_e2e]
+    @bash scripts/nx.sh run-many -t test-quick
 
 # Drives the compiled binary — never an in-process `main()`.
 # The end-to-end binary journeys in isolation (also run by `test`/`check`).
 test-e2e:
-    @cargo nextest run --locked --all-features -E 'binary(e2e)' --status-level fail
+    @bash scripts/nx.sh run oneagentgraph-e2e:test-quick
 
 # Build the crate's docs with warnings denied.
 _crate-doc:
@@ -213,9 +311,16 @@ upgrade:
     @npm update --silent --no-audit --no-fund
     @just check
 
-# Separate from `check`: `cargo deny` needs a network-fetched advisory DB.
+# Separate from `check`: `cargo deny` needs a network-fetched advisory DB. A
+# repo-level Nx target (`oneagentgraph-workspace:deps-check`) that no `check`
+# depends on, and never cached: the advisory database moves under an unchanged
+# tree.
 # Advisory + license audit and unused-dependency check.
 deps-check:
+    @bash scripts/nx.sh run oneagentgraph-workspace:deps-check
+
+# The supply-chain check itself (the `oneagentgraph-workspace:deps-check` target).
+_deps-check:
     @command -v cargo-deny >/dev/null || { echo "cargo-deny not installed: cargo install cargo-deny --locked" >&2; exit 1; }
     @command -v cargo-machete >/dev/null || { echo "cargo-machete not installed: cargo install cargo-machete --locked" >&2; exit 1; }
     @cargo deny --log-level error check
@@ -235,8 +340,14 @@ release-probe-check:
 
 # Reads the floor from Cargo.toml's `rust-version`; that toolchain must be
 # installed (`rustup toolchain install <version>`). Warnings are errors here too.
+# A repo-level Nx target (`oneagentgraph-workspace:msrv`) outside every `check`,
+# for the reason `deps-check` is: it needs a second toolchain.
 # Build under the declared MSRV.
 msrv:
+    @bash scripts/nx.sh run oneagentgraph-workspace:msrv
+
+# The MSRV build itself (the `oneagentgraph-workspace:msrv` target).
+_msrv:
     @RUSTFLAGS="-D warnings" cargo +{{msrv-version}} check --locked --all-targets --quiet \
       || { echo "the {{msrv-version}} floor no longer builds — install that toolchain, or raise rust-version in Cargo.toml (and clippy.toml)" >&2; exit 1; }
 
@@ -290,9 +401,9 @@ screenshots-tools:
 # `check`, `gate`, or CI's gate job depends on it, which is the property the
 # `Visual docs` workflow exists to keep.
 screenshots:
-    @bash scripts/nx.sh run oneagentgraph:screenshots
+    @bash scripts/nx.sh run oneagentgraph-workspace:screenshots
 
-# The crate's own capture (the `oneagentgraph:screenshots` target). The pre-push
+# The crate's own capture (the `oneagentgraph-workspace:screenshots` target). The pre-push
 # guard calls the script directly rather than coming through here: it is deciding
 # whether to block a push, and a replayed capture cannot answer that.
 _crate-screenshots:
@@ -325,7 +436,7 @@ screenshots-gif:
 # under the flag, so the next ordinary `just screenshots` still judges the tree on
 # its own merits.
 screenshots-bless:
-    @bash scripts/nx.sh run oneagentgraph:screenshots --skip-nx-cache
+    @bash scripts/nx.sh run oneagentgraph-workspace:screenshots --skip-nx-cache
     @command -v screencomp >/dev/null || { echo "screencomp not installed: https://github.com/nickderobertis/screencomp#install" >&2; exit 1; }
     @lane=$(sed -n 's/^arches *= *\[ *"\([^"]*\)" *\].*/\1/p' screencomp.toml); screencomp manifest --input shots/current --arch "$lane" --output shots/baseline/"$lane".json
     @echo "baseline refreshed; commit shots/baseline/ + docs/screenshots/"
@@ -402,11 +513,11 @@ lint-llm-validate *args:
 # size, and both are matched with the colour stripped — Nx renders them with ANSI
 # escapes under some parents (a nextest-driven run is one), which pushes the escape
 # in front of the anchor and reports every replay as a fresh judgement.
-# `tests/llmlint_cache.rs` asserts both the judged and the replayed wording, so an
+# `tests/repo-tooling/llmlint_cache.rs` asserts both the judged and the replayed wording, so an
 # Nx upgrade that renames them fails the suite rather than quietly reporting every
 # run as freshly judged.
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *nx_args:
     @command -v llmlint >/dev/null 2>&1 || { echo "llmlint not installed — run 'just setup-llmlint'" >&2; exit 1; }
     @# llmlint: ignore[tool_output_is_signal] The judge's per-rule report and its one-line provenance are this tier's product; a quiet success here would delete the tier's result and leave a replayed run saying less than a fresh one. `@#` so the directive itself stays out of that report.
-    @base_sha=$(git rev-parse --verify --quiet "$1^{commit}") || { echo "lint-llm-diff: '$1' does not resolve to a commit; fetch it or pass an existing base" >&2; exit 1; }; if [ -n "${NX_SKIP_NX_CACHE:-}${NX_DISABLE_NX_CACHE:-}" ]; then echo "lint-llm-diff: ignoring the ambient global Nx cache skip; force a fresh judgement of this tier alone with 'just lint-llm-diff $1 --skip-nx-cache'" >&2; fi; unset NX_SKIP_NX_CACHE NX_DISABLE_NX_CACHE; report=.logs/llmlint-diff.report; echo "lint-llm-diff: base $base_sha; the judge's report lands in $report ('tail -f' it to follow a fresh run)" >&2; capture=$(mktemp) || { echo "lint-llm-diff: could not open temporary storage for Nx's output; free disk space and retry" >&2; exit 1; }; trap 'rm -f "$capture"' EXIT; status=0; LLMLINT_DIFF_BASE_SHA="$base_sha" ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run oneagentgraph:lint-llm-diff "${@:2}" >"$capture" 2>&1 || status=$?; if [ "$status" -eq 0 ]; then cat "$report" 2>/dev/null || echo "lint-llm-diff: the task left no report at $report" >&2; else { cat "$report" 2>/dev/null || echo "lint-llm-diff: the task left no report at $report"; } >&2; fi; cat "$capture" >&2; esc=$(printf '\033'); if sed "s/${esc}\[[0-9;]*[a-zA-Z]//g" "$capture" | grep -qE '^Nx read the output from the cache instead of running the command|^> nx run oneagentgraph:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)'; then echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2; else echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2; fi; exit "$status"
+    @base_sha=$(git rev-parse --verify --quiet "$1^{commit}") || { echo "lint-llm-diff: '$1' does not resolve to a commit; fetch it or pass an existing base" >&2; exit 1; }; if [ -n "${NX_SKIP_NX_CACHE:-}${NX_DISABLE_NX_CACHE:-}" ]; then echo "lint-llm-diff: ignoring the ambient global Nx cache skip; force a fresh judgement of this tier alone with 'just lint-llm-diff $1 --skip-nx-cache'" >&2; fi; unset NX_SKIP_NX_CACHE NX_DISABLE_NX_CACHE; report=.logs/llmlint-diff.report; echo "lint-llm-diff: base $base_sha; the judge's report lands in $report ('tail -f' it to follow a fresh run)" >&2; capture=$(mktemp) || { echo "lint-llm-diff: could not open temporary storage for Nx's output; free disk space and retry" >&2; exit 1; }; trap 'rm -f "$capture"' EXIT; status=0; LLMLINT_DIFF_BASE_SHA="$base_sha" ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run oneagentgraph-workspace:lint-llm-diff "${@:2}" >"$capture" 2>&1 || status=$?; if [ "$status" -eq 0 ]; then cat "$report" 2>/dev/null || echo "lint-llm-diff: the task left no report at $report" >&2; else { cat "$report" 2>/dev/null || echo "lint-llm-diff: the task left no report at $report"; } >&2; fi; cat "$capture" >&2; esc=$(printf '\033'); if sed "s/${esc}\[[0-9;]*[a-zA-Z]//g" "$capture" | grep -qE '^Nx read the output from the cache instead of running the command|^> nx run oneagentgraph-workspace:lint-llm-diff +\[(local cache|remote cache|existing outputs match the cache)'; then echo "lint-llm-diff: replayed the recorded verdict for base $base_sha (Nx cache hit)" >&2; else echo "lint-llm-diff: judged this diff against base $base_sha (Nx cache miss)" >&2; fi; exit "$status"

@@ -644,6 +644,27 @@ onevcs = "0.16.0"
 name = "e2e"
 path = "tests/e2e/main.rs"
 
+# The repo-tooling tier (`tests/repo-tooling/project.json`): journeys whose
+# subject is the justfile, `scripts/`, Nx, and the workflows rather than the
+# crate. Declared by path because Cargo discovers only `tests/*.rs` and
+# `tests/*/main.rs`, and the tier lives in a directory of its own so that Nx can
+# tell its files from the contract tier's (`tests/project.json`) by ownership.
+[[test]]
+name = "llmlint_cache"
+path = "tests/repo-tooling/llmlint_cache.rs"
+
+[[test]]
+name = "affected_selection"
+path = "tests/repo-tooling/affected_selection.rs"
+
+[[test]]
+name = "tier_partition"
+path = "tests/repo-tooling/tier_partition.rs"
+
+[[test]]
+name = "workflow_contract"
+path = "tests/repo-tooling/workflow_contract.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true

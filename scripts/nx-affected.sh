@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
-# Affected-only selection, keyed off an explicitly derived merge base.
+# Affected-only selection, keyed off an explicitly derived base.
 #
 # Two modes:
 #   scripts/nx-affected.sh -t check        run a target over the affected projects
-#   scripts/nx-affected.sh --affects NAME  print `true`/`false` for one project
+#   scripts/nx-affected.sh --affects NAME  print `true`/`false` for NAME's toolchain
 #
-# Both **fail closed**: when the merge base cannot be derived — a shallow clone,
-# a missing base branch, a detached build — this runs everything and says so on
-# stderr rather than reporting a scoped pass as a full one. Affected selection is
-# a speed optimisation, and a speed optimisation that can silently skip a check
-# is a correctness hole.
+# The base is the commit a push replaced when the caller names one
+# (`ONEAGENTGRAPH_NX_BASE_SHA`, which wins), and otherwise the merge base with
+# the base branch (`ONEAGENTGRAPH_NX_BASE_REF`, then GitHub's `GITHUB_BASE_REF`).
+#
+# Both **fail closed**: when the base cannot be derived — a shallow clone, a
+# missing base branch, a pushed-over commit that is not in this checkout, a build
+# that names no base at all — this runs everything and says so on stderr rather
+# than reporting a scoped pass as a full one. Affected selection is a speed
+# optimisation, and a speed optimisation that can silently skip a check is a
+# correctness hole.
 #
 # llmlint: ignore-file[tool_output_is_signal] the fallback notices below are the whole
 # point of failing closed: a run that silently widened its scope, or answered `true` for
@@ -33,12 +38,13 @@ cd "$ROOT" || {
 #
 # In CI its absence is meaningful rather than missing: a push build is *on* the
 # base branch, so scoping against it would find nothing changed and skip every
-# check. There is no base there, and no base means run everything.
+# check. A push build names its base as a commit instead; one that names neither
+# has no base, and no base means run everything.
 base_branch() {
   local ref="${ONEAGENTGRAPH_NX_BASE_REF:-${GITHUB_BASE_REF:-}}"
   if [ -z "$ref" ]; then
     if [ -n "${CI:-}" ]; then
-      echo "nx-affected: no base branch — this is not a pull-request build" >&2
+      echo "nx-affected: no base — not a pull-request build, and ONEAGENTGRAPH_NX_BASE_SHA names no commit" >&2
       return 1
     fi
     printf 'main'
@@ -51,9 +57,24 @@ base_branch() {
   printf '%s' "$ref"
 }
 
-# The merge base this branch forked from, or nothing when it cannot be derived.
+# The commit to compare HEAD against, or nothing when it cannot be derived.
+#
+# A push to the base branch has no fork to derive a merge base from, so the
+# workflow names the commit the push replaced (GitHub's `github.event.before`).
+# It is checked for shape and then for presence: a first push names the all-zero
+# commit, and a force-push can name one this checkout never fetched — both fail
+# closed, naming the variable, rather than falling back to a branch that would
+# scope the run against something the caller did not ask for.
 resolve_base() {
-  local branch
+  local branch sha="${ONEAGENTGRAPH_NX_BASE_SHA:-}"
+  if [ -n "$sha" ]; then
+    if printf '%s' "$sha" | grep -Eq '^[0-9a-f]{7,64}$' && git cat-file -e "$sha^{commit}" 2>/dev/null; then
+      printf '%s' "$sha"
+      return 0
+    fi
+    echo "nx-affected: ONEAGENTGRAPH_NX_BASE_SHA '$sha' is not a commit in this checkout" >&2
+    return 1
+  fi
   branch="$(base_branch)" || return 1
   # A PR runner's checkout has the base branch only as a remote-tracking ref if
   # it was fetched; fetch it before asking for the merge base so detection does
@@ -73,20 +94,32 @@ case "${1:-}" in
     exit 2
   }
   if ! base="$(resolve_base)"; then
-    echo "nx-affected: no merge base — treating '$project' as affected" >&2
+    echo "nx-affected: no base — treating '$project' as affected" >&2
     printf 'true\n'
     exit 0
   fi
+  # The question CI asks is whether to run the jobs that build with NAME's
+  # toolchain — the Rust matrices for `oneagentgraph` — and those are owed to a
+  # change that reaches any project of that language: the crate, a test tier
+  # split out of it, or the repo-level project that owns the root configuration.
+  # So the answer is NAME, or any affected project carrying NAME's `lang:` tag.
   # Read for Nx's answer, so the wrapper must not fold it into a summary line.
-  if ! projects="$(ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh show projects --affected --base="$base" --head=HEAD --json)"; then
+  if ! language="$(ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh show project "$project" --json |
+    node -e 'const fs=require("node:fs");const tag=(JSON.parse(fs.readFileSync(0,"utf8")).tags||[]).find((t)=>t.startsWith("lang:"));process.stdout.write(tag??"")')"; then
+    echo "nx-affected: Nx could not describe '$project' — treating it as affected" >&2
+    printf 'true\n'
+    exit 0
+  fi
+  if ! projects="$(ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh show projects --affected --base="$base" --head=HEAD --json)" ||
+    ! family="$(ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh show projects --projects "tag:${language:-none}" --json)"; then
     echo "nx-affected: Nx could not list the affected projects — treating '$project' as affected" >&2
     printf 'true\n'
     exit 0
   fi
-  # Matched as a parsed JSON array element rather than by grepping the text: a
+  # Matched as parsed JSON array elements rather than by grepping the text: a
   # project whose name is a substring of another's would otherwise answer for it.
-  if printf '%s' "$projects" |
-    node -e 'const fs=require("node:fs");process.exit(JSON.parse(fs.readFileSync(0,"utf8")).includes(process.argv[1])?0:1)' "$project"; then
+  if node -e 'const [affected,family,name]=[JSON.parse(process.argv[1]),JSON.parse(process.argv[2]),process.argv[3]];process.exit(affected.some((p)=>p===name||family.includes(p))?0:1)' \
+    "$projects" "$family" "$project"; then
     printf 'true\n'
   else
     printf 'false\n'
@@ -98,7 +131,7 @@ case "${1:-}" in
     exit 2
   }
   if ! base="$(resolve_base)"; then
-    echo "nx-affected: no merge base — running every project instead of the affected ones" >&2
+    echo "nx-affected: no base — running every project instead of the affected ones" >&2
     exec bash scripts/nx.sh run-many "$@"
   fi
   exec bash scripts/nx.sh affected --base="$base" --head=HEAD "$@"

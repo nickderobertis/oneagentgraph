@@ -170,7 +170,7 @@ when the copies part. Each of them, and which it is:
 
 ## The capture is a node of the Nx graph
 
-`just screenshots` runs `oneagentgraph:screenshots`, like every other repo-wide
+`just screenshots` runs `oneagentgraph-workspace:screenshots`, like every other repo-wide
 verb here, with the work in the private `_crate-screenshots` recipe beside the
 other `_crate-*` tools. Two things follow, and both are the point.
 
@@ -259,7 +259,7 @@ than documenting one.
 
 - `just screenshots-tools` — install the pinned `freeze` (needs Go). screencomp is
   installed separately (see its README); CI installs both itself.
-- `just screenshots` — capture, through the `oneagentgraph:screenshots` Nx target.
+- `just screenshots` — capture, through the `oneagentgraph-workspace:screenshots` Nx target.
   Builds the release binaries, writes the shots and the README copies. Quiet on
   success, and a replay on a tree that touched none of `screenshotSource`.
 - `just screenshots-gif` — regenerate the animated hero. Needs Python 3 with
