@@ -105,13 +105,6 @@ jobs:
 
   # Re-gate the release on the same checks CI enforces, so a release can never
   # publish an artifact that would not pass the gate.
-  #
-  # This is a second full sweep of a tree ci.yml's `sweep` job already swept on
-  # the release PR, and it stays: a Release created by hand in the GitHub UI is
-  # the supported fallback (see the header), it fires this same workflow on a
-  # commit no release PR ever carried, and this job is the only gate such a
-  # release passes before it publishes. AGENTS.md ("Commits, releases, and
-  # merging") records the same reason.
   # llmlint: ignore-block[no_second_broader_sweep_over_an_already_gated_commit] a hand-cut Release is a supported fallback that fires this workflow on a commit no release PR swept, and this job is the only gate it passes before publishing; on a release-plz release it re-sweeps the release PR's tree, the price of keeping that fallback gated.
   test:
     runs-on: ubuntu-latest

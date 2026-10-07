@@ -10,8 +10,7 @@
 # Deliberately NOT a required status check. It skips fork pull requests (whose
 # read-only token cannot upsert a comment), and a required context that never
 # reports would block them forever. It is a review artifact, not a gate — the gate
-# is `just check`. AGENTS.md ("Commits, releases, and merging") records it among
-# the checks that are deliberately not required.
+# is `just check`.
 
 name: notignored
 

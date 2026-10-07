@@ -43,9 +43,13 @@ git ls-files -z --cached --others --exclude-standard --deduplicate >"$listing" |
 digest="$(
   while IFS= read -r -d '' path; do
     if [ -L "$path" ]; then
-      printf 'link %s %s\0' "$path" "$(readlink -- "$path")"
+      target="$(readlink -- "$path")" || exit 1
+      printf 'link %s %s\0' "$path" "$target"
     elif [ -f "$path" ]; then
-      printf 'file %s %s\0' "$path" "$(git hash-object --no-filters -- "$path")"
+      # Taken first, so a file git cannot hash fails the pipeline rather than
+      # hashing as empty.
+      hash="$(git hash-object --no-filters -- "$path")" || exit 1
+      printf 'file %s %s\0' "$path" "$hash"
     else
       printf 'gone %s\0' "$path"
     fi
