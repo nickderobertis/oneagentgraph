@@ -93,7 +93,12 @@ The repo-wide verbs delegate to **Nx**, which fans a uniformly-named target out
 across every project; what a target *does* stays with its project. Never loop
 over projects by hand in a recipe, and declare a cross-project dependency in the
 consuming `project.json` — an undeclared one silently drops that project out of
-`nx affected`, so a pull request runs a gate that never touched it.
+`nx affected`, so a pull request runs a gate that never touched it. The crate's
+suite is split into Nx test-tier projects (unit, contract, e2e, repo tooling)
+under one Cargo package, with one 95% coverage floor merged across the
+instrumented tiers by `oneagentgraph:coverage`.
+`msrv` and `deps-check` run through repo-level Nx targets
+(`oneagentgraph-workspace:msrv`, `:deps-check`) that no `check` depends on.
 
 **The judged tier is memoized, because the judge is not deterministic.**
 `just lint-llm-diff` runs through a cached Nx target keyed on the whole workspace,
@@ -141,7 +146,10 @@ able to override. Apply it with the create-repo skill's
 `setup_github_governance.py`, passing every context, and **re-apply it whenever a
 job or a matrix is added or renamed** — GitHub holds the required set, nothing
 reconciles it against the workflow, and a leg nobody required is advisory, which
-auto-merge lands straight past.
+auto-merge lands straight past. Three jobs are deliberately **not** required:
+`sweep` (it runs on the release PR alone), `install-documented` (it runs on
+`main` alone), and `notignored.yml`'s suppression comment (advisory by design,
+and skipped on fork pull requests, which cannot write a comment).
 
 **Releases are fully automated; the only human action is merging a PR.**
 `release-plz` is the single version driver: it opens a release PR, and merging it
@@ -151,6 +159,21 @@ because a tag from the default `GITHUB_TOKEN` triggers nothing — fires
 them. **Nothing else writes a version:** maturin reads it from `Cargo.toml` via
 `dynamic = ["version"]` and `scripts/npm-build.mjs` stamps it from the same
 place.
+
+**Where each sweep runs follows from that release model.** Releases batch: every
+merge since the last release waits behind the one release-plz release PR, and
+that PR's merge commit is what ships. So a commit is gated once at the scope it
+needs. A pull request and a push to `main` both run the **affected** tier —
+the pull request from its merge base, the push from the commit it replaced
+(`github.event.before`, handed to `scripts/nx-affected.sh` as
+`ONEAGENTGRAPH_NX_BASE_SHA`), and either one fails closed to every project when
+no base can be derived. The **full** `run-many` sweep runs once, on the release
+PR, in `ci.yml`'s `sweep` job — not a required context and needed by none, since
+the required `gate` already holds the merge. `release.yml`'s `test` job then
+runs `just check` again on the tagged commit, and it stays on purpose: a Release
+cut by hand in the GitHub UI is a supported fallback that fires the same
+workflow on a commit no release PR swept, and that job is the only gate such a
+release passes before it publishes.
 
 **What this repository releases is declared, so a consumer can wait on it.**
 `release-targets.toml` at the root names one registry-qualified identifier per

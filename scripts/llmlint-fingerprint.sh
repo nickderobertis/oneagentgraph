@@ -23,7 +23,7 @@
 # changed plugin rule source or a changed installed llmlint version invalidates a
 # recorded verdict, and that an llmlint which cannot report its version or resolve
 # its config is named rather than hashed — runs end to end in
-# tests/llmlint_cache.rs. What remains are host-failure guards on the checkout
+# tests/repo-tooling/llmlint_cache.rs. What remains are host-failure guards on the checkout
 # layout and sha256sum; simulating those is the guard's job, not a journey's.
 set -euo pipefail
 

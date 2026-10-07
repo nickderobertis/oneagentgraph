@@ -3,12 +3,12 @@
 //! `llmlint` is an LLM judge: two runs over one unchanged diff have named
 //! different rules, and one `just gate` invocation has produced two opposite
 //! verdicts on a single tree. `just lint-llm-diff` therefore routes through the
-//! cached Nx `oneagentgraph:lint-llm-diff` target, which replays a clean run's own
+//! cached Nx `oneagentgraph-workspace:lint-llm-diff` target, which replays a clean run's own
 //! report instead of rolling the dice again. These journeys drive that recipe —
 //! the real `justfile`, the real `scripts/nx.sh`, real Nx, the real target
-//! definition, the real `scripts/llmlint-fingerprint.sh` and
-//! `scripts/llmlint-judge.sh`, and a real git checkout — in a throwaway copy of
-//! this repository.
+//! definition, the real `scripts/llmlint-fingerprint.sh`,
+//! `scripts/workspace-digest.sh` and `scripts/llmlint-judge.sh`, and a real git
+//! checkout — in a throwaway copy of this repository.
 //!
 //! Counting judge runs is what proves a report was replayed rather than re-rolled,
 //! and the claim under test — that one tree yields the same answer twice — is one
@@ -32,8 +32,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// This checkout, which every journey copies rather than mutates.
-const REPO: &str = env!("CARGO_MANIFEST_DIR");
+mod checkout;
+use checkout::git;
 /// What the stand-in judge prints when it finds nothing.
 ///
 /// It reaches the judge through the environment rather than being spliced into
@@ -144,51 +144,12 @@ struct Workspace {
 }
 
 impl Workspace {
-    /// Copy exactly what git would commit from here, so the copy hashes the way
-    /// the original does: Nx skips ignored state, and bringing `target/` or `.nx/`
-    /// along would add files the original never hashed.
-    ///
-    /// `node_modules` is the one exception — ignored state Nx itself needs, far too
-    /// large to copy, so it is a link out to this checkout's own install. That is
-    /// why `just bootstrap` has to have run before these journeys do.
+    /// A throwaway copy of this checkout ([`checkout::copy_into`]), with the judge
+    /// replaced by one that counts its runs.
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("a directory for the throwaway checkout");
         let root = dir.path().join("checkout");
-        let listing = git(
-            Path::new(REPO),
-            &[
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-        );
-        for relative in listing.split('\0').filter(|entry| !entry.is_empty()) {
-            let target = root.join(relative);
-            std::fs::create_dir_all(target.parent().expect("a tracked file has a parent"))
-                .expect("create the copy's directory");
-            // Not `copy`: `CLAUDE.md` is a symlink, and following it would write a
-            // second real file where the original has a link.
-            let source = Path::new(REPO).join(relative);
-            match std::fs::read_link(&source) {
-                Ok(points_at) => std::os::unix::fs::symlink(points_at, &target),
-                Err(_) => std::fs::copy(&source, &target).map(|_| ()),
-            }
-            .unwrap_or_else(|err| panic!("copy {relative} into the throwaway checkout: {err}"));
-        }
-        let install = Path::new(REPO).join("node_modules");
-        // Checked rather than merely linked: a dangling link would send the copy's
-        // `scripts/nx.sh` into `npm ci` *through* it, writing this checkout's
-        // install from inside a temporary directory — a several-minute detour that
-        // reads as a hung test rather than as missing provisioning.
-        assert!(
-            install.is_dir(),
-            "these journeys drive real Nx and take this checkout's own install: run `just \
-             bootstrap` first"
-        );
-        std::os::unix::fs::symlink(install, root.join("node_modules"))
-            .expect("link the copy at this checkout's own Nx install");
+        checkout::copy_into(&root);
 
         // The judge goes where `scripts/setup-llmlint.sh` installs it, under a home
         // directory of this journey's own, because that is the directory the tier
@@ -375,26 +336,6 @@ fn write_executable(path: &Path, body: &str) {
         .expect("make it executable");
 }
 
-fn git(directory: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .current_dir(directory)
-        .args([
-            "-c",
-            "user.name=journey",
-            "-c",
-            "user.email=journey@invalid",
-        ])
-        .args(args)
-        .output()
-        .unwrap_or_else(|err| panic!("git {args:?}: {err}"));
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).expect("git output is UTF-8")
-}
-
 /// The whole point: one tree, one base, one answer.
 #[test]
 fn an_unchanged_tree_and_base_replays_the_first_verdict_instead_of_re_judging() {
@@ -452,6 +393,54 @@ fn a_changed_tree_is_judged_again() {
         .assert_green("the run after the tree changed")
         .assert_says(JUDGED);
     assert_eq!(workspace.judge_runs(), 2);
+}
+
+/// One edit to a throwaway checkout's work tree.
+type TreeChange = fn(&Path);
+
+/// The key is the tree git would show, not only its tracked contents: a new
+/// untracked file, a tracked file deleted from the work tree, and a symlink
+/// pointed somewhere else each re-judge, while a file git ignores does not.
+#[test]
+fn every_change_git_would_show_re_judges_and_an_ignored_one_replays() {
+    let workspace = Workspace::new();
+    let base = workspace.head();
+    workspace
+        .lint(&base, &[], &[])
+        .assert_green("the first run");
+
+    let root = &workspace.root;
+    let changes: [(&str, TreeChange); 3] = [
+        ("an untracked file", |root| {
+            std::fs::write(root.join("untracked-note.md"), "new\n").expect("add an untracked file");
+        }),
+        ("a deleted tracked file", |root| {
+            std::fs::remove_file(root.join("LICENSE")).expect("delete a tracked file");
+        }),
+        ("a retargeted symlink", |root| {
+            let link = root.join("CLAUDE.md");
+            std::fs::remove_file(&link).expect("remove the symlink");
+            std::os::unix::fs::symlink("README.md", &link).expect("point it elsewhere");
+        }),
+    ];
+    for (runs, (what, change)) in (2..).zip(changes) {
+        change(root);
+        workspace
+            .lint(&base, &[], &[])
+            .assert_green(what)
+            .assert_says(JUDGED);
+        assert_eq!(workspace.judge_runs(), runs, "{what} did not re-judge");
+    }
+
+    // `target/` is ignored, so nothing written there is part of the tree.
+    std::fs::create_dir_all(root.join("target")).expect("create the ignored directory");
+    std::fs::write(root.join("target").join("scratch"), "ignored\n")
+        .expect("write an ignored file");
+    workspace
+        .lint(&base, &[], &[])
+        .assert_green("the run after an ignored write")
+        .assert_says(REPLAYED);
+    assert_eq!(workspace.judge_runs(), 4, "an ignored file re-judged");
 }
 
 /// An identical tree judged against a different comparison is a different
@@ -700,6 +689,60 @@ fn the_re_judge_lever_is_per_invocation_and_a_global_cache_skip_is_ignored() {
     );
 }
 
+/// A digest that cannot be taken must never be a key a recorded verdict could
+/// match: Nx would read a failing runtime input as no contribution and replay.
+/// So outside a git checkout the real script still succeeds, prints a key that
+/// differs on every run, and says on stderr what failed and what to do — while
+/// over a real tree it prints one stable digest.
+#[test]
+fn a_digest_that_cannot_be_taken_keys_on_a_value_that_matches_nothing() {
+    let digest = |root: &Path| {
+        let output = Command::new("bash")
+            .arg(root.join("scripts/workspace-digest.sh"))
+            .env("GIT_CEILING_DIRECTORIES", root.parent().expect("a parent"))
+            .output()
+            .expect("run scripts/workspace-digest.sh");
+        assert!(
+            output.status.success(),
+            "the digest failed instead of keying on an unmatched value: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8(output.stdout).expect("UTF-8 key"),
+            String::from_utf8(output.stderr).expect("UTF-8 diagnostics"),
+        )
+    };
+
+    let workspace = Workspace::new();
+    let (first, _) = digest(&workspace.root);
+    let (second, _) = digest(&workspace.root);
+    assert_eq!(first, second, "one tree keyed two ways");
+    assert!(
+        first.trim().len() == 64 && first.trim().chars().all(|c| c.is_ascii_hexdigit()),
+        "a real tree did not key on a sha256 digest: {first:?}"
+    );
+
+    // The same script, in a directory git does not track.
+    let outside = tempfile::tempdir().expect("a directory outside any checkout");
+    let root = outside.path().join("not-a-checkout");
+    std::fs::create_dir_all(root.join("scripts")).expect("create the scripts directory");
+    std::fs::copy(
+        workspace.root.join("scripts/workspace-digest.sh"),
+        root.join("scripts/workspace-digest.sh"),
+    )
+    .expect("copy the digest script");
+    let (one, stderr) = digest(&root);
+    let (other, _) = digest(&root);
+    assert!(
+        one.starts_with("undigested-") && one != other,
+        "an untakeable digest keyed on a value a verdict could match: {one:?} then {other:?}"
+    );
+    assert!(
+        stderr.contains("git cannot list the tree") && stderr.contains("ACTION:"),
+        "the fallback did not say what failed and what to do:\n{stderr}"
+    );
+}
+
 /// A base ref that does not resolve is refused before the judge is paid.
 #[test]
 fn an_unresolvable_base_is_refused_before_the_judge_is_paid() {
@@ -732,7 +775,7 @@ fn the_cached_target_refuses_a_base_it_cannot_judge() {
         let output = Command::new("bash")
             .current_dir(&workspace.root)
             .arg("scripts/nx.sh")
-            .args(["run", "oneagentgraph:lint-llm-diff"])
+            .args(["run", "oneagentgraph-workspace:lint-llm-diff"])
             .env_remove("LLMLINT_ONEHARNESS_BIN")
             .envs(&workspace.env)
             .env("LLMLINT_DIFF_BASE_SHA", base_sha)

@@ -1,0 +1,33 @@
+{
+  "name": "oneagentgraph-e2e",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "tests/e2e",
+  "tags": ["scope:tests", "lang:rust"],
+  "implicitDependencies": ["oneagentgraph"],
+  "targets": {
+    "bootstrap": { "executor": "nx:noop" },
+    "format": { "command": "just _tier-format e2e" },
+    "format-check": { "command": "just _tier-fmt-check e2e", "inputs": ["e2eSource", "{workspaceRoot}/rustfmt.toml"] },
+    "lint": {
+      "command": "just _tier-lint e2e",
+      "inputs": ["e2eSource", "crateSource", "{workspaceRoot}/clippy.toml"]
+    },
+    "test": {
+      "command": "just _tier-test e2e",
+      "inputs": ["e2eSource", "crateSource", "e2eReads"],
+      "outputs": ["{workspaceRoot}/target/llvm-cov-target/oneagentgraph-e2e-*.profraw"],
+      "parallelism": false
+    },
+    "test-quick": { "command": "just _tier-test-quick e2e", "parallelism": false },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "format-check",
+        "lint",
+        "test",
+        { "projects": ["oneagentgraph"], "target": "coverage" }
+      ]
+    }
+  }
+}
