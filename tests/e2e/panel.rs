@@ -575,3 +575,276 @@ fn an_llmlint_bin_nothing_answers_kills_the_member_before_its_first_turn() {
         run.stdout
     );
 }
+
+/// A version 10 graph whose worker is judged by a panel of two — a harness
+/// reviewer over `./oneharness.judge.toml` and a command judge — with `extra`
+/// written into the worker's own mapping, which is where a journey puts the
+/// `judge_settings` it is about. `reviewer` is the reviewer's own mapping
+/// tail, which is where its `settings` go.
+fn settings_graph(extra: &str, reviewer: &str) -> String {
+    graph_with(
+        &format!(
+            concat!(
+                "version: 10\nname: node-scope\n",
+                "env: {{}}\n",
+                "members:\n  worker:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n",
+                "    agent:\n      oneharness_config: ./oneharness.toml\n",
+                "    judge:\n",
+                "      - oneharness_config: ./oneharness.judge.toml\n        label: reviewer\n{}",
+                "      - command: [the provider below]\n        label: checks\n",
+                "    mode: bypass\n{}",
+            ),
+            reviewer, extra
+        ),
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.worker.judge.1.command.0".to_string(),
+                fake_provider(),
+            ),
+        ],
+    )
+}
+
+/// The member's death detail, which is where onejudge's own refusal reaches the
+/// stream when the member's plan cannot be built.
+fn death_detail(run: &Run) -> String {
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{}", run.stdout);
+    died[0]["payload"]["detail"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// onejudge refuses a panel holding a judge that can write to the worktree,
+/// and `judge_settings` is how a graph says it accepts that: the same member,
+/// judged by a reviewer whose own config names the writable `default` mode
+/// beside a command judge, dies on onejudge's own `allow_writable_judges`
+/// refusal without it — and starts and completes with it, whether the graph
+/// writes it or `--set` supplies it to a graph that wrote no `judge_settings`
+/// at all. The setting reaches the composed provider block as the boolean it
+/// is, and the real onejudge, not this crate, is what reads it.
+#[test]
+fn a_writable_judge_in_a_panel_runs_only_when_judge_settings_allow_it() {
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("mode = \"default\"\n{}", crate::support::CHAIN),
+    );
+    let dir = workspace.dir().display().to_string();
+    let run = |graph: &str, extra: &[&str]| {
+        workspace.graph(graph);
+        let mut argv = vec![
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: judged by a writable panel",
+            "--dir",
+            &dir,
+        ];
+        argv.extend(extra);
+        workspace.run(&argv)
+    };
+
+    let refused = run(&settings_graph("", ""), &[]);
+    refused.expect_code(1);
+    let detail = death_detail(&refused);
+    assert!(detail.contains("allow_writable_judges"), "{detail}");
+    assert!(detail.contains("`default`"), "{detail}");
+    assert!(detail.contains("reviewer"), "{detail}");
+    assert!(
+        refused.of_kind("turn-started").is_empty(),
+        "no turn may be spent: {}",
+        refused.stdout
+    );
+
+    for (spelling, graph, extra) in [
+        (
+            "in the graph",
+            settings_graph("    judge_settings: {allow_writable_judges: true}\n", ""),
+            vec![],
+        ),
+        (
+            "through --set",
+            settings_graph("", ""),
+            vec![
+                "--set",
+                "members.worker.judge_settings.allow_writable_judges=true",
+            ],
+        ),
+    ] {
+        let allowed = run(&graph, &extra);
+        allowed.expect_code(0);
+        assert_eq!(
+            allowed.of_kind("member-settled")[0]["payload"]["completed"],
+            serde_json::json!(true),
+            "{spelling}"
+        );
+        let (_, config) = launched_config(&allowed);
+        assert_eq!(config["provider"]["kind"], "split", "{spelling}: {config}");
+        assert_eq!(
+            config["provider"]["allow_writable_judges"],
+            serde_json::json!(true),
+            "{spelling}: {config}"
+        );
+        assert_eq!(
+            decisions(&allowed, 1)
+                .iter()
+                .map(|(judge, _, decision, _)| (judge.as_str(), decision.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("reviewer", "done"), ("checks", "done")],
+            "{spelling}"
+        );
+    }
+}
+
+/// A key in one judge's `settings` reaches onejudge exactly as written, into
+/// that judge's entry and no other: a real per-judge setting this crate does
+/// not type — the reviewer's `instructions`, appended to every prompt that
+/// judge is handed — arrives in the prompt the reviewer's harness is given,
+/// and a key onejudge has no such field for is refused by onejudge itself,
+/// naming it. Both spellings: written in the graph, and supplied by `--set` to
+/// a judge whose graph wrote no `settings` mapping for it.
+#[test]
+fn a_judges_own_settings_reach_onejudge_unchanged() {
+    let workspace = Workspace::new();
+    let dir = workspace.dir().display().to_string();
+    let prompt = workspace.at("reviewer-prompt.log");
+    let task = format!(
+        "fake:complete-now: judge with instructions fake:record-supervisor-prompt={}",
+        prompt.display()
+    );
+    let run = |graph: &str, extra: &[&str]| {
+        workspace.graph(graph);
+        let mut argv = vec!["run", "./graph.yaml", "--task", &task, "--dir", &dir];
+        argv.extend(extra);
+        workspace.run(&argv)
+    };
+    let instructed = "Read CHANGELOG-SENTINEL before you decide.";
+
+    for (spelling, graph, extra) in [
+        (
+            "in the graph",
+            settings_graph(
+                "",
+                &format!("        settings: {{instructions: {instructed}}}\n"),
+            ),
+            vec![],
+        ),
+        (
+            "through --set",
+            settings_graph("", ""),
+            vec![
+                "--set".to_string(),
+                format!("members.worker.judge.0.settings.instructions={instructed}"),
+            ],
+        ),
+    ] {
+        let _ = std::fs::remove_file(&prompt);
+        let extra: Vec<&str> = extra.iter().map(String::as_str).collect();
+        let judged = run(&graph, &extra);
+        judged.expect_code(0);
+        let (_, config) = launched_config(&judged);
+        let judges = &config["provider"]["judges"];
+        assert_eq!(
+            judges[0]["instructions"], instructed,
+            "{spelling}: {config}"
+        );
+        assert!(
+            judges[1].get("instructions").is_none(),
+            "{spelling}: a judge's settings are its own: {config}"
+        );
+        let seen = std::fs::read_to_string(&prompt)
+            .unwrap_or_else(|err| panic!("{spelling}: the reviewer was never prompted ({err})"));
+        assert!(seen.contains(instructed), "{spelling}: {seen}");
+    }
+
+    for (spelling, graph, extra) in [
+        (
+            "in the graph",
+            settings_graph("", "        settings: {not_a_onejudge_setting: 1}\n"),
+            vec![],
+        ),
+        (
+            "through --set",
+            settings_graph("", ""),
+            vec![
+                "--set",
+                "members.worker.judge.1.settings.not_a_onejudge_setting=1",
+            ],
+        ),
+    ] {
+        let refused = run(&graph, &extra);
+        refused.expect_code(1);
+        let detail = death_detail(&refused);
+        assert!(
+            detail.contains("not_a_onejudge_setting"),
+            "{spelling}: {detail}"
+        );
+        assert!(
+            refused.of_kind("turn-started").is_empty(),
+            "{spelling}: no turn may be spent: {}",
+            refused.stdout
+        );
+    }
+}
+
+/// A key this crate composes is refused by name at either level, by both
+/// verbs, before any member is built — and a single harness judge's entry,
+/// which is the provider block itself, refuses a provider key too.
+#[test]
+fn a_composed_key_in_either_settings_is_refused_by_both_verbs_naming_it() {
+    let workspace = Workspace::new();
+    for (graph, expected) in [
+        (
+            settings_graph("    judge_settings: {judges: []}\n", ""),
+            "`judge_settings` names `judges`",
+        ),
+        (
+            settings_graph("", "        settings: {judge_config: ./elsewhere.toml}\n"),
+            "judge entry 1: `settings` names `judge_config`",
+        ),
+        (
+            graph_with(
+                concat!(
+                    "version: 10\nname: node-scope\nenv: {}\n",
+                    "members:\n  worker:\n    kind: onejudge\n",
+                    "    base_config: ./base.yaml\n",
+                    "    agent:\n      oneharness_config: ./oneharness.toml\n",
+                    "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+                    "      settings: {stream: false}\n",
+                    "    mode: bypass\n",
+                ),
+                &[(FAKE_HARNESS_KEY, fake_harness())],
+            ),
+            "judge entry 1: `settings` names `stream`",
+        ),
+    ] {
+        workspace.graph(&graph);
+        for args in [
+            vec!["validate", "./graph.yaml"],
+            vec!["run", "./graph.yaml", "--task", "fake:complete-now"],
+        ] {
+            let refused = workspace.run(&args);
+            refused.expect_code(2);
+            assert!(
+                refused.stderr.contains(expected),
+                "{}: expected {expected:?} in: {}",
+                args.join(" "),
+                refused.stderr
+            );
+            assert!(
+                refused.stderr.contains("oneagentgraph's to compose"),
+                "{}",
+                refused.stderr
+            );
+            assert!(
+                refused.stdout.trim().is_empty(),
+                "a refusal must publish no event: {}",
+                refused.stdout
+            );
+        }
+    }
+}
