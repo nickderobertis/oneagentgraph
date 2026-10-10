@@ -848,3 +848,141 @@ fn a_composed_key_in_either_settings_is_refused_by_both_verbs_naming_it() {
         }
     }
 }
+
+/// A version 10 graph whose worker is judged by exactly one harness judge, with
+/// `extra` in the worker's own mapping and `judge` in that judge's — the shape
+/// whose composed `kind: oneharness` block is both the provider and the judge's
+/// entry.
+fn single_judge_graph(extra: &str, judge: &str) -> String {
+    graph_with(
+        &format!(
+            concat!(
+                "version: 10\nname: node-scope\nenv: {{}}\n",
+                "members:\n  worker:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n",
+                "    agent:\n      oneharness_config: ./oneharness.toml\n",
+                "    judge:\n      oneharness_config: ./oneharness.judge.toml\n{}",
+                "    mode: bypass\n{}",
+            ),
+            judge, extra
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    )
+}
+
+/// One harness judge composes one `kind: oneharness` provider, and both
+/// levels of settings land in it: the member's `instructions` reach the prompt
+/// that judge's harness is handed, its own `events` sit beside them, and the
+/// block is otherwise the one it always was. A setting onejudge refuses on
+/// that shape — `allow_writable_judges`, which only a split can carry — is
+/// passed through all the same and refused by onejudge, naming it: this crate
+/// does not second-guess which shape a setting belongs on.
+#[test]
+fn a_single_harness_judge_carries_both_levels_of_settings_in_its_one_block() {
+    let workspace = Workspace::new();
+    let dir = workspace.dir().display().to_string();
+    let prompt = workspace.at("judge-prompt.log");
+    let task = format!(
+        "fake:complete-now: judge alone fake:record-supervisor-prompt={}",
+        prompt.display()
+    );
+    let instructed = "Read SINGLE-SENTINEL before you decide.";
+    workspace.graph(&single_judge_graph(
+        &format!("    judge_settings: {{instructions: {instructed}}}\n"),
+        "      settings: {events: true}\n",
+    ));
+    let judged = workspace.run(&["run", "./graph.yaml", "--task", &task, "--dir", &dir]);
+    judged.expect_code(0);
+    let (_, config) = launched_config(&judged);
+    let provider = &config["provider"];
+    assert_eq!(provider["kind"], "oneharness", "{config}");
+    assert_eq!(provider["instructions"], instructed, "{config}");
+    assert_eq!(provider["events"], true, "{config}");
+    assert_eq!(provider["stream"], true, "{config}");
+    assert_eq!(provider["control"], true, "{config}");
+    let seen = std::fs::read_to_string(&prompt)
+        .unwrap_or_else(|err| panic!("the judge was never prompted ({err})"));
+    assert!(seen.contains(instructed), "{seen}");
+
+    workspace.graph(&single_judge_graph(
+        "    judge_settings: {allow_writable_judges: true}\n",
+        "",
+    ));
+    let refused = workspace.run(&["run", "./graph.yaml", "--task", &task, "--dir", &dir]);
+    refused.expect_code(1);
+    let detail = death_detail(&refused);
+    assert!(detail.contains("allow_writable_judges"), "{detail}");
+    assert!(
+        refused.of_kind("turn-started").is_empty(),
+        "no turn may be spent: {}",
+        refused.stdout
+    );
+}
+
+/// An llmlint judge's `settings` reach its entry as written too: a key onejudge
+/// has no field for is carried into the llmlint judge's composed entry beside
+/// the fields this crate composed for it, and onejudge refuses it by name before
+/// the member spends a turn.
+#[test]
+fn an_llmlint_judges_settings_reach_onejudge_unchanged() {
+    let workspace = Workspace::new();
+    let mut stacked: serde_norway::Value =
+        serde_norway::from_str(&stacked_graph(&workspace, &[])).expect("the stacked graph");
+    stacked["version"] = 10.into();
+    stacked["members"]["worker"]["judge"][1]["settings"] =
+        serde_norway::from_str("{not_a_llmlint_setting: 1}").expect("a mapping");
+    let stacked = serde_norway::to_string(&stacked).expect("the graph serializes");
+    workspace.graph(&stacked);
+    let run = workspace.run_task("fake:complete-now: never judged");
+    run.expect_code(1);
+    let (_, config) = launched_config(&run);
+    let llmlint = &config["provider"]["judges"][1];
+    assert_eq!(llmlint["kind"], "llmlint", "{config}");
+    assert_eq!(llmlint["not_a_llmlint_setting"], 1, "{config}");
+    assert_eq!(llmlint["diff_base"], "origin/main", "{config}");
+    let detail = death_detail(&run);
+    assert!(detail.contains("not_a_llmlint_setting"), "{detail}");
+    assert!(
+        run.of_kind("turn-started").is_empty(),
+        "no turn may be spent: {}",
+        run.stdout
+    );
+}
+
+/// A document declaring a schema before version 10 that names either level of
+/// settings anyway is refused by both verbs, naming the field and the version
+/// that has it, rather than run with the setting silently dropped.
+#[test]
+fn settings_under_an_older_schema_are_refused_naming_the_version_that_has_them() {
+    let workspace = Workspace::new();
+    for graph in [
+        settings_graph("    judge_settings: {allow_writable_judges: true}\n", ""),
+        settings_graph("", "        settings: {instructions: look}\n"),
+    ] {
+        workspace.graph(&graph.replace("version: 10\n", "version: 9\n"));
+        for args in [
+            vec!["validate", "./graph.yaml"],
+            vec!["run", "./graph.yaml", "--task", "fake:complete-now"],
+        ] {
+            let refused = workspace.run(&args);
+            refused.expect_code(2);
+            for text in [
+                "`judge_settings`",
+                "`settings`",
+                "requires graph schema version 10",
+            ] {
+                assert!(
+                    refused.stderr.contains(text),
+                    "{}: expected {text:?} in: {}",
+                    args.join(" "),
+                    refused.stderr
+                );
+            }
+            assert!(
+                refused.stdout.trim().is_empty(),
+                "a refusal must publish no event: {}",
+                refused.stdout
+            );
+        }
+    }
+}
