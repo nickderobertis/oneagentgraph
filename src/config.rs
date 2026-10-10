@@ -212,6 +212,18 @@ pub struct OnejudgeMember {
     /// goldens, serialized from this build, unchanged.
     #[serde(with = "judge_sides")]
     pub judge: Vec<JudgeSide>,
+    /// onejudge settings merged verbatim into the composed `provider` block.
+    ///
+    /// Each top-level key lands in the block whichever shape it took — a split
+    /// or a single harness provider — after this crate has composed its own
+    /// keys, with its value exactly as written: nothing in it is path-resolved,
+    /// and what a key means, and whether the shape it lands in accepts it, is
+    /// onejudge's to say. A key this crate composes is refused by name instead
+    /// ([`JUDGE_SETTINGS_COMPOSED`]). Absent — and empty — is the block this
+    /// crate has always composed. Requires graph schema version
+    /// [`FIRST_JUDGE_SETTINGS_VERSION`].
+    #[serde(default, skip_serializing_if = "Settings::is_empty")]
+    pub judge_settings: Settings,
     /// onejudge approval mode.
     pub mode: String,
     /// Turn ceiling for the conversation.
@@ -413,6 +425,16 @@ impl JudgeSide {
         }
     }
 
+    /// The onejudge settings this judge passes through, whatever its shape.
+    #[must_use]
+    pub fn settings(&self) -> &Settings {
+        match self {
+            JudgeSide::Harness(side) => &side.settings,
+            JudgeSide::Llmlint(side) => &side.settings,
+            JudgeSide::Command(side) => &side.settings,
+        }
+    }
+
     /// The provider kind onejudge knows this judge as, which is also what it
     /// defaults an unlabelled judge's label from.
     #[must_use]
@@ -484,6 +506,11 @@ pub struct JudgeHarness {
     /// onejudge defaults it from the kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// onejudge settings merged verbatim into this judge's composed entry, as
+    /// [`OnejudgeMember::judge_settings`] is into the provider block; a key this
+    /// crate composes is refused by name ([`JUDGE_ENTRY_COMPOSED`]).
+    #[serde(default, skip_serializing_if = "Settings::is_empty")]
+    pub settings: Settings,
 }
 
 /// The `llmlint` judge side: one lint run over the worker's tree per decision,
@@ -516,6 +543,9 @@ pub struct JudgeLlmlint {
     /// This judge's name, as on [`JudgeHarness::label`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// This judge's own onejudge settings, as on [`JudgeHarness::settings`].
+    #[serde(default, skip_serializing_if = "Settings::is_empty")]
+    pub settings: Settings,
 }
 
 /// The one value [`JudgeLlmlint::kind`] takes.
@@ -535,6 +565,9 @@ pub struct JudgeCommand {
     /// This judge's name, as on [`JudgeHarness::label`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// This judge's own onejudge settings, as on [`JudgeHarness::settings`].
+    #[serde(default, skip_serializing_if = "Settings::is_empty")]
+    pub settings: Settings,
 }
 
 /// The two spellings of [`OnejudgeMember::judge`], read into one list and
@@ -673,7 +706,48 @@ pub const MAX_PRE_TURN_COMMANDS: usize = 4;
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
+
+/// onejudge settings a graph passes through untouched: top-level keys, each
+/// with any value, merged verbatim into what this crate composes.
+///
+/// A map rather than typed fields, because the meaning of every key is
+/// onejudge's — a setting onejudge ships reaches a graph without a release of
+/// this crate, and onejudge, which owns the meaning, is what validates it.
+pub type Settings = BTreeMap<String, serde_json::Value>;
+
+/// The keys this crate composes into a two-party member's `provider` block, and
+/// so the keys its [`judge_settings`](OnejudgeMember::judge_settings) may not
+/// name.
+///
+/// Public because the list is a published fact: `docs/contract.md` names these
+/// keys, and `tests/contract.rs` reconciles that document against this slice.
+pub const JUDGE_SETTINGS_COMPOSED: &[&str] = &[
+    "kind",
+    "skill",
+    "judges",
+    "bin",
+    "judge_config",
+    "stream",
+    "control",
+];
+
+/// The keys this crate composes into one judge's entry — every field a judge
+/// shape of the graph spells, and the keys those become — and so the keys its
+/// [`settings`](JudgeHarness::settings) may not name. Published on the same
+/// terms as [`JUDGE_SETTINGS_COMPOSED`].
+pub const JUDGE_ENTRY_COMPOSED: &[&str] = &[
+    "kind",
+    "bin",
+    "judge_config",
+    "config",
+    "command",
+    "label",
+    "model",
+    "oneharness_config",
+    "diff_base",
+    "args",
+];
 
 /// How a member's own `task` is read: as the prose it has always been, or as a
 /// template naming the run's task.
@@ -800,6 +874,16 @@ pub const FIRST_MEMBER_JOB_VERSION: u32 = 3;
 /// being handed to a build that would refuse the key outright.
 pub const FIRST_TWO_PARTY_JOB_VERSION: u32 = 9;
 
+/// The first graph schema version in which a two-party member may carry
+/// [`judge_settings`](OnejudgeMember::judge_settings) and each of its judges
+/// its own [`settings`](JudgeHarness::settings).
+///
+/// A gate on the *fields*, the way [`FIRST_TWO_PARTY_JOB_VERSION`] is one: a
+/// document naming neither composes exactly the provider block it always did,
+/// so what the gate buys is that a document *using* one says which schema it was
+/// written against.
+pub const FIRST_JUDGE_SETTINGS_VERSION: u32 = 10;
+
 /// Whether `name` is one a member may have.
 ///
 /// A member's name is a path component in the run's own directory, so this is
@@ -872,6 +956,22 @@ fn judge_sides_are_well_formed(
     }
     for (index, judge) in judges.iter().enumerate() {
         let entry = index + 1;
+        // One harness judge composes one `kind: oneharness` block that is both
+        // the provider and this judge's entry, so both lists of composed keys
+        // apply to its `settings` there; in a split each list keeps its level.
+        let alone = matches!(judges, [JudgeSide::Harness(_)]);
+        let composed = composed_key(judge.settings(), JUDGE_ENTRY_COMPOSED).or_else(|| {
+            alone
+                .then(|| composed_key(judge.settings(), JUDGE_SETTINGS_COMPOSED))
+                .flatten()
+        });
+        if let Some(key) = composed {
+            return Err(Error::InvalidConfig(format!(
+                "member {name:?}: judge entry {entry}: `settings` names `{key}`, which is \
+                 oneagentgraph's to compose into this judge's entry — spell it as the judge's \
+                 own field in the graph, or leave it to the member's launch"
+            )));
+        }
         if let JudgeSide::Command(command) = judge {
             if let Some(why) = command_judge_refusal(&command.command) {
                 return Err(Error::InvalidConfig(format!(
@@ -890,6 +990,14 @@ fn judge_sides_are_well_formed(
         }
     }
     Ok(())
+}
+
+/// The first key of `settings` that `composed` names, if any.
+fn composed_key<'a>(settings: &'a Settings, composed: &[&str]) -> Option<&'a str> {
+    settings
+        .keys()
+        .map(String::as_str)
+        .find(|key| composed.contains(key))
 }
 
 /// Everything about a graph that can be checked without launching it.
@@ -1027,6 +1135,24 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                     )));
                 }
                 judge_sides_are_well_formed(name, &member.judge)?;
+                let settings_given = !member.judge_settings.is_empty()
+                    || member
+                        .judge
+                        .iter()
+                        .any(|judge| !judge.settings().is_empty());
+                if settings_given && graph.version < FIRST_JUDGE_SETTINGS_VERSION {
+                    return Err(Error::InvalidConfig(format!(
+                        "member {name:?} uses onejudge `judge_settings` or a judge's `settings`, \
+                         which requires graph schema version {FIRST_JUDGE_SETTINGS_VERSION}"
+                    )));
+                }
+                if let Some(key) = composed_key(&member.judge_settings, JUDGE_SETTINGS_COMPOSED) {
+                    return Err(Error::InvalidConfig(format!(
+                        "member {name:?}: `judge_settings` names `{key}`, which is \
+                         oneagentgraph's to compose into the provider block — the member's own \
+                         `agent:` and `judge:` in the graph decide it"
+                    )));
+                }
                 // A conversation's own worktree and pace, gated the way a
                 // single-sided member's `dir` is and refused for the same reason:
                 // a document declaring an older schema and naming either would
@@ -1552,6 +1678,7 @@ mod tests {
                 oneharness_config: ConfigRef("./j.toml".into()),
                 model: None,
                 label: None,
+                settings: Default::default(),
             })]
         );
         let written = serde_norway::to_string(&single).expect("serializes");
@@ -1581,6 +1708,7 @@ mod tests {
                     oneharness_config: ConfigRef("./j.toml".into()),
                     model: Some("opus".into()),
                     label: Some("reviewer".into()),
+                    settings: Default::default(),
                 }),
                 JudgeSide::Llmlint(JudgeLlmlint {
                     kind: LlmlintKind::Llmlint,
@@ -1589,10 +1717,12 @@ mod tests {
                     diff_base: Some("origin/main".into()),
                     args: vec!["--rule".into(), "no_todo".into()],
                     label: Some("lint".into()),
+                    settings: Default::default(),
                 }),
                 JudgeSide::Command(JudgeCommand {
                     command: vec!["my-judge".into(), "--flag".into()],
                     label: None,
+                    settings: Default::default(),
                 }),
             ]
         );
@@ -2237,5 +2367,114 @@ mod tests {
         let quiet: AgentSide =
             serde_norway::from_str("oneharness_config: ./a.toml\nstream: false\n").unwrap();
         assert!(!quiet.stream);
+    }
+
+    /// A two-party member's `judge_settings` and each judge's `settings` read
+    /// as the mappings they were written as, from the schema that has them, and
+    /// are refused by name below it; a key this crate composes is refused at
+    /// each level naming the key and the field — and, for a single harness
+    /// judge, whose entry is the provider block, from both lists.
+    #[test]
+    fn judge_settings_read_from_their_schema_and_refuse_every_composed_key() {
+        let document = |version: u32, judge_settings: &str, judge: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n  w:\n    kind: onejudge\n",
+                    "    base_config: ./b.yaml\n    mode: bypass\n",
+                    "    agent: {{oneharness_config: ./a.toml}}\n",
+                    "    judge_settings: {}\n    judge: {}\n",
+                ),
+                version, judge_settings, judge
+            )
+        };
+        let panel = |settings: &str| {
+            format!("[{{oneharness_config: ./j.toml, settings: {settings}}}, {{command: [c]}}]")
+        };
+        let graph = parse(&document(
+            SCHEMA_VERSION,
+            "{allow_writable_judges: true}",
+            &panel("{instructions: ./x.md}"),
+        ));
+        validate(&graph).expect("the schema that has the fields accepts them");
+        let Member::Onejudge(member) = &graph.members["w"] else {
+            panic!("the member is two-party")
+        };
+        assert_eq!(
+            member.judge_settings["allow_writable_judges"],
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            member.judge[0].settings()["instructions"],
+            serde_json::json!("./x.md")
+        );
+        let reparsed: GraphConfig =
+            serde_norway::from_str(&serde_norway::to_string(&graph).expect("serializes"))
+                .expect("reparses");
+        assert_eq!(reparsed, graph);
+
+        for older in FIRST_SCHEMA_VERSION..FIRST_JUDGE_SETTINGS_VERSION {
+            for (judge_settings, judge) in [
+                ("{allow_writable_judges: true}", panel("{}")),
+                ("{}", panel("{events: true}")),
+            ] {
+                let err = validate(&parse(&document(older, judge_settings, &judge)))
+                    .expect_err("the fields postdate this schema");
+                assert!(
+                    err.to_string().contains(&format!(
+                        "requires graph schema version {FIRST_JUDGE_SETTINGS_VERSION}"
+                    )),
+                    "version {older}: {err}"
+                );
+            }
+        }
+
+        for key in JUDGE_SETTINGS_COMPOSED {
+            let err = validate(&parse(&document(
+                SCHEMA_VERSION,
+                &format!("{{{key}: x}}"),
+                &panel("{}"),
+            )))
+            .expect_err("a composed key is refused");
+            let message = err.to_string();
+            assert!(
+                message.contains(&format!("`judge_settings` names `{key}`")),
+                "{message}"
+            );
+            assert!(message.contains("oneagentgraph's to compose"), "{message}");
+        }
+        for key in JUDGE_ENTRY_COMPOSED {
+            let err = validate(&parse(&document(
+                SCHEMA_VERSION,
+                "{}",
+                &panel(&format!("{{{key}: x}}")),
+            )))
+            .expect_err("a composed key is refused");
+            let message = err.to_string();
+            assert!(
+                message.contains(&format!("judge entry 1: `settings` names `{key}`")),
+                "{message}"
+            );
+            assert!(message.contains("oneagentgraph's to compose"), "{message}");
+        }
+
+        // A single harness judge's entry is the provider block, so a key composed
+        // there for the provider is refused in its `settings` too; the same key
+        // is the judge's own to pass in a split.
+        for key in ["stream", "control", "skill", "judges"] {
+            let alone = format!("{{oneharness_config: ./j.toml, settings: {{{key}: false}}}}");
+            let err = validate(&parse(&document(SCHEMA_VERSION, "{}", &alone)))
+                .expect_err("a provider key is refused for the one harness judge");
+            assert!(
+                err.to_string()
+                    .contains(&format!("judge entry 1: `settings` names `{key}`")),
+                "{err}"
+            );
+            validate(&parse(&document(
+                SCHEMA_VERSION,
+                "{}",
+                &panel(&format!("{{{key}: false}}")),
+            )))
+            .expect("a split leaves a provider key to the judge's entry");
+        }
     }
 }

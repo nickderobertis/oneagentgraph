@@ -806,26 +806,52 @@ const RESERVED_LABELS: &[&str] = &["run_id", "member", "persona"];
 /// being silently dropped, which is the difference between a member on the model
 /// an operator asked for and one on the model they thought they asked for.
 ///
+/// A segment addressing a list is its zero-based index, so one judge of a panel
+/// is `members.<name>.judge.<index>.<field>`. An absent parent is created as an
+/// empty mapping when the schema accepts one there — an optional block every
+/// field of which is optional, or a pass-through `judge_settings` or `settings`
+/// mapping — so a key reaches such a mapping whether or not the graph wrote it.
+///
 /// # Errors
 ///
 /// [`Error::InvalidConfig`] when a path names nothing in the schema, an
-/// intermediate parent is absent, or the value does not have the field's type.
+/// intermediate parent is absent and could not be empty, or the value does not
+/// have the field's type.
 pub fn apply_overrides(document: &mut Value, overrides: &[Override]) -> Result<(), Error> {
     for Override { path, value } in overrides {
-        let before = document.clone();
-        let mut cursor = &mut *document;
+        let mut before = document.clone();
         let segments: Vec<&str> = path.split('.').collect();
         let (last, parents) = segments.split_last().ok_or_else(|| {
             Error::InvalidConfig(format!("--set {path}=…: the path before `=` is empty"))
         })?;
-        for segment in parents {
-            cursor = cursor.get_mut(segment).ok_or_else(|| {
-                Error::InvalidConfig(format!("--set {path}=…: this graph has no {segment}"))
-            })?;
+        let present = present_depth(&before, parents);
+        if present < parents.len() {
+            // An override may add an optional leaf, but it may not repair an
+            // otherwise invalid graph by supplying a required field — and a
+            // parent it creates is held to the same rule, one level at a time.
+            schema_holds(&before, path)?;
+            for depth in present..parents.len() {
+                let mut created = before.clone();
+                let made = slot(&mut created, &parents[..depth])
+                    .and_then(Value::as_object_mut)
+                    .map(|parent| {
+                        parent.insert(parents[depth].to_string(), Value::Object(Map::new()))
+                    })
+                    .is_some();
+                if !made || graph_from_value(&created).is_err() {
+                    return Err(Error::InvalidConfig(format!(
+                        "--set {path}=…: this graph has no {}",
+                        parents[depth]
+                    )));
+                }
+                before = created;
+            }
         }
-        let object = cursor.as_object_mut().ok_or_else(|| {
-            Error::InvalidConfig(format!("--set {path}=…: this graph has no {last}"))
-        })?;
+        let object = slot(&mut before, parents)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                Error::InvalidConfig(format!("--set {path}=…: this graph has no {last}"))
+            })?;
         if let Some(slot) = object.get_mut(*last) {
             *slot = match slot {
                 Value::Number(_) => value.parse::<u64>().map(Value::from).map_err(|_| {
@@ -836,42 +862,83 @@ pub fn apply_overrides(document: &mut Value, overrides: &[Override]) -> Result<(
                 })?,
                 _ => Value::String(value.clone()),
             };
+            *document = before;
         } else {
-            // An override may add an optional leaf, but it may not repair an
-            // otherwise invalid graph by supplying a required field.
-            graph_from_value(&before).map_err(|err| {
-                Error::InvalidConfig(format!(
-                    "--set {path}=…: the graph must satisfy the schema before an absent field can be populated: {err}"
-                ))
-            })?;
+            schema_holds(&before, path)?;
             // The document cannot tell an absent optional leaf's type. Let the
             // same deny-unknown-fields schema that reads graph files decide
             // both whether the field exists and which textual shape it accepts.
-            // String comes first so a string field keeps CLI text such as
-            // `true`; YAML parsing supplies numbers, booleans, lists, and maps.
-            let parsed = serde_norway::from_str::<Value>(value).ok();
-            let mut candidates = vec![Value::String(value.clone())];
-            if let Some(parsed) = parsed.filter(|parsed| parsed != &candidates[0]) {
+            // A string field keeps CLI text such as `true`; YAML parsing
+            // supplies numbers, booleans, lists, and maps. Where the schema
+            // takes either — a pass-through setting, whose value is onejudge's
+            // to type — the text means what it would mean written in the graph,
+            // which is why the parsed reading is tried first. A parsed null is
+            // never one: an override that meant "absent" would be no override.
+            let written = Value::String(value.clone());
+            let mut candidates = Vec::new();
+            if let Some(parsed) = serde_norway::from_str::<Value>(value)
+                .ok()
+                .filter(|parsed| !parsed.is_null() && parsed != &written)
+            {
                 candidates.push(parsed);
             }
-            let mut accepted = None;
-            for candidate in candidates {
-                let mut candidate_document = before.clone();
-                insert_leaf(&mut candidate_document, parents, last, candidate);
-                if graph_from_value(&candidate_document).is_ok() {
-                    accepted = Some(candidate_document);
-                    break;
-                }
-            }
-            let candidate_document = accepted.ok_or_else(|| {
-                Error::InvalidConfig(format!(
-                    "--set {path}={value:?}: the schema has no field at this path, or the value does not parse as that field's type"
-                ))
-            })?;
+            candidates.push(written);
+            let candidate_document = candidates
+                .into_iter()
+                .map(|candidate| {
+                    let mut candidate_document = before.clone();
+                    insert_leaf(&mut candidate_document, parents, last, candidate);
+                    candidate_document
+                })
+                .find(|candidate_document| graph_from_value(candidate_document).is_ok())
+                .ok_or_else(|| {
+                    Error::InvalidConfig(format!(
+                        "--set {path}={value:?}: the schema has no field at this path, or the value does not parse as that field's type"
+                    ))
+                })?;
             *document = candidate_document;
         }
     }
     Ok(())
+}
+
+/// Refuse to populate an absent field of a document that does not already
+/// satisfy the schema.
+fn schema_holds(document: &Value, path: &str) -> Result<(), Error> {
+    graph_from_value(document).map(drop).map_err(|err| {
+        Error::InvalidConfig(format!(
+            "--set {path}=…: the graph must satisfy the schema before an absent field can be populated: {err}"
+        ))
+    })
+}
+
+/// How many of `parents` the document already holds, from the root.
+fn present_depth(document: &Value, parents: &[&str]) -> usize {
+    let mut cursor = document;
+    for (depth, segment) in parents.iter().enumerate() {
+        let next = match cursor {
+            Value::Array(items) => segment.parse::<usize>().ok().and_then(|i| items.get(i)),
+            other => other.get(segment),
+        };
+        match next {
+            Some(next) => cursor = next,
+            None => return depth,
+        }
+    }
+    parents.len()
+}
+
+/// The value at `path` below `document`: a mapping's key, or a list's
+/// zero-based index, segment by segment.
+fn slot<'a>(document: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
+    let mut cursor = document;
+    for segment in path {
+        cursor = match cursor {
+            Value::Array(items) => items.get_mut(segment.parse::<usize>().ok()?)?,
+            other => other.get_mut(segment)?,
+        };
+    }
+    Some(cursor)
 }
 
 /// Apply what [`BACKGROUND_ENV`](crate::liveness::BACKGROUND_ENV) in `env` says
@@ -938,13 +1005,8 @@ fn graph_from_value(document: &Value) -> Result<GraphConfig, serde_norway::Error
 }
 
 fn insert_leaf(document: &mut Value, parents: &[&str], last: &str, value: Value) {
-    let mut cursor = document;
-    for segment in parents {
-        cursor = cursor
-            .get_mut(segment)
-            .expect("parents were found in the source document");
-    }
-    cursor
+    slot(document, parents)
+        .expect("parents were found in the source document")
         .as_object_mut()
         .expect("the leaf's parent was an object in the source document")
         .insert(last.to_string(), value);
@@ -2324,6 +2386,88 @@ mod tests {
         let err = apply_overrides(&mut missing_required, &[set("members.worker.mode=bypass")])
             .unwrap_err();
         assert!(err.to_string().contains("members.worker.mode"), "{err}");
+    }
+
+    /// `--set` reaches a two-party member's `judge_settings` and one judge's
+    /// `settings` whether or not the graph wrote either mapping — a panel's
+    /// judge by its index, a single judge through the mapping it was spelled
+    /// as — with the value typed as it would read written in the graph, while
+    /// a string field keeps CLI text as text, a list index past the end names
+    /// nothing, and a block that cannot be empty is still never conjured.
+    #[test]
+    fn set_overrides_reach_pass_through_settings_the_graph_never_wrote() {
+        let member = |judge: Value| {
+            serde_json::json!({
+                "version": 10,
+                "name": "g",
+                "env": {},
+                "members": {"worker": {
+                    "kind": "onejudge",
+                    "base_config": "base.yaml",
+                    "agent": {"oneharness_config": "agent.toml"},
+                    "judge": judge,
+                    "mode": "bypass"
+                }}
+            })
+        };
+        let set = |raw: &str| parse_set(raw).expect("a parsed override");
+        let mut panel = member(serde_json::json!([
+            {"oneharness_config": "judge.toml"},
+            {"command": ["checks"]}
+        ]));
+        apply_overrides(
+            &mut panel,
+            &[
+                set("members.worker.judge_settings.allow_writable_judges=true"),
+                set("members.worker.judge.0.settings.instructions=./look.md"),
+                set("members.worker.judge.1.settings.retries=3"),
+                set("members.worker.judge_settings.allow_writable_judges=false"),
+                set("env.COUNT=1"),
+                set("members.worker.task=null"),
+            ],
+        )
+        .expect("every path is a field");
+        let worker = &panel["members"]["worker"];
+        assert_eq!(
+            worker["judge_settings"],
+            serde_json::json!({"allow_writable_judges": false})
+        );
+        assert_eq!(
+            worker["judge"][0]["settings"],
+            serde_json::json!({"instructions": "./look.md"})
+        );
+        assert_eq!(
+            worker["judge"][1]["settings"],
+            serde_json::json!({"retries": 3})
+        );
+        assert_eq!(panel["env"]["COUNT"], "1");
+        assert_eq!(worker["task"], "null");
+
+        let mut single = member(serde_json::json!({"oneharness_config": "judge.toml"}));
+        apply_overrides(
+            &mut single,
+            &[set("members.worker.judge.settings.events=true")],
+        )
+        .expect("the single spelling is a mapping");
+        assert_eq!(
+            single["members"]["worker"]["judge"]["settings"],
+            serde_json::json!({"events": true})
+        );
+
+        for (path, expected) in [
+            ("members.worker.judge.2.settings.x", "this graph has no 2"),
+            (
+                "members.worker.judge_setings.x",
+                "this graph has no judge_setings",
+            ),
+            (
+                "members.worker.schedule.every",
+                "this graph has no schedule",
+            ),
+        ] {
+            let err = apply_overrides(&mut panel, &[set(&format!("{path}=1"))]).unwrap_err();
+            assert!(err.to_string().contains(expected), "{path}: {err}");
+        }
     }
 
     /// `--set` and `--label` say what they expected when they are given
