@@ -60,7 +60,7 @@ example declares is not a second source: `tests/contract.rs`'s
 `the_readme_graph_uses_the_current_schema_version` holds this line to
 `config::SCHEMA_VERSION`, so the example cannot drift from the schema. -->
 ```yaml
-version: 9
+version: 10
 name: node-scope
 members:
   worker:

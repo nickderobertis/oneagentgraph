@@ -20,12 +20,13 @@
 //!
 //! # Why this is not onejudge's own `onejudge-echo-provider`
 //!
-//! onejudge does ship one — `src/bin/echo_provider.rs`, behind its `fake-provider`
-//! feature, answering the same five ops. It is a **binary of a dependency**, and
-//! cargo does not build those for a consumer: a `dev-dependencies` entry with that
-//! feature compiles onejudge's *library*, never its `[[bin]]`, so there is no
-//! `CARGO_BIN_EXE_*` to point a graph at. Reaching it means `cargo install
-//! onejudge --features fake-provider` in `bootstrap` and in CI, which puts a
+//! onejudge shipped one through 0.17 — `src/bin/echo_provider.rs`, behind its
+//! `fake-provider` feature, answering the same five ops — and dropped both in
+//! 0.18.0. Even while it existed it was a **binary of a dependency**, and cargo
+//! does not build those for a consumer: a `dev-dependencies` entry with that
+//! feature compiled onejudge's *library*, never its `[[bin]]`, so there was no
+//! `CARGO_BIN_EXE_*` to point a graph at. Reaching it meant `cargo install
+//! onejudge --features fake-provider` in `bootstrap` and in CI, which put a
 //! second pin on a crate `Cargo.lock` already pins and a second `onejudge` build
 //! on `PATH` to shadow — the outage `tests/e2e/support.rs::required` exists to
 //! diagnose, and one this development host already had: an

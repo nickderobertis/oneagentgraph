@@ -57,7 +57,7 @@ use serde_json::Value;
 use toml_edit::{DocumentMut, Item};
 
 use crate::anchor::{anchored, anchored_path};
-use crate::config::{AgentSide, ConfigRef, JudgeSide, Member, OnejudgeMember, TaskText};
+use crate::config::{AgentSide, ConfigRef, JudgeSide, Member, OnejudgeMember, Settings, TaskText};
 use crate::error::Error;
 use crate::persona::{self, Persona};
 use crate::resolve::{ResolvedRef, Resolver};
@@ -347,7 +347,13 @@ fn onejudge(
     let agent_path = context.scratch.join(AGENT_CONFIG_FILE);
     write(&agent_path, &agent_config)?;
 
-    let provider = provider_block(&member.judge, &member.agent, context, resolver)?;
+    let provider = provider_block(
+        &member.judge,
+        &member.judge_settings,
+        &member.agent,
+        context,
+        resolver,
+    )?;
     let map = effective.as_object_mut().expect("merge returns a mapping");
     anchor_skill(map, base.base_dir.as_deref());
     map.insert("provider".into(), provider);
@@ -647,8 +653,16 @@ const ASK_FOR_CONTROL: bool = true;
 /// scratch, an llmlint side with its `config` anchored to the graph's directory
 /// and handed over absolute, a command side as written. A label passes through
 /// verbatim, and an absent one is left for onejudge to default.
+///
+/// Last, whichever shape was composed, the member's `judge_settings` are merged
+/// into the block and each judge's own `settings` into its entry, every value
+/// exactly as the graph wrote it: what a key means, and whether the shape it
+/// lands in accepts it, is onejudge's to decide when it reads the plan. The keys
+/// composed here are refused by [`crate::config::validate`] before anything is
+/// built, so a pass-through key never replaces one this function wrote.
 fn provider_block(
     judges: &[JudgeSide],
+    settings: &Settings,
     agent: &AgentSide,
     context: &Context<'_>,
     resolver: &mut Resolver,
@@ -657,13 +671,16 @@ fn provider_block(
         let (config, _) = judge_config(harness, context, resolver)?;
         let path = context.scratch.join(JUDGE_CONFIG_FILE);
         write(&path, &config)?;
-        return Ok(serde_json::json!({
+        let mut block = serde_json::json!({
             "kind": "oneharness",
             "bin": context.oneharness_bin,
             "judge_config": path.display().to_string(),
             "stream": agent.stream,
             "control": ASK_FOR_CONTROL,
-        }));
+        });
+        pass_through(&mut block, settings);
+        pass_through(&mut block, &harness.settings);
+        return Ok(block);
     }
     if judges.is_empty() {
         return Err(Error::InvalidConfig(
@@ -733,9 +750,10 @@ fn provider_block(
         if let Some(label) = judge.label() {
             block["label"] = Value::String(label.to_string());
         }
+        pass_through(&mut block, judge.settings());
         entries.push(block);
     }
-    Ok(serde_json::json!({
+    let mut block = serde_json::json!({
         "kind": "split",
         "skill": {
             "kind": "oneharness",
@@ -744,7 +762,19 @@ fn provider_block(
             "control": ASK_FOR_CONTROL,
         },
         "judges": entries,
-    }))
+    });
+    pass_through(&mut block, settings);
+    Ok(block)
+}
+
+/// Merge `settings` into `block` key by key, each value as written.
+fn pass_through(block: &mut Value, settings: &Settings) {
+    let map = block
+        .as_object_mut()
+        .expect("every block composed here is a mapping");
+    for (key, value) in settings {
+        map.insert(key.clone(), value.clone());
+    }
 }
 
 /// Resolve one harness judge's oneharness config, stamped with this member's
@@ -1912,14 +1942,14 @@ mod tests {
         }
     }
 
-    /// The judge list `document` spells, read through the member field that
-    /// accepts both the single spelling and the list.
-    fn judges(document: &str) -> Vec<JudgeSide> {
-        let member: OnejudgeMember = serde_norway::from_str(&format!(
+    /// The two-party member `document` spells beside a fixed base and agent —
+    /// its judge list read through the member field that accepts both the
+    /// single spelling and the list.
+    fn member(document: &str) -> OnejudgeMember {
+        serde_norway::from_str(&format!(
             "base_config: ./base.yaml\nmode: bypass\nagent: {{oneharness_config: ./oneharness.toml}}\n{document}"
         ))
-        .expect("a member");
-        member.judge
+        .expect("a member")
     }
 
     /// The provider block `document`'s judge list composes over a fresh
@@ -1927,8 +1957,10 @@ mod tests {
     fn compose(dir: &Path, scratch: &Path, document: &str) -> Result<Value, Error> {
         let agent: AgentSide =
             serde_norway::from_str("oneharness_config: ./oneharness.toml\n").expect("a side");
+        let member = member(document);
         provider_block(
-            &judges(document),
+            &member.judge,
+            &member.judge_settings,
             &agent,
             &context(dir, scratch),
             &mut Resolver::new(),
@@ -2005,6 +2037,57 @@ mod tests {
 
         let err = compose(dir.path(), &scratch, "judge: []\n").unwrap_err();
         assert!(err.to_string().contains("names no side"), "{err}");
+    }
+
+    /// `judge_settings` lands in the composed provider block and each judge's
+    /// `settings` in that judge's entry, after this crate's own keys and with
+    /// every value exactly as written — a relative path stays the text it was,
+    /// a nested mapping stays a mapping — in both shapes the block takes. A
+    /// single harness judge's entry is the provider block itself, so its
+    /// `settings` land there.
+    #[test]
+    fn settings_pass_through_verbatim_into_the_block_and_each_entry() {
+        let dir = workspace();
+        let scratch = dir.path().join("scratch");
+        let block = compose(
+            dir.path(),
+            &scratch,
+            concat!(
+                "judge_settings: {allow_writable_judges: true, nested: {path: ./x.md}}\n",
+                "judge:\n",
+                "  - oneharness_config: ./oneharness.toml\n",
+                "    settings: {instructions: ./read-me.md, events: false}\n",
+                "  - command: [my-provider]\n    settings: {unknown_to_us: [1, two]}\n",
+            ),
+        )
+        .expect("a provider");
+        assert_eq!(block["kind"], serde_json::json!("split"));
+        assert_eq!(block["allow_writable_judges"], serde_json::json!(true));
+        assert_eq!(block["nested"], serde_json::json!({"path": "./x.md"}));
+        assert_eq!(
+            block["judges"][0]["instructions"],
+            serde_json::json!("./read-me.md")
+        );
+        assert_eq!(block["judges"][0]["events"], serde_json::json!(false));
+        assert_eq!(block["judges"][0]["kind"], serde_json::json!("oneharness"));
+        assert_eq!(
+            block["judges"][1],
+            serde_json::json!({"kind": "command", "command": ["my-provider"], "unknown_to_us": [1, "two"]})
+        );
+
+        let block = compose(
+            dir.path(),
+            &scratch,
+            concat!(
+                "judge_settings: {instructions: ./member.md}\n",
+                "judge: {oneharness_config: ./oneharness.toml, settings: {events: true}}\n",
+            ),
+        )
+        .expect("a provider");
+        assert_eq!(block["kind"], serde_json::json!("oneharness"));
+        assert_eq!(block["instructions"], serde_json::json!("./member.md"));
+        assert_eq!(block["events"], serde_json::json!(true));
+        assert_eq!(block["stream"], serde_json::json!(true));
     }
 
     /// A stack of judges composes `kind: split` with one entry per side in

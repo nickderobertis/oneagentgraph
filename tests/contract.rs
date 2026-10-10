@@ -1653,6 +1653,10 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
                     oneharness_config: ConfigRef("./oneharness.judge.toml".to_string()),
                     model: None,
                     label: Some("reviewer".to_string()),
+                    settings: BTreeMap::from([(
+                        "instructions".to_string(),
+                        json!("Run the suite before you decide."),
+                    )]),
                 }),
                 JudgeSide::Llmlint(oneagentgraph::config::JudgeLlmlint {
                     kind: oneagentgraph::config::LlmlintKind::Llmlint,
@@ -1661,12 +1665,15 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
                     diff_base: Some("origin/main".to_string()),
                     args: Vec::new(),
                     label: None,
+                    settings: Default::default(),
                 }),
                 JudgeSide::Command(oneagentgraph::config::JudgeCommand {
                     command: vec!["my-judge".to_string(), "--flag".to_string()],
                     label: None,
+                    settings: Default::default(),
                 }),
             ],
+            judge_settings: BTreeMap::from([("allow_writable_judges".to_string(), json!(true))]),
             mode: "bypass".to_string(),
             max_turns: None,
             dir: Some(std::path::PathBuf::from("./api")),
@@ -2195,6 +2202,24 @@ fn drop_what_postdates_the_schedule(graph: &mut GraphConfig) {
         }
     }
     drop_background(graph);
+    drop_judge_settings(graph);
+}
+
+/// The documented two-party member's onejudge settings, at both levels,
+/// removed — they postdate every schema before `version: 10`.
+fn drop_judge_settings(graph: &mut GraphConfig) {
+    for member in graph.members.values_mut() {
+        if let Member::Onejudge(member) = member {
+            member.judge_settings.clear();
+            for judge in &mut member.judge {
+                match judge {
+                    JudgeSide::Harness(side) => side.settings.clear(),
+                    JudgeSide::Llmlint(side) => side.settings.clear(),
+                    JudgeSide::Command(side) => side.settings.clear(),
+                }
+            }
+        }
+    }
 }
 
 /// The documented members' own `background`, removed from both kinds.
@@ -2680,7 +2705,28 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
             "the turn ceiling of a conversation; a single-sided member has exactly one turn per \
              firing",
         ),
+        (
+            "judge_settings",
+            "onejudge settings for the provider block a conversation's judge side composes, \
+             which a single-sided member does not have",
+        ),
     ]);
+
+    // A judge's own `settings` is two-party-only one level down: every judge
+    // shape reads it, and the single-sided member, which has no judge, does not.
+    for shape in [
+        "oneharness_config: ./j.toml",
+        "kind: llmlint",
+        "command: [c]",
+    ] {
+        let judge: JudgeSide = serde_norway::from_str(&format!("{shape}\nsettings: {{x: 1}}\n"))
+            .unwrap_or_else(|err| panic!("{shape}: a judge reads `settings`: {err}"));
+        assert_eq!(judge.settings()["x"], json!(1), "{shape}");
+    }
+    assert!(
+        !serde_fields::<OneharnessMember>("oneharness_config: ./a.toml\n").contains("settings"),
+        "a single-sided member has no judge, so no judge's `settings`"
+    );
 
     let onejudge = serde_fields::<OnejudgeMember>(concat!(
         "base_config: ./b.yaml\nmode: bypass\n",
@@ -2754,6 +2800,39 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
     );
 }
 
+/// The keys the contract says a graph's onejudge settings may not name are the
+/// keys the code refuses, at each level, read out of the `version: 10` bullet
+/// itself — and that bullet still says values pass as written, unresolved.
+#[test]
+fn the_documented_composed_keys_are_the_ones_the_code_refuses() {
+    use oneagentgraph::config::{JUDGE_ENTRY_COMPOSED, JUDGE_SETTINGS_COMPOSED};
+    let (_, bullet) = CONTRACT
+        .split_once("- From `version: 10`, a graph passes **onejudge settings**")
+        .expect("the contract no longer carries the version 10 bullet");
+    let bullet = bullet.lines().next().expect("the bullet is one line");
+    let listed = |opening: &str, closing: char| -> Vec<String> {
+        let (_, rest) = bullet
+            .split_once(opening)
+            .unwrap_or_else(|| panic!("the bullet no longer says {opening:?}"));
+        let (list, _) = rest.split_once(closing).expect("the list closes");
+        backticked_in(list)
+    };
+    assert_eq!(
+        listed("in `judge_settings`, any of", ';'),
+        JUDGE_SETTINGS_COMPOSED.to_vec(),
+        "docs/contract.md and config::JUDGE_SETTINGS_COMPOSED name different keys"
+    );
+    assert_eq!(
+        listed("in a judge's `settings`, any of", '.'),
+        JUDGE_ENTRY_COMPOSED.to_vec(),
+        "docs/contract.md and config::JUDGE_ENTRY_COMPOSED name different keys"
+    );
+    assert!(
+        bullet.contains("**Values are passed as written and never path-resolved**"),
+        "the contract no longer says settings pass through unresolved"
+    );
+}
+
 /// The two single spellings the contract's judge bullet names read as the
 /// one-element list they are shorthand for, through the member they sit on —
 /// which is the field that reads both spellings — and write back in the
@@ -2781,12 +2860,14 @@ fn the_documented_single_judge_spellings_are_the_one_element_list() {
             JudgeSide::Command(oneagentgraph::config::JudgeCommand {
                 command: vec!["./oneharness.judge.toml".to_string()],
                 label: None,
+                settings: Default::default(),
             })
         } else {
             JudgeSide::Harness(oneagentgraph::config::JudgeHarness {
                 oneharness_config: ConfigRef("./oneharness.judge.toml".to_string()),
                 model: None,
                 label: None,
+                settings: Default::default(),
             })
         };
         assert_eq!(member.judge[0], expected, "{spelling}");

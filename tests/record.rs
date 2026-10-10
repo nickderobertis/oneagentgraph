@@ -27,15 +27,16 @@
 //! * `member-started.json` — the three shapes of the payload a supervisor reads
 //!   first, on the same terms: one per runner, plus the one a member publishes
 //!   when it comes up without taking a turn.
-//! * `graph.v4.yaml` … `graph.v9.yaml` — the graph config
+//! * `graph.v4.yaml` … `graph.v10.yaml` — the graph config
 //!   schema, which is versioned for the same reason and read on the *other* side
 //!   of the same promise: this build does not write these, an author does, and a
 //!   document written against an older schema has to keep meaning what it said.
 //!   Each differs from the one before it by exactly what that version added: the
 //!   `events` block in version 5, the `personas` catalog in version 6, the
 //!   member's own pre-turn views in version 7, each member's own say over
-//!   whether it holds the run open in version 8, and a two-party member's own
-//!   `dir` and `schedule` in version 9.
+//!   whether it holds the run open in version 8, a two-party member's own
+//!   `dir` and `schedule` in version 9, and its onejudge `judge_settings` and
+//!   each judge's own `settings` in version 10.
 //!
 //! Regenerating an old golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -54,8 +55,8 @@ use std::collections::BTreeMap;
 use oneagentgraph::config::{
     AgentSide, ConfigRef, Events, GraphConfig, JudgeHarness, JudgeSide, Member, OneharnessMember,
     OnejudgeMember, PreTurn, Schedule, FIRST_BACKGROUND_VERSION, FIRST_EVENT_FILTER_VERSION,
-    FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION, FIRST_TWO_PARTY_JOB_VERSION,
-    SCHEMA_VERSION,
+    FIRST_JUDGE_SETTINGS_VERSION, FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION,
+    FIRST_TWO_PARTY_JOB_VERSION, SCHEMA_VERSION,
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
@@ -78,7 +79,9 @@ use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
 /// the field spelled both ways; and the two-party member's own `dir` and
 /// `schedule` version 9 added, which is what makes that `background: false` a
 /// declaration rather than the default: a scheduled conversation that holds the
-/// run open, the observer shape this version exists for.
+/// run open, the observer shape this version exists for; and the onejudge
+/// settings version 10 added, at both levels — the member's `judge_settings`
+/// and its judge's own `settings`.
 fn golden_graph() -> GraphConfig {
     GraphConfig {
         version: SCHEMA_VERSION,
@@ -145,7 +148,15 @@ fn golden_graph() -> GraphConfig {
                         oneharness_config: ConfigRef("./oneharness.judge.toml".into()),
                         model: None,
                         label: None,
+                        settings: BTreeMap::from([(
+                            "events".to_string(),
+                            serde_json::Value::Bool(true),
+                        )]),
                     })],
+                    judge_settings: BTreeMap::from([(
+                        "instructions".to_string(),
+                        serde_json::Value::from("Run the suite before you decide."),
+                    )]),
                     mode: "bypass".into(),
                     max_turns: None,
                     dir: Some("./api".into()),
@@ -166,7 +177,7 @@ fn golden_graph() -> GraphConfig {
 /// back to the same graph, and validates as a runnable one.
 #[test]
 fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
-    let golden = include_str!("golden/graph.v9.yaml");
+    let golden = include_str!("golden/graph.v10.yaml");
     let written = serde_norway::to_string(&golden_graph()).expect("a graph serializes");
     assert_eq!(
         written, golden,
@@ -235,6 +246,49 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
     assert_eq!(pace.every, 300);
     assert_eq!(pace.first_turn_after(read.version), 0);
     assert!(!pace.resettable);
+
+    // The onejudge settings this version added, read back at both levels: a
+    // mapping that survived the trip as an empty one would be a member whose
+    // setting never reaches onejudge, which is the wait this version ends.
+    let Member::Onejudge(worker) = &read.members["worker"] else {
+        panic!("worker is onejudge")
+    };
+    assert_eq!(
+        worker.judge_settings["instructions"],
+        "Run the suite before you decide."
+    );
+    assert_eq!(worker.judge[0].settings()["events"], true);
+}
+
+/// A graph written against the schema before onejudge settings could pass
+/// through reads unchanged, gains neither key when written back, and is refused
+/// by the field's name if it names either anyway.
+#[test]
+fn a_version_nine_graph_still_reads_and_is_refused_the_judge_settings_it_predates() {
+    let golden = include_str!("golden/graph.v9.yaml");
+    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 9 graph still reads");
+    assert_eq!(graph.version, FIRST_JUDGE_SETTINGS_VERSION - 1);
+    oneagentgraph::config::validate(&graph).expect("a version 9 graph still validates");
+    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    assert_eq!(written, golden, "a version 9 document did not round-trip");
+
+    for asking in [
+        "    judge_settings: {allow_writable_judges: true}\n    mode: bypass\n",
+        "      settings: {events: true}\n    mode: bypass\n",
+    ] {
+        let asking: GraphConfig =
+            serde_norway::from_str(&golden.replace("    mode: bypass\n", asking))
+                .expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(error.to_string().contains("worker"), "{error}");
+        assert!(
+            error.to_string().contains(&format!(
+                "requires graph schema version {FIRST_JUDGE_SETTINGS_VERSION}"
+            )),
+            "{error}"
+        );
+    }
 }
 
 /// A graph written against the schema before a two-party member could carry

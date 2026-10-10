@@ -375,7 +375,19 @@ test-doubles = []
 # the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
 # still `^0.18.0`.
 #
-# **0.17.1 is what is linked**, and it moves in lockstep with oneharness-core
+# **0.19.0 is what is linked.** It is the release that gives every judge one
+# evidence contract whatever its mode, so a read-only judge is no longer told
+# never to use its shell and left to judge blind — and a two-party member is judged in-process, so that prompt reaches its judges only
+# through this requirement. Its `oneharness-core` requirement is still
+# `^0.24.0`, so the one-copy rule below holds unchanged. The release it crosses,
+# 0.18.0, was breaking only for onejudge's own build: it moved its gate to Nx,
+# split its tests into crates, and dropped the `fake-provider` feature and the
+# echo provider behind it — which this crate never linked, because
+# `src/bin/fake_provider.rs` is its own double. The `allow_writable_judges` a
+# graph's `judge_settings` passes through (`docs/contract.md`) is onejudge's
+# from 0.16.0 and refused by it on a non-split provider.
+#
+# 0.17.1 moved in lockstep with oneharness-core
 # 0.24.0 below: its published requirement is `^0.24.0`, a pre-1.0 minor every
 # earlier core requirement here excludes, so the two are edited together or the
 # graph carries two cores — and with two, the engine that takes this crate as a
@@ -407,7 +419,7 @@ test-doubles = []
 #      stacked-panel journeys in `tests/e2e/panel.rs` are what that holds.
 #   3. 0.17.0's readable `--format text` is the onejudge CLI's; this crate links
 #      the engine and reads no CLI output.
-onejudge = { version = "0.17.1", features = ["cli"] }
+onejudge = { version = "0.19.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
