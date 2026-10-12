@@ -1,7 +1,7 @@
 # Throwaway differential harness for the serde-yaml-replacement spike: it never
-# lands. Its own workspace, so the crate's `members = ["."]` is untouched and
-# nothing here reaches `just check`.
-[workspace]
+# lands. A member of the root workspace, resolved against the root `Cargo.lock`;
+# the root lists only itself in `default-members`, so nothing here reaches
+# `just check`.
 
 [package]
 name = "saphyr-diff"

@@ -1,8 +1,12 @@
 [workspace]
 # One member today — the crate at the root. Declared explicitly so a second
 # crate (a future runtime, a test-support crate) joins the graph by being listed
-# here rather than by changing what `--workspace` means.
-members = ["."]
+# here rather than by changing what `--workspace` means. `spikes/saphyr-diff` is
+# the serde-yaml-replacement spike's throwaway differential harness: a member so
+# it resolves against this one lock, and never a default member, so every
+# recipe that runs from the root still builds and tests the root crate alone.
+members = [".", "spikes/saphyr-diff"]
+default-members = ["."]
 resolver = "2"
 
 [package]
