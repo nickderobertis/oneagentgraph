@@ -182,6 +182,7 @@ fn closest_options() -> Options {
     o.duplicate_keys = DuplicateKeyPolicy::LastWins;
     o.with_snippet = false;
     o.emit_comments = false;
+    o.reject_unsupported_tags = true;
     o
 }
 
