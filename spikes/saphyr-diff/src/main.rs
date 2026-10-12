@@ -1030,6 +1030,7 @@ fn schemaless_probes() -> Section {
         ("BOM", "\u{feff}a: 1\n"),
         ("GitHub `on:` key", "on:\n  pull_request:\n    branches: [main]\n"),
         ("quoted key", "\"a b\": 1\n'c': 2\n"),
+        ("persona bool flag spelled yes", "user:\n  done_when: x\n  done_when_replaces_base: yes\n"),
         ("null forms", "a:\nb: ~\nc: null\nd: Null\n"),
     ];
     for (what, text) in probes {
@@ -1474,6 +1475,20 @@ fn error_messages(c: &Corpus) -> Section {
         let prod_a = if ty == "GraphConfig" { Some(graph_norway_production(&doc).map(|_| ())) } else { None };
         let prod_b = if ty == "GraphConfig" { Some(graph_saphyr_json(&doc).map(|_| ())) } else { None };
         let prod_c = if ty == "GraphConfig" { Some(graph_saphyr_json_with(&doc, closest_options()).map(|_| ())) } else { None };
+        // The one code change tried on this path: an empty document read as an
+        // empty mapping before `from_value`, as serde_norway's `from_value` does.
+        let prod_d = if ty == "GraphConfig" {
+            Some(
+                saphyr_with::<Value>(&doc, closest_options())
+                    .map_err(|e| format!("parse: {e}"))
+                    .and_then(|v| {
+                        let v = if v.is_null() { Value::Object(Default::default()) } else { v };
+                        serde_json::from_value::<GraphConfig>(v).map(|_| ()).map_err(|e| format!("from_value: {e}"))
+                    }),
+            )
+        } else {
+            None
+        };
         // `tests/contract.rs::serde_fields`, verbatim in what it does to the text.
         let fields = |e: &str| -> String {
             let Some((_, listed)) = e.split_once("expected one of ") else {
@@ -1510,12 +1525,13 @@ fn error_messages(c: &Corpus) -> Section {
             } else {
                 String::new()
             },
-            match (&prod_a, &prod_b, &prod_c) {
-                (Some(x), Some(y), Some(z)) => format!(
-                    "\n  production path — serde_norway (to_value/from_value):  {}\n                    serde-saphyr + serde_json::from_value:   {}\n                    serde-saphyr CLOSEST + from_value:        {}",
+            match (&prod_a, &prod_b, &prod_c, &prod_d) {
+                (Some(x), Some(y), Some(z), Some(w)) => format!(
+                    "\n  production path — serde_norway (to_value/from_value):  {}\n                    serde-saphyr + serde_json::from_value:   {}\n                    serde-saphyr CLOSEST + from_value:        {}\n                    CLOSEST + null-as-{{}} + from_value:      {}",
                     show_err(x),
                     show_err(y),
-                    show_err(z)
+                    show_err(z),
+                    show_err(w)
                 ),
                 _ => String::new(),
             }

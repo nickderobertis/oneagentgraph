@@ -69,4 +69,4 @@ for banned in serde_yaml_ng serde_norway unsafe-libyaml unsafe-libyaml-norway; d
 done
 echo
 echo "cargo deny (this repository's deny.toml) over the harness's tree:"
-cargo deny --manifest-path "$here/Cargo.toml" check --config "$repo/deny.toml" bans licenses sources 2>&1 | tail -40 || true
+cargo deny --manifest-path "$here/Cargo.toml" check --config "$repo/deny.toml" advisories bans licenses sources 2>&1 | tail -40 || true
