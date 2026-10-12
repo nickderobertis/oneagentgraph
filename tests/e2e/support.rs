@@ -156,6 +156,15 @@ impl Workspace {
             std::fs::create_dir_all(parent).expect("parent");
         }
         std::fs::write(&path, content).expect("write");
+        // Spike only (serde-yaml-replacement): copy every file a journey writes
+        // to a capture directory, so `spikes/saphyr-diff` can read the graphs,
+        // bases and personas the e2e suite writes. Never lands.
+        if let Some(capture) = std::env::var_os("SAPHYR_DIFF_CAPTURE") {
+            let journey = self.root.path().file_name().expect("a temp dir name");
+            let copy = std::path::Path::new(&capture).join(journey).join(name);
+            std::fs::create_dir_all(copy.parent().expect("parent")).expect("capture dir");
+            std::fs::write(copy, content).expect("capture");
+        }
         path
     }
 
