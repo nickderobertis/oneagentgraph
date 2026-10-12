@@ -1188,6 +1188,63 @@ fn strip_blank_indent(text: &str) -> String {
         .collect()
 }
 
+/// One small value per class of emitted difference, written by both crates,
+/// so each class has its before and after bytes on record.
+fn emitted_examples() -> Section {
+    let mut s = Section::new("WRITE emitted-byte examples — one per class seen in the real writes");
+    let long = "every acceptance criterion stated in the task is met, with every change this dispatch made committed and nothing half-applied left behind";
+    let path = "/home/nick/.onevcs/workspaces/github.com-nickderobertis-oneagentgraph-f0db8e1bb310/pool/1/worktree/target/debug/oneagentgraph-fake-harness";
+    let cases: Vec<(&str, Value)> = vec![
+        ("blank line inside a literal block scalar", serde_json::json!({"system_prompt": "first paragraph\n\nsecond paragraph\n"})),
+        ("nested: blank line inside a literal block under a mapping", serde_json::json!({"user": {"persona": "one\n\ntwo\n"}})),
+        ("single-line string longer than 80 columns, with spaces", serde_json::json!({"done_when": long})),
+        ("single-line string longer than 80 columns, no spaces", serde_json::json!({"ONEHARNESS_BIN_CLAUDE_CODE": path})),
+        ("string that looks like an integer", serde_json::json!({"ONEHARNESS_HISTORY": "1"})),
+        ("string containing `: `", serde_json::json!({"system_prompt": "Standing bar: verify before you claim done."})),
+        ("string starting with `{`", serde_json::json!({"task": "{task}"})),
+        ("empty string", serde_json::json!({"dir": ""})),
+        ("string that looks like a YAML 1.1 boolean", serde_json::json!({"a": "yes", "b": "on"})),
+        ("string that looks like null", serde_json::json!({"a": "null", "b": "~"})),
+        ("list under a mapping key", serde_json::json!({"judge": [{"oneharness_config": "./j.toml"}, {"command": ["x"]}]})),
+        ("empty mapping and empty list", serde_json::json!({"settings": {}, "deps": []})),
+        ("null value", serde_json::json!({"task": null})),
+        ("literal block with trailing blank lines", serde_json::json!({"a": "x\n\n\n"})),
+        ("multi-line string without a trailing newline", serde_json::json!({"a": "x\ny"})),
+    ];
+    for (what, value) in cases {
+        let today = serde_norway::to_string(&value).unwrap();
+        let next = saphyr_out(&value, SerializerOptions::default()).unwrap();
+        let mut o = SerializerOptions::default();
+        o.folded_wrap_chars = usize::MAX;
+        o.min_fold_chars = usize::MAX;
+        let best = strip_blank_indent(&saphyr_out(&value, o).unwrap());
+        if today == next {
+            s.same();
+            continue;
+        }
+        let reproducing: Vec<String> = ser_profiles()
+            .into_iter()
+            .flat_map(|(name, o)| {
+                let out = saphyr_out(&value, o).unwrap();
+                let mut hits = Vec::new();
+                if out == today {
+                    hits.push(name.to_string());
+                }
+                if strip_blank_indent(&out) == today {
+                    hits.push(format!("{name} + blank-line post-process"));
+                }
+                hits
+            })
+            .collect();
+        s.diff(format!(
+            "{what}\n  serde_norway bytes:  {today:?}\n  serde-saphyr bytes:  {next:?}\n  serde-saphyr with folded_wrap_chars=MAX+min_fold_chars=MAX, then the blank-line post-process: {best:?}\n  that reproduces today: {}\n  every profile (± post-process) that reproduces today: {reproducing:?}\n  serde-saphyr bytes read back by serde_norway to the same value: {}",
+            best == today,
+            serde_norway::from_str::<Value>(&next).map(|v| json(&v) == json(&value)).unwrap_or(false),
+        ));
+    }
+    s
+}
+
 /// The graph goldens `tests/record.rs` compares byte for byte.
 fn graph_writes(c: &Corpus) -> Section {
     let mut s = Section::new("WRITE graph records — goldens tests/record.rs compares byte for byte");
@@ -1650,6 +1707,7 @@ fn main() {
     schemaless(&c, &c.schemaless, "READ persona files + onejudge base configs — `from_str::<serde_json::Value>` (persona.rs)").print();
     schemaless(&c, &c.workflows, "READ .github/workflows — schema-less walk (tests/repo-tooling/workflow_contract.rs)").print();
     schemaless_probes().print();
+    emitted_examples().print();
     graph_writes(&c).print();
     indentation_substrings().print();
     effective_configs(&c).print();
