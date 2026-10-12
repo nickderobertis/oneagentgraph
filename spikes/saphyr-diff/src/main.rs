@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use std::time::Instant;
 
 use oneagentgraph::config::{GraphConfig, OneharnessMember, OnejudgeMember, TaskText};
@@ -378,12 +379,15 @@ struct Doc {
     text: String,
 }
 
-fn read_docs(paths: impl IntoIterator<Item = PathBuf>, label: &str) -> Vec<Doc> {
+/// Reads every listed document, or names the first one that cannot be read:
+/// a corpus missing a file would report counts and differences for a smaller
+/// set than `method` says, so the run stops rather than skipping it.
+fn read_docs(paths: impl IntoIterator<Item = PathBuf>, label: &str) -> Result<Vec<Doc>, String> {
     paths
         .into_iter()
-        .map(|path| Doc {
-            origin: format!("{label}:{}", path.display()),
-            text: std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
+        .map(|path| {
+            let text = std::fs::read_to_string(&path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+            Ok(Doc { origin: format!("{label}:{}", path.display()), text })
         })
         .collect()
 }
@@ -450,7 +454,7 @@ struct Corpus {
     counts: BTreeMap<String, usize>,
 }
 
-fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
+fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Result<Corpus, String> {
     let mut counts = BTreeMap::new();
     let mut count = |k: &str, n: usize| {
         counts.insert(k.to_string(), n);
@@ -459,7 +463,7 @@ fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
     let goldens = read_docs(
         (4..=10).map(|v| repo.join(format!("tests/golden/graph.v{v}.yaml"))),
         "golden",
-    );
+    )?;
     count("tests/golden/graph.v4-v10.yaml", goldens.len());
 
     let fixture_all = yaml_files(&repo.join("screenshots/fixture"), false);
@@ -468,11 +472,11 @@ fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
         .filter(|p| is_graph(&std::fs::read_to_string(p).unwrap_or_default()))
         .cloned()
         .collect();
-    let fixture_graphs = read_docs(fixture_graph_paths.clone(), "fixture");
+    let fixture_graphs = read_docs(fixture_graph_paths.clone(), "fixture")?;
     let fixture_other = read_docs(
         fixture_all.iter().filter(|p| !fixture_graph_paths.contains(p)).cloned(),
         "fixture",
-    );
+    )?;
     count("screenshots/fixture graphs", fixture_graphs.len());
     count("screenshots/fixture personas/bases", fixture_other.len());
 
@@ -488,7 +492,7 @@ fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
     count("docs/contract.md + README.md fenced graph blocks", contract_docs.len());
 
     let real_graph_paths = yaml_files(&orchestrator.join("graphs"), false);
-    let real_graphs = read_docs(real_graph_paths.clone(), "ai-orchestrator");
+    let real_graphs = read_docs(real_graph_paths.clone(), "ai-orchestrator")?;
     count("ai-orchestrator graphs/*.yaml", real_graphs.len());
 
     let mut e2e_graph_paths = Vec::new();
@@ -507,13 +511,13 @@ fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
             }
         }
     }
-    let e2e_graphs = read_docs(e2e_graph_paths.clone(), "e2e");
+    let e2e_graphs = read_docs(e2e_graph_paths.clone(), "e2e")?;
     count("e2e-written graphs (captured)", e2e_graphs.len());
     count("e2e-written bases/personas (captured)", e2e_other.len());
     count("e2e-written --event-filter files (captured)", e2e_filters.len());
 
     let persona_paths: Vec<PathBuf> = yaml_files(&orchestrator.join("personas"), true);
-    let real_personas = read_docs(persona_paths.clone(), "ai-orchestrator");
+    let real_personas = read_docs(persona_paths.clone(), "ai-orchestrator")?;
     count("ai-orchestrator personas/**/*.yaml", real_personas.len());
     // The onejudge base configs the real graphs name, and nothing else in
     // `config/`: those are the bases this crate reads.
@@ -535,12 +539,12 @@ fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
         .collect();
     bases.sort();
     bases.dedup();
-    let real_config = read_docs(bases, "ai-orchestrator");
+    let real_config = read_docs(bases, "ai-orchestrator")?;
     count("ai-orchestrator onejudge base configs the real graphs name", real_config.len());
-    let shipped = read_docs(yaml_files(&repo.join("personas"), true), "repo");
+    let shipped = read_docs(yaml_files(&repo.join("personas"), true), "repo")?;
     count("repo personas/**/*.yaml (shipped)", shipped.len());
 
-    let workflows = read_docs(yaml_files(&repo.join(".github/workflows"), false), "repo");
+    let workflows = read_docs(yaml_files(&repo.join(".github/workflows"), false), "repo")?;
     count(".github/workflows/*.yml (workflow_contract walk)", workflows.len());
 
     let mut graphs = Vec::new();
@@ -572,7 +576,7 @@ fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
     }
     count("--event-filter documents", filters.len());
 
-    Corpus {
+    Ok(Corpus {
         repo: repo.to_path_buf(),
         orchestrator: orchestrator.to_path_buf(),
         graphs,
@@ -585,7 +589,7 @@ fn corpus(repo: &Path, orchestrator: &Path, capture: Option<&Path>) -> Corpus {
         fixture_graph_paths,
         persona_paths,
         counts,
-    }
+    })
 }
 
 // ----------------------------------------------------------------- checks
@@ -1437,7 +1441,13 @@ fn effective_configs(c: &Corpus) -> Section {
     let mut s = Section::new(
         "WRITE effective onejudge.yaml — invoke.rs, per member, read back by onejudge's Config",
     );
-    let scratch_root = tempfile::tempdir().expect("scratch");
+    let scratch_root = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            s.note(format!("no scratch directory for the effective configs, so none were built: {e}"));
+            return s;
+        }
+    };
     let mut built = 0;
     let mut members_seen = 0;
     let mut skipped_invalid = 0;
@@ -1464,7 +1474,13 @@ fn effective_configs(c: &Corpus) -> Section {
         graph_sources.push((p.display().to_string(), p.clone(), None));
     }
     for (i, (origin, path, persona)) in graph_sources.iter().enumerate() {
-        let text = std::fs::read_to_string(path).unwrap();
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) => {
+                s.note(format!("{origin}: not read, so not built ({e})"));
+                continue;
+            }
+        };
         let Ok(mut loose) = norway::<Value>(&text) else { continue };
         if let Some(persona) = persona {
             for (_, member) in loose["members"].as_object_mut().unwrap().iter_mut() {
@@ -1487,7 +1503,10 @@ fn effective_configs(c: &Corpus) -> Section {
             }
             members_seen += 1;
             let scratch = scratch_root.path().join(format!("{i}-{name}"));
-            std::fs::create_dir_all(&scratch).unwrap();
+            if let Err(e) = std::fs::create_dir_all(&scratch) {
+                s.note(format!("{origin} member {name}: no scratch directory, so not built ({e})"));
+                continue;
+            }
             let dir = path.parent().unwrap();
             let context = oneagentgraph::invoke::Context {
                 dir,
@@ -1509,8 +1528,14 @@ fn effective_configs(c: &Corpus) -> Section {
                 }
             };
             let oneagentgraph::invoke::Launch::Judge(launch) = invocation.launch else { continue };
+            let today = match std::fs::read_to_string(&launch.config) {
+                Ok(today) => today,
+                Err(e) => {
+                    s.note(format!("{origin} member {name}: the effective config was not readable ({e})"));
+                    continue;
+                }
+            };
             built += 1;
-            let today = std::fs::read_to_string(&launch.config).unwrap();
             let value: Value = norway(&today).expect("the effective config re-reads");
             if serde_norway::to_string(&value).unwrap() != today {
                 s.note(format!("{origin} member {name}: serde_norway Value round trip is lossy"));
@@ -1535,8 +1560,17 @@ fn error_messages(c: &Corpus) -> Section {
     let mut s = Section::new(
         "ERRORS — serde_fields (`expected one of`, ` at line `), unknown fields, malformed documents",
     );
-    let contract = std::fs::read_to_string(c.repo.join("docs/contract.md")).unwrap();
-    let graph = fenced(&contract, "yaml").into_iter().find(|b| is_graph(b)).expect("contract graph");
+    let contract = match std::fs::read_to_string(c.repo.join("docs/contract.md")) {
+        Ok(contract) => contract,
+        Err(e) => {
+            s.note(format!("docs/contract.md not read, so no error cases were run: {e}"));
+            return s;
+        }
+    };
+    let Some(graph) = fenced(&contract, "yaml").into_iter().find(|b| is_graph(b)) else {
+        s.note("docs/contract.md has no fenced graph block, so no error cases were run".to_string());
+        return s;
+    };
     let mut cases: Vec<(String, String, &'static str)> = vec![
         (
             "serde_fields::<OneharnessMember>".into(),
@@ -1756,19 +1790,44 @@ fn time_one(text: &str) {
 
 // ------------------------------------------------------------------- main
 
-fn main() {
+/// Exit status 2 for a usage error, as `run.sh` gives its own, and 1 for a
+/// corpus that cannot be read.
+fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let mut orchestrator = PathBuf::from("/home/nick/projects/ai-orchestrator");
     let mut capture = None;
     while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--orchestrator" => orchestrator = PathBuf::from(args.next().expect("a dir")),
-            "--e2e-capture" => capture = Some(PathBuf::from(args.next().expect("a dir"))),
-            other => panic!("unknown argument {other}"),
+        let value = match arg.as_str() {
+            "--orchestrator" | "--e2e-capture" => match args.next() {
+                Some(dir) => PathBuf::from(dir),
+                None => {
+                    eprintln!("{arg} needs a directory");
+                    return ExitCode::from(2);
+                }
+            },
+            other => {
+                eprintln!("unknown argument {other}");
+                return ExitCode::from(2);
+            }
+        };
+        if arg == "--orchestrator" {
+            orchestrator = value;
+        } else {
+            capture = Some(value);
         }
     }
-    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
-    let c = corpus(&repo, &orchestrator, capture.as_deref());
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let c = match manifest
+        .canonicalize()
+        .map_err(|e| format!("resolving the repository root {}: {e}", manifest.display()))
+        .and_then(|repo| corpus(&repo, &orchestrator, capture.as_deref()))
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("saphyr-diff: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
     println!("# serde_norway 0.9 vs serde-saphyr 1.3 (+ saphyr 0.2 tree) — differential report");
     println!("\ncrate versions: see `cargo tree` in run.sh output; corpus:");
@@ -1792,4 +1851,5 @@ fn main() {
     effective_configs(&c).print();
     error_messages(&c).print();
     timing(&c);
+    ExitCode::SUCCESS
 }
