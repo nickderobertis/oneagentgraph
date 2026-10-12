@@ -78,8 +78,9 @@ fn indent(text: &str) -> String {
     text.lines().map(|l| format!("    | {l}\n")).collect()
 }
 
-/// A small LCS line diff, printed as `-` (serde_norway) / `+` (serde-saphyr).
-fn line_diff(before: &str, after: &str, limit: usize) -> String {
+/// The changed lines between two texts, by LCS: every one, in order, as `-`
+/// (serde_norway) / `+` (serde-saphyr). Nothing is elided.
+fn diff_lines(before: &str, after: &str) -> Vec<(char, String)> {
     let a: Vec<&str> = before.split_inclusive('\n').collect();
     let b: Vec<&str> = after.split_inclusive('\n').collect();
     let (n, m) = (a.len(), b.len());
@@ -94,33 +95,31 @@ fn line_diff(before: &str, after: &str, limit: usize) -> String {
         }
     }
     let (mut i, mut j) = (0, 0);
-    let mut out = String::new();
-    let mut shown = 0;
-    let mut changed = 0;
-    let show = |out: &mut String, tag: char, line: &str, shown: &mut usize| {
-        if *shown < limit {
-            let _ = writeln!(out, "{tag} {:?}", line.strip_suffix('\n').unwrap_or(line));
-        }
-        *shown += 1;
-    };
+    let mut out = Vec::new();
+    let strip = |l: &str| l.strip_suffix('\n').unwrap_or(l).to_string();
     while i < n || j < m {
         if i < n && j < m && a[i] == b[j] {
             i += 1;
             j += 1;
         } else if j < m && (i == n || lcs[i][j + 1] >= lcs[i + 1][j]) {
-            show(&mut out, '+', b[j], &mut shown);
-            changed += 1;
+            out.push(('+', strip(b[j])));
             j += 1;
         } else {
-            show(&mut out, '-', a[i], &mut shown);
-            changed += 1;
+            out.push(('-', strip(a[i])));
             i += 1;
         }
     }
-    if shown > limit {
-        let _ = writeln!(out, "  … {} more changed lines", shown - limit);
+    out
+}
+
+/// Every changed line, printed in full, then the count.
+fn line_diff(before: &str, after: &str) -> String {
+    let lines = diff_lines(before, after);
+    let mut out = String::new();
+    for (tag, line) in &lines {
+        let _ = writeln!(out, "{tag} {line:?}");
     }
-    let _ = writeln!(out, "  ({changed} changed lines; '-' serde_norway, '+' serde-saphyr)");
+    let _ = writeln!(out, "  ({} changed lines; '-' serde_norway, '+' serde-saphyr)", lines.len());
     out
 }
 
@@ -1084,11 +1083,7 @@ fn ser_compare<T: serde::Serialize>(
         if out == today {
             exact.push(name);
         }
-        let changed = line_diff(today, &out, 0)
-            .lines()
-            .last()
-            .and_then(|l| l.trim().strip_prefix('(').and_then(|r| r.split(' ').next()).and_then(|n| n.parse().ok()))
-            .unwrap_or(usize::MAX);
+        let changed = diff_lines(today, &out).len();
         if best.as_ref().is_none_or(|(_, _, c)| changed < *c) {
             best = Some((name, out, changed));
         }
@@ -1137,8 +1132,8 @@ fn ser_compare<T: serde::Serialize>(
     let (best_name, best_out, _) = best.expect("a profile");
     s.diff(format!(
         "{origin}\n  byte-identical under profiles: {exact:?}\n  byte-identical after blank-line post-process under profiles: {post:?} (post-processed text reads back identically: {post_reads})\n  default profile output {semantic}\n  default profile diff:\n{}\n  closest profile `{best_name}` diff:\n{}",
-        indent(&line_diff(today, &default_out, 40)),
-        indent(&line_diff(today, &best_out, 40)),
+        indent(&line_diff(today, &default_out)),
+        indent(&line_diff(today, &best_out)),
     ));
 }
 
@@ -1346,7 +1341,7 @@ fn indentation_substrings() -> Section {
         } else {
             s.diff(format!(
                 "{what}\n  assertion holds under profiles: {passing:?}\n  default output re-reads to the same graph: {reread_ok}\n  serde_norway → serde-saphyr (default):\n{}",
-                indent(&line_diff(&today, &default_out, 30))
+                indent(&line_diff(&today, &default_out))
             ));
         }
     }
