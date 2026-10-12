@@ -152,6 +152,8 @@ fn de_profiles() -> Vec<(&'static str, Options)> {
     let mut budget = serde_saphyr::Budget::default();
     budget.max_buffered_comment_events = 1 << 20;
     roomy.budget = Some(budget);
+    let mut tags = Options::default();
+    tags.reject_unsupported_tags = true;
     let combined = closest_options();
     vec![
         ("default", Options::default()),
@@ -165,6 +167,7 @@ fn de_profiles() -> Vec<(&'static str, Options)> {
         ("reject_non_finite_typeless_float=false", finite),
         ("emit_comments=false", quiet),
         ("budget.max_buffered_comment_events=2^20", roomy),
+        ("reject_unsupported_tags=true", tags),
         ("CLOSEST", combined),
     ]
 }
@@ -269,7 +272,30 @@ fn graph_saphyr_rerender(text: &str) -> Result<GraphConfig, String> {
 /// `serde_json::Value` serde_norway produces: what a `Value` cannot hold —
 /// non-string keys, tags, aliases — is marked.
 fn saphyr_tree(text: &str) -> Result<String, String> {
-    let docs = saphyr::YamlOwned::load_from_str(text).map_err(|e| e.to_string())?;
+    saphyr_tree_with(text, TreeLoad::default())
+}
+
+/// How saphyr 0.2's loader is driven: its two `YamlLoader` switches, and the
+/// one code change measured for a leading byte-order mark.
+#[derive(Clone, Copy, Default)]
+struct TreeLoad {
+    allow_duplicate_keys: bool,
+    early_parse_off: bool,
+    strip_bom: bool,
+}
+
+fn saphyr_tree_with(text: &str, how: TreeLoad) -> Result<String, String> {
+    let text = if how.strip_bom { text.strip_prefix('\u{feff}').unwrap_or(text) } else { text };
+    let mut loader: saphyr::YamlLoader<'_, saphyr::YamlOwned> = saphyr::YamlLoader::default();
+    loader.allow_duplicate_keys(how.allow_duplicate_keys);
+    loader.early_parse(!how.early_parse_off);
+    saphyr_parser::Parser::new_from_str(text)
+        .load(&mut loader, true)
+        .map_err(|e| e.to_string())?;
+    if let Some(e) = loader.error() {
+        return Err(e.to_string());
+    }
+    let docs = loader.into_documents();
     let mut out = String::new();
     match docs.as_slice() {
         [] => out.push_str("null"),
@@ -290,8 +316,16 @@ fn render_tree(node: &saphyr::YamlOwned, out: &mut String) {
         YamlOwned::Value(ScalarOwned::Null) => out.push_str("null"),
         YamlOwned::Value(ScalarOwned::Boolean(b)) => out.push_str(&b.to_string()),
         YamlOwned::Value(ScalarOwned::Integer(i)) => out.push_str(&i.to_string()),
-        YamlOwned::Value(ScalarOwned::FloatingPoint(f)) => {
-            out.push_str(&json(&serde_json::Number::from_f64(f.0).map_or(Value::Null, Value::Number)))
+        // A non-finite float has no JSON form; print it as itself rather than
+        // as the `null` a `serde_json::Value` would make of it.
+        YamlOwned::Value(ScalarOwned::FloatingPoint(f)) => match serde_json::Number::from_f64(f.0) {
+            Some(n) => out.push_str(&json(&Value::Number(n))),
+            None => {
+                let _ = write!(out, "<NONFINITE {:?}>", f.0);
+            }
+        },
+        YamlOwned::Representation(text, _, _) => {
+            let _ = write!(out, "<REPR {text:?}>");
         }
         YamlOwned::Value(ScalarOwned::String(s)) => out.push_str(&json(&Value::String(s.clone()))),
         YamlOwned::Sequence(items) => {
@@ -1006,18 +1040,27 @@ fn first_divergence(a: &str, b: &str) -> String {
 /// the YAML features a hand-written persona or workflow can use.
 fn schemaless_probes() -> Section {
     let mut s = Section::new("READ schema-less — feature probes into serde_json::Value and saphyr's tree");
+    // One feature per probe, so a refusal of one key cannot hide how another reads.
     let probes = [
         ("anchor + alias", "a: &x {k: 1}\nb: *x\n"),
         ("merge key", "base: &b {k: 1, j: 2}\nchild:\n  <<: *b\n  j: 3\n"),
         ("duplicate key", "k: 1\nk: 2\n"),
         ("integer key", "1: a\n2: b\n"),
-        ("bool/null keys", "true: a\nnull: b\non: c\n"),
-        ("explicit tag", "k: !!str 123\nj: !custom v\n"),
+        ("bool key", "true: a\n"),
+        ("null key", "null: b\n"),
+        ("`on` key", "on: c\n"),
+        ("core tag !!str", "k: !!str 123\n"),
+        ("custom tag", "j: !custom v\n"),
         ("yes/no/on/off values", "a: yes\nb: no\nc: on\nd: off\n"),
-        ("octal-looking", "a: 010\nb: 0o10\nc: 0x10\n"),
+        ("leading-zero integer", "a: 010\n"),
+        ("0o octal", "a: 0o10\n"),
+        ("0x hex", "a: 0x10\n"),
         ("timestamp-looking", "a: 2026-10-12\nb: 12:30:00\n"),
-        ("float specials", "a: .inf\nb: .nan\nc: 1e999\n"),
-        ("big int", "a: 18446744073709551616\nb: 9223372036854775808\n"),
+        (".inf", "a: .inf\n"),
+        (".nan", "a: .nan\n"),
+        ("1e999 (overflows f64)", "a: 1e999\n"),
+        ("u64 overflow 18446744073709551616", "a: 18446744073709551616\n"),
+        ("i64 overflow 9223372036854775808", "a: 9223372036854775808\n"),
         ("literal block, keep/strip", "a: |+\n  x\n\nb: |-\n  y\nc: >\n  folded\n  text\n"),
         ("empty document", ""),
         ("comment only", "# nothing\n"),
@@ -1032,27 +1075,67 @@ fn schemaless_probes() -> Section {
         ("persona bool flag spelled yes", "user:\n  done_when: x\n  done_when_replaces_base: yes\n"),
         ("null forms", "a:\nb: ~\nc: null\nd: Null\n"),
     ];
+    let show = |r: &Result<Value, String>| match r {
+        Ok(v) => format!("Ok({})", json(v)),
+        Err(e) => format!("Err: {}", e.replace('\n', "⏎")),
+    };
+    let show_tree = |r: &Result<String, String>| match r {
+        Ok(t) => format!("Ok({t})"),
+        Err(e) => format!("Err: {e}"),
+    };
     for (what, text) in probes {
         let a = norway::<Value>(text);
         let b = saphyr::<Value>(text);
+        let closest = saphyr_with::<Value>(text, closest_options());
         let tree = saphyr_tree(text);
-        let show = |r: &Result<Value, String>| {
-            r.as_ref()
-                .map(|v| format!("Ok({})", json(v)))
-                .unwrap_or_else(|e| format!("Err: {}", short(&e.replace('\n', "⏎"), 220)))
+        let today_tree = a.as_ref().map(json).map_err(|_| ());
+        let tree_agrees = match (&today_tree, &tree) {
+            (Ok(x), Ok(y)) => x == y,
+            (Err(()), Err(_)) => true,
+            _ => false,
         };
-        let tree_s = tree.clone().map(|t| format!("Ok({t})")).unwrap_or_else(|e| format!("Err: {e}"));
-        if ok_eq_json(&a, &b) && a.as_ref().map(json).ok() == tree.as_ref().ok().cloned() {
+        if ok_eq_json(&a, &b) && !err_text_differs(&a, &b) && tree_agrees {
             s.same();
             continue;
         }
-        s.diff(format!(
-            "{what}: {text:?}\n  serde_norway → Value: {}\n  serde-saphyr → Value: {}\n  saphyr tree:          {}\n  serde-saphyr profiles that agree with serde_norway: {:?}",
+        let mut out = format!(
+            "{what}: {text:?}\n  serde_norway → Value:           {}\n  serde-saphyr (default) → Value: {}\n  serde-saphyr (CLOSEST) → Value: {}\n  serde-saphyr profiles with the same outcome (same Value, or both refuse): {:?}",
             show(&a),
             show(&b),
-            tree_s,
+            show(&closest),
             which_profiles::<Value, _>(text, &a, ok_eq_json),
-        ));
+        );
+        // Every profile whose result is neither today's nor the default's, so
+        // what an option changes is printed rather than only whether it agrees.
+        let mut seen = vec![show(&b)];
+        for (name, opts) in de_profiles() {
+            let r = show(&saphyr_with::<Value>(text, opts));
+            if r != show(&a) && !seen.contains(&r) {
+                let _ = write!(out, "\n  serde-saphyr ({name}) → Value: {r}");
+                seen.push(r);
+            }
+        }
+        if a.is_err() {
+            let _ = write!(
+                out,
+                "\n  serde-saphyr profiles with the same error text: {:?}",
+                which_profiles::<Value, _>(text, &a, |x, y| matches!((x, y), (Err(p), Err(q)) if p == q)),
+            );
+        }
+        let _ = write!(out, "\n  saphyr tree (default loader):   {}", show_tree(&tree));
+        let variants = [
+            ("allow_duplicate_keys(true)", TreeLoad { allow_duplicate_keys: true, ..TreeLoad::default() }),
+            ("early_parse(false)", TreeLoad { early_parse_off: true, ..TreeLoad::default() }),
+            ("leading U+FEFF stripped first", TreeLoad { strip_bom: true, ..TreeLoad::default() }),
+        ];
+        for (name, how) in variants {
+            let v = saphyr_tree_with(text, how);
+            if v != tree {
+                let _ = write!(out, "\n  saphyr tree, {name}: {}", show_tree(&v));
+            }
+        }
+        let _ = write!(out, "\n  saphyr tree agrees with serde_norway's Value: {tree_agrees}");
+        s.diff(out);
     }
     s
 }

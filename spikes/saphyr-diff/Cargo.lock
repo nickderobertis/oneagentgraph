@@ -1454,6 +1454,7 @@ dependencies = [
  "oneagentgraph",
  "onejudge",
  "saphyr",
+ "saphyr-parser",
  "serde",
  "serde-saphyr",
  "serde_json",

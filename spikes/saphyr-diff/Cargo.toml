@@ -18,4 +18,5 @@ serde_json = { version = "1", features = ["preserve_order"] }
 serde_norway = "0.9"
 serde-saphyr = "=1.3.0"
 saphyr = "=0.2.1"
+saphyr-parser = "=0.2.1"
 tempfile = "3"
