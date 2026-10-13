@@ -150,10 +150,10 @@ test('release artifact routes retain every platform and gate Darwin publication 
  assert.deepEqual(recorded.targets,darwin,'telemetry must identify both sequential target builds');
  const steps=release.jobs.darwin.steps;
  const source=steps.filter(s=>s.run).map(s=>s.run).join('\n');
- for(const target of darwin) assert.ok(source.includes(`scripts/smoke-darwin.sh ${target}`));
- assert.match(source,/release-darwin\.sh/);assert.match(source,/install-rosetta/);
+ for(const target of darwin) assert.ok(source.includes(`scripts/release-smoke.sh ${target}`));
+ assert.match(source,/release-build\.sh/);assert.match(source,/install-rosetta/);
  const firstUpload=steps.findIndex(s=>s.uses?.startsWith('actions/upload-artifact@'));
- assert.ok(steps.slice(0,firstUpload).filter(s=>s.run?.includes('scripts/smoke-darwin.sh')).length===darwin.length);
+ assert.ok(steps.slice(0,firstUpload).filter(s=>s.run?.includes('scripts/release-smoke.sh')).length===darwin.length);
  for(const publisher of ['publish-pypi','publish-npm','upload-darwin']) {
   assert.ok([].concat(release.jobs[publisher].needs).includes('darwin'),publisher);
   assert.equal(release.jobs[publisher]['runs-on'],'ubuntu-latest');

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wrap one compiled Darwin binary in an archive and CLI wheel, without rebuilding."""
+"""Wrap one compiled binary in an archive and CLI wheel, without rebuilding."""
 import argparse
 import base64
 import csv
@@ -23,6 +23,8 @@ parser.add_argument('--binary', required=True, type=Path)
 parser.add_argument('--out', required=True, type=Path)
 parser.add_argument('--tag', required=True)
 args = parser.parse_args()
+if not args.out.is_absolute() or (args.out.exists() and not args.out.is_dir()):
+    parser.error('--out must be an absolute artifact directory; pass a new directory or an existing directory')
 root = Path(__file__).resolve().parent.parent
 project = tomllib.loads((root / 'pyproject.toml').read_text()).get('project')
 package = tomllib.loads((root / 'Cargo.toml').read_text()).get('package')

@@ -500,14 +500,14 @@ jobs:
         run: |
           mkdir -p "$GITHUB_WORKSPACE/darwin"
           for target in $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log(t))'); do
-            bash scripts/release-darwin.sh "$target" "$GITHUB_REF_NAME" "$GITHUB_WORKSPACE/darwin"
+            bash scripts/release-build.sh "$target" "$GITHUB_REF_NAME" "$GITHUB_WORKSPACE/darwin"
           done
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
           architecture: x64
       - name: Install and run staged Intel Darwin products before publication
-        run: bash scripts/smoke-darwin.sh x86_64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
+        run: bash scripts/release-smoke.sh x86_64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -517,7 +517,7 @@ jobs:
           python-version: "3.12"
           architecture: arm64
       - name: Install and run staged ARM Darwin products before publication
-        run: bash scripts/smoke-darwin.sh aarch64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
+        run: bash scripts/release-smoke.sh aarch64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-darwin

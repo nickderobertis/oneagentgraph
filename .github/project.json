@@ -20,8 +20,9 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/screencomp.toml",
-        "{workspaceRoot}/scripts/release-darwin.sh",
-        "{workspaceRoot}/scripts/smoke-darwin.sh",
+        "{workspaceRoot}/scripts/release-build.sh",
+        "{workspaceRoot}/scripts/release-package.py",
+        "{workspaceRoot}/scripts/release-smoke.sh",
         "sharedGlobals"
       ],
       "outputs": [

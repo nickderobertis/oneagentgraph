@@ -3,15 +3,15 @@
 # The Linux target/profile is the native integration journey for this same driver.
 set -euo pipefail
 fail() {
-  echo "release-darwin: $1" >&2
-  echo 'ACTION: run bash scripts/release-darwin.sh <x86_64-apple-darwin|aarch64-apple-darwin> <vX.Y.Z> <absolute-output-directory>' >&2
+  echo "release-build: $1" >&2
+  echo 'ACTION: run bash scripts/release-build.sh <x86_64-apple-darwin|aarch64-apple-darwin|x86_64-unknown-linux-gnu> <vX.Y.Z> <absolute-output-directory>' >&2
   exit 2
 }
 [ "$#" -eq 3 ] || [ "$#" -eq 5 ] || fail 'three arguments are required (or append --profile dev for a native packaging journey)'
 TARGET=$1
 TAG=$2
 OUT=$3
-case "$TARGET" in x86_64-apple-darwin|aarch64-apple-darwin|x86_64-unknown-linux-gnu) ;; *) fail "unsupported Darwin target: $TARGET";; esac
+case "$TARGET" in x86_64-apple-darwin|aarch64-apple-darwin|x86_64-unknown-linux-gnu) ;; *) fail "unsupported release target: $TARGET";; esac
 [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || fail 'tag must be a release version'
 [[ "$OUT" == /* ]] || fail 'output directory must be absolute'
 PROFILE=release

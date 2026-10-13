@@ -134,7 +134,7 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         .env("CARGO_TARGET_DIR", &target_dir)
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .args([
-            "scripts/release-darwin.sh",
+            "scripts/release-build.sh",
             native_target,
             &format!("v{version}"),
         ])
@@ -229,7 +229,7 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
     }
     let result = Command::new("bash")
         .current_dir(repo)
-        .args(["scripts/smoke-darwin.sh", native_target])
+        .args(["scripts/release-smoke.sh", native_target])
         .arg(&native)
         .arg(version)
         .output()
