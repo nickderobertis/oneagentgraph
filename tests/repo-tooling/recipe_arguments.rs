@@ -162,3 +162,28 @@ fn the_spliced_form_the_recipes_had_ran_the_tier_and_the_argv_form_does_not() {
         String::from_utf8_lossy(&run.stdout)
     );
 }
+
+/// Bootstrap provisions toolchains only. A dry run drives the real recipe without
+/// installing unrelated tools, and holds its complete expansion to the Nx fan-out.
+/// Existing clones can retain their hooksPath: there is no repository hook left
+/// there for Git to execute, and setup cannot restore one.
+#[test]
+fn bootstrap_leaves_hook_configuration_alone() {
+    let run = Command::new("just")
+        .current_dir(REPO)
+        .args(["--dry-run", "bootstrap"])
+        .output()
+        .expect("run the real bootstrap dry-run");
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr).trim(),
+        "bash scripts/nx.sh run-many -t bootstrap --parallel=1",
+        "bootstrap must only delegate provisioning to the projects"
+    );
+    assert!(!Path::new(REPO).join(".githooks/pre-push").exists());
+    assert!(!Path::new(REPO).join("scripts/activate-hooks.sh").exists());
+}

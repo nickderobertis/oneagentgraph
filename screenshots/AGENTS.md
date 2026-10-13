@@ -282,10 +282,11 @@ output change. For a local review gallery after capture, run:
 
 ```bash
 lane=$(sed -n 's/^arches *= *\[ *"\([^" ]*\)" *\].*/\1/p' screencomp.toml)
-screencomp gallery --input shots/current --arch "$lane" --output shots/review
+gallery=$(sed -n 's/^gallery *= *"\([^"]*\)".*/\1/p' screencomp.toml)
+screencomp gallery --input shots/current --arch "$lane" --output "$gallery"
 ```
 
-The arch is the lane declared in `screencomp.toml`. `shots/review/` is gitignored;
+The arch and gallery directory come from `screencomp.toml`. The gallery is gitignored;
 there is no published gallery or badge. The workflow's check is not required by
 branch protection, so its drift failure remains advisory on the merge path.
 
@@ -300,7 +301,8 @@ without capturing images.
   (gitignored; regenerated). `$SHOTS_OUT` overrides the directory; the reusable
   workflow exports it per lane.
 - `shots/baseline/<lane>.json` — the committed digest baseline (no images).
-- `shots/review/` — the manual review gallery (gitignored).
+- The `[guard].gallery` directory in `screencomp.toml` — the manual review gallery
+  (gitignored).
 - `docs/screenshots/*.svg` and `docs/screenshots/demo.gif` — the committed copies
   the README embeds.
 

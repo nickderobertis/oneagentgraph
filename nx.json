@@ -53,6 +53,7 @@
       "sharedGlobals"
     ],
     "repoToolingReads": [
+      "{workspaceRoot}/.githooks/**/*",
       "{workspaceRoot}/scripts/**/*",
       "{workspaceRoot}/**/project.json",
       "{workspaceRoot}/.github/workflows/**/*",
