@@ -20,6 +20,8 @@
       "inputs": [
         "{projectRoot}/**/*",
         "{workspaceRoot}/screencomp.toml",
+        "{workspaceRoot}/scripts/release-darwin.sh",
+        "{workspaceRoot}/scripts/smoke-darwin.sh",
         "sharedGlobals"
       ],
       "outputs": [

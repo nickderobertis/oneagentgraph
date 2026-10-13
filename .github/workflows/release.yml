@@ -491,6 +491,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: maturin@1.14.1
       - name: Enable Rosetta for Intel product smokes
         run: softwareupdate --install-rosetta --agree-to-license
       - name: Build every Darwin distribution from one binary per target

@@ -6,6 +6,11 @@ import csv
 import hashlib
 import io
 import json
+from email.parser import Parser
+import os
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 import re
 import tarfile
@@ -19,8 +24,15 @@ parser.add_argument('--out', required=True, type=Path)
 parser.add_argument('--tag', required=True)
 args = parser.parse_args()
 root = Path(__file__).resolve().parent.parent
-project = tomllib.loads((root / 'pyproject.toml').read_text())['project']
-version = tomllib.loads((root / 'Cargo.toml').read_text())['package']['version']
+project = tomllib.loads((root / 'pyproject.toml').read_text()).get('project')
+package = tomllib.loads((root / 'Cargo.toml').read_text()).get('package')
+if not isinstance(project, dict) or not all(isinstance(project.get(key), str) and project[key] for key in ['name', 'requires-python', 'description']):
+    parser.error('pyproject.toml must define project name, requires-python and description strings; restore the project metadata')
+if not re.fullmatch(r'[A-Za-z0-9]+(?:[-_.][A-Za-z0-9]+)*', project['name']):
+    parser.error('project name is not a valid distribution name; restore pyproject.toml project.name')
+if not isinstance(package, dict) or not isinstance(package.get('version'), str):
+    parser.error('Cargo.toml must define a package version string; restore package.version')
+version = package['version']
 if args.tag != f'v{version}' or not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version):
     parser.error('release tag must equal v plus the Cargo.toml version')
 binary = args.binary.read_bytes()
@@ -31,29 +43,42 @@ with tarfile.open(archive, 'w:gz') as tar:
     for name in ['README.md', 'LICENSE', 'CHANGELOG.md']:
         tar.add(root / name, arcname=name)
 (args.out / f'{archive.name}.sha256').write_text(f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n')
-arch = 'x86_64' if args.target.startswith('x86_64') else 'arm64'
-# Match Rust's minimum supported deployment versions for these targets.
-platform = f'macosx_{"10_12" if arch == "x86_64" else "11_0"}_{arch}'
-if args.target == 'x86_64-unknown-linux-gnu':
-    platform = 'linux_x86_64'
-name = project['name'].replace('-', '_')
-# PEP 440 spells SemVer prereleases differently; this repository publishes plain
-# release versions. Refuse a suffix rather than emit invalid wheel metadata.
-if not re.fullmatch(r'\d+\.\d+\.\d+', version):
-    parser.error('CLI wheel packaging requires a plain release version')
-info = f'{name}-{version}.dist-info'
-files = {
-    f'{name}-{version}.data/scripts/oneagentgraph': binary,
-    f'{info}/METADATA': (f'Metadata-Version: 2.1\nName: {project["name"]}\nVersion: {version}\nRequires-Python: {project["requires-python"]}\nSummary: {project["description"]}\nLicense: MIT\n\n' + (root / 'README.md').read_text()).encode(),
-    f'{info}/WHEEL': f'Wheel-Version: 1.0\nGenerator: oneagentgraph release-package\nRoot-Is-Purelib: false\nTag: py3-none-{platform}\n'.encode(),
-    f'{info}/licenses/LICENSE': (root / 'LICENSE').read_bytes(),
-}
+# Maturin's existing PEP 517 metadata producer exposes the packaging seam
+# without a build. Keep its metadata and version normalization authoritative.
+candidates = [shutil.which('maturin'), str(Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo'))) / 'bin/maturin')]
+maturin = None
+for candidate in candidates:
+    if candidate and Path(candidate).is_file() and subprocess.check_output([candidate, '--version'], text=True).strip() == 'maturin 1.14.1':
+        maturin = candidate
+        break
+if not maturin:
+    parser.error('maturin 1.14.1 is required; run bash scripts/setup-packaging.sh')
+with tempfile.TemporaryDirectory(dir=args.out) as metadata_dir:
+    command = [maturin, 'pep517', 'write-dist-info', '--bindings', 'bin', '--target', args.target, '--locked', '--metadata-directory', metadata_dir]
+    if args.target == 'x86_64-unknown-linux-gnu':
+        command += ['--compatibility', 'linux']
+    subprocess.run(command, cwd=root, check=True)
+    infos = list(Path(metadata_dir).glob('*.dist-info'))
+    if len(infos) != 1:
+        parser.error('maturin produced ambiguous metadata; inspect the metadata producer output')
+    info = infos[0].name
+    metadata = Parser().parsestr((infos[0] / 'METADATA').read_text())
+    wheel_version = metadata.get('Version')
+    if not wheel_version or not re.fullmatch(r'[A-Za-z0-9.+!_-]+', wheel_version):
+        parser.error('maturin produced no safe wheel version; inspect project metadata')
+    name = info.removesuffix('.dist-info').removesuffix('-' + wheel_version)
+    tags = [line.removeprefix('Tag: ') for line in (infos[0] / 'WHEEL').read_text().splitlines() if line.startswith('Tag: ')]
+    if len(tags) != 1 or not re.fullmatch(r'py3-none-[A-Za-z0-9_.]+', tags[0]):
+        parser.error('maturin produced an unsupported binary-wheel tag; inspect target metadata')
+    tag = tags[0]
+    files = {f'{info}/{path.relative_to(infos[0]).as_posix()}': path.read_bytes() for path in infos[0].rglob('*') if path.is_file()}
+files[f'{name}-{wheel_version}.data/scripts/oneagentgraph'] = binary
 rows = [[path, 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('='), str(len(data))] for path, data in files.items()]
 rows.append([f'{info}/RECORD', '', ''])
 record = io.StringIO()
 csv.writer(record, lineterminator='\n').writerows(rows)
 files[f'{info}/RECORD'] = record.getvalue().encode()
-wheel = args.out / f'{name}-{version}-py3-none-{platform}.whl'
+wheel = args.out / f'{name}-{wheel_version}-{tag}.whl'
 with zipfile.ZipFile(wheel, 'w', zipfile.ZIP_DEFLATED) as z:
     for path, data in files.items():
         entry = zipfile.ZipInfo(path)

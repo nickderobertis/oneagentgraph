@@ -3,10 +3,15 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import re
 import tarfile
 
+if len(sys.argv) != 3:
+    raise SystemExit('ACTION: pass an absolute native-artifact directory and X.Y.Z version')
 out = Path(sys.argv[1])
 version = sys.argv[2]
+if not out.is_absolute() or not out.is_dir() or not re.fullmatch(r'\d+\.\d+\.\d+', version):
+    raise SystemExit('ACTION: pass an existing absolute artifact directory and plain release version')
 def run(argv, **kwargs):
     return subprocess.check_output(argv, text=True, stderr=subprocess.STDOUT, **kwargs)
 def smoke(directory):

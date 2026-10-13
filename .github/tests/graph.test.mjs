@@ -102,7 +102,16 @@ test('actual graph: all event classes, semantic diffs, PR ownership and publish 
    lifecycles.push({diff,fork,pypi,npm,releasePr,runs:lifecycle});
   }
   mkdirSync(join(root,'.github/.telemetry'),{recursive:true});
-  writeFileSync(join(root,'.github/.telemetry/macos-policy.json'),JSON.stringify({schema_version:1,sourceDigest:digest(),scenarios,runs:allRuns,lifecycles},null,2)+'\n');
+  const telemetry={schema_version:2,sourceDigest:digest(),scenarios,runs:allRuns,lifecycles};
+  const golden=JSON.parse(readFileSync(join(root,'.github/tests/fixtures/telemetry.v2.shape.json'),'utf8'));
+  assert.equal(telemetry.schema_version,golden.schema_version);
+  assert.deepEqual(Object.keys(telemetry),golden.rootKeys);
+  for(const row of [...allRuns,...lifecycles.flatMap(lifecycle=>lifecycle.runs)].flatMap(run=>run.rows)) {
+   assert.deepEqual(Object.keys(row).filter(key=>!golden.optionalRowKeys.includes(key)),golden.rowKeys);
+   if(row.targets) assert.ok(row.targets.length>0,'empty optional target lists must be omitted');
+  }
+  assert.deepEqual(JSON.parse(JSON.stringify(telemetry)).runs,telemetry.runs,'job rows and optional targets must round-trip');
+  writeFileSync(join(root,'.github/.telemetry/macos-policy.json'),JSON.stringify(telemetry,null,2)+'\n');
  } finally {rmSync(history.dir,{recursive:true,force:true});}
 });
 test('graph refuses unresolved runners, calls and matrices',()=>{
@@ -131,6 +140,8 @@ test('release artifact routes retain every platform and gate Darwin publication 
   const built=[...release.jobs[job].strategy.matrix.include.map(row=>row.target),...darwin];
   assert.deepEqual(built.map(targetPackages).sort(),[...targets].sort(),job);
  }
+ const recorded=resolveRun({path:'.github/workflows/release.yml',doc:release},{id:'target-detail',eventName:'release',action:'published',ref:'refs/tags/v0.5.7',event:{}},{macosRequired:false,isReleaseOnly:false}).find(row=>row.job==='darwin');
+ assert.deepEqual(recorded.targets,darwin,'telemetry must identify both sequential target builds');
  const steps=release.jobs.darwin.steps;
  const source=steps.filter(s=>s.run).map(s=>s.run).join('\n');
  for(const target of darwin) assert.ok(source.includes(`scripts/smoke-darwin.sh ${target}`));
@@ -147,5 +158,13 @@ test('release artifact routes retain every platform and gate Darwin publication 
  // download from another run or repository would evade pre-publication proofs.
  for(const job of Object.values(release.jobs)) for(const step of job.steps??[]) if(step.uses?.startsWith('actions/download-artifact@')) {
   assert.equal(step.with?.['run-id'],undefined);assert.equal(step.with?.repository,undefined);
+ }
+});
+
+test('automatic callers cannot opt into the manual Mac diagnostic',()=>{
+ const smoke=workflows().find(w=>w.path.endsWith('/published-smoke.yml'));
+ for(const eventName of ['push','pull_request','release','workflow_run','repository_dispatch','schedule']) {
+  const rows=resolveRun(smoke,{id:`injected-opt-in/${eventName}`,eventName,ref:'refs/heads/main',event:{}},{macosRequired:false,isReleaseOnly:false},{inputs:{macos:true,version:''}});
+  assert.ok(rows.filter(row=>row.job==='macos-diagnostic').every(row=>!row.requested),eventName);
  }
 });

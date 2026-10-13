@@ -3,11 +3,16 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import re
 import tarfile
 import zipfile
 
+if len(sys.argv) != 5:
+    raise SystemExit('ACTION: pass binary, supported Rust target, X.Y.Z version and absolute artifact directory')
 binary, target, version, directory = sys.argv[1:]
 out = Path(directory)
+if target not in ['x86_64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin'] or not re.fullmatch(r'\d+\.\d+\.\d+', version) or not out.is_absolute() or not out.is_dir() or not Path(binary).is_file():
+    raise SystemExit('ACTION: pass an existing binary, supported target, plain release version and absolute directory')
 expected = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
 receipt = json.loads((out / f'{target}.json').read_text())
 assert receipt['target'] == target and receipt['version'] == version

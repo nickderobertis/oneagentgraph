@@ -1,13 +1,21 @@
 #!/usr/bin/env bash
 # Install staged products on the Apple Silicon release host, before publication.
 set -euo pipefail
-TARGET=${1:?target required}
-OUT=${2:?absolute artifact directory required}
-VERSION=${3:?version required}
+fail() {
+  echo "smoke-darwin: $1" >&2
+  echo 'ACTION: run bash scripts/smoke-darwin.sh <x86_64-apple-darwin|aarch64-apple-darwin> <absolute-staged-artifact-directory> <X.Y.Z>' >&2
+  exit 2
+}
+[ "$#" -eq 3 ] || fail 'three arguments are required'
+TARGET=$1
+OUT=$2
+VERSION=$3
+[[ "$OUT" == /* && -d "$OUT" ]] || fail 'staged artifact directory must exist and be absolute'
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || fail 'version must have release-version syntax'
 case "$TARGET" in
   x86_64-apple-darwin) cpu=x86_64; npm_cpu=x64; wheel_platform=macosx_10_12_x86_64 ;;
   aarch64-apple-darwin) cpu=arm64; npm_cpu=arm64; wheel_platform=macosx_11_0_arm64 ;;
-  *) echo "unsupported Darwin target: $TARGET" >&2; exit 1 ;;
+  *) fail "unsupported Darwin target: $TARGET" ;;
 esac
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -21,12 +29,8 @@ python3 -m venv "$work/venv"
 PATH="$work/python/bin:$PATH" /usr/bin/arch "-$cpu" /bin/bash scripts/smoke-published.sh --expect-version "$VERSION" --label "Darwin wheel $TARGET"
 /usr/bin/arch "-$cpu" node --version
 /usr/bin/arch "-$cpu" npm install --prefix "$work/npm" --offline --os=darwin --cpu="$npm_cpu" "$OUT/oneagentgraph-cli-darwin-$npm_cpu-$VERSION.tgz"
-# Drive the real committed launcher with its staged platform carrier.
+# Pack and install the launcher the way a user installs the registry tarball.
 launcher=$(node scripts/npm-build.mjs launcher --out "$work/launcher")
-mkdir -p "$launcher/node_modules"
-cp -R "$work/npm/node_modules/oneagentgraph-cli-darwin-$npm_cpu" "$launcher/node_modules/"
-PATH="$launcher/bin:$PATH" /usr/bin/arch "-$cpu" node "$launcher/bin/oneagentgraph.js" --version
-# The launcher command is an npm bin symlink, as on a normal install.
-mkdir -p "$work/bin"
-ln -s "$launcher/bin/oneagentgraph.js" "$work/bin/oneagentgraph"
-PATH="$work/bin:$PATH" /usr/bin/arch "-$cpu" /bin/bash scripts/smoke-published.sh --expect-version "$VERSION" --label "Darwin npm $TARGET"
+(cd "$launcher" && npm pack --pack-destination "$work")
+/usr/bin/arch "-$cpu" npm install --prefix "$work/npm" --offline --omit=optional --os=darwin --cpu="$npm_cpu" "$work/oneagentgraph-cli-$VERSION.tgz"
+PATH="$work/npm/node_modules/.bin:$PATH" /usr/bin/arch "-$cpu" /bin/bash scripts/smoke-published.sh --expect-version "$VERSION" --label "Darwin npm $TARGET"

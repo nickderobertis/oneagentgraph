@@ -8,7 +8,15 @@ if(args.length!==4||args[0]!=='--metric'||args[2]!=='--telemetry'||!['jobs-per-r
 // repository-root command uses .github/.telemetry instead. Both name the receipt.
 const path=resolve(args[3]);
 const telemetry=JSON.parse(readFileSync(path,'utf8'));
-if(telemetry.schema_version!==1||telemetry.sourceDigest!==digest()||!telemetry.scenarios?.length||!telemetry.runs?.length||!telemetry.lifecycles?.length) throw Error('missing or stale macOS telemetry: run github-workflows:test');
+const object=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
+const text=value=>typeof value==='string'&&value.length>0;
+const list=(value,predicate)=>Array.isArray(value)&&value.length>0&&value.every(predicate);
+const row=value=>object(value)&&text(value.workflow)&&text(value.event)&&text(value.job)&&text(value.name)&&typeof value.requested==='boolean'&&typeof value.target==='string'&&(value.targets===undefined||(Array.isArray(value.targets)&&value.targets.length>0&&value.targets.every(text)))&&typeof value.runner==='string'&&/^(ubuntu|macos|windows)-[a-z0-9.-]+$/.test(value.runner);
+const run=value=>object(value)&&text(value.workflow)&&text(value.event)&&list(value.rows,row);
+const scenario=value=>object(value)&&text(value.class)&&text(value.diff)&&typeof value.fork==='boolean';
+const lifecycle=value=>object(value)&&text(value.diff)&&typeof value.fork==='boolean'&&typeof value.pypi==='boolean'&&typeof value.npm==='boolean'&&typeof value.releasePr==='boolean'&&list(value.runs,run);
+if(!object(telemetry)||telemetry.schema_version!==2||telemetry.sourceDigest!==digest()) throw Error('missing or stale macOS telemetry: run github-workflows:test');
+if(!list(telemetry.scenarios,scenario)||!list(telemetry.runs,run)||!list(telemetry.lifecycles,lifecycle)) throw Error('invalid macOS telemetry structure: run github-workflows:test');
 const mac=run=>run.rows.filter(row=>row.requested&&row.runner.startsWith('macos-'));
 const measurements=args[1]==='jobs-per-run'?telemetry.runs.map(run=>({value:mac(run).length,detail:run})):telemetry.lifecycles.map(lifecycle=>({value:lifecycle.runs.filter(run=>mac(run).length).length,detail:lifecycle}));
 const maximum=Math.max(...measurements.map(m=>m.value));

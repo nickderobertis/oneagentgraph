@@ -43,6 +43,7 @@
       "{workspaceRoot}/scripts/smoke-published.sh",
       "{workspaceRoot}/scripts/release-probe.sh",
       "{workspaceRoot}/scripts/release-package.py",
+      "{workspaceRoot}/scripts/setup-packaging.sh",
       "{workspaceRoot}/scripts/npm-build.mjs",
       "{workspaceRoot}/npm/test/release-targets.test.mjs",
       "{workspaceRoot}/npm/test/support/declaration.mjs",

@@ -161,7 +161,7 @@ export function resolveRun(workflow, scenario, policy, {overrides={},prefix='',i
       } else {
         const runner=render(spec['runs-on'],ctx,outcomes);
         if (typeof runner !== 'string' || !/^(ubuntu|macos|windows)-[a-z0-9.-]+$/.test(runner)) throw Error(`unresolved runner ${workflow.path}:${id}: ${JSON.stringify(runner)}`);
-        rows.push({workflow:workflow.path,event:scenario.id,job:id,name:`${prefix}${name}`,runner,target:matrix.target??matrix.arch??'',requested:active,matrix,needs:needIds});
+        rows.push({workflow:workflow.path,event:scenario.id,job:id,name:`${prefix}${name}`,runner,target:matrix.target??matrix.arch??'',...(spec.env?.DARWIN_TARGETS?{targets:JSON.parse(render(spec.env.DARWIN_TARGETS,ctx,outcomes))}:{}),requested:active,matrix,needs:needIds});
       }
     }
     const result=overrides[id]??(active?'success':'skipped');
