@@ -374,7 +374,7 @@ fn onejudge(
     }
 
     let config_path = context.scratch.join(ONEJUDGE_CONFIG_FILE);
-    let rendered = serde_norway::to_string(&effective).map_err(|err| {
+    let rendered = crate::yaml::to_string(&effective).map_err(|err| {
         Error::InvalidConfig(format!("cannot render the effective config: {err}"))
     })?;
     write(&config_path, &rendered)?;
@@ -1420,7 +1420,7 @@ mod tests {
     fn a_members_own_turn_cap_reaches_the_effective_config() {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
-        let member: Member = serde_norway::from_str(concat!(
+        let member: Member = crate::yaml::from_str(concat!(
             "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\nmax_turns: 9\n",
             "agent: {oneharness_config: ./oneharness.toml}\n",
             "judge: {oneharness_config: ./oneharness.toml}\n",
@@ -1503,7 +1503,7 @@ mod tests {
         )
         .expect("persona");
         let scratch = dir.path().join("scratch");
-        let member: Member = serde_norway::from_str(concat!(
+        let member: Member = crate::yaml::from_str(concat!(
             "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\n",
             "task: its own task\npersona: ./lead.yaml\n",
             "agent: {oneharness_config: ./oneharness.toml}\n",
@@ -1526,7 +1526,7 @@ mod tests {
     fn a_single_sided_member_carries_its_persona_and_needs_a_task() {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
-        let member: Member = serde_norway::from_str(
+        let member: Member = crate::yaml::from_str(
             "kind: oneharness\noneharness_config: ./oneharness.toml\npersona: reviewer\n",
         )
         .expect("a member");
@@ -1561,7 +1561,7 @@ mod tests {
         .expect("a catalog persona");
         let scratch = dir.path().join("scratch");
         let member = |named: &str| -> Member {
-            serde_norway::from_str(&format!(
+            crate::yaml::from_str(&format!(
                 "kind: oneharness\noneharness_config: ./oneharness.toml\npersona: {named}\n"
             ))
             .expect("a member")
@@ -1669,7 +1669,7 @@ mod tests {
         )
         .expect("a persona no graph named");
         let scratch = dir.path().join("scratch");
-        let member: Member = serde_norway::from_str(
+        let member: Member = crate::yaml::from_str(
             "kind: oneharness\noneharness_config: ./oneharness.toml\npersona: reviewer\n",
         )
         .expect("a member");
@@ -1692,7 +1692,7 @@ mod tests {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
         let two_party = |own: &str| -> Member {
-            serde_norway::from_str(&format!(
+            crate::yaml::from_str(&format!(
                 concat!(
                     "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\n",
                     "agent: {{oneharness_config: ./oneharness.toml}}\n",
@@ -1752,9 +1752,9 @@ mod tests {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
         let graph_wide: Member =
-            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+            crate::yaml::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
                 .expect("a member");
-        let own: Member = serde_norway::from_str(concat!(
+        let own: Member = crate::yaml::from_str(concat!(
             "kind: oneharness\noneharness_config: ./oneharness.toml\n",
             "task: write one status update\ndir: ./api\n",
         ))
@@ -1782,7 +1782,7 @@ mod tests {
         // somewhere that is not below the graph's directory at all is the case a
         // scratch-dwelling member is.
         let elsewhere = tempfile::tempdir().expect("tempdir");
-        let absolute: Member = serde_norway::from_str(&format!(
+        let absolute: Member = crate::yaml::from_str(&format!(
             "kind: oneharness\noneharness_config: ./oneharness.toml\ndir: {}\n",
             elsewhere.path().display()
         ))
@@ -1885,7 +1885,7 @@ mod tests {
         let mut literal = context(dir.path(), &scratch);
         literal.task = Some("mind the {task} in this sentence");
         let graph_wide: Member =
-            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+            crate::yaml::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
                 .expect("a member");
         assert_eq!(
             Some(harness_launch(&graph_wide, &literal).prompt.as_str()),
@@ -1899,7 +1899,7 @@ mod tests {
     fn a_two_party_members_own_task_takes_the_runs_the_same_way() {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
-        let member: Member = serde_norway::from_str(concat!(
+        let member: Member = crate::yaml::from_str(concat!(
             "kind: onejudge\nbase_config: ./base.yaml\nmode: bypass\n",
             "task: \"{task}\\n\\nand judge it\"\n",
             "agent: {oneharness_config: ./oneharness.toml}\n",
@@ -1946,7 +1946,7 @@ mod tests {
     /// its judge list read through the member field that accepts both the
     /// single spelling and the list.
     fn member(document: &str) -> OnejudgeMember {
-        serde_norway::from_str(&format!(
+        crate::yaml::from_str(&format!(
             "base_config: ./base.yaml\nmode: bypass\nagent: {{oneharness_config: ./oneharness.toml}}\n{document}"
         ))
         .expect("a member")
@@ -1956,7 +1956,7 @@ mod tests {
     /// scratch, or the refusal it earns.
     fn compose(dir: &Path, scratch: &Path, document: &str) -> Result<Value, Error> {
         let agent: AgentSide =
-            serde_norway::from_str("oneharness_config: ./oneharness.toml\n").expect("a side");
+            crate::yaml::from_str("oneharness_config: ./oneharness.toml\n").expect("a side");
         let member = member(document);
         provider_block(
             &member.judge,
@@ -2431,7 +2431,7 @@ mod tests {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
         let member: Member =
-            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+            crate::yaml::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
                 .expect("a member");
         // Top-level keys only, so a setting appended below is one and not the
         // last line of a `[harness.…]` section.
@@ -2482,7 +2482,7 @@ mod tests {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
         let member: Member =
-            serde_norway::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
+            crate::yaml::from_str("kind: oneharness\noneharness_config: ./oneharness.toml\n")
                 .expect("a member");
         for (config, expected) in [
             ("not = toml = here\n", "not valid TOML"),

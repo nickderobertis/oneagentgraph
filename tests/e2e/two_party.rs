@@ -345,8 +345,7 @@ fn beside(name: &str, settings: &str, task: &str) -> String {
         settings = settings,
     );
     // Through the serializer, for the reason `graph_with` gives.
-    let quoted = serde_norway::to_string(&serde_norway::Value::String(task.to_string()))
-        .expect("a task serializes");
+    let quoted = oneagentgraph::yaml::to_string(task).expect("a task serializes");
     document.push_str(&format!("    task: {}", quoted.trim_start_matches("---\n")));
     if !document.ends_with('\n') {
         document.push('\n');
@@ -363,26 +362,25 @@ fn beside(name: &str, settings: &str, task: &str) -> String {
 /// the one text every **agent** turn carries: a task steers only the turn it
 /// opens, so a sentinel that has to fire on a later turn goes here.
 fn base_without_done_when(system: &str) -> String {
-    let mut document: serde_norway::Value =
-        serde_norway::from_str(BASE).expect("the base is a YAML document");
-    let mapping = document.as_mapping_mut().expect("a mapping");
-    let key = serde_norway::Value::String("system_prompt".to_string());
+    let mut document: serde_json::Value =
+        oneagentgraph::yaml::from_str(BASE).expect("the base is a YAML document");
+    let mapping = document.as_object_mut().expect("a mapping");
     let standing = mapping
-        .get(&key)
-        .and_then(serde_norway::Value::as_str)
+        .get("system_prompt")
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
     mapping.insert(
-        key,
-        serde_norway::Value::String(format!("{standing}\n{system}\n")),
+        "system_prompt".to_string(),
+        serde_json::Value::String(format!("{standing}\n{system}\n")),
     );
     let user = mapping
         .get_mut("user")
         .expect("the base has a user block")
-        .as_mapping_mut()
+        .as_object_mut()
         .expect("user is a mapping");
-    user.remove("done_when");
-    serde_norway::to_string(&document).expect("the base serializes")
+    user.shift_remove("done_when");
+    oneagentgraph::yaml::to_string(&document).expect("the base serializes")
 }
 
 /// The task every held conversation below runs on: one the command judge

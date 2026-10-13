@@ -1370,7 +1370,7 @@ mod tests {
     use super::*;
 
     fn parse(document: &str) -> GraphConfig {
-        serde_norway::from_str(document).expect("a graph")
+        crate::yaml::from_str(document).expect("a graph")
     }
 
     const ONE_MEMBER: &str = concat!(
@@ -1516,7 +1516,7 @@ mod tests {
         );
         // And a schedule that named none serializes without one, so a document
         // written before the field existed round-trips unchanged.
-        let rendered = serde_norway::to_string(&inherited).expect("a schedule serializes");
+        let rendered = crate::yaml::to_string(&inherited).expect("a schedule serializes");
         assert!(!rendered.contains("start_after"), "{rendered}");
     }
 
@@ -1681,7 +1681,7 @@ mod tests {
                 settings: Default::default(),
             })]
         );
-        let written = serde_norway::to_string(&single).expect("serializes");
+        let written = crate::yaml::to_string(&single).expect("serializes");
         assert!(
             written.contains("    judge:\n      oneharness_config: ./j.toml\n"),
             "{written}"
@@ -1730,7 +1730,7 @@ mod tests {
             member.judge.iter().map(JudgeSide::kind).collect::<Vec<_>>(),
             vec!["oneharness", "llmlint", "command"]
         );
-        let written = serde_norway::to_string(&stacked).expect("serializes");
+        let written = crate::yaml::to_string(&stacked).expect("serializes");
         assert!(
             written.contains("    judge:\n    - oneharness_config: ./j.toml\n"),
             "{written}"
@@ -1780,7 +1780,7 @@ mod tests {
             ("3", "judge: 3 is neither one side nor a list of sides"),
             ("[1]", "judge entry 1: 1 is not a mapping"),
         ] {
-            let err = serde_norway::from_str::<GraphConfig>(&document(judge))
+            let err = crate::yaml::from_str::<GraphConfig>(&document(judge))
                 .expect_err(&format!("{judge} must be refused"));
             assert!(err.to_string().contains(expected), "{judge}: {err}");
         }
@@ -1882,7 +1882,7 @@ mod tests {
             let graph = parse(&unchanged);
             assert_eq!(graph.events, None);
             assert!(validate(&graph).is_ok(), "{unchanged}");
-            let rendered = serde_norway::to_string(&graph).expect("a graph serializes");
+            let rendered = crate::yaml::to_string(&graph).expect("a graph serializes");
             assert!(!rendered.contains("events"), "{rendered}");
         }
     }
@@ -1934,7 +1934,7 @@ mod tests {
             let graph = parse(&unchanged);
             assert_eq!(graph.personas, None);
             assert!(validate(&graph).is_ok(), "{unchanged}");
-            let rendered = serde_norway::to_string(&graph).expect("a graph serializes");
+            let rendered = crate::yaml::to_string(&graph).expect("a graph serializes");
             assert!(!rendered.contains("personas"), "{rendered}");
         }
     }
@@ -2034,7 +2034,7 @@ mod tests {
             };
             assert!(build.pre_turn.is_empty());
             assert!(validate(&graph).is_ok(), "{unchanged}");
-            let rendered = serde_norway::to_string(&graph).expect("a graph serializes");
+            let rendered = crate::yaml::to_string(&graph).expect("a graph serializes");
             assert!(!rendered.contains("pre_turn"), "{rendered}");
         }
     }
@@ -2108,7 +2108,7 @@ mod tests {
             "    judge: {oneharness_config: ./j.toml}\n",
             "    pre_turn:\n      - {command: [queue-depth]}\n",
         );
-        let err = serde_norway::from_str::<GraphConfig>(document)
+        let err = crate::yaml::from_str::<GraphConfig>(document)
             .expect_err("a two-party member has no pre_turn");
         assert!(err.to_string().contains("pre_turn"), "{err}");
     }
@@ -2152,7 +2152,7 @@ mod tests {
         assert_eq!(graph.members["monitor"].schedule(), monitor.schedule);
         assert_eq!(graph.members["monitor"].dir(), monitor.dir.as_deref());
         let reparsed: GraphConfig =
-            serde_norway::from_str(&serde_norway::to_string(&graph).expect("serializes"))
+            crate::yaml::from_str(&crate::yaml::to_string(&graph).expect("serializes"))
                 .expect("reparses");
         assert_eq!(reparsed, graph);
 
@@ -2188,7 +2188,7 @@ mod tests {
             assert!(validate(&unchanged).is_ok(), "version {version}");
             assert_eq!(unchanged.members["monitor"].schedule(), None);
             assert_eq!(unchanged.members["monitor"].dir(), None);
-            let rendered = serde_norway::to_string(&unchanged).expect("a graph serializes");
+            let rendered = crate::yaml::to_string(&unchanged).expect("a graph serializes");
             assert!(!rendered.contains("dir"), "{rendered}");
             assert!(!rendered.contains("schedule"), "{rendered}");
         }
@@ -2296,7 +2296,7 @@ mod tests {
             .members
             .values()
             .all(|member| member.declared_background().is_none()));
-        let rendered = serde_norway::to_string(&current).expect("a graph serializes");
+        let rendered = crate::yaml::to_string(&current).expect("a graph serializes");
         assert!(!rendered.contains("background"), "{rendered}");
 
         // Under every older schema the same document is the inference those
@@ -2332,7 +2332,7 @@ mod tests {
         );
         assert_eq!(declared.members["worker"].declared_background(), Some(true));
         let reparsed: GraphConfig =
-            serde_norway::from_str(&serde_norway::to_string(&declared).expect("serializes"))
+            crate::yaml::from_str(&crate::yaml::to_string(&declared).expect("serializes"))
                 .expect("reparses");
         assert_eq!(reparsed, declared);
 
@@ -2362,10 +2362,10 @@ mod tests {
     /// The contract's own default: a side streams unless a graph turns it off.
     #[test]
     fn an_agent_side_streams_unless_it_is_turned_off() {
-        let side: AgentSide = serde_norway::from_str("oneharness_config: ./a.toml\n").unwrap();
+        let side: AgentSide = crate::yaml::from_str("oneharness_config: ./a.toml\n").unwrap();
         assert!(side.stream);
         let quiet: AgentSide =
-            serde_norway::from_str("oneharness_config: ./a.toml\nstream: false\n").unwrap();
+            crate::yaml::from_str("oneharness_config: ./a.toml\nstream: false\n").unwrap();
         assert!(!quiet.stream);
     }
 
@@ -2408,7 +2408,7 @@ mod tests {
             serde_json::json!("./x.md")
         );
         let reparsed: GraphConfig =
-            serde_norway::from_str(&serde_norway::to_string(&graph).expect("serializes"))
+            crate::yaml::from_str(&crate::yaml::to_string(&graph).expect("serializes"))
                 .expect("reparses");
         assert_eq!(reparsed, graph);
 

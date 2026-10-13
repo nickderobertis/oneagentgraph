@@ -876,7 +876,7 @@ pub fn apply_overrides(document: &mut Value, overrides: &[Override]) -> Result<(
             // never one: an override that meant "absent" would be no override.
             let written = Value::String(value.clone());
             let mut candidates = Vec::new();
-            if let Some(parsed) = serde_norway::from_str::<Value>(value)
+            if let Some(parsed) = crate::yaml::from_str::<Value>(value)
                 .ok()
                 .filter(|parsed| !parsed.is_null() && parsed != &written)
             {
@@ -1000,8 +1000,32 @@ fn background_overrides(
     Ok(overrides)
 }
 
-fn graph_from_value(document: &Value) -> Result<GraphConfig, serde_norway::Error> {
-    serde_norway::from_value(serde_norway::to_value(document)?)
+/// Read one graph document the way every caller does: parsed loosely, handed to
+/// `prepare` — where the environment's and the request's overrides go — and only
+/// then read as a graph, so an override is checked against the schema rather
+/// than against the document as written.
+///
+/// Hidden, and outside the contract's surface: public only so the binary's
+/// preflight and the crate's tests read a graph through this one path.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`], prefixed with `origin`, when the document is not
+/// YAML or is not a graph; and whatever `prepare` refuses.
+#[doc(hidden)]
+pub fn read_graph(
+    content: &str,
+    origin: &str,
+    prepare: impl FnOnce(&mut Value) -> Result<(), Error>,
+) -> Result<GraphConfig, Error> {
+    let mut parsed: Value = crate::yaml::from_str(content)
+        .map_err(|err| Error::InvalidConfig(format!("{origin}: {err}")))?;
+    prepare(&mut parsed)?;
+    graph_from_value(&parsed).map_err(|err| Error::InvalidConfig(format!("{origin}: {err}")))
+}
+
+fn graph_from_value(document: &Value) -> Result<GraphConfig, serde_json::Error> {
+    GraphConfig::deserialize(document)
 }
 
 fn insert_leaf(document: &mut Value, parents: &[&str], last: &str, value: Value) {
@@ -1168,17 +1192,12 @@ fn run_announcing(
 ) -> Result<i32, Error> {
     let mut resolver = Resolver::new();
     let graph_document = resolver.resolve(&request.graph, None)?.clone();
-    let mut parsed: Value = serde_norway::from_str(&graph_document.content)
-        .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?;
-    // The environment's say first, so the request's own `--set` — which is the
-    // operator's, typed for this run — wins over it.
-    apply_background_env(&mut parsed, env)?;
-    apply_overrides(&mut parsed, &request.overrides)?;
-    let graph: GraphConfig = serde_norway::from_value(
-        serde_norway::to_value(&parsed)
-            .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?,
-    )
-    .map_err(|err| Error::InvalidConfig(format!("{}: {err}", request.graph.0)))?;
+    let graph = read_graph(&graph_document.content, &request.graph.0, |parsed| {
+        // The environment's say first, so the request's own `--set` — which is
+        // the operator's, typed for this run — wins over it.
+        apply_background_env(parsed, env)?;
+        apply_overrides(parsed, &request.overrides)
+    })?;
     crate::config::validate(&graph)?;
     // The flag beats the graph's own key, and whichever one is in force is
     // checked here — before a directory is created, a ref is fetched, or a
@@ -2043,7 +2062,7 @@ mod tests {
     use super::*;
 
     fn graph(document: &str) -> GraphConfig {
-        serde_norway::from_str(document).expect("a graph")
+        crate::yaml::from_str(document).expect("a graph")
     }
 
     const TWO_MEMBERS: &str = concat!(

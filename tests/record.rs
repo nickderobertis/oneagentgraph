@@ -178,7 +178,7 @@ fn golden_graph() -> GraphConfig {
 #[test]
 fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
     let golden = include_str!("golden/graph.v10.yaml");
-    let written = serde_norway::to_string(&golden_graph()).expect("a graph serializes");
+    let written = oneagentgraph::yaml::to_string(&golden_graph()).expect("a graph serializes");
     assert_eq!(
         written, golden,
         "the graph schema's serialized shape changed. If that was deliberate, bump \
@@ -186,7 +186,7 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
          it, or nothing proves a document written against the old schema still reads."
     );
 
-    let read: GraphConfig = serde_norway::from_str(golden).expect("the golden reads");
+    let read: GraphConfig = oneagentgraph::yaml::from_str(golden).expect("the golden reads");
     assert_eq!(read, golden_graph(), "the golden did not round-trip");
     assert_eq!(read.version, SCHEMA_VERSION);
     oneagentgraph::config::validate(&read).expect("the golden is a graph that could run");
@@ -266,10 +266,11 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
 #[test]
 fn a_version_nine_graph_still_reads_and_is_refused_the_judge_settings_it_predates() {
     let golden = include_str!("golden/graph.v9.yaml");
-    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 9 graph still reads");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 9 graph still reads");
     assert_eq!(graph.version, FIRST_JUDGE_SETTINGS_VERSION - 1);
     oneagentgraph::config::validate(&graph).expect("a version 9 graph still validates");
-    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
     assert_eq!(written, golden, "a version 9 document did not round-trip");
 
     for asking in [
@@ -277,7 +278,7 @@ fn a_version_nine_graph_still_reads_and_is_refused_the_judge_settings_it_predate
         "      settings: {events: true}\n    mode: bypass\n",
     ] {
         let asking: GraphConfig =
-            serde_norway::from_str(&golden.replace("    mode: bypass\n", asking))
+            oneagentgraph::yaml::from_str(&golden.replace("    mode: bypass\n", asking))
                 .expect("it still parses");
         let error = oneagentgraph::config::validate(&asking)
             .expect_err("the field postdates the schema this document declares");
@@ -304,7 +305,8 @@ fn a_version_nine_graph_still_reads_and_is_refused_the_judge_settings_it_predate
 #[test]
 fn a_version_eight_graph_still_reads_and_is_refused_the_two_party_job_it_predates() {
     let golden = include_str!("golden/graph.v8.yaml");
-    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 8 graph still reads");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 8 graph still reads");
     assert_eq!(graph.version, FIRST_TWO_PARTY_JOB_VERSION - 1);
     assert_eq!(graph.members["worker"].dir(), None);
     assert_eq!(graph.members["worker"].schedule(), None);
@@ -312,7 +314,7 @@ fn a_version_eight_graph_still_reads_and_is_refused_the_two_party_job_it_predate
     // An unscheduled two-party member holds the run open, as it did.
     assert!(!graph.is_background("worker"));
 
-    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
     assert_eq!(written, golden, "a version 8 document did not round-trip");
 
     for (field, after) in [
@@ -320,7 +322,7 @@ fn a_version_eight_graph_still_reads_and_is_refused_the_two_party_job_it_predate
         ("schedule", "    mode: bypass\n    schedule: {every: 300}\n"),
     ] {
         let asking: GraphConfig =
-            serde_norway::from_str(&golden.replace("    mode: bypass\n", after))
+            oneagentgraph::yaml::from_str(&golden.replace("    mode: bypass\n", after))
                 .expect("it still parses");
         let error = oneagentgraph::config::validate(&asking)
             .expect_err("the field postdates the schema this document declares");
@@ -350,7 +352,8 @@ fn a_version_eight_graph_still_reads_and_is_refused_the_two_party_job_it_predate
 #[test]
 fn a_version_seven_graph_still_reads_and_is_refused_the_background_it_predates() {
     let golden = include_str!("golden/graph.v7.yaml");
-    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 7 graph still reads");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 7 graph still reads");
     assert_eq!(graph.version, FIRST_BACKGROUND_VERSION - 1);
     for member in graph.members.values() {
         assert_eq!(
@@ -365,7 +368,7 @@ fn a_version_seven_graph_still_reads_and_is_refused_the_background_it_predates()
     assert!(graph.is_background("reporter"));
     assert!(!graph.is_background("worker"));
 
-    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
     assert!(
         !written.contains("background"),
         "an absent declaration must stay absent, or an older reader now meets a key it \
@@ -386,7 +389,7 @@ fn a_version_seven_graph_still_reads_and_is_refused_the_background_it_predates()
         ),
     ] {
         let asking: GraphConfig =
-            serde_norway::from_str(&golden.replace(before, after)).expect("it still parses");
+            oneagentgraph::yaml::from_str(&golden.replace(before, after)).expect("it still parses");
         let error = oneagentgraph::config::validate(&asking)
             .expect_err("the field postdates the schema this document declares");
         assert!(error.to_string().contains("`background`"), "{error}");
@@ -412,7 +415,8 @@ fn a_version_seven_graph_still_reads_and_is_refused_the_background_it_predates()
 #[test]
 fn a_version_six_graph_still_reads_and_is_refused_the_views_it_predates() {
     let golden = include_str!("golden/graph.v6.yaml");
-    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 6 graph still reads");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 6 graph still reads");
     assert_eq!(graph.version, FIRST_PRE_TURN_VERSION - 1);
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
@@ -423,7 +427,7 @@ fn a_version_six_graph_still_reads_and_is_refused_the_views_it_predates() {
     );
     oneagentgraph::config::validate(&graph).expect("a version 6 graph still validates");
 
-    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
     assert!(
         !written.contains("pre_turn"),
         "an absent view list must stay absent, or an older reader now meets a key it \
@@ -431,7 +435,7 @@ fn a_version_six_graph_still_reads_and_is_refused_the_views_it_predates() {
     );
     assert_eq!(written, golden, "a version 6 document did not round-trip");
 
-    let asking: GraphConfig = serde_norway::from_str(&golden.replace(
+    let asking: GraphConfig = oneagentgraph::yaml::from_str(&golden.replace(
         "    persona: ./reporter.yaml\n",
         "    persona: ./reporter.yaml\n    pre_turn:\n    - command: [queue-depth]\n",
     ))
@@ -459,12 +463,13 @@ fn a_version_six_graph_still_reads_and_is_refused_the_views_it_predates() {
 #[test]
 fn a_version_five_graph_still_reads_and_is_refused_the_catalog_it_predates() {
     let golden = include_str!("golden/graph.v5.yaml");
-    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 5 graph still reads");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 5 graph still reads");
     assert_eq!(graph.version, FIRST_PERSONA_CATALOG_VERSION - 1);
     assert_eq!(graph.personas, None, "version 5 has no persona catalog");
     oneagentgraph::config::validate(&graph).expect("a version 5 graph still validates");
 
-    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
     assert!(
         !written.contains("personas"),
         "an absent catalog must stay absent, or an older reader now meets a key it \
@@ -473,7 +478,7 @@ fn a_version_five_graph_still_reads_and_is_refused_the_catalog_it_predates() {
     assert_eq!(written, golden, "a version 5 document did not round-trip");
 
     let named = format!("personas: ./personas\n{golden}");
-    let asking: GraphConfig = serde_norway::from_str(&named).expect("it still parses");
+    let asking: GraphConfig = oneagentgraph::yaml::from_str(&named).expect("it still parses");
     let error = oneagentgraph::config::validate(&asking)
         .expect_err("the key postdates the schema this document declares");
     assert!(error.to_string().contains("`personas`"), "{error}");
@@ -496,7 +501,8 @@ fn a_version_five_graph_still_reads_and_is_refused_the_catalog_it_predates() {
 #[test]
 fn a_version_four_graph_still_reads_and_is_refused_the_block_it_predates() {
     let golden = include_str!("golden/graph.v4.yaml");
-    let graph: GraphConfig = serde_norway::from_str(golden).expect("a version 4 graph still reads");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 4 graph still reads");
     assert_eq!(graph.version, FIRST_EVENT_FILTER_VERSION - 1);
     assert_eq!(graph.events, None, "version 4 has no events block");
     oneagentgraph::config::validate(&graph).expect("a version 4 graph still validates");
@@ -506,7 +512,7 @@ fn a_version_four_graph_still_reads_and_is_refused_the_block_it_predates() {
         "everything version 4 carried is unchanged"
     );
 
-    let written = serde_norway::to_string(&graph).expect("a graph serializes");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
     assert!(
         !written.contains("events"),
         "an absent events block must stay absent, or an older reader now meets a key \
@@ -516,7 +522,7 @@ fn a_version_four_graph_still_reads_and_is_refused_the_block_it_predates() {
 
     // The same document, naming the block its schema predates.
     let named = format!("{golden}events:\n  filter:\n    exclude:\n    - kind: turn-activity\n");
-    let asking: GraphConfig = serde_norway::from_str(&named).expect("it still parses");
+    let asking: GraphConfig = oneagentgraph::yaml::from_str(&named).expect("it still parses");
     let error = oneagentgraph::config::validate(&asking)
         .expect_err("the block postdates the schema this document declares");
     assert!(error.to_string().contains("`events`"), "{error}");

@@ -5,6 +5,12 @@
 members = ["."]
 resolver = "2"
 
+[workspace.dependencies]
+# The one YAML crate, declared here and inherited by every member that reads or
+# writes YAML. serde-saphyr is safe Rust: the libyaml translation the
+# `serde_yaml` family carries is banned in `deny.toml` (RUSTSEC-2024-0449).
+serde-saphyr = "1.3"
+
 [package]
 name = "oneagentgraph"
 version = "0.5.9"
@@ -429,7 +435,9 @@ test-doubles = []
 #      stacked-panel journeys in `tests/e2e/panel.rs` are what that holds.
 #   3. 0.17.0's readable `--format text` is the onejudge CLI's; this crate links
 #      the engine and reads no CLI output.
-onejudge = { version = "0.19.1", features = ["cli"] }
+#   4. 0.19.2 reads and writes its YAML through serde-saphyr, so no libyaml
+#      translation reaches this graph through onejudge.
+onejudge = { version = "0.19.2", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -450,7 +458,10 @@ onejudge = { version = "0.19.1", features = ["cli"] }
 # version `onejudge` 0.14.0 asks for, so one bus serves this crate and the
 # conversation it drives; the two requirements are edited together or the graph
 # carries two buses, which `tests/inventory.rs` refuses against the lockfile.
-onemessagebus = "0.9.0"
+#
+# 0.9.1 reads a filter file's YAML through serde-saphyr rather than
+# `serde_yaml_ng`, so no libyaml translation reaches this graph through the bus.
+onemessagebus = "0.9.1"
 # The payload structs are registered with the bus's schema registry as
 # `Message` types, which is a `schemars` derivation. The same major and feature
 # the bus itself takes, so the one `JsonSchema` trait is the bus's.
@@ -598,9 +609,9 @@ serde = { version = "1", features = ["derive"] }
 # envelope carries its payload's fields in the order they arrived — what the
 # contract's "deterministic rendering" promise needs from the JSON mode.
 serde_json = { version = "1", features = ["preserve_order"] }
-# The graph config is YAML. serde_norway is the maintained fork of the
-# deprecated serde_yaml; `cargo deny` is what keeps that choice honest.
-serde_norway = "0.9"
+# The graph config, personas, base configs and the effective onejudge config are
+# YAML, read and written through `src/yaml.rs` alone.
+serde-saphyr = { workspace = true }
 thiserror = "2"
 # A remote ref is recorded content-addressed, so replay never depends on the URL
 # staying stable — that record is a SHA-256 of the exact bytes fetched.
@@ -678,8 +689,9 @@ sha2 = "0.10"
 # onejudge in-process: the reader answers a value a test can assert on, it is
 # pinned by `Cargo.lock` rather than by whatever is on a machine's `PATH`, and it
 # needs nothing installed for the gate to run offline on every platform leg.
-# Dev-only — nothing here reaches a consumer's build.
-onevcs = "0.16.0"
+# Dev-only — nothing here reaches a consumer's build. 0.51.0 reads its own YAML
+# through serde-saphyr, so the libyaml translation no longer reaches the dev graph.
+onevcs = "0.51.0"
 
 [[test]]
 name = "e2e"

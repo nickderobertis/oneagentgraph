@@ -439,14 +439,14 @@ pub const BASE: &str = concat!(
 /// double-quoted scalar, and the parser refused the document. The correct
 /// quoting differs per value and per context — single quotes fail on an
 /// apostrophe, plain scalars on `: ` — so every journey's author would have to
-/// re-derive it. `serde_norway` does not: quoting what needs quoting is the one
+/// re-derive it. The serializer does not: quoting what needs quoting is the one
 /// thing a serializer cannot get wrong.
 ///
 /// A `skeleton` is `concat!` rather than `format!` on purpose: literal text has
 /// nowhere to interpolate into, so the next value has nowhere to go but
 /// `values`.
 pub fn graph_with<K: AsRef<str>, V: AsRef<str>>(skeleton: &str, values: &[(K, V)]) -> String {
-    let mut document: serde_norway::Value = serde_norway::from_str(skeleton)
+    let mut document: serde_json::Value = oneagentgraph::yaml::from_str(skeleton)
         .unwrap_or_else(|err| panic!("the skeleton is not a YAML document ({err}):\n{skeleton}"));
     for (path, value) in values {
         let (path, value) = (path.as_ref(), value.as_ref());
@@ -457,33 +457,30 @@ pub fn graph_with<K: AsRef<str>, V: AsRef<str>>(skeleton: &str, values: &[(K, V)
                 // provider spelled as a command line, `…deps.1` for a second
                 // dependency. One past the end appends, which is how a journey
                 // adds to a list the skeleton already has.
-                serde_norway::Value::Sequence(items) => {
+                serde_json::Value::Array(items) => {
                     let index: usize = key.parse().unwrap_or_else(|_| {
                         panic!("{path}: `{key}` is not an index into the sequence there")
                     });
                     let held = items.len();
                     if index == held {
-                        items.push(serde_norway::Value::Null);
+                        items.push(serde_json::Value::Null);
                     }
                     items.get_mut(index).unwrap_or_else(|| {
                         panic!("{path}: the sequence there has {held} elements, so {index} is past its end")
                     })
                 }
-                holder => {
-                    let key = serde_norway::Value::String(key.to_string());
-                    let holder = holder.as_mapping_mut().unwrap_or_else(|| {
+                holder => holder
+                    .as_object_mut()
+                    .unwrap_or_else(|| {
                         panic!("{path}: the skeleton has neither a mapping nor a sequence there")
-                    });
-                    holder
-                        .entry(key.clone())
-                        .or_insert(serde_norway::Value::Null);
-                    holder.get_mut(&key).expect("the entry just inserted")
-                }
+                    })
+                    .entry(key)
+                    .or_insert(serde_json::Value::Null),
             };
         }
-        *at = serde_norway::Value::String(value.to_string());
+        *at = serde_json::Value::String(value.to_string());
     }
-    serde_norway::to_string(&document).expect("a document built from strings serializes")
+    oneagentgraph::yaml::to_string(&document).expect("a document built from strings serializes")
 }
 
 /// The default graph: one two-party member, both sides on the doubled chain,
