@@ -113,3 +113,148 @@ fn package_list() -> Vec<String> {
         .map(|line| line.replace('\\', "/"))
         .collect()
 }
+
+/// The edited release packager carries the same compiled binary through all
+/// distribution forms. Linux executes only its native products; Darwin payloads
+/// are inspected as artifact contracts, never executed on this host.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let scratch = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let work = tempfile::tempdir_in(scratch).expect("packaging workspace");
+    let version = env!("CARGO_PKG_VERSION");
+    let native_target = "x86_64-unknown-linux-gnu";
+    let native = work.path().join(native_target);
+    let target_dir = repo.join("target/release-packaging");
+    let built = Command::new("bash")
+        .current_dir(repo)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .args([
+            "scripts/release-build.sh",
+            native_target,
+            &format!("v{version}"),
+        ])
+        .arg(&native)
+        .args(["--profile", "dev"])
+        .output()
+        .expect("real production builder runs for the native target");
+    assert!(
+        built.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let native_binary = target_dir.join(native_target).join("debug/oneagentgraph");
+    let binary = native_binary.to_str().expect("native binary path");
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+    ] {
+        let out = work.path().join(target);
+        if target != native_target {
+            let result = Command::new("python3")
+                .current_dir(repo)
+                .args([
+                    "scripts/release-package.py",
+                    "--target",
+                    target,
+                    "--binary",
+                    binary,
+                    "--tag",
+                    &format!("v{version}"),
+                    "--out",
+                ])
+                .arg(&out)
+                .output()
+                .expect("release packager runs");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let package = Command::new("node")
+                .current_dir(repo)
+                .args([
+                    "scripts/npm-build.mjs",
+                    "platform",
+                    "--target",
+                    target,
+                    "--binary",
+                    binary,
+                    "--out",
+                ])
+                .arg(out.join("npm"))
+                .output()
+                .expect("npm package builder runs");
+            assert!(
+                package.status.success(),
+                "{}",
+                String::from_utf8_lossy(&package.stderr)
+            );
+            let dir = String::from_utf8(package.stdout).expect("npm package path");
+            let packed = Command::new("npm")
+                .current_dir(dir.trim())
+                .args(["pack", "--pack-destination"])
+                .arg(&out)
+                .output()
+                .expect("npm pack runs");
+            assert!(
+                packed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&packed.stderr)
+            );
+        }
+        let inspected = Command::new("python3")
+            .current_dir(repo)
+            .args([
+                "-c",
+                include_str!("support/release_payload.py"),
+                binary,
+                target,
+                version,
+            ])
+            .arg(&out)
+            .output()
+            .expect("artifact inspector runs");
+        assert!(
+            inspected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&inspected.stderr)
+        );
+    }
+    let result = Command::new("bash")
+        .current_dir(repo)
+        .args(["scripts/release-smoke.sh", native_target])
+        .arg(&native)
+        .arg(version)
+        .output()
+        .expect("native product installs run");
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let rejected = Command::new("python3")
+        .current_dir(repo)
+        .args([
+            "scripts/release-package.py",
+            "--target",
+            "x86_64-apple-darwin",
+            "--binary",
+            binary,
+            "--tag",
+            "v999.0.0",
+            "--out",
+        ])
+        .arg(work.path().join("wrong-tag"))
+        .output()
+        .expect("invalid tag packager runs");
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("release tag must equal"));
+}

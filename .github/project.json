@@ -1,0 +1,53 @@
+{
+  "name": "github-workflows",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": ".github",
+  "tags": [
+    "scope:repo",
+    "lang:js"
+  ],
+  "targets": {
+    "bootstrap": {
+      "command": "npm ci --ignore-scripts --prefix .github"
+    },
+    "test": {
+      "command": "node --test .github/tests/*.test.mjs",
+      "dependsOn": [
+        "bootstrap"
+      ],
+      "cache": false,
+      "inputs": [
+        "{projectRoot}/**/*",
+        "{workspaceRoot}/screencomp.toml",
+        "{workspaceRoot}/scripts/release-build.sh",
+        "{workspaceRoot}/scripts/release-package.py",
+        "{workspaceRoot}/scripts/release-smoke.sh",
+        "sharedGlobals"
+      ],
+      "outputs": [
+        "{workspaceRoot}/.github/.telemetry/macos-policy.json"
+      ]
+    },
+    "lint": {
+      "command": "node .github/syntax-check.mjs",
+      "inputs": [
+        "{projectRoot}/**/*"
+      ]
+    },
+    "budgets": {
+      "command": "node .github/check-budgets.mjs",
+      "dependsOn": [
+        "test"
+      ],
+      "cache": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": [
+        "lint",
+        "budgets"
+      ]
+    }
+  }
+}

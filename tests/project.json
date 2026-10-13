@@ -6,7 +6,7 @@
   "tags": ["scope:tests", "lang:rust"],
   "implicitDependencies": ["oneagentgraph"],
   "targets": {
-    "bootstrap": { "executor": "nx:noop" },
+    "bootstrap": { "command": "bash scripts/setup-packaging.sh" },
     "format": { "command": "just _tier-format contract" },
     "format-check": { "command": "just _tier-fmt-check contract", "inputs": ["contractSource", "{workspaceRoot}/rustfmt.toml"] },
     "lint": {

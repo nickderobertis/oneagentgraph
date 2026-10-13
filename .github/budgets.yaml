@@ -1,0 +1,34 @@
+schema_version: 1
+budgets:
+  # The brief requests both constraints; the manager approved separate scheduling budgets.
+  - id: oneagentgraph-macos-jobs-per-run
+    description: >-
+      Maximum resolved Mac job instances per workflow run, including matrix and
+      reusable jobs, across 12 event classes, 3 diff classes, 2 PR ownership classes,
+      both Darwin architectures and all publish combinations. Explicit manual diagnostic
+      included. inner_measure_reason: one run can occupy several shared Mac slots even
+      when the lifecycle run count stays within its bound. The brief explicitly requests
+      both jobs/run and Mac-spending runs/change bounds; the manager approved separate
+      budgets for these two scheduling constraints.
+    measure: reported
+    command: [node, macos-budget.mjs, --metric, jobs-per-run, --telemetry, .telemetry/macos-policy.json]
+    unit: jobs
+    direction: max
+    threshold: 1
+    timeout_seconds: 30
+  # The brief requests both constraints; the manager approved separate scheduling budgets.
+  - id: oneagentgraph-macos-runs-per-change
+    description: >-
+      Maximum distinct Mac-spending workflow runs over one PR push, base merge,
+      version/changelog-only release PR and merge when used, tag, release build and
+      every workflow_run descendant. Three diff classes, two PR ownership classes,
+      both Darwin architectures and all optional publishing combinations. Explicit
+      manual diagnostics excluded. The brief explicitly requests both jobs/run and
+      Mac-spending runs/change bounds; the manager approved separate budgets for these
+      two scheduling constraints.
+    measure: reported
+    command: [node, macos-budget.mjs, --metric, runs-per-change, --telemetry, .telemetry/macos-policy.json]
+    unit: runs
+    direction: max
+    threshold: 2
+    timeout_seconds: 30

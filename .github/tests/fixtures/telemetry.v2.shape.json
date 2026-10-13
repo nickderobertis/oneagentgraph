@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "rootKeys": ["schema_version", "sourceDigest", "scenarios", "runs", "lifecycles"],
+  "rowKeys": ["workflow", "event", "job", "name", "runner", "target", "requested", "matrix", "needs"],
+  "optionalRowKeys": ["targets", "call"]
+}

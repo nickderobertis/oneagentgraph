@@ -33,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.affected.outputs.rust }}
+      macosRequired: ${{ steps.policy.outputs.macosRequired }}
+      isReleaseOnly: ${{ steps.policy.outputs.isReleaseOnly }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,6 +49,14 @@ jobs:
         env:
           ONEAGENTGRAPH_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
         run: echo "rust=$(bash scripts/nx-affected.sh --affects oneagentgraph)" >> "$GITHUB_OUTPUT"
+      - name: Install classifier parser
+        run: npm ci --ignore-scripts
+      - name: Classify Mac policy
+        id: policy
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: node .github/macos-policy.mjs classify --event "$GITHUB_EVENT_PATH" --base "$BASE" --head "$HEAD"
 
   # The gate on a clean checkout: bootstrap from scratch, then the deterministic
   # gate (format, clippy, every test tier incl. the contract and binary e2e, the
@@ -114,26 +124,21 @@ jobs:
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
   #
-  # The macOS leg names an arm64 image outright rather than `macos-latest`,
+  # The shared macOS job names an arm64 image outright rather than `macos-latest`,
   # whose architecture is GitHub's to change: Apple Silicon's CPU counters tick
   # in something other than nanoseconds, and the test that proves they are
   # converted (`src/scratch.rs`) runs only on arm64. `macos-26` is arm64; its
   # Intel twin is `macos-26-intel`.
   #
-  # No job-level condition on the `changes` output, on purpose: each leg's
-  # context (`cross (macos-26)`, `cross (windows-latest)`) is required by name,
-  # and a matrix job skipped at job level reports only a bare skipped `cross`.
-  # So every leg is scheduled on every change and its skip lives on its steps:
-  # on a change that reaches no Rust project, a leg succeeds through the one step
-  # that says so — on ubuntu-latest, because the context name comes from the
-  # matrix rather than the runner. tests/repo-tooling/workflow_contract.rs holds
-  # that scheduling.
+  # Windows retains its path-sensitive matrix context. The single Mac lane
+  # combines cross and install assertions; Linux result carriers below preserve
+  # both protected Mac names on every PR, including authorized omissions.
   cross:
     needs: changes
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26, windows-latest]
+        os: [windows-latest]
     runs-on: ${{ needs.changes.outputs.rust == 'true' && matrix.os || 'ubuntu-latest' }}
     defaults:
       run:
@@ -166,6 +171,58 @@ jobs:
         if: needs.changes.outputs.rust == 'true'
         run: just test-quick
       # llmlint: ignore-end[ci_invokes_gate_recipe_not_inline_stages]
+
+  macos:
+    needs: [changes, gate]
+    if: needs.changes.outputs.macosRequired == 'true' && needs.changes.outputs.rust == 'true'
+    runs-on: macos-26
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just,nextest
+      - name: Bootstrap
+        run: just bootstrap
+      # llmlint: ignore-block[ci_invokes_gate_recipe_not_inline_stages] these are the gate's own recipes, each fanned out through Nx, and the leg calls them rather than `just check` because the gate's coverage floor is measured on Linux only (`gate`); the cross legs run the same tiers uninstrumented, which is what `test-quick` is.
+      - name: Format + lint
+        run: just fmt-check && just lint
+      # Every Rust project's `test-quick` target, through Nx.
+      - name: Tests (unit + contract + e2e + repo tooling)
+        run: just test-quick
+      # llmlint: ignore-end[ci_invokes_gate_recipe_not_inline_stages]
+
+      - name: Install (this revision)
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo install --path . --locked
+      - name: Smoke-test the installed binary
+        run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
+
+  macos-results:
+    name: ${{ matrix.context }}
+    needs: [changes, gate, macos]
+    if: always()
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        context: ['cross (macos-26)', 'install (macos-latest)']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Report actual Mac result or authorized omission
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: node .github/macos-result.mjs "$RESULTS"
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency
@@ -257,7 +314,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ needs.changes.outputs.rust == 'true' && matrix.os || 'ubuntu-latest' }}
     defaults:
       run:
@@ -291,7 +348,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:

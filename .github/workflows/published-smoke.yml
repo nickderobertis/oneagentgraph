@@ -45,6 +45,11 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      macos:
+        description: "Run one manual Mac diagnostic (outside automatic lifecycle)"
+        required: false
+        default: false
+        type: boolean
       version:
         description: "Exact version to smoke (default: whatever the registry serves as latest)"
         required: false
@@ -63,7 +68,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -105,7 +110,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, macos-15-intel, windows-latest]
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -175,3 +180,37 @@ jobs:
         # halves against a stubbed `gh` (this path only ever runs when something
         # is already broken, so it cannot be left to prove itself in production).
         run: bash scripts/report-workflow-failure.sh
+
+  macos-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.macos == true
+    runs-on: macos-26
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install and smoke both registry products
+        env:
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          if [ -n "${REQUESTED:-}" ] && ! [[ "$REQUESTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::requested version is not X.Y.Z" >&2
+            exit 1
+          fi
+          pypi=oneagentgraph-cli
+          npm_spec=oneagentgraph-cli
+          if [ -n "${REQUESTED:-}" ]; then
+            pypi="$pypi==$REQUESTED"
+            npm_spec="$npm_spec@$REQUESTED"
+          fi
+          pip install --no-cache-dir "$pypi"
+          bash scripts/smoke-published.sh ${REQUESTED:+--expect-version "$REQUESTED"} --label "manual Mac PyPI"
+          pip uninstall -y oneagentgraph-cli
+          npm install -g --prefer-online "$npm_spec"
+          bash scripts/smoke-published.sh ${REQUESTED:+--expect-version "$REQUESTED"} --label "manual Mac npm"

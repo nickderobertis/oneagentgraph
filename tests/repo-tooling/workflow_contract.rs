@@ -403,12 +403,19 @@ impl Workflow {
                     "{}'s `{id}` matrix has more than one axis; extend this test to render it",
                     self.file
                 );
-                let (_, values) = matrix.iter().next().unwrap();
+                let (axis, values) = matrix.iter().next().unwrap();
                 values
                     .as_sequence()
                     .expect("a matrix axis is a list")
                     .iter()
-                    .map(|v| format!("{name} ({})", v.as_str().expect("a matrix value")))
+                    .map(|v| {
+                        let value = v.as_str().expect("a matrix value");
+                        if name == "${{ matrix.context }}" && axis.as_str() == Some("context") {
+                            value.to_owned()
+                        } else {
+                            format!("{name} ({value})")
+                        }
+                    })
                     .collect()
             }
         }
@@ -502,10 +509,13 @@ impl Workflow {
     /// it, every job it needs is scheduled, and its own `if` holds.
     fn scheduled(&self, id: &str, context: &Context) -> bool {
         self.triggered(context)
-            && self
-                .needs(id)
-                .iter()
-                .all(|need| self.scheduled(need, context))
+            && (self.job(id)["if"]
+                .as_str()
+                .is_some_and(|cond| cond.contains("always()"))
+                || self
+                    .needs(id)
+                    .iter()
+                    .all(|need| self.scheduled(need, context)))
             && self.job(id)["if"]
                 .as_str()
                 .is_none_or(|cond| evaluate(cond, context).truthy())
@@ -555,6 +565,10 @@ fn event(name: &str, head_ref: &str, head_repo: &str, rust_affected: bool) -> Co
     let text = |value: &str| Val::Str(value.to_string());
     let mut context = Context::from([
         ("github.event_name".to_string(), text(name)),
+        (
+            "needs.changes.outputs.macosRequired".to_string(),
+            text(&(name == "pull_request" && !head_ref.starts_with("release-plz-")).to_string()),
+        ),
         ("github.repository".to_string(), text(REPOSITORY)),
         ("github.sha".to_string(), text(SHA)),
         (

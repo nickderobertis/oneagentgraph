@@ -31,7 +31,7 @@
       "sharedGlobals"
     ],
     "crateFormat": ["{workspaceRoot}/src/**/*.rs", "{workspaceRoot}/rustfmt.toml", "sharedGlobals"],
-    "contractSource": ["{workspaceRoot}/tests/*.rs", "sharedGlobals"],
+    "contractSource": ["{workspaceRoot}/tests/*.rs", "{workspaceRoot}/tests/support/**/*", "sharedGlobals"],
     "contractReads": [
       "{workspaceRoot}/tests/golden/**/*",
       "{workspaceRoot}/tests/recorded/**/*",
@@ -41,7 +41,17 @@
       "{workspaceRoot}/README.md",
       "{workspaceRoot}/release-targets.toml",
       "{workspaceRoot}/scripts/smoke-published.sh",
-      "{workspaceRoot}/scripts/release-probe.sh"
+      "{workspaceRoot}/scripts/release-probe.sh",
+      "{workspaceRoot}/scripts/release-package.py",
+      "{workspaceRoot}/scripts/release-build.sh",
+      "{workspaceRoot}/scripts/release-smoke.sh",
+      "{workspaceRoot}/scripts/setup-packaging.sh",
+      "{workspaceRoot}/scripts/npm-build.mjs",
+      "{workspaceRoot}/npm/test/release-targets.test.mjs",
+      "{workspaceRoot}/npm/test/support/declaration.mjs",
+      "{workspaceRoot}/pyproject.toml",
+      "{workspaceRoot}/.github/workflows/release.yml",
+      "{workspaceRoot}/npm/oneagentgraph-cli/package.json"
     ],
     "e2eSource": ["{workspaceRoot}/tests/e2e/**/*.rs", "sharedGlobals"],
     "e2eReads": ["{workspaceRoot}/README.md", "{workspaceRoot}/scripts/smoke-published.sh"],
