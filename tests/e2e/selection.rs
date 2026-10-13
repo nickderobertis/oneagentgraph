@@ -972,10 +972,14 @@ fn plugins_flags(argv: &[String]) -> Vec<(usize, bool)> {
 fn a_member_whose_config_names_no_plugins_starts_codex_with_plugins_off() {
     for argv in codex_launches_under(CODEX_CHAIN) {
         let flags = plugins_flags(&argv);
+        // `-c features.plugins=false` is the spelling oneharness releases, so a
+        // caller's own later `-c features.plugins=true` can still win.
         let off = flags
             .iter()
-            .position(|(_, on)| !on)
-            .unwrap_or_else(|| panic!("codex was started without plugins off: {argv:?}"));
+            .position(|&(at, on)| !on && argv[at] == "-c")
+            .unwrap_or_else(|| {
+                panic!("codex was started without -c features.plugins=false: {argv:?}")
+            });
         assert!(
             flags[off..].iter().all(|(_, on)| !on),
             "a later flag turns plugins back on: {argv:?}"
