@@ -6,12 +6,17 @@ import { parse as toml } from '../node_modules/smol-toml/dist/index.js';
 // This prefix is the repository's release-plz convention. Authors are not an
 // authority: its PAT and an ordinary developer share the same login.
 const prefix = 'release-plz-';
+const version = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+function removeVersion(value) {
+  if (!version.test(value.version)) throw Error('missing or invalid package version');
+  delete value.version;
+}
 const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 function withoutVersion(path, source) {
   if (path === 'Cargo.toml') {
     const value = toml(source);
     if (!value.package?.version) throw Error('missing package version');
-    delete value.package.version;
+    removeVersion(value.package);
     return value;
   }
   if (path === 'Cargo.lock') {
@@ -20,29 +25,35 @@ function withoutVersion(path, source) {
     // package version may move in a release-only change.
     const own = value.package.filter(p => p.name === 'oneagentgraph' && !p.source);
     if (own.length !== 1) throw Error('missing or ambiguous root package');
-    delete own[0].version;
+    removeVersion(own[0]);
     return value;
   }
   if (['package.json', 'package-lock.json', 'npm/oneagentgraph-cli/package.json'].includes(path)) {
     const value = JSON.parse(source);
-    delete value.version;
-    if (path === 'package-lock.json' && value.packages?.['']) delete value.packages[''].version;
+    removeVersion(value);
+    if (path === 'package-lock.json' && value.packages?.['']) removeVersion(value.packages['']);
     // Optional dependency pins in the generated launcher are release versions,
     // but their names must remain unchanged.
     if (path === 'npm/oneagentgraph-cli/package.json') {
-      for (const name of Object.keys(value.optionalDependencies ?? {})) value.optionalDependencies[name] = '<version>';
+      for (const name of Object.keys(value.optionalDependencies ?? {})) {
+        if (!/^oneagentgraph-cli-(linux-(x64|arm64)|darwin-(x64|arm64)|win32-x64)$/.test(name) || !version.test(value.optionalDependencies[name])) throw Error('non-version launcher dependency');
+        value.optionalDependencies[name] = '<version>';
+      }
     }
     return value;
   }
   if (path === 'pyproject.toml') {
     const value = toml(source);
-    delete value.project?.version;
+    if (value.project?.version !== undefined) removeVersion(value.project);
     return value;
   }
   throw Error(`non-release file: ${path}`);
 }
 export function classify(event, base, head, eventName) {
-  if (eventName && eventName !== 'pull_request') return { isReleaseOnly: false, macosRequired: false, reason: `non-PR event: ${eventName}` };
+  if (eventName && eventName !== 'pull_request') {
+    const known = ['push', 'release', 'workflow_run', 'schedule', 'repository_dispatch', 'workflow_dispatch'];
+    return { isReleaseOnly: false, macosRequired: !known.includes(eventName), reason: `${known.includes(eventName) ? 'non-PR' : 'unrecognised CI'} event: ${eventName}` };
+  }
   const required = reason => ({ isReleaseOnly: false, macosRequired: true, reason });
   try {
     if (!event?.pull_request || (eventName && eventName !== 'pull_request')) return required('unknown PR payload');

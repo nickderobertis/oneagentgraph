@@ -12,6 +12,8 @@ test('real classifier over git histories: release identity alone never authorize
     git('init'); git('config', 'user.email', 'test@example.com'); git('config', 'user.name', 'Test');
     writeFileSync(join(dir, 'Cargo.toml'), '[package]\nname="oneagentgraph"\nversion="0.1.0"\n[dependencies]\nx="1"\n');
     writeFileSync(join(dir, 'CHANGELOG.md'), '# Changes\n');
+    const lock = version => `version = 4\n[[package]]\nname = "oneagentgraph"\nversion = "0.1.0"\n[[package]]\nname = "oneagentgraph"\nversion = "${version}"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\nchecksum = "abc"\n`;
+    writeFileSync(join(dir, 'Cargo.lock'), lock('0.1.0'));
     git('add', '.'); git('commit', '-m', 'base'); const base = git('rev-parse', 'HEAD');
     const event = { repository: { full_name: 'nickderobertis/oneagentgraph' }, pull_request: { title: 'chore: release', user: { login: 'github-actions[bot]' }, head: { ref: 'release-plz-2026', repo: { full_name: 'nickderobertis/oneagentgraph' } }, base: { repo: { full_name: 'nickderobertis/oneagentgraph' } } } };
     const run = (input = event, eventName = 'pull_request', head = 'HEAD') => {
@@ -21,6 +23,9 @@ test('real classifier over git histories: release identity alone never authorize
     writeFileSync(join(dir, 'Cargo.toml'), '[package]\nname="oneagentgraph"\nversion="0.2.0"\n[dependencies]\nx="1"\n');
     git('add', 'Cargo.toml'); git('commit', '-m', 'version');
     assert.equal(run().isReleaseOnly, true);
+    const unknown = run(event, 'unknown-ci-event');
+    assert.equal(unknown.macosRequired, true);
+    assert.match(unknown.reason, /unknown-ci-event/);
     const human = structuredClone(event); human.pull_request.user.login = 'nickderobertis';
     assert.equal(run(human).isReleaseOnly, true);
     const forged = structuredClone(event); forged.pull_request.head.ref = 'feature';
@@ -30,6 +35,10 @@ test('real classifier over git histories: release identity alone never authorize
     assert.equal(run('{').macosRequired, true);
     assert.equal(run(event, 'pull_request', 'missing-ref').macosRequired, true);
     for (const name of ['push', 'release', 'workflow_run', 'schedule', 'repository_dispatch', 'workflow_dispatch']) assert.equal(run('{', name).macosRequired, false);
+    writeFileSync(join(dir, 'Cargo.lock'), lock('0.2.0'));
+    git('add', 'Cargo.lock'); git('commit', '-m', 'same-named registry dependency');
+    assert.equal(run().macosRequired, true);
+    writeFileSync(join(dir, 'Cargo.lock'), lock('0.1.0'));
     writeFileSync(join(dir, 'Cargo.toml'), '[package]\nname="oneagentgraph"\nversion="0.2.0"\n[dependencies]\nx="2"\n');
     git('add', 'Cargo.toml'); git('commit', '-m', 'dependency');
     assert.equal(run().macosRequired, true);

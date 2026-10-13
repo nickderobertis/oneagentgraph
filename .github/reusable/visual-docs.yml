@@ -1,0 +1,558 @@
+# screencomp reusable visual-docs workflow.
+#
+# Call it from a consumer repo and own only the capture; everything downstream —
+# the reproducibility gate, the classify check, the gallery, the GitHub Pages
+# deploy (a canonical gallery on the default branch, a per-PR preview on PRs),
+# and the sticky before/after PR comment — is screencomp's. `screencomp init`
+# scaffolds a caller for this file.
+#
+#   jobs:
+#     visual-docs:
+#       uses: nickderobertis/screencomp/.github/workflows/visual-docs-reusable.yml@vX.Y.Z
+#       with:
+#         capture-command: |
+#           npm ci
+#           npx playwright install --with-deps chromium
+#           npx playwright test          # MUST write $SHOTS_OUT/captures.json plus its PNGs
+#       secrets:
+#         push-token: ${{ secrets.VISUAL_DOCS_PUSH_TOKEN }}   # optional
+#
+# Affected-only monorepos pass a runtime JSON array from an upstream job:
+#
+#   projects: ${{ needs.affected.outputs.projects }}
+#
+# Each object has a unique non-empty `id` and may override `current`, `verify`,
+# `manifest`, and `gallery-title`; capture roots must remain beneath the uploaded
+# `shots/` tree. The shared capture command receives SCREENCOMP_PROJECT and
+# SHOTS_OUT for that project/arch lane. Each project keeps its own manifest,
+# gallery subpath, and sticky comment. See the README for the complete shape.
+#
+# Architecture matrix: which CPU arch(es) to capture is the single committed list
+# `[capture].arches` in screencomp.toml — never a workflow input. Captures run in
+# a Linux container, so only the arch varies. The `arches` job reads that list and
+# every downstream job fans out one lane per arch, each on a matching runner
+# (arm64 -> ubuntu-24.04-arm), with its own baseline `shots/baseline/<arch>.json`
+# and its own gallery subpath. Add an arch to the list to gain a lane.
+#
+# Per-arch job split (each lane):
+#   * `capture` runs INSIDE your container (Playwright/Cypress/…). It only writes
+#     screenshots and hands them off as an artifact. Container images carry your
+#     capture toolchain but NOT host tools (`gh`, a configured `git`, etc.).
+#   * `report` runs on the HOST runner (no container), where `gh`, `git`, and the
+#     screencomp binary are available. It does the reproducibility gate, classify,
+#     gallery, PR comment, and manifest push — all via the `visual-docs`
+#     composable action, so this job is thin glue (see below).
+# A run-wide `deploy-pages` job then publishes every lane's gallery in ONE
+# gh-pages commit and waits for the Pages build it triggers. Grant the caller
+# `pages: read` so it can gate on that build; without it the deploy still
+# coalesces and the gate degrades to a warning.
+# Putting a `gh pr comment` or `git push` step inside the capture container is the
+# bug this split exists to prevent.
+#
+# Baselines are image-free: the repo commits only a per-arch digest manifest
+# (shots/baseline/<arch>.json), never the PNGs. The first run with no committed
+# manifest SEEDS it from the capture (and, when publishing, pushes it); subsequent
+# runs diff against it. Enable Pages (Settings -> Pages -> "Deploy from a branch:
+# gh-pages /") to get galleries.
+#
+# Inline comment thumbnails are fetched through GitHub's anonymous image proxy, so
+# they only render from a PUBLIC Pages site. A private Pages gallery still works as
+# a link, but its inline previews will not load.
+#
+# Keeping gh-pages bounded: galleries DO commit PNGs to the gh-pages branch (the
+# source repo never does — only the digest manifest), so left alone that branch
+# grows without bound: stale /pr-<n>/ previews are never removed (keep_files), and
+# every changed shot leaves its old blob in history forever. Two jobs cap this,
+# ON BY DEFAULT (gh-pages-maintenance: true):
+#   * cleanup-preview — on `pull_request: closed`, deletes that PR's /pr-<n>/.
+#   * prune-history   — on `schedule:`, keeps the most recent gallery versions
+#                       (gh-pages-history-versions, default 20) and collapses older
+#                       history into one base commit, discarding the accreted blobs.
+# `screencomp init` scaffolds a caller that forwards both triggers; a reusable
+# workflow can't self-trigger on schedule/PR-close, so the caller must forward
+# them for the jobs to fire. Opt out with gh-pages-maintenance: false (no need to
+# touch the triggers).
+# llmlint: ignore-file[changed_behavior_has_e2e] This thin reusable workflow only forwards external repo/token values: the gh-pages-maintenance action's real git surgery is exercised against disposable repositories by its dedicated workflow/script tests, and integration contract tests enforce this workflow's repo/token wiring and preflight dependencies.
+name: Visual docs (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      capture-command:
+        description: Shell that writes $SHOTS_OUT/captures.json plus its PNGs.
+        type: string
+        required: true
+      projects:
+        description: >-
+          Dynamic affected-project JSON array. Each object requires a stable `id`
+          and may set `current`, `verify`, `manifest`, and `gallery-title`.
+          Capture roots must remain beneath shots/. Empty preserves the existing
+          single-capture workflow.
+        type: string
+        default: '[]'
+      container:
+        description: Container image the capture runs in (pin to your Playwright version).
+        type: string
+        default: mcr.microsoft.com/playwright:v1.60.0-noble
+      screencomp-version:
+        description: screencomp release to install on the host, or "latest".
+        type: string
+        default: latest
+      arches:
+        description: >-
+          ADVANCED / testing override for the capture arch matrix, as a JSON array
+          string (e.g. '["x86_64"]'). Leave empty (the default) for the normal
+          single-source flow, where the matrix is read from [capture].arches in the
+          committed screencomp.toml. Set it only when there is no committed config to
+          read — e.g. screencomp's own reusable-workflow self-test, which has no
+          repo-level screencomp.toml.
+        type: string
+        default: ''
+      gallery-title:
+        description: Title for the generated gallery.
+        type: string
+        default: Visual docs
+      verify:
+        description: Capture twice and require byte-identical output (the reproducibility gate).
+        type: boolean
+        default: true
+      pages:
+        description: Deploy the gallery to GitHub Pages (canonical on push, per-PR preview on PRs).
+        type: boolean
+        default: true
+      pages-repository:
+        description: External owner/name repository that hosts the galleries. Empty uses this repository.
+        type: string
+        default: ''
+      publish:
+        description: >-
+          Perform external side effects: post the PR comment, push the regenerated
+          manifest, and deploy Pages. Set false to run every step but produce no
+          side effects — a dry run for previewing or for testing the workflow.
+        type: boolean
+        default: true
+      gh-pages-maintenance:
+        description: >-
+          Keep the gh-pages branch bounded: delete a PR's /pr-<n>/ preview when the
+          PR closes (cleanup-preview) and prune gh-pages history to the most recent
+          gallery versions on a schedule (prune-history; see
+          gh-pages-history-versions). On by default — set false to opt out (e.g. you
+          serve Pages from a source other than the gh-pages branch, or prune it with
+          your own tooling). Only fires when the caller also forwards the matching
+          `pull_request: closed` and `schedule:` triggers; the `screencomp init`
+          scaffold does. Also gated on pages + publish, so dry runs skip it.
+        type: boolean
+        default: true
+      gh-pages-history-versions:
+        description: >-
+          How many of the most recent gallery versions (gh-pages commits) the
+          scheduled prune-history job keeps intact; everything older is collapsed
+          into a single base commit. 0 collapses the branch to one fresh commit.
+          Ignored when gh-pages-maintenance is off.
+        type: number
+        default: 20
+      fail-on-drift:
+        description: >-
+          Fail the job when the capture drifts from the committed baseline manifest
+          (the strict gate, default). The developer regenerates and commits the
+          baseline locally with the pre-push guard; CI is the backstop that goes
+          red on anything they missed. Set false to auto-accept drift instead — a
+          loud warning, not a failed check (the lighter model, where changes can
+          slip through unnoticed).
+        type: boolean
+        default: true
+      update-manifest:
+        description: >-
+          Regenerate the baseline manifest and, on a PR when publishing, push it to
+          the PR branch. Off by default: under the strict gate the developer owns
+          the baseline. Turn it on (with fail-on-drift:false) for the CI-auto-accept
+          model, where CI moves the baseline for you.
+        type: boolean
+        default: false
+      comment-base-ref:
+        description: >-
+          Git ref whose committed manifest is the PR comment's "Before". Defaults to
+          the PR base branch, so the sticky comment shows the intended before/after
+          even though classify gates against the (already-updated) committed
+          baseline. Set to a single space or an unknown ref to fall back to diffing
+          the committed manifest.
+        type: string
+        default: ''
+      comment-mode:
+        description: >-
+          `per-project` (default) posts one sticky before/after comment per project
+          lane — correct, but a monorepo with N affected projects gets N comments per
+          PR. `aggregated` instead posts a SINGLE comment covering every affected
+          project (one row each with its counts and its own gallery link, plus a
+          combined summary), upserted in place by one stable marker. The per-project
+          galleries and Pages output are identical either way; only the PR-comment
+          surface consolidates. Recommended for many-project monorepos.
+        type: string
+        default: per-project
+    secrets:
+      push-token:
+        description: >-
+          Token that can trigger workflows, used to push the regenerated manifest
+          to the PR branch. Only needed when the repo enforces required status
+          checks (the default GITHUB_TOKEN cannot trigger runs). See the README's
+          "Branch protection".
+        required: false
+      pages-token:
+        description: Token with contents:write on pages-repository. Required when pages-repository is set.
+        required: false
+
+# Serialize gh-pages writes WITHOUT dropping canonical deploys. Every run writes
+# the same gh-pages branch, so overlapping runs on one ref would race — but the
+# fix is to QUEUE them, not cancel. Keyed by github.ref, the default branch's key
+# (refs/heads/main) is shared by every push and the scheduled prune, so
+# cancel-in-progress:true would let a second push (a follow-up merge, the sync
+# bot's next push) kill the in-flight canonical deploy ~2s in, leaving a blessed
+# gallery half-deployed for someone to re-run by hand. So cancel ONLY PR previews,
+# where a newer push should supersede a stale one; on push/schedule it is off, so
+# runs queue on the shared ref instead of cancelling each other.
+concurrency:
+  group: visual-docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Validate external hosting before matrix resolution can start capture work.
+  # Empty keeps the same-repository path unchanged.
+  pages-preflight:
+    runs-on: ubuntu-latest
+    env:
+      PAGES_REPOSITORY: ${{ inputs.pages-repository }}
+      PAGES_TOKEN: ${{ secrets.pages-token }}
+    steps:
+      - name: Validate external Pages configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -n "$PAGES_REPOSITORY" ] || exit 0
+          [[ "$PAGES_REPOSITORY" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || {
+            echo "::error::pages-repository must be an owner/name" >&2
+            exit 1
+          }
+          [ -n "${PAGES_TOKEN// }" ] || {
+            echo "::error::pages-token is required when pages-repository is configured; provide a token with contents:write on ${PAGES_REPOSITORY}" >&2
+            exit 1
+          }
+
+  # ---- Arches: resolve the capture arch matrix ------------------------------
+  # The single source of truth for which arches to capture is [capture].arches in
+  # screencomp.toml. Install the CLI and let it parse the list, so the matrix
+  # can't drift from the config the local commands use. The `arches` input is an
+  # escape hatch for callers with no committed config (e.g. the self-test); when
+  # empty (the norm) the config is read.
+  arches:
+    needs: pages-preflight
+    if: ${{ github.event_name != 'schedule' && github.event.action != 'closed' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.read.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: nickderobertis/screencomp@v0 # install the CLI on the host
+        with:
+          version: ${{ inputs.screencomp-version }}
+      - name: Resolve [capture].arches
+        id: read
+        shell: bash
+        env:
+          ARCHES_OVERRIDE: ${{ inputs.arches }}
+          PROJECTS_INPUT: ${{ inputs.projects }}
+          DEFAULT_TITLE: ${{ inputs.gallery-title }}
+        run: |
+          set -euo pipefail
+          if [ -n "$ARCHES_OVERRIDE" ]; then
+            matrix="$ARCHES_OVERRIDE"   # explicit override (no committed config to read)
+          else
+            matrix="$(screencomp arches --format json)"
+          fi
+          if [ -z "$matrix" ] || [ "$matrix" = "[]" ]; then
+            echo "::error::no [capture].arches configured in screencomp.toml; add e.g. arches = [\"x86_64\"], or pass the workflow's 'arches' input" >&2
+            exit 1
+          fi
+          projects="$PROJECTS_INPUT"
+          if [ -z "$projects" ] || [ "$projects" = "[]" ]; then
+            projects='[{"id":"","current":"shots/current","verify":"shots/verify"}]'
+          else
+            if ! jq -e '
+              def safe_capture_path:
+                type == "string" and length > 0 and
+                startswith("shots/") and
+                (contains("\\") | not) and
+                (split("/") | all(. != "" and . != "." and . != ".."));
+              def safe_relative_path:
+                type == "string" and length > 0 and
+                (startswith("/") | not) and
+                (contains("\\") | not) and
+                (split("/") | all(. != "" and . != "." and . != ".."));
+              type == "array" and length > 0 and
+              all(.[];
+                type == "object" and
+                (.id | type == "string" and test("^[A-Za-z0-9_-]+$")) and
+                ((has("current") | not) or (.current | safe_capture_path)) and
+                ((has("verify") | not) or (.verify | safe_capture_path)) and
+                ((has("manifest") | not) or (.manifest | safe_relative_path)) and
+                ((has("gallery-title") | not) or
+                  (."gallery-title" | type == "string" and length > 0))) and
+              ([.[].id] | length == (unique | length))
+            ' <<<"$projects" >/dev/null; then
+              echo "::error::projects needs unique non-empty IDs, capture roots under shots/, safe relative manifests, and non-empty gallery titles" >&2
+              exit 1
+            fi
+          fi
+          combined="$(jq -cn --argjson arches "$matrix" --argjson projects "$projects" --arg title "$DEFAULT_TITLE" '
+            {include: [
+              $arches[] as $arch | $projects[] |
+              {
+                arch: $arch,
+                project: .id,
+                current: (.current // ("shots/current/" + .id)),
+                verify: (.verify // ("shots/verify/" + .id)),
+                manifest: (.manifest // (if .id == "" then "" else "shots/baseline/" + .id + "/" + $arch + ".json" end)),
+                gallery_title: (."gallery-title" // $title)
+              }
+            ]}')"
+          echo "matrix=$combined" >>"$GITHUB_OUTPUT"
+
+  # ---- Capture: the ONLY job that runs inside your container ----------------
+  # One lane per configured arch, each on a runner of that arch so the pixels
+  # match the committed baseline's arch.
+  capture:
+    needs: [pages-preflight, arches]
+    if: ${{ github.event_name != 'schedule' && github.event.action != 'closed' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.arches.outputs.matrix).include }}
+    runs-on: ${{ (matrix.arch == 'arm64' || matrix.arch == 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    container: ${{ inputs.container }}
+    permissions:
+      contents: read
+    env:
+      SCREENCOMP_PROJECT: ${{ matrix.project }}
+      SHOTS_OUT: ${{ matrix.current }}/${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Record the runner's CPU. ubuntu-latest hands out heterogeneous CPUs (Intel
+      # vs AMD), and Blink lays text out in floating point, so the last bit of an
+      # anti-aliased glyph edge can differ across CPUs — flipping a dense-text shot
+      # between re-runs even when `verify` is byte-clean on one machine. Logging the
+      # CPU turns "same commit, passes then fails" from a multi-hour spelunk into a
+      # diff you can see. See the screencomp README "Cross-CPU" troubleshooting.
+      - name: Log runner CPU (cross-CPU anti-aliasing drift diagnostics)
+        run: |
+          echo "::group::Runner CPU ($(uname -m))"
+          grep -E -m1 'model name' /proc/cpuinfo \
+            || grep -E 'Model|CPU implementer|CPU part' /proc/cpuinfo | sort -u \
+            || true
+          echo "::endgroup::"
+
+      # Your capture writes $SHOTS_OUT/captures.json plus its PNGs. No host tools are
+      # used here, so the container needs only your capture toolchain — a capture
+      # that would rather not hash its own shots can install this CLI in the
+      # container and end with `screencomp index --input "$SHOTS_OUT"`.
+      - name: Capture screenshots
+        run: ${{ inputs.capture-command }}
+
+      # Reproducibility gate, half 1: capture the SAME build again to a second
+      # tree. The byte comparison happens in `report` (screencomp lives there).
+      - name: Capture again for the reproducibility gate
+        if: ${{ inputs.verify }}
+        env:
+          SHOTS_OUT: ${{ matrix.verify }}/${{ matrix.arch }}
+        run: ${{ inputs.capture-command }}
+
+      # Hand this arch's screenshots to the host-side `report` job.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.project && format('screencomp-shots-{0}-{1}', matrix.project, matrix.arch) || format('screencomp-shots-{0}', matrix.arch) }}
+          path: shots
+          if-no-files-found: error
+          retention-days: 1
+
+  # ---- Report: runs on the HOST runner, where gh/git/screencomp live --------
+  # Thin glue: check out the PR branch, install the CLI, pull this arch's capture
+  # artifact, then hand the entire downstream half — reproducibility gate,
+  # classify, gallery, Pages deploy, sticky PR comment, manifest push — to the
+  # `visual-docs` composite action. That action is the ONE implementation of this
+  # logic; a custom workflow that needs injectable capture steps composes the SAME
+  # action directly (see examples/visual-docs-custom.yml), so the two paths can't
+  # diverge. Internal actions float on the major tag `@v0`, which each release
+  # advances to itself (see release.yml), so they always resolve to the latest 0.x.
+  # The arch is passed explicitly so `report` need not run on a matching-arch
+  # runner (classify is a byte comparison, arch-independent).
+  report:
+    needs: [pages-preflight, arches, capture]
+    runs-on: ubuntu-latest
+    strategy:
+      # Report lanes write the shared PR branch (the sticky comment and, under CI
+      # auto-accept, the manifest push). max-parallel: 1 keeps those checkouts and
+      # pushes ordered while capture remains fully parallel. The gallery branch is
+      # no longer among them — deploy-pages writes it once, for the whole run.
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        include: ${{ fromJSON(needs.arches.outputs.matrix).include }}
+    permissions:
+      contents: write # push the regenerated manifest + the gh-pages gallery
+      pull-requests: write # post the diff comment
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }} # PR branch (empty on push -> the pushed ref)
+          token: ${{ secrets.push-token || github.token }}
+
+      - uses: nickderobertis/screencomp@v0 # install the CLI on the host
+        with:
+          version: ${{ inputs.screencomp-version }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.project && format('screencomp-shots-{0}-{1}', matrix.project, matrix.arch) || format('screencomp-shots-{0}', matrix.arch) }}
+          path: shots
+
+      - uses: nickderobertis/screencomp/visual-docs@v0
+        with:
+          project: ${{ matrix.project }}
+          arch: ${{ matrix.arch }}
+          current: ${{ matrix.current }}
+          manifest: ${{ matrix.manifest }}
+          gallery-title: ${{ matrix.gallery_title }}
+          # verify (half 1) re-captured into shots/verify; point the gate at it.
+          verify-second: ${{ inputs.verify && matrix.verify || '' }}
+          pages: ${{ inputs.pages }}
+          publish: ${{ inputs.publish }}
+          fail-on-drift: ${{ inputs.fail-on-drift }}
+          update-manifest: ${{ inputs.update-manifest }}
+          comment-base-ref: ${{ inputs.comment-base-ref }}
+          # In aggregated mode the per-lane comment is suppressed here; the
+          # aggregate-comment job posts the single combined comment instead.
+          comment-mode: ${{ inputs.comment-mode }}
+          pages-repository: ${{ inputs.pages-repository }}
+          pages-token: ${{ secrets.pages-token }}
+          # Hand the gallery to deploy-pages instead of pushing it here: one
+          # coalesced commit per run rather than one per lane (see that job).
+          pages-artifact: ${{ matrix.project && format('screencomp-gallery-{0}-{1}', matrix.project, matrix.arch) || format('screencomp-gallery-{0}', matrix.arch) }}
+          github-token: ${{ secrets.push-token || github.token }}
+
+  # Each report lane used to push its own gallery, and every push to the gallery
+  # branch starts a GitHub Pages build that kills whichever build is in flight —
+  # so a run with several projects left the site `errored` with the newest gallery
+  # unpublished, silently, because nothing observed the build. This job collects
+  # every lane's gallery artifact, publishes them in a single commit, and then
+  # WAITS for the resulting Pages build, failing the run if it errored. One lane
+  # is unaffected: one artifact, one commit, one build, exactly as before.
+  #
+  # `!cancelled()` rather than plain success: under the strict gate a drifted lane
+  # fails on purpose, and its gallery and PR comment must still publish — a red
+  # check a reviewer cannot see the diff on is the worst outcome. A run whose lanes
+  # all died before building a gallery hands off nothing, and the action no-ops.
+  deploy-pages:
+    needs: [pages-preflight, arches, report]
+    if: ${{ !cancelled() && inputs.pages && inputs.publish && needs.report.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    # Deliberately NO `permissions:` block, unlike every other job here. A called
+    # job's declared permissions must be a subset of what the caller granted, and
+    # exceeding it fails the whole run at parse time — so declaring the `pages:
+    # read` this job wants would break every existing caller the moment they
+    # upgrade. Taking the caller's token as granted instead means the deploy keeps
+    # working on the `contents: write` they already grant, and only the build gate
+    # notices the difference: with `pages: read` (which the `init` scaffold now
+    # grants) it fails the run on an errored build, without it it warns.
+    steps:
+      - uses: nickderobertis/screencomp/visual-docs-pages@v0
+        with:
+          pages-repository: ${{ inputs.pages-repository }}
+          pages-token: ${{ secrets.pages-token }}
+          github-token: ${{ secrets.push-token || github.token }}
+
+  # ---- Aggregate comment: ONE combined comment for a many-project monorepo ---
+  # Runs only in aggregated mode (comment-mode: aggregated), on a PR, after every
+  # report lane has suppressed its own per-project comment. It pulls ALL lanes'
+  # capture artifacts, then hands the matrix to the `visual-docs-aggregate`
+  # composite action, which composes `screencomp comment --projects` over every
+  # affected project and upserts a SINGLE comment (one row per project + a combined
+  # summary) keyed by one stable marker. Comment-only: galleries, Pages, and
+  # baselines are the report job's, untouched here. A custom caller composes the
+  # SAME action after its own report lanes, so the two paths can't diverge.
+  aggregate-comment:
+    needs: [pages-preflight, arches, report]
+    if: ${{ inputs.comment-mode == 'aggregated' && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # fetch the base-ref manifests that source each row's "Before"
+      pull-requests: write # post the single combined comment
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }} # PR branch, for the base-ref manifest diff
+          token: ${{ secrets.push-token || github.token }}
+
+      - uses: nickderobertis/screencomp@v0 # install the CLI on the host
+        with:
+          version: ${{ inputs.screencomp-version }}
+
+      # Every lane's capture, merged back into one shots/ tree so each project's
+      # <current>/<arch>/captures.json is on disk for classification.
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: screencomp-shots-*
+          merge-multiple: true
+          path: shots
+
+      - uses: nickderobertis/screencomp/visual-docs-aggregate@v0
+        with:
+          matrix: ${{ toJSON(fromJSON(needs.arches.outputs.matrix).include) }}
+          comment-base-ref: ${{ inputs.comment-base-ref }}
+          publish: ${{ inputs.publish }}
+          pages-repository: ${{ inputs.pages-repository }}
+          github-token: ${{ secrets.push-token || github.token }}
+
+  # ---- Cleanup: drop a closed PR's preview from gh-pages ---------------------
+  # keep_files:true keeps a main deploy from clobbering live /pr-<n>/ previews,
+  # but nothing else removes them — so without this they pile up forever. Runs
+  # only when the caller forwards `pull_request: closed` (merged or not). The git
+  # surgery is the `gh-pages-maintenance` action (which wraps the one tested
+  # script), floated on `@v0` — no capture, just a branch rewrite. Deleting the
+  # whole /pr-<n>/ prefix removes every arch's preview for that PR at once.
+  cleanup-preview:
+    needs: pages-preflight
+    if: ${{ inputs.pages && inputs.publish && inputs.gh-pages-maintenance && github.event_name == 'pull_request' && github.event.action == 'closed' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # rewrite the gh-pages branch
+    steps:
+      - uses: nickderobertis/screencomp/gh-pages-maintenance@v0
+        with:
+          mode: cleanup
+          pr: ${{ github.event.pull_request.number }}
+          repo: ${{ inputs.pages-repository || github.repository }}
+          token: ${{ inputs.pages-repository && secrets.pages-token || secrets.push-token || github.token }}
+
+  # ---- Prune: bound gh-pages history so old galleries don't accrete ----------
+  # Every deploy commits PNG blobs; a changed shot leaves its old blob in history
+  # forever. The `gh-pages-maintenance` action keeps the most recent gallery
+  # versions (gh-pages-history-versions, default 20) and collapses older history
+  # into one base commit, discarding the accreted blobs. Runs only when the caller
+  # forwards a `schedule:` trigger. A destructive rewrite of
+  # the GENERATED branch only — nothing bases work on gh-pages, and the canonical
+  # gallery is regenerated on the next default-branch push regardless. The
+  # force-push shares the default branch's concurrency group with push deploys
+  # (same github.ref), so it queues behind an in-flight deploy rather than racing
+  # it; it does not touch in-flight PR previews (a different ref), which redeploy.
+  prune-history:
+    needs: pages-preflight
+    if: ${{ inputs.pages && inputs.publish && inputs.gh-pages-maintenance && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: nickderobertis/screencomp/gh-pages-maintenance@v0
+        with:
+          mode: prune
+          keep-versions: ${{ inputs.gh-pages-history-versions }}
+          repo: ${{ inputs.pages-repository || github.repository }}
+          token: ${{ inputs.pages-repository && secrets.pages-token || secrets.push-token || github.token }}

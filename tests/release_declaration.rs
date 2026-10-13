@@ -216,3 +216,21 @@ fn targets(document: &mut DocumentMut) -> &mut toml_edit::ArrayOfTables {
         .as_array_of_tables_mut()
         .expect("the declaration's targets are [[target]] tables")
 }
+
+/// Every covered npm carrier still has a real production builder in the release
+/// graph, including both targets built sequentially by the single Darwin job.
+#[test]
+fn declared_carriers_are_reachable_from_the_release_builders() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let result = std::process::Command::new("node")
+        .current_dir(root)
+        .args(["--test", "npm/test/release-targets.test.mjs"])
+        .output()
+        .expect("release declaration's production configuration gate runs");
+    assert!(
+        result.status.success(),
+        "release declaration is not backed by the production build graph:\n{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+}

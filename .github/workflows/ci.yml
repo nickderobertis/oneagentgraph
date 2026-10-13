@@ -130,14 +130,9 @@ jobs:
   # converted (`src/scratch.rs`) runs only on arm64. `macos-26` is arm64; its
   # Intel twin is `macos-26-intel`.
   #
-  # No job-level condition on the `changes` output, on purpose: each leg's
-  # context (`cross (macos-26)`, `cross (windows-latest)`) is required by name,
-  # and a matrix job skipped at job level reports only a bare skipped `cross`.
-  # So every leg is scheduled on every change and its skip lives on its steps:
-  # on a change that reaches no Rust project, a leg succeeds through the one step
-  # that says so — on ubuntu-latest, because the context name comes from the
-  # matrix rather than the runner. tests/repo-tooling/workflow_contract.rs holds
-  # that scheduling.
+  # Windows retains its path-sensitive matrix context. The single Mac lane
+  # combines cross and install assertions; Linux result carriers below preserve
+  # both protected Mac names on every PR, including authorized omissions.
   cross:
     needs: changes
     strategy:
@@ -185,31 +180,21 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Nothing to prove (the change reaches no Rust project)
-        if: needs.changes.outputs.rust != 'true'
-        run: echo "the change reaches no Rust project, so cross has nothing to build or test for macos-26"
       - uses: actions/checkout@v4
-        if: needs.changes.outputs.rust == 'true'
       - uses: Swatinem/rust-cache@v2
-        if: needs.changes.outputs.rust == 'true'
       - uses: actions/setup-node@v4
-        if: needs.changes.outputs.rust == 'true'
         with:
           node-version: "22"
       - uses: taiki-e/install-action@v2
-        if: needs.changes.outputs.rust == 'true'
         with:
           tool: just,nextest
       - name: Bootstrap
-        if: needs.changes.outputs.rust == 'true'
         run: just bootstrap
       # llmlint: ignore-block[ci_invokes_gate_recipe_not_inline_stages] these are the gate's own recipes, each fanned out through Nx, and the leg calls them rather than `just check` because the gate's coverage floor is measured on Linux only (`gate`); the cross legs run the same tiers uninstrumented, which is what `test-quick` is.
       - name: Format + lint
-        if: needs.changes.outputs.rust == 'true'
         run: just fmt-check && just lint
       # Every Rust project's `test-quick` target, through Nx.
       - name: Tests (unit + contract + e2e + repo tooling)
-        if: needs.changes.outputs.rust == 'true'
         run: just test-quick
       # llmlint: ignore-end[ci_invokes_gate_recipe_not_inline_stages]
 
@@ -235,9 +220,7 @@ jobs:
       - name: Report actual Mac result or authorized omission
         env:
           RESULTS: ${{ toJSON(needs) }}
-        run: |
-          node -e 'const n=JSON.parse(process.env.RESULTS); console.log(JSON.stringify({required:n.changes.outputs.macosRequired,affected:n.changes.outputs.rust,changes:n.changes.result,gate:n.gate.result,macos:n.macos.result}))' > macos-results.json
-          node .github/macos-result.mjs "$(cat macos-results.json)"
+        run: node .github/macos-result.mjs "$RESULTS"
 
   # The declared MSRV is a promise to consumers, so prove it rather than document
   # it: a floor that only lives in Cargo.toml drifts the first time a dependency
