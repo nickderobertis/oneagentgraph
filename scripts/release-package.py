@@ -35,6 +35,8 @@ if not isinstance(package, dict) or not isinstance(package.get('version'), str):
 version = package['version']
 if args.tag != f'v{version}' or not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', version):
     parser.error('release tag must equal v plus the Cargo.toml version')
+if not args.binary.is_file():
+    parser.error('--binary must name an existing regular file; compile the requested target before packaging')
 binary = args.binary.read_bytes()
 args.out.mkdir(parents=True, exist_ok=True)
 archive = args.out / f'oneagentgraph-{args.tag}-{args.target}.tar.gz'

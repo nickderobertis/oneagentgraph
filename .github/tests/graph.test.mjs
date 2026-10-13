@@ -50,7 +50,7 @@ function fanout(docs,initial,scenario,policy) {
  // completion of smoke itself. Cycles cannot be silently discarded.
  function next(run,seen) {
   const upstream=docs.find(w=>w.path===run.workflow).doc.name;
-  const child={...scenario,id:`${scenario.id} -> ${upstream}`,eventName:'workflow_run',action:'completed',upstream,inputs:{}};
+  const child={...scenario,id:`${scenario.id} -> ${upstream}`,eventName:'workflow_run',action:'completed',upstream,ref:'refs/heads/main',event:{repository:scenario.event.repository,workflow_run:{head_sha:scenario.head,head_branch:'main',conclusion:'success'}},inputs:{}};
   for (const downstream of runs(docs,child,{isReleaseOnly:false,macosRequired:false,reason:'workflow completion'})) {
    if (seen.includes(downstream.workflow)) throw Error('workflow_run event cycle');
    result.push(downstream);next(downstream,[...seen,downstream.workflow]);
@@ -98,6 +98,12 @@ test('actual graph: all event classes, semantic diffs, PR ownership and publish 
    for(const [id,eventName,action,content,branch] of events) {
     const s=scenario(history,id,eventName,action,content,branch?false:fork,branch,pypi,npm);
     lifecycle.push(...fanout(docs,runs(docs,s,classify(history,s)),s));
+    if (['base-push','release-merge'].includes(id)) {
+     const closed={...scenario(history,`${id}-closed`,'pull_request','closed',content,branch?false:fork,branch,pypi,npm),ref:'refs/heads/main'};
+     const closeRuns=runs(docs,closed,classify(history,closed));
+     assert.ok(closeRuns.every(run=>run.workflow!=='.github/workflows/ci.yml'),'CI uses GitHub default PR actions, excluding closed');
+     lifecycle.push(...fanout(docs,closeRuns,closed));
+    }
    }
    lifecycles.push({diff,fork,pypi,npm,releasePr,runs:lifecycle});
   }

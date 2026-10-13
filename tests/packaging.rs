@@ -125,65 +125,90 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     let work = tempfile::tempdir_in(scratch).expect("packaging workspace");
-    let binary = env!("CARGO_BIN_EXE_oneagentgraph");
     let version = env!("CARGO_PKG_VERSION");
+    let native_target = "x86_64-unknown-linux-gnu";
+    let native = work.path().join(native_target);
+    let target_dir = repo.join("target/release-packaging");
+    let built = Command::new("bash")
+        .current_dir(repo)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env_remove("CARGO_ENCODED_RUSTFLAGS")
+        .args([
+            "scripts/release-darwin.sh",
+            native_target,
+            &format!("v{version}"),
+        ])
+        .arg(&native)
+        .args(["--profile", "dev"])
+        .output()
+        .expect("real production builder runs for the native target");
+    assert!(
+        built.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&built.stderr)
+    );
+    let native_binary = target_dir.join(native_target).join("debug/oneagentgraph");
+    let binary = native_binary.to_str().expect("native binary path");
     for target in [
         "x86_64-unknown-linux-gnu",
         "x86_64-apple-darwin",
         "aarch64-apple-darwin",
     ] {
         let out = work.path().join(target);
-        let result = Command::new("python3")
-            .current_dir(repo)
-            .args([
-                "scripts/release-package.py",
-                "--target",
-                target,
-                "--binary",
-                binary,
-                "--tag",
-                &format!("v{version}"),
-                "--out",
-            ])
-            .arg(&out)
-            .output()
-            .expect("release packager runs");
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        let package = Command::new("node")
-            .current_dir(repo)
-            .args([
-                "scripts/npm-build.mjs",
-                "platform",
-                "--target",
-                target,
-                "--binary",
-                binary,
-                "--out",
-            ])
-            .arg(out.join("npm"))
-            .output()
-            .expect("npm package builder runs");
-        assert!(
-            package.status.success(),
-            "{}",
-            String::from_utf8_lossy(&package.stderr)
-        );
-        let dir = String::from_utf8(package.stdout).expect("npm package path");
-        let packed = Command::new("npm")
-            .current_dir(dir.trim())
-            .args(["pack", "--pack-destination"])
-            .arg(&out)
-            .output()
-            .expect("npm pack runs");
-        assert!(
-            packed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&packed.stderr)
-        );
+        if target != native_target {
+            let result = Command::new("python3")
+                .current_dir(repo)
+                .args([
+                    "scripts/release-package.py",
+                    "--target",
+                    target,
+                    "--binary",
+                    binary,
+                    "--tag",
+                    &format!("v{version}"),
+                    "--out",
+                ])
+                .arg(&out)
+                .output()
+                .expect("release packager runs");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            let package = Command::new("node")
+                .current_dir(repo)
+                .args([
+                    "scripts/npm-build.mjs",
+                    "platform",
+                    "--target",
+                    target,
+                    "--binary",
+                    binary,
+                    "--out",
+                ])
+                .arg(out.join("npm"))
+                .output()
+                .expect("npm package builder runs");
+            assert!(
+                package.status.success(),
+                "{}",
+                String::from_utf8_lossy(&package.stderr)
+            );
+            let dir = String::from_utf8(package.stdout).expect("npm package path");
+            let packed = Command::new("npm")
+                .current_dir(dir.trim())
+                .args(["pack", "--pack-destination"])
+                .arg(&out)
+                .output()
+                .expect("npm pack runs");
+            assert!(
+                packed.status.success(),
+                "{}",
+                String::from_utf8_lossy(&packed.stderr)
+            );
+        }
         let inspected = Command::new("python3")
             .current_dir(repo)
             .args([
@@ -202,11 +227,10 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
             String::from_utf8_lossy(&inspected.stderr)
         );
     }
-    let native = work.path().join("x86_64-unknown-linux-gnu");
-    let result = Command::new("python3")
+    let result = Command::new("bash")
         .current_dir(repo)
-        .args(["-c", include_str!("support/release_install.py")])
-        .arg(native)
+        .args(["scripts/smoke-darwin.sh", native_target])
+        .arg(&native)
         .arg(version)
         .output()
         .expect("native product installs run");

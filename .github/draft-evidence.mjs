@@ -2,7 +2,11 @@
 import { execFileSync } from 'node:child_process';
 import { parse } from 'yaml';
 import { workflows, resolveRun, triggered } from './workflow-graph.mjs';
-const base=execFileSync('git',['merge-base','HEAD','origin/main'],{encoding:'utf8'}).trim();
+const args=process.argv.slice(2);
+if(args.length && (args.length!==2||args[0]!=='--base'||!args[1])) throw Error('ACTION: run draft-evidence.mjs [--base existing-git-ref]');
+let base;
+try { base=args[1]?execFileSync('git',['rev-parse','--verify',`${args[1]}^{commit}`],{encoding:'utf8'}).trim():execFileSync('git',['merge-base','HEAD','origin/main'],{encoding:'utf8'}).trim(); }
+catch { throw Error('ACTION: fetch origin/main or pass --base with an existing commit'); }
 const docs=workflows();
 const variants=[['ordinary PR','pull_request','synchronize','feature'],['release-only PR','pull_request','synchronize','release-plz-2026'],['main push','push',undefined,''],['published release','release','published',''],['Release completion','workflow_run','completed',''],['schedule','schedule',undefined,''],['manual default','workflow_dispatch',undefined,''],['manual opt-in','workflow_dispatch',undefined,'']];
 console.log(`Workflow comparison read from merge base ${base} and the working tree. Release routes are modeled; hosted runs are reported separately.\n`);

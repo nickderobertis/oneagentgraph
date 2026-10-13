@@ -1,6 +1,6 @@
 // Repository-private resolver. Expressions use GitHub's published evaluator;
 // unsupported workflows, matrices and runners fail closed with their source site.
-import { readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -67,7 +67,7 @@ export function digest() {
   // excluding only generated telemetry, dependencies and this receipt itself.
   const paths = new Set(execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {cwd:root,encoding:'utf8'}).trim().split('\n'));
   const hash = createHash('sha256');
-  for (const path of [...paths].sort()) if (path && !path.startsWith('.github/.telemetry/')) hash.update(path).update(read(path));
+  for (const path of [...paths].sort()) if (path && !path.startsWith('.github/.telemetry/') && existsSync(join(root,path))) hash.update(path).update(read(path));
   return hash.digest('hex');
 }
 function matches(pattern, value) {
@@ -85,6 +85,7 @@ export function triggered(doc, scenario) {
   const filter = on[scenario.eventName] ?? {};
   for (const key of Object.keys(filter)) if (!['branches','branches-ignore','tags','tags-ignore','types','workflows','inputs'].includes(key)) throw Error(`unsupported trigger filter ${key}`);
   if (filter.types && !filter.types.includes(scenario.action)) return false;
+  if (scenario.eventName === 'pull_request' && !filter.types && !['opened','synchronize','reopened'].includes(scenario.action)) return false;
   if (filter.workflows && !filter.workflows.includes(scenario.upstream)) return false;
   for (const [type,prefix] of [['branches','refs/heads/'],['tags','refs/tags/']]) {
     const ref = scenario.eventName === 'pull_request' ? 'refs/heads/main' : scenario.ref;

@@ -15,6 +15,10 @@ if target not in ['x86_64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-ap
     raise SystemExit('ACTION: pass an existing binary, supported target, plain release version and absolute directory')
 expected = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
 receipt = json.loads((out / f'{target}.json').read_text())
+if not isinstance(receipt, dict) or set(receipt) != {'target', 'version', 'tag', 'binarySha256', 'archive', 'wheel'} or not all(isinstance(value, str) for value in receipt.values()):
+    raise SystemExit('invalid release receipt schema; inspect the production packager output')
+if receipt['archive'] != f'oneagentgraph-v{version}-{target}.tar.gz' or Path(receipt['wheel']).name != receipt['wheel'] or not re.fullmatch(r'oneagentgraph_cli-[A-Za-z0-9.+!_-]+-py3-none-[A-Za-z0-9_.]+\.whl', receipt['wheel']):
+    raise SystemExit('invalid release receipt filenames; inspect the production packager output')
 assert receipt['target'] == target and receipt['version'] == version
 assert receipt['tag'] == f'v{version}' and receipt['binarySha256'] == expected
 archive = out / receipt['archive']
@@ -30,7 +34,10 @@ with zipfile.ZipFile(out / receipt['wheel']) as wheel:
     assert f'Version: {version}\n' in metadata and 'Name: oneagentgraph-cli\n' in metadata
     tag = {'x86_64-apple-darwin':'macosx_10_12_x86_64', 'aarch64-apple-darwin':'macosx_11_0_arm64', 'x86_64-unknown-linux-gnu':'linux_x86_64'}[target]
     assert f'Tag: py3-none-{tag}\n' in wheel.read(next(p for p in wheel.namelist() if p.endswith('/WHEEL'))).decode()
-with tarfile.open(next(out.glob('*.tgz'))) as npm:
+carriers = list(out.glob('*.tgz'))
+if len(carriers) != 1 or not carriers[0].is_file():
+    raise SystemExit('stage exactly one platform npm carrier before inspecting')
+with tarfile.open(carriers[0]) as npm:
     assert hashlib.sha256(npm.extractfile('package/bin/oneagentgraph').read()).hexdigest() == expected
     manifest = json.load(npm.extractfile('package/package.json'))
     assert manifest['version'] == version

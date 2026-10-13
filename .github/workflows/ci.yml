@@ -199,6 +199,8 @@ jobs:
       # llmlint: ignore-end[ci_invokes_gate_recipe_not_inline_stages]
 
       - name: Install (this revision)
+        env:
+          RUSTFLAGS: "-D warnings"
         run: cargo install --path . --locked
       - name: Smoke-test the installed binary
         run: bash scripts/smoke-published.sh --label "cargo install on $RUNNER_OS/$RUNNER_ARCH"
