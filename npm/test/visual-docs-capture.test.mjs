@@ -10,10 +10,10 @@
 // from its adoption until this suite landed, `main` included.
 //
 // Nothing else catches that. The capture is deliberately outside `just check` and
-// the `gate` job, its own workflow is not a required check, and the local pre-push
-// guard runs the script under an interactive developer's bash — which is the one
-// shell that cannot see the defect. So the block itself is driven here: extracted
-// from the workflow verbatim, run under a strict POSIX `sh` with `-e` the way the
+// the `gate` job, its own workflow is not a required check, and manual capture
+// runs the script under bash — which cannot see the defect. So the block itself
+// is driven here: extracted from the workflow verbatim, run under a strict POSIX
+// `sh` with `-e` the way the
 // runner runs it, with the tools it reaches for stubbed on its search path so the
 // case is about the shell rather than about the network.
 //

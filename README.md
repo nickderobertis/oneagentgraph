@@ -186,8 +186,7 @@ surface.
 ## Develop
 
 ```bash
-just bootstrap   # from a clean clone; installs the oneharness CLI and activates
-                 # the pre-push screenshot guard (screenshots/AGENTS.md)
+just bootstrap   # from a clean clone; installs the toolchain and oneharness CLI
 just check       # the deterministic gate: format, clippy, tests, coverage, docs
 just gate        # check + the LLM-judge tier; the pre-push bar
 ```

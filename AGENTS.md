@@ -82,10 +82,9 @@ because each needs something a clean clone does not have — a network advisory
 database, a second toolchain, a cross compiler, the public registries; CI covers
 all four as jobs of their own. The `screenshots*` recipes sit outside for a
 different reason — they are informational, and `.github/workflows/visual-docs.yml`
-is the gate for them. Their local half is the **one** git hook this repository
-installs: `just bootstrap` points `core.hooksPath` at `.githooks`, which carries
-the screencomp pre-push guard and nothing else, so `just gate` stays unhooked and
-is still run by hand. `screenshots/AGENTS.md` owns the rest. Holding `release-targets.toml` to its schema is
+is the gate for them. No Git hooks are installed by `just bootstrap`; capture
+and baseline refresh remain manual commands. `screenshots/AGENTS.md` owns the
+rest. Holding `release-targets.toml` to its schema is
 *not* one of them: `onevcs` is a dev-dependency, so its reader is linked into
 `tests/release_declaration.rs` and runs inside `check`, offline, on every leg.
 

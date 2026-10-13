@@ -4,9 +4,8 @@
 # Captures are deterministic SVGs — a vendored, pinned font embedded into each
 # file — so the bytes are identical on every arch and runner. One arch lane is
 # therefore enough; its committed baseline is shots/baseline/x86_64.json, and it
-# is the lane the local guard classifies on every host. This line is the one
-# source for the lane: scripts/screenshots.sh and .githooks/pre-push both read it
-# from here rather than carrying a copy.
+# is the lane CI classifies. scripts/screenshots.sh reads the lane from here
+# rather than carrying a copy.
 arches = ["x86_64"]
 
 [comment]
@@ -24,8 +23,8 @@ label = "View"
 values = ["list", "record"]
 
 [guard]
-# Local pre-push guard (.githooks/pre-push): re-capture only when something that
-# can change a rendered shot changes — the verbs' own reporting, the argument
+# Screenshot scope for screencomp review: files that
+# can change a rendered shot — the verbs' own reporting, the argument
 # surface `--help` renders, the diagnostics a refusal carries, the shipped persona
 # catalogue the `persona` shot validates, or the capture machinery itself.
 paths = [

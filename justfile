@@ -77,15 +77,8 @@ default:
 # Every project's `bootstrap` target, so one clean-clone command provisions the
 # whole graph rather than the crate alone. Serialized: the projects share
 # installers, and two of those running at once race the same directory.
-#
-# The one step above the fan-out is the committed git hooks directory, because a
-# hook is per-clone state rather than anything a project owns: `core.hooksPath` is
-# never committed, so a `.githooks/pre-push` nothing points git at is a guard that
-# runs nothing. That directory holds the screencomp visual guard and nothing else
-# — `just gate` stays unhooked (screenshots/AGENTS.md says why).
 # Set up the project from a clean clone.
 bootstrap:
-    @bash scripts/activate-hooks.sh
     @bash scripts/nx.sh run-many -t bootstrap --parallel=1
 
 # The Rust crate's own provisioning (the `oneagentgraph:bootstrap` target).
@@ -400,8 +393,7 @@ lint-windows:
 # is the durable explanation: what each scene documents, why it is reproducible,
 # and what to do when a verb's output legitimately changes. Regenerating is out of
 # the gate for the reason `deps-check` and `msrv` are — CI's Visual docs workflow
-# owns the comparison, and the pre-push guard refreshes the baseline locally on
-# drift.
+# owns the comparison; `screenshots-bless` refreshes the baseline on demand.
 
 # Install the pinned screenshot renderer (`freeze`) on demand. Needs Go.
 screenshots-tools:
@@ -422,9 +414,7 @@ screenshots-tools:
 screenshots:
     @bash scripts/nx.sh run oneagentgraph-workspace:screenshots
 
-# The crate's own capture (the `oneagentgraph-workspace:screenshots` target). The pre-push
-# guard calls the script directly rather than coming through here: it is deciding
-# whether to block a push, and a replayed capture cannot answer that.
+# The crate's own capture (the `oneagentgraph-workspace:screenshots` target).
 _crate-screenshots:
     @bash scripts/screenshots.sh
 
