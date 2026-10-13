@@ -3671,7 +3671,15 @@ fn an_agents_reasoning_and_words_are_relayed_as_themselves_and_never_as_tools() 
         assert_eq!(call["detail"], "just check", "{kind}: {call}");
         assert_eq!(call["tool_call_id"], "t1", "{kind}: {call}");
         let result = &activity[3];
-        assert_eq!(result["name"], Value::Null, "{kind}: {result}");
+        // A result names the call it answers from oneharness-core 0.24.1 on. A
+        // single-sided member's turn runs on the core `Cargo.toml` links, which
+        // is past that; a two-party member's sides are spawned through the CLI
+        // the justfile pins, whose core is not.
+        let answered = match kind {
+            "single-sided" => call["name"].clone(),
+            _ => Value::Null,
+        };
+        assert_eq!(result["name"], answered, "{kind}: {result}");
         assert_eq!(result["tool_call_id"], "t1", "{kind}: {result}");
         assert!(
             result["output"]

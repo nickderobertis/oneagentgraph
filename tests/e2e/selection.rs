@@ -855,6 +855,114 @@ fn a_member_whose_config_extends_a_parent_runs_under_the_harness_the_parent_name
     );
 }
 
+/// A one-identity `codex` chain, so the member's turn is a Codex launch.
+#[cfg(unix)]
+const CODEX_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n";
+
+/// The argv every Codex launch of one `kind: oneharness` member's turn was
+/// started with, under `config`, as a `codex` on `PATH` recorded it.
+///
+/// The double is found the way an operator's Codex is — by name on `PATH`, with
+/// no `ONEHARNESS_BIN_CODEX` — and is placed first on it, so a host with Codex
+/// installed still runs the double. It writes one argument per line and ends each
+/// launch with a line of its own, then hands the same argv to the compiled
+/// harness double, which plays the turn.
+#[cfg(unix)]
+fn codex_launches_under(config: &str) -> Vec<Vec<String>> {
+    const END: &str = "--end-of-launch--";
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", config);
+    let record = workspace.at("codex-argv.txt");
+    let codex = workspace.write(
+        "bin/codex",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" {END} >> '{}'\nexec '{}' \"$@\"\n",
+            record.display(),
+            fake_harness()
+        ),
+    );
+    make_executable(&codex);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        NO_ENV,
+    ));
+    let path = format!(
+        "{}:{}",
+        workspace.at("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    let run = workspace.run_task_with("fake:complete-now: start codex", &[("PATH", &path)]);
+    run.expect_code(0);
+    assert_eq!(
+        run.of_kind("member-settled").len(),
+        1,
+        "the member did not settle: {:?}",
+        run.kinds()
+    );
+
+    let recorded = std::fs::read_to_string(&record)
+        .expect("the codex on PATH recorded its argv, so it is what the turn started");
+    let launches: Vec<Vec<String>> = recorded
+        .split_terminator(&format!("{END}\n"))
+        .map(|launch| launch.lines().map(str::to_string).collect())
+        .collect();
+    assert!(!launches.is_empty(), "codex was never started: {recorded}");
+    launches
+}
+
+/// Where in `argv` a plugins override sits, and whether it turns plugins on.
+#[cfg(unix)]
+fn plugins_flags(argv: &[String]) -> Vec<(usize, bool)> {
+    argv.windows(2)
+        .enumerate()
+        .filter_map(|(at, pair)| match (pair[0].as_str(), pair[1].as_str()) {
+            ("-c", "features.plugins=false") | ("--disable", "plugins") => Some((at, false)),
+            ("-c", "features.plugins=true") | ("--enable", "plugins") => Some((at, true)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A member whose config says nothing about plugins starts Codex with them off,
+/// so a monitor or drafting member's turn never downloads the plugin catalog —
+/// and nothing later on the argv turns them back on.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_names_no_plugins_starts_codex_with_plugins_off() {
+    for argv in codex_launches_under(CODEX_CHAIN) {
+        let flags = plugins_flags(&argv);
+        let off = flags
+            .iter()
+            .position(|(_, on)| !on)
+            .unwrap_or_else(|| panic!("codex was started without plugins off: {argv:?}"));
+        assert!(
+            flags[off..].iter().all(|(_, on)| !on),
+            "a later flag turns plugins back on: {argv:?}"
+        );
+    }
+}
+
+/// A config that opts into plugins starts Codex with no plugins flag at all, so
+/// Codex's own default — and the operator's choice — stands.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_opts_into_plugins_starts_codex_with_no_plugins_flag() {
+    let config = format!("{CODEX_CHAIN}\n[harness.codex]\nplugins = true\n");
+    for argv in codex_launches_under(&config) {
+        assert_eq!(plugins_flags(&argv), [], "{argv:?}");
+        assert!(
+            !argv.iter().any(|arg| arg.contains("plugins")),
+            "codex was started with a plugins flag: {argv:?}"
+        );
+    }
+}
+
 // llmlint: ignore-end[tests_mirror_real_usage]
 
 /// A parent that is not there refuses the member rather than running it under
