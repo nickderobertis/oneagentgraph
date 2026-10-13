@@ -163,7 +163,7 @@ when the copies part. Each of them, and which it is:
 | --- | --- | --- |
 | the `freeze` release | `screenshots/tools.env` (`FREEZE_VERSION`) | derived. `scripts/screenshots.sh`, `just screenshots-tools`, and the workflow's `capture-command` all read that file; none carries a number. |
 | the vendored font | `screenshots/tools.env` (`FONT_FILE`) | derived. `scripts/screenshots.sh` and `scripts/demo-gif.py` read it from there. |
-| the arch lane | `screencomp.toml` (`[capture].arches`) | derived. `scripts/screenshots.sh` and `.githooks/pre-push` each parse that line, and both refuse loudly rather than guess if it ever names more than one lane. |
+| the arch lane | `screencomp.toml` (`[capture].arches`) | derived. `scripts/screenshots.sh` parses that line and refuses loudly rather than guess if it ever names more than one lane. |
 | the Rust toolchain | `rust-toolchain.toml` | derived. The workflow's container is deliberately *unversioned* (`rust:bookworm`) and sets no `RUSTUP_TOOLCHAIN`, so rustup installs the pinned toolchain from that file. Nothing about a shot depends on the compiler anyway. |
 | the `oneharness` CLI the GIF wants | the justfile (`oneharness-version`) | derived. `scripts/demo-gif.py` reads the pin out of the justfile for its diagnostic, exactly as `tests/e2e/support.rs` does, so this note names *which* pin rather than restating the number. |
 | the screencomp version | `.github/workflows/visual-docs.yml` (the `uses:` ref and `screencomp-version:`) | **checked**, not derived: the two copies are screencomp's own contract, and `screencomp doctor --env` reports a workflow pin that has drifted from the installed CLI as a problem. |
@@ -195,12 +195,8 @@ over-approximation only costs a re-capture nobody needed.
 is where to confirm that after touching the graph. The `Visual docs` workflow
 stays the only gate for these images.
 
-Two callers deliberately do not come through the target. The pre-push guard runs
-`scripts/screenshots.sh` directly, because it is deciding whether to block a push
-and a replayed capture cannot answer that; and `just screenshots-bless` passes
-`--skip-nx-cache`, because blessing is the one call whose answer must come from a
-capture taken now — a hit would restore the last captured tree's shots and then
-write a baseline over them.
+`just screenshots-bless` passes `--skip-nx-cache`, because blessing must use a
+fresh capture rather than restoring a previously captured tree’s shots.
 
 ## The animated hero (`docs/screenshots/demo.gif`)
 
@@ -266,60 +262,37 @@ than documenting one.
   Pillow, **and** the `oneharness` CLI on `PATH` at the release the justfile pins
   as `oneharness-version`, which `just bootstrap` installs. That CLI is a
   prerequisite of **regenerating the GIF and nothing else**: `just screenshots`,
-  the pre-push guard and the CI capture never reach it, and the number is not
+  the CI capture never reaches it, and the number is not
   restated here because the justfile is its one source (see "One source per
   version"). Why only this one needs it is above.
 - `just screenshots-bless` — **after an intended output change**: recapture, past
   the cache, and refresh `shots/baseline/<lane>.json`. Commit it alongside
   `docs/screenshots/`.
 
-## The strict gate, and how it is activated
+## CI verification and manual review
 
 CI (`fail-on-drift: true`) fails when a capture diverges from the committed
-baseline. The local half is `.githooks/pre-push`, which re-captures **only** when a
-`[guard].paths` file changed (`screencomp.toml`) and, on drift, refreshes the
-baseline, builds a review gallery at `shots/review/index.html`, and **blocks the
-push** so the new baseline and README images are committed deliberately.
+baseline. `just bootstrap` installs no Git hooks, and ordinary pushes do not
+capture, classify, refresh baselines or build galleries. Existing clones may
+retain `core.hooksPath = .githooks`; the removed hook leaves that setting inert
+without changing any shared hook configuration.
 
-`core.hooksPath` is per-clone state and is never committed, so a committed hook
-that nothing points git at is a guard that runs nothing. **`just bootstrap`
-activates it** (`scripts/activate-hooks.sh`), and `screencomp doctor --env` is what
-reports the difference between wired and merely present. Nothing was displaced:
-this repository shipped no hook before, and `.git/hooks` holds only git's own
-`.sample` files.
+Use `just screenshots` to capture and `just screenshots-bless` after an intended
+output change. For a local review gallery after capture, run:
 
-**`.githooks/` carries this guard and nothing else.** `just gate` — this
-repository's complete pre-push bar — is deliberately *not* wired into it: putting
-a full gate on `git push` changes the development loop of every clone, which is a
-separate decision nobody has made. Run `just gate` yourself before you push, as
-before.
+```bash
+lane=$(sed -n 's/^arches *= *\[ *"\([^" ]*\)" *\].*/\1/p' screencomp.toml)
+screencomp gallery --input shots/current --arch "$lane" --output shots/review
+```
 
-Two things the gate is **not**, so nobody reads more into it than is there. Until
-the repository owner adds the workflow's check to branch protection, a pull
-request whose capture drifted still merges — the workflow fails, but the context
-is not required, so the strict gate is advisory on the merge path. And there is no
-gallery link or badge anywhere in this repository — not in the README, not here,
-not in the workflow's comments — because this repository has no published gallery
-to link to, and a link that 404s on the day it merges is wrong on the day it
-merges. The gallery this capture does produce locally is `shots/review/`, which
-the pre-push guard builds on drift and `.gitignore` keeps out of the tree. A
-published one, and the badge for it, are the repository owner's to add once a
-Pages site exists.
+The arch is the lane declared in `screencomp.toml`. `shots/review/` is gitignored;
+there is no published gallery or badge. The workflow's check is not required by
+branch protection, so its drift failure remains advisory on the merge path.
 
-### The two halves run under different shells
-
-The local guard hands `scripts/screenshots.sh` to **bash**; CI's `capture-command`
-is a step inside a `container:`, which GitHub runs under **`sh -e {0}`** — dash on
-this image. So the workflow's block is POSIX sh and the script it calls is bash,
-and only the first of those constraints is invisible locally: a bashism in that
-block ends the step at its first line with nothing captured, which is what
-`set -euo pipefail` did on every run of the workflow from its adoption until it
-was dropped. `.github/workflows/visual-docs.yml` says so at the block, and
-`npm/test/visual-docs-capture.test.mjs` drives that block under a strict `sh -e`
-so the next one fails in `just check` rather than in a workflow nobody requires.
-That suite captures **nothing** — every tool the block reaches for is stubbed,
-`bash` included — so what the gate gained is the portability of those six lines,
-and the capture itself stays outside `just check` exactly as before.
+CI's `capture-command` runs under **`sh -e {0}`** inside its container; the script
+it calls runs under bash. `npm/test/visual-docs-capture.test.mjs` drives the
+workflow block under strict sh so shell portability is checked in `just check`
+without capturing images.
 
 ## Outputs
 
@@ -327,7 +300,7 @@ and the capture itself stays outside `just check` exactly as before.
   (gitignored; regenerated). `$SHOTS_OUT` overrides the directory; the reusable
   workflow exports it per lane.
 - `shots/baseline/<lane>.json` — the committed digest baseline (no images).
-- `shots/review/` — the pre-push guard's review gallery (gitignored).
+- `shots/review/` — the manual review gallery (gitignored).
 - `docs/screenshots/*.svg` and `docs/screenshots/demo.gif` — the committed copies
   the README embeds.
 
