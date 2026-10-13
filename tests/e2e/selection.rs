@@ -855,6 +855,41 @@ fn a_member_whose_config_extends_a_parent_runs_under_the_harness_the_parent_name
     );
 }
 
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A parent that is not there refuses the member rather than running it under
+/// whatever the child alone would select.
+#[test]
+fn a_member_whose_parent_config_is_missing_is_refused_by_name() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", "extends = \"shared/gone.toml\"\n");
+    workspace.graph(&single_sided_graph(&fake_harness()));
+
+    let run = workspace.run_task("fake:complete-now: never runs");
+    assert_ne!(run.code, 0, "a missing parent ran: {:?}", run.kinds());
+    assert!(
+        run.of_kind("member-settled").is_empty(),
+        "{:?}",
+        run.kinds()
+    );
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    let detail = died[0]["payload"]["detail"].as_str().unwrap_or_default();
+    // The core reports the parent as the absolute path it resolved and failed to
+    // read, so the refusal spells it with the separator the platform uses and
+    // the missing-file error in that platform's words. The parent it names is
+    // the same file either way, which is what this reads.
+    assert!(
+        detail.replace('\\', "/").contains("shared/gone.toml"),
+        "the refusal does not name the parent it could not read: {detail}"
+    );
+}
+
+// llmlint: ignore-block[tests_mirror_real_usage] these journeys read the argv a
+// `codex` on `PATH` recorded, because which plugins flag Codex was started with is
+// on no stream: the member settles identically either way, and the only effect of
+// a missing flag is a catalog download nothing here observes. The exit code and
+// the settle are still read through the CLI.
 /// A one-identity `codex` chain, so the member's turn is a Codex launch.
 #[cfg(unix)]
 const CODEX_CHAIN: &str = "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n";
@@ -962,33 +997,4 @@ fn a_member_whose_config_opts_into_plugins_starts_codex_with_no_plugins_flag() {
         );
     }
 }
-
 // llmlint: ignore-end[tests_mirror_real_usage]
-
-/// A parent that is not there refuses the member rather than running it under
-/// whatever the child alone would select.
-#[test]
-fn a_member_whose_parent_config_is_missing_is_refused_by_name() {
-    let workspace = Workspace::new();
-    workspace.write("oneharness.toml", "extends = \"shared/gone.toml\"\n");
-    workspace.graph(&single_sided_graph(&fake_harness()));
-
-    let run = workspace.run_task("fake:complete-now: never runs");
-    assert_ne!(run.code, 0, "a missing parent ran: {:?}", run.kinds());
-    assert!(
-        run.of_kind("member-settled").is_empty(),
-        "{:?}",
-        run.kinds()
-    );
-    let died = run.of_kind("member-died");
-    assert_eq!(died.len(), 1, "{:?}", run.kinds());
-    let detail = died[0]["payload"]["detail"].as_str().unwrap_or_default();
-    // The core reports the parent as the absolute path it resolved and failed to
-    // read, so the refusal spells it with the separator the platform uses and
-    // the missing-file error in that platform's words. The parent it names is
-    // the same file either way, which is what this reads.
-    assert!(
-        detail.replace('\\', "/").contains("shared/gone.toml"),
-        "the refusal does not name the parent it could not read: {detail}"
-    );
-}
