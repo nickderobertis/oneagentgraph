@@ -1,0 +1,30 @@
+# Persona template. `just new-persona <name>` copies this to the named catalog path.
+#
+# A persona is a onejudge config *fragment* layered over `config/onejudge.base.yaml`
+# — put only what makes this role different here. Everything else (provider,
+# session, the shared system prompt, default turn cap) is inherited from the base at
+# dispatch time.
+#
+# Contract (enforced by `just validate-personas`, which validates against onejudge's
+# own config schema):
+#   optional  system_prompt  the worker's role, appended after the base's preamble
+#   optional  user.persona   how the supervisor reviews this kind of work
+#   optional  name           the label stamped on this member's events
+#   optional  user.done_when a SECOND bar, enforced alongside the base's
+#   optional  user.max_turns a role-specific turn cap (else base default)
+#   optional  evals          extra transcript checks for this role
+# `provider`, `session`, `task`, and `skill` are refused: the member's own launch
+# decides each. Anything else onejudge accepts, a persona may carry.
+
+name: <role-name>
+system_prompt: |
+  <What this worker specializes in and how it should approach its subtasks.
+  Be specific about the role; the shared quality bar is already in the base.>
+
+user:
+  persona: |
+    <The supervisor's stance for reviewing this role's work — what to push on,
+    what "not done yet" looks like for this kind of task.>
+  # done_when: "<a bar this role adds to the base's; both are enforced>"
+  # done_when_replaces_base: true   # only when the base's bar must NOT apply here
+  # max_turns: 12

@@ -41,6 +41,12 @@ include = [
   # a file somebody typed.
   "tests/recorded/*.ndjson",
   "tests/recorded/README.md",
+  # And the YAML `tests/yaml_corpus.rs` reads, for the same reason: the graph
+  # goldens (which `tests/record.rs` also reads), the screenshot fixtures, and
+  # the host's real files with what this crate read from them before.
+  "/tests/golden/*.yaml",
+  "/screenshots/fixture/*.yaml",
+  "/tests/yaml-corpus/**",
   "personas/**/*.yaml",
   # Anchored with a leading `/`, every one of them. These are gitignore-style
   # patterns: one with no separator in it matches at *any* depth, so a bare

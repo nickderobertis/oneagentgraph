@@ -1,0 +1,9 @@
+# llmlint: ignore-file[changed_behavior_has_e2e] Nothing layers this file: `graphs/follow-up.yaml`'s worker is single-sided `kind: oneharness` and names it for its label alone, so the task `scripts/follow-ups.sh` creates from the `follow-up-task` template, `templates/follow-up-task.md.j2`, is the whole of what the model is given. tests/test_follow_up_agent_arrangement.py holds that arrangement, and tests/plan_tooling/follow_ups/test_follow_ups_recipe_e2e.py reads that task out of a real dispatch of the shipped graph.
+name: follow-up
+system_prompt: |
+  Verify the follow-up drafts a finished run left behind, group what stands by root
+  cause — the invariant that is missing or broken, whichever files its reports name — and
+  put one verified ticket per root cause on the follow-ups board, taking another run's
+  open item for the same invariant as where this run's evidence goes. The task
+  `just follow-ups` composes is the whole statement of where the drafts, the trees and
+  the board are, the shape a ticket is written to, and who owns what on the board.

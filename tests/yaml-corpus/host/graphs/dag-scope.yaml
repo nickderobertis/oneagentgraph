@@ -1,0 +1,251 @@
+# llmlint: ignore-file[changed_behavior_has_e2e] The `check-in` member's `task` is prose given to a paid model, and whether a model then refrains from a verb it was told not to send cannot be driven by a deterministic double. What is provable is driven: tests/e2e/launch_monitor_observer/test_orchestrate_launch_e2e.py launches a run whose pacemaker comes due mid-flight and asserts the prohibition reached the prompt it was actually given.
+# The dag-scope agent graph `just orchestrate` attaches to every run it launches.
+#
+# `onepipeline start --dag-graph <REF>` names it and hands it to `oneagentgraph
+# run`. The shipped default is `off`: since onepipeline 0.4.0 no agent is required
+# to run a plan at all, because the engine drives its own DAG continuously to
+# settlement. A graph named here **observes** that run and authors channel
+# surfaces; it never drives the engine. `just orchestrate` opts in by naming this
+# file, which is why an operator on this host always gets the watcher and a bare
+# `onepipeline start` elsewhere does not.
+#
+# Nothing scaffolds this file: the published crate ships the *flag*, not the
+# document, because the document names the operator's own onejudge and oneharness
+# configs. This repository is that operator, and this is its file.
+#
+# Every ref below is relative to THIS file's directory, not the working
+# directory: `oneagentgraph` resolves a relative ref against the directory the
+# document it appears in was read from.
+#
+# Schema 9, the first version that admits every field the members below carry. The
+# `check-in` member carries its own `task`, which requires 3; that task interpolates
+# `{task}`, which `oneagentgraph` expands only from 4 — under 3 the token reaches the
+# model as its six literal characters. The `monitor` member's `background` requires
+# 8, and a `schedule` on a two-party member requires 9. None of it is remembered:
+# `tests/e2e/`'s launch suite runs a member at the version declared below on every
+# gate run and fails if `{task}` reached it literally,
+# tests/e2e/launch_monitor_observer/test_observer_graph_liveness_e2e.py reads the paced fields back off a real
+# launch, and the range is re-read off the pinned binary at each adoption, which
+# refuses 0 and 11 by naming it. oneagentgraph 0.5.6 reads 1 through 10.
+version: 9
+name: dag-scope
+members:
+  # The run's active monitor. It drives nothing — there are no engine verbs left to
+  # drive — and its whole value is judgment: it reads the detailed activity stream,
+  # compares what the run is actually doing against the goal, each node's task
+  # prose, and the graph, and says something about the difference. Its two ways of
+  # saying it are a non-blocking planner surface and an attributed live edit inside
+  # the engine's monitor allowlist. `../personas/orchestrator.yaml` states that bar
+  # on both sides; the file keeps its name because it is this repository's
+  # supervisory-role persona and the catalog in ../personas/README.md indexes it
+  # under that name.
+  monitor:
+    kind: onejudge
+    base_config: ../config/onejudge.base.yaml
+    persona: ../personas/orchestrator.yaml
+    agent:
+      oneharness_config: ../oneharness.orchestrator.toml
+    # The planner channel IS this member's judge side, so the planner's replies
+    # reach the monitor in its own conversation rather than only as graph edits.
+    #
+    # `onemessagebus serve surfaces --codec monitor` is that side: the bus's generic
+    # binding interpreter, reading the `monitor` binding this host declares in
+    # config/onemessagebus.yaml. The grammar is the bus's, in onemessagebus's
+    # docs/codecs.md; what each frame is answered — the texts, the two surface kinds,
+    # what a lost turn is called — is this host's policy, written there as data.
+    #
+    # The channel directory is the run's own, and an argv cannot name a run it is not
+    # told: the engine exports `ONEPIPELINE_RUNS_DIR` and `ONEPIPELINE_RUN_ID` to both
+    # sides of an observer member (tests/e2e/launch_monitor_observer/test_orchestrate_launch_e2e.py measures
+    # it), so the command composes the directory from those and nothing else.
+    #
+    # This is the one ref in this file NOT resolved against this file's directory:
+    # `command` is an argv, spawned with the directory the run was launched from as
+    # its working directory — measured by dumping a judge command's own `PWD` on a
+    # real launch. So the configuration is named launch-relative, which is why `just
+    # orchestrate` is run from the repository root, exactly as `--dag-graph
+    # graphs/dag-scope.yaml` already is.
+    judge:
+      command:
+        - bash
+        - -c
+        - >-
+          exec onemessagebus serve surfaces --codec monitor
+          --config config/onemessagebus.yaml
+          --transport-dir "${ONEPIPELINE_RUNS_DIR:-runs}/$ONEPIPELINE_RUN_ID/channel"
+    mode: bypass
+    # One turn every five minutes, paced by the graph rather than by the model: `every`
+    # is the hold between the judge's answer and the next agent turn, and a `schedule`
+    # on a two-party member paces this one conversation rather than starting a second.
+    # The persona reads the stream from a cursor rather than a tail because of it.
+    #
+    # `start_after: 0` is stated because from schema 4 an omitted one defaults to
+    # `every`, which would leave the first five minutes of every run unwatched; the
+    # conversation still opens with the wave. `resettable` is deliberately absent: a
+    # planner-visible surface resets the pacemaker's clock below, not this one.
+    #
+    # A manager's `note` offered during the hold ENDS it — the turn opens with the note
+    # in it — so a note is never held for five minutes; a `trigger`, the run's `stop`,
+    # a `cancel`, and the driver's cancel at settlement end one the same way. A journey
+    # needing turns closer together says so with
+    # `just orchestrate --set members.monitor.schedule.every=<seconds>`, never here.
+    schedule: {every: 300, start_after: 0}
+    # FOREGROUND, and this line is what keeps the observer graph alive between the
+    # monitor's turns. A scheduled member is background unless it says otherwise, and a
+    # run settles once only background members survive — so without this the graph
+    # would take its initial wave and settle, and the pacemaker below would have
+    # nothing to fire inside. Liveness is a property this document declares;
+    # tests/e2e/launch_monitor_observer/test_observer_graph_liveness_e2e.py reads it back off a real launch.
+    background: false
+  # The durable planner-update pacemaker: a single-sided member that comes due on a
+  # schedule, reports the run's progress from durable evidence, and exits. It is what
+  # keeps a supervising planner informed without being asked. Resettable, so every
+  # planner-visible surface restarts its clock and a run that is already reporting
+  # does not also get a pacemaker surface.
+  #
+  # It claims its own `task`, and that is a rule rather than a nicety. `onepipeline`
+  # composes ONE task for this graph and `oneagentgraph` hands it to every member
+  # that does not claim one; a member's own `task` REPLACES that composed task as its
+  # whole prompt. So this member is told what it is for here rather than inheriting
+  # the run-level task — and it opens by interpolating `{task}` back in, because a
+  # member that replaced the composed task is otherwise told nothing about the run.
+  #
+  # `../personas/check-in.yaml` is named below for the LABEL alone. A single-sided
+  # `kind: oneharness` member has no onejudge base config to layer a persona delta
+  # over, so neither that file's `system_prompt` nor its `user.persona` reaches this
+  # turn: the `task` below is the whole of what the model is given, and the persona
+  # file is the catalog entry naming the role. That is why the reporting discipline
+  # this member is held to — the heredoc the update travels in, the bound an
+  # elapsed time is compared against before anything is called a hang, and the command
+  # and output a liveness verdict is shown from — is stated
+  # here and not only there. `tests/e2e/launch_monitor_observer/test_path_dispatched_personas_e2e.py` holds
+  # the label-only arrangement and `tests/e2e/launch_monitor_observer/test_supervisory_prompt_discipline_e2e.py`
+  # reads this task out of a real launch.
+  #
+  # The environment names the run too. `onepipeline` exports `ONEPIPELINE_RUN_ID`,
+  # set to the run id, to an observer member, beside `ONEPIPELINE_RUNS_DIR` and the
+  # launcher identity —
+  # measured against onepipeline 0.66.0 on both of that member's sides, by dumping
+  # each one's whole environment on a real launch. `{task}` is still what this member
+  # is written against: it is this graph's own contract rather than a per-release
+  # export, and it carries the run's goal as well as its id.
+  # `tests/e2e/launch_monitor_observer/test_orchestrate_launch_e2e.py` re-takes that measurement on the judge
+  # side of a real observer member every gate run, and
+  # `tests/e2e/launch_monitor_observer/test_monitor_cursor_e2e.py` on this member's agent side, so a release
+  # that moved the export fails there rather than here.
+  #
+  # Its task scopes it to reporting and away from editing, which is load-bearing
+  # rather than tidy: this member is single-sided and finitely deadlined, so a live
+  # edit issued from it would be answered after the member that issued it had
+  # stopped watching. Judgment about the running graph belongs to the `monitor`
+  # member above, which stays for the run.
+  #
+  # The task also prescribes the turn as a bounded sequence — one run-scoped status
+  # read, the drafts listing, one surface, exit — and forbids command discovery,
+  # host-wide run listings and recursive searches by name, because that deadline is
+  # finite and two recorded turns spent all of it on exactly those, raising nothing.
+  # `tests/e2e/launch_monitor_observer/test_supervisory_prompt_discipline_e2e.py` reads the sequence off a
+  # real turn's prompt and `tests/test_pacemaker_discipline.py` reconciles it against
+  # the persona's copy.
+  #
+  # Never point this member at ../oneharness.orchestrator.toml: it reads its own
+  # config so that it keeps a finite deadline, and re-sharing one file is what
+  # would silently take that away. See
+  # docs/onejudge-integration.md#choosing-a-deadline-per-side.
+  check-in:
+    kind: oneharness
+    oneharness_config: ../oneharness.check-in.toml
+    persona: ../personas/check-in.yaml
+    task: |
+      {task}
+
+      Report current progress on that run, for the planner supervising it. Your turn
+      is this bounded sequence, in this order:
+
+      1. Run `onepipeline status <run-id>` for the run named above — that one run,
+         never the view over every run.
+      2. Run `onetaskgraph task list --source drafts --project <run-id> --json`, the
+         draft root the launch exported. Report how many follow-up drafts the run's
+         draft project holds and their titles; an empty list is none, and your working
+         directory needs no configuration for it, because the launch exported the
+         source whole.
+      3. Compose one compact update from those two readings — the run's state and what
+         is running, then the drafts — and raise it with the one `onepipeline surface
+         --kind check-in` invocation shown below, naming the run above.
+      4. Exit.
+
+      Those two readings are the whole of your reading. Never discover commands: no
+      `--help` walk, no `just --list`. Never list runs host-wide: no bare `just runs`,
+      no `onepipeline runs`. Never search the filesystem recursively: no `rg`, no
+      `grep -r`, no `find` over the checkout or a state directory. Two turns of this
+      member spent their entire deadline on exactly those and were killed having raised
+      nothing, which is the one outcome a pacemaker exists to prevent. A question the
+      two readings cannot answer is reported in the update as unanswered, with what you
+      read, rather than investigated. Never send `onepipeline reply`: live graph edits
+      belong to the monitor member, which watches the whole run, and to the planner.
+
+      A draft is an unverified, non-blocking follow-up somebody verifies after the run.
+      You may draft one yourself before you exit, with `"$ORCHESTRATOR_FOLLOW_UP_DRAFT"
+      --as pacemaker --member check-in` — its `--help` gives the body, and is the one
+      `--help` this turn may read — but anything the planner must act on now stays in
+      this update, never only in a draft: nobody reads a draft until the run is over.
+
+      Hand the update to the verb as bytes, on its stdin, never as a command-line
+      word:
+
+          onepipeline surface --kind check-in <run-id> <<'UPDATE'
+          <your update, punctuated however you like, backticks and dollar signs
+          included>
+          UPDATE
+
+      The verb reads the surface's text from a file you name, or from stdin when you
+      name none, so those bytes reach it without a shell ever parsing them. Never
+      reach for the inline `--message` form instead: that text is a command-line
+      word, and inside double quotes bash performs command substitution on backticks
+      and on `$(...)`, so an update that quotes a command name runs that command in
+      the launch directory and splices its output into what the planner reads. That
+      is measured rather than feared — an update naming a command was read back with
+      the command replaced by its own output, after spending twenty-five minutes of a
+      shared host's CPU on work nobody requested. The heredoc's single-quoted
+      delimiter is what keeps its body literal on the way to stdin; do not build the
+      text up in a double-quoted shell variable first.
+
+      Never call anything a hang until you have compared its elapsed time against a
+      bound you located and can name — the timeout the command itself declares, the
+      member's configured deadline, the node's turn budget. Three escalations from
+      this member in one session were false for want of that comparison: 3m25s into a
+      360s bound is a bounded wait, not a stall, and that command completed on its
+      own at 360.068s. Report elapsed against the bound, or not at all; if you cannot
+      find a bound, say that you could not find one rather than inferring a hang from
+      elapsed time alone.
+
+      Show the reading behind any claim that something is alive or dead. Quote the
+      command you ran and that command's own output, and read it a second time before you
+      escalate to a terminal verdict — a driver, an observer or a dispatch called dead is
+      a claim about a state, and one read cannot tell a state from a gap. Nine such claims
+      in one run said that run's driver was gone; the engine had answered no such thing at
+      any of the nine moments, no stop was recorded, and each of that run's fourteen
+      launches carried a distinct driver process, so the record was never stale. Not one
+      of the nine quoted an output. What one of them did quote was a host-wide view, whose
+      seven entries called stale belonged to seven other runs. An unquoted verdict
+      establishes nothing however often it is repeated, and a supervisor whose terminal
+      verdicts are usually wrong has lost the instrument for the one that is real.
+
+      Read an absence of events beside a live heartbeat as generation, not silence.
+      The views print `alive Ns ago` for a streaming dispatch, and a model
+      mid-generation records nothing while staying alive, so "no turn activity for
+      over two minutes" with a live heartbeat is a model thinking. Two neighbouring
+      readings failed the same way and are worth the same care: no matching process
+      is not no work, because a command whose output is captured to a log file runs
+      with nothing on a terminal to show it — three named processes were in fact
+      running — and text that renders oddly in a status view is usually the renderer
+      rather than the thing it renders, as a report of a "malformed edit command"
+      turned out to be newlines flattened for display. Say what you measured and what
+      you measured it against.
+    schedule: {every: 1800, resettable: true}
+    # BACKGROUND, by saying nothing: a scheduled member that declares no `background`
+    # is background, which is exactly the pacemaker this member is meant to be. It fires
+    # while the `monitor` conversation above holds the run open and never again once
+    # that conversation returns. `background: false` here would make a member that
+    # exits after each firing hold the run open forever, because a scheduled foreground
+    # member never finishes on its own.
