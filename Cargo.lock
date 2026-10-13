@@ -1140,9 +1140,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.24.0"
+version = "0.26.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b56b42037cb7c3adad9cb3078c18633f96315afb70167e8690358ef8a0917e5"
+checksum = "82bfb0569aa25329c151994f1ebc96c20a0ccf27f70464608b9b640c1f4aec1a"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",
@@ -1161,9 +1161,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "866c10bcfcf8624e6feacedf352f349fa276b13ed83be0d767306e7ef602ddd0"
+checksum = "3165f288a1ca35f588baf12221d0f024e52ea2bd4305607e46936f52b5165e0b"
 dependencies = [
  "clap",
  "oneharness-core",

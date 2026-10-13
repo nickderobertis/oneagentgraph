@@ -375,7 +375,17 @@ test-doubles = []
 # the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
 # still `^0.18.0`.
 #
-# **0.19.0 is what is linked.** It is the release that gives every judge one
+# **0.19.1 is what is linked**, and moves in lockstep with oneharness-core
+# 0.26.0 below: its published requirement is `^0.26.0`, a pre-1.0 minor the
+# `^0.24.0` 0.19.0 asked for excludes, so the two are edited together or the
+# graph carries two cores — the state `tests/inventory.rs` refuses. Its `src/` is
+# byte-identical to 0.19.0's; what moved is only the core it links. That core's
+# plugins-off launch does not reach a two-party member's sides through this
+# requirement: `src/judge.rs` installs a spawn hook, which selects onejudge's
+# process seam, so each side's Codex is started by the `oneharness` CLI the host
+# installs rather than by the linked engine.
+#
+# 0.19.0 gives every judge one
 # evidence contract whatever its mode, so a read-only judge is no longer told
 # never to use its shell and left to judge blind — and a two-party member is judged in-process, so that prompt reaches its judges only
 # through this requirement. Its `oneharness-core` requirement is still
@@ -419,7 +429,7 @@ test-doubles = []
 #      stacked-panel journeys in `tests/e2e/panel.rs` are what that holds.
 #   3. 0.17.0's readable `--format text` is the onejudge CLI's; this crate links
 #      the engine and reads no CLI output.
-onejudge = { version = "0.19.0", features = ["cli"] }
+onejudge = { version = "0.19.1", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -451,11 +461,30 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.24.0; that was re-measured for this bump rather than assumed, and
+# 0.26.0; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.24.0 is what is linked, and it is linked exactly once**, in lockstep with
-# onejudge 0.17.1 above, which asks for `^0.24.0`. It is the release whose
+# **0.26.0 is what is linked, and it is linked exactly once**, in lockstep with
+# onejudge 0.19.1 above, which asks for `^0.26.0`. It is the release that starts
+# Codex with plugins off — `-c features.plugins=false` on every `exec` and
+# `app-server` launch — unless the config opts in with `plugins = true` under
+# `[harness.codex]` (or a codex variant), where every earlier core let Codex
+# download its whole remote plugin catalog on each process start. A
+# `kind: oneharness` member's turn is this core called in-process, so such a
+# turn reaches Codex without that download only through this requirement;
+# `tests/e2e/selection.rs` drives such a member against a recording `codex` on
+# `PATH`, with the key absent and with it set. It is breaking for the new
+# `BuildCtx` field and the new config key, neither of which this crate builds or
+# restates: a member's config is handed to the core as the operator wrote it.
+# The two releases it crosses forced nothing here: 0.25.0's break is the usage
+# report's banked Codex reset credits, which `src/health.rs`'s sweep passes
+# through untouched, and 0.25.1 finds and stops a dispatch's marked processes
+# beside `io::runner`, which is byte-identical to 0.24.0's. 0.24.1 and 0.24.2
+# (a failed Claude tool call marked in the text stream, OpenCode text and
+# reasoning parts as `message` and `reasoning` events) are carried along.
+#
+# 0.24.0 moved in lockstep with onejudge 0.17.1 above, which asks for
+# `^0.24.0`. It is the release whose
 # history recording reads no index and lists no directory (oneharness's
 # `docs/history-index.md`), where every earlier core re-read the whole index and
 # walked the store on each run. A `kind: oneharness` member's turn records
@@ -562,7 +591,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # requirement. The rule that went with the split is retired with it, because
 # there is no longer a second set of types to confuse this one with; what remains
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.24.0"
+oneharness-core = "0.26.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized
