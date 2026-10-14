@@ -17,7 +17,7 @@
 //!   before the move reads to.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf, MAIN_SEPARATOR};
+use std::path::{Path, PathBuf, MAIN_SEPARATOR_STR};
 
 use oneagentgraph::config::{ConfigRef, GraphConfig, Member, TaskText};
 use oneagentgraph::persona::{self, Persona};
@@ -208,6 +208,29 @@ fn onejudge_reads(text: &str, what: &str) -> String {
     format!("{config:#?}")
 }
 
+/// `recorded` with each path under `placeholder` moved under `dir`.
+///
+/// A recorded path is a whole scalar running to the end of its line, captured
+/// where `/` is the separator. The crate writes these paths natively — joined
+/// onto `dir` and made absolute — so every `/` in one, after the placeholder as
+/// well as within the tail beneath it (`../config/…`), is the separator this
+/// platform writes there.
+fn place(recorded: &str, placeholder: &str, dir: &Path) -> String {
+    recorded
+        .lines()
+        .map(|line| match line.split_once(placeholder) {
+            Some((head, tail)) => format!(
+                "{head}{}{}",
+                dir.display(),
+                tail.replace('/', MAIN_SEPARATOR_STR)
+            ),
+            None => line.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 #[test]
 fn every_real_two_party_members_config_reads_back_to_what_it_did_before() {
     let host = host();
@@ -245,18 +268,13 @@ fn every_real_two_party_members_config_reads_back_to_what_it_did_before() {
         }
         built.unwrap_or_else(|err| panic!("{}: {err}", case.file));
         let written = std::fs::read_to_string(scratch.join("onejudge.yaml")).expect("written");
-        // The crate joins onto these directories natively, so a recorded
-        // `/` after one is the separator this platform writes there.
-        let before = std::fs::read_to_string(&before_path)
-            .expect("recorded")
-            .replace(
-                &format!("{SCRATCH}/{}/", case.file.trim_end_matches(".yaml")),
-                &format!("{}{MAIN_SEPARATOR}", scratch.display()),
-            )
-            .replace(
-                &format!("{HOST}/graphs/"),
-                &format!("{}{MAIN_SEPARATOR}", graph_dir.display()),
-            );
+        let before = std::fs::read_to_string(&before_path).expect("recorded");
+        let before = place(
+            &before,
+            &format!("{SCRATCH}/{}", case.file.trim_end_matches(".yaml")),
+            &scratch,
+        );
+        let before = place(&before, &format!("{HOST}/graphs"), &graph_dir);
         assert!(
             !before.contains(SCRATCH) && !before.contains(HOST),
             "{}: a recorded path this test does not place",
