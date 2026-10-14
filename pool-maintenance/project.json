@@ -1,0 +1,14 @@
+{
+  "name": "pool-maintenance",
+  "$schema": "../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "pool-maintenance",
+  "tags": ["scope:repo", "lang:bash"],
+  "targets": {
+    "bootstrap": { "command": "just _ensure-prune-superseded" },
+    "budgets-release": {
+      "command": "npx --no-install onebudgetspec check pool-maintenance/budgets.yaml --label host",
+      "cache": false
+    }
+  }
+}

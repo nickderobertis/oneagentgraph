@@ -10,6 +10,7 @@
       "{workspaceRoot}/justfile"
     ],
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "production": ["default"],
     "screenshotSource": [
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/personas/**/*",
@@ -86,6 +87,16 @@
       "dependsOn": ["format-check", "lint", "test"]
     },
     "screenshots": { "cache": true, "inputs": ["screenshotSource"] },
+    "budgets": {
+      "cache": true,
+      "inputs": [
+        "{projectRoot}/**/*",
+        "^production",
+        { "dependentTasksOutputFiles": "**/telemetry/*.json" },
+        { "externalDependencies": ["@onebudgetspec/cli"] }
+      ]
+    },
+    "budgets-host": { "cache": false },
     "lint-llm-diff": {
       "cache": true,
       "inputs": [

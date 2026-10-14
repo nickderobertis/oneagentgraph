@@ -51,6 +51,12 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # only a CLI at it.
 oneharness-version := "0.21.1"
 
+# The pruner `pool-maintenance` runs, which onevcs runs in this repository's idle
+# warm-pool slots (`onevcs.toml`). `just bootstrap` installs exactly this release
+# (the `pool-maintenance` project's `bootstrap` target), so a host that
+# bootstraps this repository has the command its slots' maintenance names.
+prune-superseded-version := "0.1.1"
+
 # Keep the gate's own output to signal: successes are silent, failures are not.
 export CARGO_TERM_QUIET := "true"
 
@@ -107,6 +113,16 @@ _ensure-oneharness:
        if [ "$("$candidate" --version 2>/dev/null)" = "oneharness {{oneharness-version}}" ]; then exit 0; fi; \
      done; \
      cargo install --locked oneharness --version {{oneharness-version}}
+
+# Version-checked rather than merely present, and probed in the cargo bin
+# directory as well as on `PATH`, for the reason `_ensure-oneharness` is: a stale
+# pruner on `PATH` would otherwise be what every idle slot's maintenance runs.
+# Install the pinned `cargo-prune-superseded`. Quiet when already at the pin.
+_ensure-prune-superseded:
+    @for candidate in cargo-prune-superseded "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-prune-superseded"; do \
+       if [ "$("$candidate" --version 2>/dev/null)" = "cargo-prune-superseded {{prune-superseded-version}}" ]; then exit 0; fi; \
+     done; \
+     cargo install --locked cargo-prune-superseded --version {{prune-superseded-version}}
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
@@ -339,6 +355,35 @@ _deps-check:
     @# machete prints the unused deps it finds on stdout, so keep it: hiding
     @# them would leave a failing gate with no actionable detail.
     @cargo machete
+
+# What onevcs runs in each idle warm-pool slot of this repository (`onevcs.toml`).
+# The target dirs are every directory this repository's cargo builds write to:
+# `.cargo/config.toml`'s `target-dir`, resolved against the directory holding
+# `.cargo/`, which is this one. Each unit's newest build and every build modified
+# within the window are kept; older superseded builds are removed.
+# Prune superseded cargo build output older than 2 days.
+pool-maintenance:
+    @cargo-prune-superseded --keep-within 2d target
+
+# Outside `check` and the affected tier on purpose: the measurement builds this
+# repository twice (`pool-maintenance/measure.sh`), so only the release PR's
+# `sweep` job runs it, after its gate.
+# Check the pool-maintenance pass against its budget.
+pool-maintenance-budget:
+    @bash scripts/nx.sh run pool-maintenance:budgets-release
+
+# create-repo's onebudgetspec setup step: every project's `budgets` and
+# `budgets-host` targets, then the root `budgets.yaml` when there is one. No
+# project declares a target that runs `pool-maintenance/budgets.yaml`'s budget
+# under either name, so this never reaches it.
+# Check the onebudgetspec budgets, affected projects (default) or all.
+budgets tier="affected":
+    @case "$1" in \
+      all) bash scripts/nx.sh run-many -t budgets budgets-host ;; \
+      affected) bash scripts/nx-affected.sh -t budgets budgets-host ;; \
+      *) echo "unknown tier '$1' — use 'affected' (the default) or 'all'" >&2; exit 2 ;; \
+    esac
+    @[ ! -f budgets.yaml ] || npx --no-install onebudgetspec check budgets.yaml
 
 # Separate from `check` on the same terms `deps-check` is: two of the probe's
 # three answers are what a public registry serves, and the deterministic gate
