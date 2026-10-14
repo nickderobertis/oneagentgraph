@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # The default types plus `ready_for_review`: a pull request opened as a draft
+    # gets no new run when it is marked ready otherwise.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Least privilege: most jobs only need to read the repo.
 permissions:

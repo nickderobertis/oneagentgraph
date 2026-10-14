@@ -1,0 +1,32 @@
+# The node-scope agent graph for the `design-doc` role: one worker, supervised by one
+# simulated-user judge, exactly as `graphs/node-scope.yaml` is. A plan node names it
+# with `agent_graph` when its job is to write the design document a plan is reviewed as.
+#
+# What it changes and all it changes: WHICH harness runs each side. This role's pairing
+# is the reverse of this host's ordinary one — Codex leads the side that writes the
+# document, the Claude subscriptions lead the side that reviews it — so it cannot borrow
+# either shipped config and names its own two instead. Everything else is the shipped
+# node-scope member: the same base config, the same `bypass` mode, and the task and the
+# persona still come from the node.
+#
+# A run reaches this document only through a node that names it: `just orchestrate` still
+# attaches `graphs/node-scope.yaml`. The one launch that names it is the design-document
+# launch `scripts/finish-plan.sh` makes, whose single node carries it as `agent_graph`.
+#
+# Every ref below is relative to THIS file's directory, not the working directory.
+version: 1
+name: design-doc
+members:
+  worker:
+    kind: onejudge
+    base_config: ../config/onejudge.base.yaml
+    # The task comes from the node over `--task`, and `onepipeline` forwards a
+    # dispatched plan node's `persona` as this member's persona override — which for
+    # this role is the PATH `../personas/design-doc.yaml`, since a bare `design-doc`
+    # would resolve against the roles built into oneagentgraph and read no file of this
+    # repository's at all. See personas/README.md.
+    agent:
+      oneharness_config: ../oneharness.design-doc.toml
+    judge:
+      oneharness_config: ../oneharness.design-doc-judge.toml
+    mode: bypass

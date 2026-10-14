@@ -1,0 +1,24 @@
+# The node-scope agent graph every dispatched plan node runs under: one worker,
+# supervised by one simulated-user judge. `onepipeline` reads this path —
+# `graphs/node-scope.yaml`, relative to the directory the run was launched from
+# — unless a plan node names its own with `agent_graph`. `ONEPIPELINE_NODE_GRAPH`
+# moves the default.
+#
+# Every ref below is relative to THIS file's directory, not the working
+# directory.
+version: 1
+name: node-scope
+members:
+  worker:
+    kind: onejudge
+    base_config: ../config/onejudge.base.yaml
+    # The task comes from the node over `--task`, and `onepipeline` forwards a
+    # dispatched plan node's `persona` as this member's persona override. Nodes
+    # that do not dispatch (`expects_no_diff` and human nodes) need no persona;
+    # a direct graph invocation with no override uses the base config's generic
+    # role. See docs/orchestration.md, "The agent graphs a run launches".
+    agent:
+      oneharness_config: ../oneharness.toml
+    judge:
+      oneharness_config: ../oneharness.judge.toml
+    mode: bypass

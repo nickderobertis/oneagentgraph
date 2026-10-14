@@ -137,20 +137,19 @@ fn start(workspace: &Workspace, system: &str, task: &str) -> Running {
 /// text appended to the rendered document lands under whatever key happens to
 /// follow it.
 fn base_with(system: &str) -> String {
-    let mut document: serde_norway::Value =
-        serde_norway::from_str(BASE).expect("the base is a YAML document");
-    let key = serde_norway::Value::String("system_prompt".to_string());
-    let mapping = document.as_mapping_mut().expect("the base is a mapping");
+    let mut document: serde_json::Value =
+        oneagentgraph::yaml::from_str(BASE).expect("the base is a YAML document");
+    let mapping = document.as_object_mut().expect("the base is a mapping");
     let standing = mapping
-        .get(&key)
-        .and_then(serde_norway::Value::as_str)
+        .get("system_prompt")
+        .and_then(serde_json::Value::as_str)
         .unwrap_or_default()
         .to_string();
     mapping.insert(
-        key,
-        serde_norway::Value::String(format!("{standing}\n{system}\n")),
+        "system_prompt".to_string(),
+        serde_json::Value::String(format!("{standing}\n{system}\n")),
     );
-    serde_norway::to_string(&document).expect("the base serializes")
+    oneagentgraph::yaml::to_string(&document).expect("the base serializes")
 }
 
 /// Every prompt captured in `at`, one per element.

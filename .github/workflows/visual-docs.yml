@@ -16,8 +16,9 @@ name: Visual docs
 on:
   pull_request:
     # `closed` lets screencomp delete this PR's gallery preview once it closes, so
-    # stale /pr-<n>/ previews do not accumulate.
-    types: [opened, synchronize, reopened, closed]
+    # stale /pr-<n>/ previews do not accumulate. `ready_for_review` re-runs the
+    # required report when a draft pull request is marked ready.
+    types: [opened, synchronize, reopened, ready_for_review, closed]
   push:
     branches: [main]
   schedule:

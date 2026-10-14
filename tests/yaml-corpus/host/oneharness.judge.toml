@@ -1,0 +1,4 @@
+# A stand-in for the host's oneharness.judge.toml: the effective onejudge.yaml names the
+# path a side's config is written to, never what it says, so only its shape matters.
+run_mode = "fallback"
+harnesses = ["claude-code"]

@@ -19,7 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use serde_norway::Value;
+use serde_json::Value;
 
 /// This checkout, whose committed files are what is read.
 const REPO: &str = env!("CARGO_MANIFEST_DIR");
@@ -321,8 +321,10 @@ fn workflows() -> Vec<Workflow> {
         })
         .map(|path| Workflow {
             file: path.file_name().unwrap().to_string_lossy().into_owned(),
-            doc: serde_norway::from_str(&std::fs::read_to_string(&path).expect("read a workflow"))
-                .unwrap_or_else(|err| panic!("{} is not YAML: {err}", path.display())),
+            doc: oneagentgraph::yaml::from_str(
+                &std::fs::read_to_string(&path).expect("read a workflow"),
+            )
+            .unwrap_or_else(|err| panic!("{} is not YAML: {err}", path.display())),
         })
         .collect();
     found.sort_by(|a, b| a.file.cmp(&b.file));
@@ -339,10 +341,10 @@ fn workflow(name: &str) -> Workflow {
 impl Workflow {
     fn jobs(&self) -> BTreeMap<String, &Value> {
         self.doc["jobs"]
-            .as_mapping()
+            .as_object()
             .unwrap_or_else(|| panic!("{} declares no jobs", self.file))
             .iter()
-            .map(|(id, job)| (id.as_str().expect("a job id").to_string(), job))
+            .map(|(id, job)| (id.clone(), job))
             .collect()
     }
 
@@ -358,7 +360,7 @@ impl Workflow {
         let on = &self.doc["on"];
         let trigger = match on {
             Value::String(event) => return event == "pull_request",
-            Value::Sequence(events) => return events.iter().any(|e| e == "pull_request"),
+            Value::Array(events) => return events.iter().any(|e| e == "pull_request"),
             _ => match on.get("pull_request") {
                 Some(trigger) => trigger,
                 None => return false,
@@ -375,7 +377,7 @@ impl Workflow {
         let listed = |key: &str, wanted: &str| {
             trigger
                 .get(key)
-                .and_then(Value::as_sequence)
+                .and_then(Value::as_array)
                 .is_none_or(|values| values.iter().any(|value| value == wanted))
         };
         listed("branches", "main") && listed("types", "synchronize")
@@ -393,7 +395,7 @@ impl Workflow {
         match job
             .get("strategy")
             .and_then(|s| s.get("matrix"))
-            .and_then(Value::as_mapping)
+            .and_then(Value::as_object)
         {
             None => vec![name],
             Some(matrix) => {
@@ -405,12 +407,12 @@ impl Workflow {
                 );
                 let (axis, values) = matrix.iter().next().unwrap();
                 values
-                    .as_sequence()
+                    .as_array()
                     .expect("a matrix axis is a list")
                     .iter()
                     .map(|v| {
                         let value = v.as_str().expect("a matrix value");
-                        if name == "${{ matrix.context }}" && axis.as_str() == Some("context") {
+                        if name == "${{ matrix.context }}" && axis == "context" {
                             value.to_owned()
                         } else {
                             format!("{name} ({value})")
@@ -432,7 +434,7 @@ impl Workflow {
         match self.job(id).get("needs") {
             None => Vec::new(),
             Some(Value::String(one)) => vec![one.clone()],
-            Some(Value::Sequence(many)) => many
+            Some(Value::Array(many)) => many
                 .iter()
                 .map(|n| n.as_str().expect("a needs entry").to_string())
                 .collect(),
@@ -450,8 +452,8 @@ impl Workflow {
         let on = &self.doc["on"];
         let trigger = match on {
             Value::String(listed) => return *listed == event,
-            Value::Sequence(listed) => return listed.iter().any(|e| *e == *event),
-            Value::Mapping(_) => match on.get(event.as_str()) {
+            Value::Array(listed) => return listed.iter().any(|e| *e == *event),
+            Value::Object(_) => match on.get(event.as_str()) {
                 Some(trigger) => trigger,
                 None => return false,
             },
@@ -466,7 +468,7 @@ impl Workflow {
                 None => panic!("a synthetic {event} names no branch: {reference}"),
             }
         };
-        let Some(filters) = trigger.as_mapping() else {
+        let Some(filters) = trigger.as_object() else {
             assert!(
                 trigger.is_null(),
                 "{}'s `{event}` trigger is unreadable: {trigger:?}",
@@ -476,9 +478,9 @@ impl Workflow {
         };
         let mut taken = true;
         for (key, value) in filters {
-            let key = key.as_str().expect("a trigger filter name");
+            let key = key.as_str();
             let listed: Vec<&str> = value
-                .as_sequence()
+                .as_array()
                 .unwrap_or_else(|| panic!("{}'s `{event}.{key}` is not a list", self.file))
                 .iter()
                 .map(|v| v.as_str().expect("a trigger filter value"))
@@ -534,7 +536,7 @@ impl Workflow {
     /// The `run:` text of every step a job runs for an event.
     fn runs(&self, id: &str, context: &Context) -> Vec<String> {
         self.job(id)["steps"]
-            .as_sequence()
+            .as_array()
             .expect("a job has steps")
             .iter()
             .filter(|step| {
@@ -549,7 +551,7 @@ impl Workflow {
     /// An env value a step sees for an event, by the step's `run:` text.
     fn step_env(&self, id: &str, run: &str, var: &str, context: &Context) -> String {
         let step = self.job(id)["steps"]
-            .as_sequence()
+            .as_array()
             .expect("a job has steps")
             .iter()
             .find(|step| step["run"].as_str().is_some_and(|r| r.contains(run)))
@@ -699,6 +701,37 @@ fn every_required_context_is_reported_on_every_pull_request() {
     }
 }
 
+/// A pull request opened as a draft and then marked ready gets no new run from
+/// GitHub's default `pull_request` types, so the required contexts carry only the
+/// runs from while it was a draft, and a merge path that waits for a run after the
+/// lift waits on nothing.
+#[test]
+fn every_required_context_reruns_when_a_draft_is_marked_ready() {
+    let all = workflows();
+    for w in all.iter().filter(|w| w.runs_on_every_pull_request()) {
+        let reports_required = w.jobs().into_keys().any(|id| {
+            w.contexts(&id).iter().any(|c| {
+                REQUIRED
+                    .iter()
+                    .any(|r| r == c || (c.ends_with(" / ") && r.starts_with(c.as_str())))
+            })
+        });
+        if !reports_required {
+            continue;
+        }
+        let types: Vec<&str> = w.doc["on"]["pull_request"]["types"]
+            .as_array()
+            .map(|types| types.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert!(
+            types.contains(&"ready_for_review"),
+            "{} reports a required context but its pull_request trigger does not list \
+             `ready_for_review` (types: {types:?}), so lifting a draft runs nothing",
+            w.file
+        );
+    }
+}
+
 #[test]
 fn a_leg_with_nothing_to_prove_reports_on_ubuntu_and_one_with_work_runs_it() {
     let ci = workflow("ci.yml");
@@ -706,7 +739,7 @@ fn a_leg_with_nothing_to_prove_reports_on_ubuntu_and_one_with_work_runs_it() {
         let legs = ci.contexts(id);
         let job = ci.job(id);
         let os_values: Vec<String> = job["strategy"]["matrix"]["os"]
-            .as_sequence()
+            .as_array()
             .expect("an os axis")
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
@@ -859,7 +892,7 @@ fn the_suppression_comment_runs_on_same_repository_pull_requests_only() {
     assert_eq!(w.doc["permissions"]["contents"], "read");
     assert_eq!(w.doc["permissions"]["pull-requests"], "write");
     let uses: Vec<&str> = w.job("suppressions")["steps"]
-        .as_sequence()
+        .as_array()
         .unwrap()
         .iter()
         .filter_map(|step| step["uses"].as_str())

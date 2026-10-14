@@ -1619,7 +1619,7 @@ fn the_documented_sweep_report_round_trips_through_the_document_type() {
 fn the_documented_graph_round_trips_through_the_config_schema() {
     let yaml = fenced_block("yaml");
     let graph: GraphConfig =
-        serde_norway::from_str(&yaml).expect("the documented graph does not parse");
+        oneagentgraph::yaml::from_str(&yaml).expect("the documented graph does not parse");
 
     assert_eq!(graph.version, SCHEMA_VERSION);
     oneagentgraph::config::validate(&graph).expect("the documented graph must validate");
@@ -1712,9 +1712,10 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
         }
     );
 
-    let reserialized = serde_norway::to_string(&graph).expect("the graph does not serialize");
-    let reparsed: GraphConfig =
-        serde_norway::from_str(&reserialized).expect("the serialized graph does not parse back");
+    let reserialized =
+        oneagentgraph::yaml::to_string(&graph).expect("the graph does not serialize");
+    let reparsed: GraphConfig = oneagentgraph::yaml::from_str(&reserialized)
+        .expect("the serialized graph does not parse back");
     assert_eq!(reparsed, graph, "the graph schema must round-trip");
 }
 
@@ -1723,7 +1724,7 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
 #[test]
 fn the_documented_event_filter_is_the_grammar_the_crate_applies() {
     let graph: GraphConfig =
-        serde_norway::from_str(&fenced_block("yaml")).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&fenced_block("yaml")).expect("the documented graph parses");
     let filter = graph
         .events
         .as_ref()
@@ -1787,9 +1788,9 @@ fn the_documented_event_filter_is_the_grammar_the_crate_applies() {
 fn the_documented_event_block_is_omitted_when_unset_and_gated_when_set() {
     let documented = fenced_block("yaml");
     let mut graph: GraphConfig =
-        serde_norway::from_str(&documented).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&documented).expect("the documented graph parses");
     graph.events = None;
-    let rendered = serde_norway::to_string(&graph).expect("the graph serializes");
+    let rendered = oneagentgraph::yaml::to_string(&graph).expect("the graph serializes");
     assert!(
         !rendered.contains("events:"),
         "an absent events block must stay absent for older consumers: {rendered}"
@@ -1800,7 +1801,8 @@ fn the_documented_event_block_is_omitted_when_unset_and_gated_when_set() {
             &format!("version: {SCHEMA_VERSION}"),
             &format!("version: {older}"),
         );
-        let mut graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        let mut graph: GraphConfig =
+            oneagentgraph::yaml::from_str(&older).expect("it still parses");
         // The documented graph's `personas` catalog postdates every schema in
         // this loop too; dropping it leaves the block as the one thing refused.
         graph.personas = None;
@@ -1827,9 +1829,9 @@ fn the_documented_persona_catalog_is_gated_and_omitted_when_unset() {
         "the documented graph must show its own persona catalog"
     );
     let mut graph: GraphConfig =
-        serde_norway::from_str(&documented).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&documented).expect("the documented graph parses");
     graph.personas = None;
-    let rendered = serde_norway::to_string(&graph).expect("the graph serializes");
+    let rendered = oneagentgraph::yaml::to_string(&graph).expect("the graph serializes");
     assert!(
         !rendered.contains("personas:"),
         "an absent catalog must stay absent for older consumers: {rendered}"
@@ -1840,7 +1842,7 @@ fn the_documented_persona_catalog_is_gated_and_omitted_when_unset() {
             &format!("version: {SCHEMA_VERSION}"),
             &format!("version: {older}"),
         );
-        let graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        let graph: GraphConfig = oneagentgraph::yaml::from_str(&older).expect("it still parses");
         let error = oneagentgraph::config::validate(&graph)
             .expect_err("the key postdates this schema version");
         assert!(error.to_string().contains("`personas`"), "{error}");
@@ -1864,7 +1866,7 @@ fn the_documented_pre_turn_views_are_gated_and_omitted_when_unset() {
         "the documented reporter must show its own pre-turn views"
     );
     let mut graph: GraphConfig =
-        serde_norway::from_str(&documented).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&documented).expect("the documented graph parses");
     let Some(Member::Oneharness(reporter)) = graph.members.get("reporter") else {
         panic!("reporter is oneharness")
     };
@@ -1886,7 +1888,7 @@ fn the_documented_pre_turn_views_are_gated_and_omitted_when_unset() {
         panic!("reporter is oneharness")
     };
     reporter.pre_turn.clear();
-    let rendered = serde_norway::to_string(&graph).expect("the graph serializes");
+    let rendered = oneagentgraph::yaml::to_string(&graph).expect("the graph serializes");
     assert!(
         !rendered.contains("pre_turn"),
         "an absent view list must stay absent for older consumers: {rendered}"
@@ -1897,7 +1899,8 @@ fn the_documented_pre_turn_views_are_gated_and_omitted_when_unset() {
             &format!("version: {SCHEMA_VERSION}"),
             &format!("version: {older}"),
         );
-        let mut graph: GraphConfig = serde_norway::from_str(&older).expect("it still parses");
+        let mut graph: GraphConfig =
+            oneagentgraph::yaml::from_str(&older).expect("it still parses");
         // The documented graph's catalog, events block, and members' own
         // `background` postdate every schema in this loop too; dropping them
         // leaves the views as the one refusal.
@@ -2087,7 +2090,7 @@ fn the_readme_graph_is_one_this_build_reads_and_validates() {
         .expect("the README carries a fenced graph example");
     let (document, _) = rest.split_once("```").expect("the fenced example closes");
     let graph: GraphConfig =
-        serde_norway::from_str(document).expect("the README graph does not parse");
+        oneagentgraph::yaml::from_str(document).expect("the README graph does not parse");
     oneagentgraph::config::validate(&graph).expect("the README graph must validate");
     let Some(Member::Onejudge(worker)) = graph.members.get("worker") else {
         panic!("the README's worker is a two-party member");
@@ -2109,7 +2112,7 @@ fn the_documented_dependency_field_round_trips_on_both_member_kinds() {
         "the documented graph must carry deps on both member variants"
     );
     let graph: GraphConfig =
-        serde_norway::from_str(&document).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&document).expect("the documented graph parses");
     let Member::Onejudge(worker) = &graph.members["worker"] else {
         panic!("worker is onejudge")
     };
@@ -2118,12 +2121,12 @@ fn the_documented_dependency_field_round_trips_on_both_member_kinds() {
         panic!("reporter is oneharness")
     };
     assert!(reporter.deps.is_empty());
-    let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    let round_trip = oneagentgraph::yaml::to_string(&graph).expect("graph serializes");
     assert!(
         !round_trip.contains("deps:"),
         "empty dependencies must remain omitted for older consumers: {round_trip}"
     );
-    let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    let reparsed: GraphConfig = oneagentgraph::yaml::from_str(&round_trip).expect("graph reparses");
     assert_eq!(reparsed, graph);
 }
 
@@ -2144,23 +2147,23 @@ fn the_documented_member_job_fields_round_trip_and_stay_omitted_when_unset() {
         );
     }
     let graph: GraphConfig =
-        serde_norway::from_str(&document).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&document).expect("the documented graph parses");
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
     };
     assert_eq!(reporter.task, None);
     assert_eq!(reporter.dir, None);
 
-    let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    let round_trip = oneagentgraph::yaml::to_string(&graph).expect("graph serializes");
     // The reporter's own rendering rather than the whole graph's: the documented
     // worker carries a `dir` of its own from version 9, so the whole document
     // legitimately shows the key.
-    let reporter_alone = serde_norway::to_string(reporter).expect("a member serializes");
+    let reporter_alone = oneagentgraph::yaml::to_string(reporter).expect("a member serializes");
     assert!(
         !reporter_alone.contains("task:") && !reporter_alone.contains("dir:"),
         "a member with no job of its own must serialize without either field: {reporter_alone}"
     );
-    let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    let reparsed: GraphConfig = oneagentgraph::yaml::from_str(&round_trip).expect("graph reparses");
     assert_eq!(reparsed, graph);
 
     // And a member that *does* carry them keeps them across the round trip,
@@ -2174,14 +2177,15 @@ fn the_documented_member_job_fields_round_trip_and_stay_omitted_when_unset() {
          --dir\n",
         "    dir: ./api\n",
     );
-    let graph: GraphConfig = serde_norway::from_str(&carried).expect("the carried graph parses");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(&carried).expect("the carried graph parses");
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
     };
     assert_eq!(reporter.task.as_deref(), Some("send one status update"));
     assert_eq!(reporter.dir.as_deref(), Some(std::path::Path::new("./api")));
     let reparsed: GraphConfig =
-        serde_norway::from_str(&serde_norway::to_string(&graph).expect("serializes"))
+        oneagentgraph::yaml::from_str(&oneagentgraph::yaml::to_string(&graph).expect("serializes"))
             .expect("reparses");
     assert_eq!(reparsed, graph);
 }
@@ -2247,7 +2251,7 @@ fn the_documented_background_is_gated_and_omitted_when_unset() {
         );
     }
     let graph: GraphConfig =
-        serde_norway::from_str(&documented).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&documented).expect("the documented graph parses");
     // The document says it on both kinds, and the reading agrees with what it
     // says: the two-party worker holds the run open, the scheduled reporter
     // does not.
@@ -2280,12 +2284,12 @@ fn the_documented_background_is_gated_and_omitted_when_unset() {
         !unscheduled.is_background("worker"),
         "an unscheduled member naming nothing holds the run open"
     );
-    let rendered = serde_norway::to_string(&unset).expect("the graph serializes");
+    let rendered = oneagentgraph::yaml::to_string(&unset).expect("the graph serializes");
     assert!(
         !rendered.contains("background"),
         "an absent `background` must stay absent for older consumers: {rendered}"
     );
-    let reparsed: GraphConfig = serde_norway::from_str(&rendered).expect("it reparses");
+    let reparsed: GraphConfig = oneagentgraph::yaml::from_str(&rendered).expect("it reparses");
     assert_eq!(reparsed, unset);
 
     // And the explicit value overrides the default in both directions.
@@ -2318,7 +2322,7 @@ fn the_documented_background_is_gated_and_omitted_when_unset() {
             .replace("start_after: 1800, ", "");
         for kind in ["worker", "reporter"] {
             let mut graph: GraphConfig =
-                serde_norway::from_str(&declared).expect("an older graph parses");
+                oneagentgraph::yaml::from_str(&declared).expect("an older graph parses");
             drop_what_postdates_the_schedule(&mut graph);
             let named = graph.members.get_mut(kind).expect("a documented member");
             match named {
@@ -2337,7 +2341,7 @@ fn the_documented_background_is_gated_and_omitted_when_unset() {
             );
         }
         let mut graph: GraphConfig =
-            serde_norway::from_str(&declared).expect("an older graph parses");
+            oneagentgraph::yaml::from_str(&declared).expect("an older graph parses");
         drop_what_postdates_the_schedule(&mut graph);
         oneagentgraph::config::validate(&graph)
             .unwrap_or_else(|err| panic!("version {older} must still validate: {err}"));
@@ -2361,7 +2365,7 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
         "the documented schedule must show `start_after`"
     );
     let graph: GraphConfig =
-        serde_norway::from_str(&document).expect("the documented graph parses");
+        oneagentgraph::yaml::from_str(&document).expect("the documented graph parses");
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
     };
@@ -2372,22 +2376,22 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
     // A schedule naming none: one whole interval under this schema, and the
     // document round-trips without gaining a key an older consumer would reject.
     let unset = document.replace("start_after: 1800, ", "");
-    let graph: GraphConfig = serde_norway::from_str(&unset).expect("the graph parses");
+    let graph: GraphConfig = oneagentgraph::yaml::from_str(&unset).expect("the graph parses");
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
     };
     let inherited = reporter.schedule.expect("the reporter is scheduled");
     assert_eq!(inherited.start_after, None);
     assert_eq!(inherited.first_turn_after(SCHEMA_VERSION), inherited.every);
-    let round_trip = serde_norway::to_string(&graph).expect("graph serializes");
+    let round_trip = oneagentgraph::yaml::to_string(&graph).expect("graph serializes");
     // The reporter's own rendering: the documented worker's schedule names
     // `start_after: 0`, which is a key it is meant to show.
-    let reporter_alone = serde_norway::to_string(reporter).expect("a member serializes");
+    let reporter_alone = oneagentgraph::yaml::to_string(reporter).expect("a member serializes");
     assert!(
         !reporter_alone.contains("start_after"),
         "a schedule that named no start_after must serialize without one: {reporter_alone}"
     );
-    let reparsed: GraphConfig = serde_norway::from_str(&round_trip).expect("graph reparses");
+    let reparsed: GraphConfig = oneagentgraph::yaml::from_str(&round_trip).expect("graph reparses");
     assert_eq!(reparsed, graph);
 
     // The same schedule under every schema that predates the field takes its
@@ -2402,7 +2406,7 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
             1,
         );
         let mut graph: GraphConfig =
-            serde_norway::from_str(&declared).expect("an older graph parses");
+            oneagentgraph::yaml::from_str(&declared).expect("an older graph parses");
         // The documented graph also carries an `events` block, a `personas`
         // catalog, and a member's own pre-turn views, all of which postdate
         // every schema in this loop; dropping them leaves the schedule as the
@@ -2415,7 +2419,8 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
             &format!("version: {older}"),
             1,
         );
-        let mut graph: GraphConfig = serde_norway::from_str(&named).expect("the graph parses");
+        let mut graph: GraphConfig =
+            oneagentgraph::yaml::from_str(&named).expect("the graph parses");
         drop_what_postdates_the_schedule(&mut graph);
         let refused =
             oneagentgraph::config::validate(&graph).expect_err("start_after postdates this schema");
@@ -2429,7 +2434,8 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
 
     // And `0`, the spelling that asks for the behaviour every schedule had.
     let at_once = document.replace("start_after: 1800", "start_after: 0");
-    let graph: GraphConfig = serde_norway::from_str(&at_once).expect("the immediate graph parses");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(&at_once).expect("the immediate graph parses");
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
     };
@@ -2551,7 +2557,7 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
         "run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n",
     )
     .expect("a chain");
-    let member: Member = serde_norway::from_str(concat!(
+    let member: Member = oneagentgraph::yaml::from_str(concat!(
         "kind: oneharness\noneharness_config: ./oneharness.toml\n",
         "task: \"{task}\\n\\nand report it, using {{task}} to say so\"\n",
     ))
@@ -2586,7 +2592,7 @@ fn the_documented_task_token_expands_into_a_members_own_task() {
 #[test]
 fn a_graph_with_an_unknown_field_is_rejected() {
     let yaml = format!("{}\nnodes: []\n", fenced_block("yaml").trim_end());
-    let error = serde_norway::from_str::<GraphConfig>(&yaml)
+    let error = oneagentgraph::yaml::from_str::<GraphConfig>(&yaml)
         .expect_err("an unknown graph field must not be silently dropped");
     assert!(
         error.to_string().contains("nodes"),
@@ -2610,7 +2616,7 @@ fn a_member_of_either_kind_rejects_an_unknown_field() {
         let yaml = graph.replace(from, to);
         assert_ne!(yaml, graph, "the contract no longer shows `{from}`");
 
-        let error = serde_norway::from_str::<GraphConfig>(&yaml).expect_err(&format!(
+        let error = oneagentgraph::yaml::from_str::<GraphConfig>(&yaml).expect_err(&format!(
             "a `{kind}` member's unknown field must not be silently dropped"
         ));
         assert!(
@@ -2627,9 +2633,10 @@ fn a_member_of_either_kind_rejects_an_unknown_field() {
 /// Not a list kept in this test: a hand-maintained copy is exactly the drift
 /// this gate exists to refuse, one level down.
 fn serde_fields<T: serde::de::DeserializeOwned>(minimal: &str) -> BTreeSet<String> {
-    let error = serde_norway::from_str::<T>(&format!("{minimal}bogus_field_for_the_gate: 1\n"))
-        .err()
-        .expect("a document carrying a bogus key is refused, or deny_unknown_fields is gone");
+    let error =
+        oneagentgraph::yaml::from_str::<T>(&format!("{minimal}bogus_field_for_the_gate: 1\n"))
+            .err()
+            .expect("a document carrying a bogus key is refused, or deny_unknown_fields is gone");
     let text = error.to_string();
     let (_, listed) = text
         .split_once("expected one of ")
@@ -2719,8 +2726,9 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
         "kind: llmlint",
         "command: [c]",
     ] {
-        let judge: JudgeSide = serde_norway::from_str(&format!("{shape}\nsettings: {{x: 1}}\n"))
-            .unwrap_or_else(|err| panic!("{shape}: a judge reads `settings`: {err}"));
+        let judge: JudgeSide =
+            oneagentgraph::yaml::from_str(&format!("{shape}\nsettings: {{x: 1}}\n"))
+                .unwrap_or_else(|err| panic!("{shape}: a judge reads `settings`: {err}"));
         assert_eq!(judge.settings()["x"], json!(1), "{shape}");
     }
     assert!(
@@ -2851,7 +2859,7 @@ fn the_documented_single_judge_spellings_are_the_one_element_list() {
     );
     for spelling in &documented {
         let spelling = spelling.replace("...", "./oneharness.judge.toml");
-        let member: OnejudgeMember = serde_norway::from_str(&format!(
+        let member: OnejudgeMember = oneagentgraph::yaml::from_str(&format!(
             "base_config: ./b.yaml\nmode: bypass\nagent: {{oneharness_config: ./a.toml}}\n{spelling}\n"
         ))
         .unwrap_or_else(|err| panic!("the documented `{spelling}` does not parse: {err}"));
@@ -2871,7 +2879,7 @@ fn the_documented_single_judge_spellings_are_the_one_element_list() {
             })
         };
         assert_eq!(member.judge[0], expected, "{spelling}");
-        let written = serde_norway::to_string(&member).expect("a member serializes");
+        let written = oneagentgraph::yaml::to_string(&member).expect("a member serializes");
         assert!(
             written.contains("judge:\n  ") && !written.contains("judge:\n  - "),
             "one side must write back as the mapping it read from:\n{written}"
@@ -2886,12 +2894,13 @@ fn an_agent_side_streams_unless_the_graph_turns_it_off() {
         "the contract no longer states the streaming default this test pins"
     );
 
-    let defaulted: AgentSide = serde_norway::from_str("oneharness_config: ./oneharness.toml\n")
-        .expect("an agent side without `stream` must parse");
+    let defaulted: AgentSide =
+        oneagentgraph::yaml::from_str("oneharness_config: ./oneharness.toml\n")
+            .expect("an agent side without `stream` must parse");
     assert!(defaulted.stream, "streaming is on unless turned off");
 
     let off: AgentSide =
-        serde_norway::from_str("oneharness_config: ./oneharness.toml\nstream: false\n")
+        oneagentgraph::yaml::from_str("oneharness_config: ./oneharness.toml\nstream: false\n")
             .expect("an agent side with `stream: false` must parse");
     assert!(!off.stream, "report-only is what `stream: false` asks for");
 }

@@ -97,7 +97,7 @@ fn launched_config(run: &Run) -> (PathBuf, Value) {
         .unwrap_or_else(|err| panic!("cannot read {} ({err})", path.display()));
     (
         path,
-        serde_norway::from_str(&text).expect("the effective config is YAML"),
+        oneagentgraph::yaml::from_str(&text).expect("the effective config is YAML"),
     )
 }
 
@@ -926,12 +926,12 @@ fn a_single_harness_judge_carries_both_levels_of_settings_in_its_one_block() {
 #[test]
 fn an_llmlint_judges_settings_reach_onejudge_unchanged() {
     let workspace = Workspace::new();
-    let mut stacked: serde_norway::Value =
-        serde_norway::from_str(&stacked_graph(&workspace, &[])).expect("the stacked graph");
+    let mut stacked: serde_json::Value =
+        oneagentgraph::yaml::from_str(&stacked_graph(&workspace, &[])).expect("the stacked graph");
     stacked["version"] = 10.into();
     stacked["members"]["worker"]["judge"][1]["settings"] =
-        serde_norway::from_str("{not_a_llmlint_setting: 1}").expect("a mapping");
-    let stacked = serde_norway::to_string(&stacked).expect("the graph serializes");
+        oneagentgraph::yaml::from_str("{not_a_llmlint_setting: 1}").expect("a mapping");
+    let stacked = oneagentgraph::yaml::to_string(&stacked).expect("the graph serializes");
     workspace.graph(&stacked);
     let run = workspace.run_task("fake:complete-now: never judged");
     run.expect_code(1);

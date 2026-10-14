@@ -40,3 +40,7 @@ pub mod run;
 pub mod scratch;
 pub mod smoke;
 pub mod sweep;
+// Hidden, and outside the contract's surface: public only so the binary and the
+// integration tests read and write YAML under the crate's own settings.
+#[doc(hidden)]
+pub mod yaml;

@@ -1,0 +1,2 @@
+# A stand-in for the host's plan-checklist.llmlint.yml: a two-party member checks
+# only that an llmlint config it names is a readable file, and passes its path on.

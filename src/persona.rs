@@ -204,7 +204,7 @@ impl Persona {
     /// or is not a onejudge config fragment. Every message is prefixed with
     /// `origin`, so the answer names the file that has to be repaired.
     pub fn parse(document: &str, origin: &str) -> Result<Self, Error> {
-        let value: Value = serde_norway::from_str(document)
+        let value: Value = crate::yaml::from_str(document)
             .map_err(|err| Error::InvalidConfig(format!("{origin}: {err}")))?;
         Self::read(value).map_err(|err| Error::InvalidConfig(format!("{origin}: {err}")))
     }
@@ -396,7 +396,7 @@ pub fn shipped(name: &str) -> Option<&'static str> {
 /// refused `agent:` block, spells `system_prompt`, `user`, or `user.done_when` as
 /// something other than what the composition reads, or is not a onejudge config.
 pub fn merge(base: &str, base_origin: &str, persona: &Persona) -> Result<Value, Error> {
-    let mut config: Value = serde_norway::from_str(base)
+    let mut config: Value = crate::yaml::from_str(base)
         .map_err(|err| Error::InvalidConfig(format!("{base_origin}: {err}")))?;
     if config.is_null() {
         config = Value::Object(Map::new());

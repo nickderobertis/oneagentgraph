@@ -301,6 +301,71 @@ fn validate_refuses_a_graph_that_could_never_run() {
     }
 }
 
+/// A document or a value that does not read is refused with exit 2, and the
+/// refusal says which file or option it was, where in it — the key or field, or
+/// the line and column — and what was wrong, so the operator repairs it from the
+/// message alone.
+#[test]
+fn a_malformed_document_or_value_is_refused_naming_where_and_what() {
+    let workspace = Workspace::new();
+    let single = concat!(
+        "version: 1\nname: g\nmembers:\n  a:\n    kind: oneharness\n",
+        "    oneharness_config: ./oneharness.toml\n",
+    );
+    let refused = |args: &[&str], expected: &[&str]| {
+        let run = workspace.run(args);
+        run.expect_code(2);
+        for needle in expected {
+            assert!(
+                run.stderr.contains(needle),
+                "{args:?}: no {needle:?} in {}",
+                run.stderr
+            );
+        }
+    };
+
+    // A graph: an unknown field by name, and a syntax error by position.
+    workspace.graph(&format!("{single}    typo: 3\n"));
+    refused(
+        &["validate", "./graph.yaml"],
+        &["./graph.yaml", "unknown field `typo`"],
+    );
+    workspace.graph("version: 1\nname: g\nmembers: [\n");
+    refused(
+        &["validate", "./graph.yaml"],
+        &["./graph.yaml", "'['", "line 3, column 10"],
+    );
+
+    // A persona the graph names: the same two, prefixed with its own path.
+    workspace.graph(&format!("{single}    persona: ./bad.yaml\n"));
+    workspace.write("bad.yaml", "name: x\nsystem_prompt: hi\nbogus_key: 1\n");
+    refused(
+        &["validate", "./graph.yaml"],
+        &["./bad.yaml", "unknown field `bogus_key`"],
+    );
+    workspace.write("bad.yaml", "name: x\nsystem_prompt: [\n");
+    refused(
+        &["validate", "./graph.yaml"],
+        &["./bad.yaml", "'['", "line 2, column 16"],
+    );
+
+    // A `--set` value: the option, the path, and why it did not take.
+    workspace.graph(single);
+    let dir = workspace.dir().display().to_string();
+    let run = ["run", "./graph.yaml", "--task", "t", "--dir", &dir];
+    refused(
+        &[&run[..], &["--set", "members.a.max_turns=abc"]].concat(),
+        &["--set members.a.max_turns=\"abc\"", "does not parse"],
+    );
+
+    // An event filter file: its path and the position it stopped at.
+    workspace.write("filter.yaml", "include: [\n");
+    refused(
+        &[&run[..], &["--event-filter", "./filter.yaml"]].concat(),
+        &["./filter.yaml is not a filter", "line 1, column 10"],
+    );
+}
+
 /// A graph, or a ref inside one, may be an `https` URL — and a host that cannot
 /// be reached is a refusal naming the URL, not a run that started against a
 /// document nobody read. Cleartext is refused before a byte leaves.

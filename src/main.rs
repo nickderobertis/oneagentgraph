@@ -136,7 +136,7 @@ fn requested_filter(args: &RunArgs) -> Result<Option<EventFilter>, Error> {
         let document = std::fs::read_to_string(spec).map_err(|err| {
             Error::InvalidConfig(format!("cannot read --event-filter {spec}: {err}"))
         })?;
-        serde_norway::from_str(&document)
+        oneagentgraph::yaml::from_str(&document)
             .map_err(|err| Error::InvalidConfig(format!("{spec} is not a filter: {err}")))?
     };
     // Named here as well as inside the run: `--detach` reports a started run
@@ -336,20 +336,15 @@ fn preflight(
     let mut resolver = Resolver::new();
     let reference = config::ConfigRef(graph_ref.to_string());
     let document = resolver.resolve(&reference, None)?.clone();
-    // Parsed loosely, overridden, and only then read as a graph — the order
-    // `run` itself uses. Checking the document as written would pass a `--set`
+    // Parsed loosely, overridden, and only then read as a graph, through the
+    // reader `run` itself uses. Checking the document as written would pass a `--set`
     // that names nothing, and `--detach` forwards those to the child.
-    let mut parsed: serde_json::Value = serde_norway::from_str(&document.content)
-        .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?;
-    if environment == RunEnvironment::Read {
-        run::apply_background_env(&mut parsed, env)?;
-    }
-    run::apply_overrides(&mut parsed, overrides)?;
-    let graph: GraphConfig = serde_norway::from_value(
-        serde_norway::to_value(&parsed)
-            .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?,
-    )
-    .map_err(|err| Error::InvalidConfig(format!("{graph_ref}: {err}")))?;
+    let graph = run::read_graph(&document.content, graph_ref, |parsed| {
+        if environment == RunEnvironment::Read {
+            run::apply_background_env(parsed, env)?;
+        }
+        run::apply_overrides(parsed, overrides)
+    })?;
     config::validate(&graph)?;
     run::ready_order(&graph)?;
 

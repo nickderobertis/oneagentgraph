@@ -35,6 +35,10 @@ fn the_package_carries_every_file_the_crate_is_built_from() {
     // that proves an old record still reads — is caught here too.
     needed.push("tests/golden/record.v1.json".into());
     needed.push("tests/golden/record.v2.json".into());
+    // The YAML `tests/yaml_corpus.rs` reads, and what it holds that YAML to.
+    needed.push("tests/golden/graph.v10.yaml".into());
+    needed.push("tests/yaml-corpus/expected.json".into());
+    needed.push("tests/yaml-corpus/host/config/onejudge.base.yaml".into());
     // The release declaration `tests/release_declaration.rs` hands to the reader
     // that defines its schema, read the same way.
     needed.push("release-targets.toml".into());
@@ -75,7 +79,14 @@ fn the_package_carries_no_symlink_a_registry_would_reject() {
 #[test]
 fn the_package_carries_nothing_from_outside_the_crate() {
     let listed = package_list();
-    let roots = ["src/", "tests/", "personas/", "docs/"];
+    // `screenshots/fixture/` for its graphs, which `tests/yaml_corpus.rs` reads.
+    let roots = [
+        "src/",
+        "tests/",
+        "personas/",
+        "docs/",
+        "screenshots/fixture/",
+    ];
     for packaged in &listed {
         let inside_a_root = roots.iter().any(|root| packaged.starts_with(root));
         // The manifest, the lockfile, and the two documents cargo adds itself.

@@ -9,13 +9,7 @@ all-features = true
 
 [advisories]
 yanked = "deny"
-ignore = [
-    # Temporary, authorized by the user on 2026-10-12: `unsafe-libyaml` is
-    # unmaintained (informational, no fixed version), reached through
-    # `serde_yaml` / `serde_yaml_ng`. The planned move to `serde_norway`
-    # (plan authoring:serde-yaml-replacement) removes this entry.
-    "RUSTSEC-2024-0449",
-]
+ignore = []
 
 [licenses]
 # Permissive licenses compatible with this MIT-licensed crate. Adding a
@@ -55,7 +49,18 @@ exceptions = []
 multiple-versions = "allow"
 wildcards = "deny"
 allow = []
-deny = []
+# The YAML crates built on libyaml's C-to-Rust translation. Every YAML read and
+# write here goes through serde-saphyr, which is safe Rust, so one of these
+# re-entering the graph — directly or through a dependency — fails the check.
+deny = [
+    { crate = "serde_yaml", reason = "RUSTSEC-2024-0449: the libyaml translation (unsafe-libyaml and its forks) is unmaintained; YAML goes through serde-saphyr" },
+    { crate = "serde_yaml_ng", reason = "RUSTSEC-2024-0449: the libyaml translation (unsafe-libyaml and its forks) is unmaintained; YAML goes through serde-saphyr" },
+    { crate = "serde_norway", reason = "RUSTSEC-2024-0449: the libyaml translation (unsafe-libyaml and its forks) is unmaintained; YAML goes through serde-saphyr" },
+    { crate = "serde_yml", reason = "RUSTSEC-2024-0449: the libyaml translation (unsafe-libyaml and its forks) is unmaintained; YAML goes through serde-saphyr" },
+    { crate = "unsafe-libyaml", reason = "RUSTSEC-2024-0449: the libyaml translation (unsafe-libyaml and its forks) is unmaintained; YAML goes through serde-saphyr" },
+    { crate = "unsafe-libyaml-norway", reason = "RUSTSEC-2024-0449: the libyaml translation (unsafe-libyaml and its forks) is unmaintained; YAML goes through serde-saphyr" },
+    { crate = "libyml", reason = "RUSTSEC-2024-0449: the libyaml translation (unsafe-libyaml and its forks) is unmaintained; YAML goes through serde-saphyr" },
+]
 skip = []
 skip-tree = []
 

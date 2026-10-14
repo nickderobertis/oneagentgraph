@@ -35,6 +35,8 @@
     "contractReads": [
       "{workspaceRoot}/tests/golden/**/*",
       "{workspaceRoot}/tests/recorded/**/*",
+      "{workspaceRoot}/tests/yaml-corpus/**/*",
+      "{workspaceRoot}/screenshots/fixture/**/*",
       "{workspaceRoot}/docs/contract.md",
       "{workspaceRoot}/docs/persona-format.md",
       "{workspaceRoot}/docs/oneharness-library.md",

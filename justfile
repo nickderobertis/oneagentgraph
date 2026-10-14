@@ -61,7 +61,7 @@ export CARGO_TERM_QUIET := "true"
 # `tests/repo-tooling/tier_partition.rs` holds them to the test targets Cargo
 # actually builds: a test target in no tier, or in two, fails the gate rather
 # than silently dropping out of every run.
-contract-tests := "contract inventory packaging persona_bar persona_format record recorded release_declaration"
+contract-tests := "contract inventory packaging persona_bar persona_format record recorded release_declaration yaml_corpus"
 e2e-tests := "e2e"
 repo-tooling-tests := "llmlint_cache affected_selection tier_partition workflow_contract recipe_arguments"
 

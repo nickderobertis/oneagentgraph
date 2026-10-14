@@ -1,0 +1,35 @@
+# The node-scope agent graph `just follow-ups <run-id>` dispatches its one direct node
+# under: the follow-up agent, which verifies a finished run's drafted follow-ups, groups
+# what stands by root cause, and puts the verified tickets on the `followups` board.
+#
+# One single-sided `kind: oneharness` member and **no judge side**. That is the user's
+# decision: nothing judges the follow-up agent's output. What holds it is the ticket shape
+# `orchestrator/follow_up_tickets.py` states and `just follow-ups` validates once an
+# attached run settles, the manager's reading of its report, and the journeys.
+#
+# The member claims no `task` of its own, so the task `scripts/follow-ups.sh` creates
+# from the `follow-up-task` template, `templates/follow-up-task.md.j2`, reaches it whole as
+# its prompt. It layers no persona
+# either — a single-sided member has no onejudge base config to layer a persona delta
+# over — so `../personas/follow-up.yaml` is named for the label alone and that composed
+# task is the one copy of its instructions the model is given. The plan node names the
+# same persona because the engine refuses a direct agent node that names none.
+#
+# The member's turn runs in `bypass` mode, and declares no `mode` here. Its working
+# directory is this graph's scratch directory, not a repository, where a `default`-mode
+# turn is refused by codex as an untrusted directory and denied its tools by Claude Code.
+# The mode is declared in `oneharness.follow-up.toml`, because the linked oneagentgraph
+# admits no `mode` on a single-sided member — so the next single-sided member that runs
+# commands declares its mode in its own harness config too.
+# `tests/test_follow_up_agent_arrangement.py` holds this arrangement, and
+# `tests/plan_tooling/follow_ups/test_follow_ups_recipe_e2e.py` launches a direct node naming this
+# graph through the installed engine and reads the composed task out of the member's turn.
+#
+# Every ref below is relative to THIS file's directory, not the working directory.
+version: 9
+name: follow-up
+members:
+  worker:
+    kind: oneharness
+    oneharness_config: ../oneharness.follow-up.toml
+    persona: ../personas/follow-up.yaml
