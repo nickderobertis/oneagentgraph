@@ -701,6 +701,37 @@ fn every_required_context_is_reported_on_every_pull_request() {
     }
 }
 
+/// A pull request opened as a draft and then marked ready gets no new run from
+/// GitHub's default `pull_request` types, so the required contexts carry only the
+/// runs from while it was a draft, and a merge path that waits for a run after the
+/// lift waits on nothing.
+#[test]
+fn every_required_context_reruns_when_a_draft_is_marked_ready() {
+    let all = workflows();
+    for w in all.iter().filter(|w| w.runs_on_every_pull_request()) {
+        let reports_required = w.jobs().into_keys().any(|id| {
+            w.contexts(&id).iter().any(|c| {
+                REQUIRED
+                    .iter()
+                    .any(|r| r == c || (c.ends_with(" / ") && r.starts_with(c.as_str())))
+            })
+        });
+        if !reports_required {
+            continue;
+        }
+        let types: Vec<&str> = w.doc["on"]["pull_request"]["types"]
+            .as_array()
+            .map(|types| types.iter().filter_map(Value::as_str).collect())
+            .unwrap_or_default();
+        assert!(
+            types.contains(&"ready_for_review"),
+            "{} reports a required context but its pull_request trigger does not list \
+             `ready_for_review` (types: {types:?}), so lifting a draft runs nothing",
+            w.file
+        );
+    }
+}
+
 #[test]
 fn a_leg_with_nothing_to_prove_reports_on_ubuntu_and_one_with_work_runs_it() {
     let ci = workflow("ci.yml");
