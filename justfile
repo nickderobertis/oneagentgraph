@@ -69,7 +69,7 @@ export CARGO_TERM_QUIET := "true"
 # than silently dropping out of every run.
 contract-tests := "contract inventory packaging persona_bar persona_format record recorded release_declaration yaml_corpus"
 e2e-tests := "e2e"
-repo-tooling-tests := "llmlint_cache affected_selection tier_partition workflow_contract recipe_arguments"
+repo-tooling-tests := "llmlint_cache affected_selection tier_partition workflow_contract recipe_arguments prune_superseded_install"
 
 # Where the instrumented tiers write their raw profiles. Each tier names its own
 # files (`LLVM_PROFILE_FILE_NAME`), so one tier's run never clears another's, and
@@ -114,15 +114,26 @@ _ensure-oneharness:
      done; \
      cargo install --locked oneharness --version {{oneharness-version}}
 
-# Version-checked rather than merely present, and probed in the cargo bin
-# directory as well as on `PATH`, for the reason `_ensure-oneharness` is: a stale
-# pruner on `PATH` would otherwise be what every idle slot's maintenance runs.
+# Version-checked on `PATH` alone, because `pool-maintenance` runs whichever
+# `cargo-prune-superseded` resolves there: a pinned copy in the cargo bin
+# directory behind a stale one on `PATH` would leave every idle slot's
+# maintenance running the stale release. So the install is checked the same way,
+# and a shadowing binary is named rather than accepted.
 # Install the pinned `cargo-prune-superseded`. Quiet when already at the pin.
 _ensure-prune-superseded:
-    @for candidate in cargo-prune-superseded "${CARGO_HOME:-$HOME/.cargo}/bin/cargo-prune-superseded"; do \
-       if [ "$("$candidate" --version 2>/dev/null)" = "cargo-prune-superseded {{prune-superseded-version}}" ]; then exit 0; fi; \
-     done; \
-     cargo install --locked cargo-prune-superseded --version {{prune-superseded-version}}
+    @want="cargo-prune-superseded {{prune-superseded-version}}"; \
+     [ "$(cargo-prune-superseded --version 2>/dev/null)" = "$want" ] && exit 0; \
+     cargo install --locked cargo-prune-superseded --version {{prune-superseded-version}}; \
+     found="$(command -v cargo-prune-superseded || true)"; \
+     got="$(cargo-prune-superseded --version 2>/dev/null || true)"; \
+     [ "$got" = "$want" ] && exit 0; \
+     installed="${CARGO_HOME:-$HOME/.cargo}/bin/cargo-prune-superseded"; \
+     if [ -z "$found" ]; then \
+       echo "cargo-prune-superseded {{prune-superseded-version}} was installed at $installed, but no cargo-prune-superseded is on PATH — add ${installed%/*} to PATH" >&2; \
+     else \
+       echo "cargo-prune-superseded {{prune-superseded-version}} was installed at $installed, but PATH resolves $found (${got:-no version}) ahead of it — remove that binary or put ${installed%/*} earlier on PATH" >&2; \
+     fi; \
+     exit 1
 
 # These are test runners, not rules: their version cannot change the gate's
 # verdict, so both here and CI take the latest rather than keeping two pins that
