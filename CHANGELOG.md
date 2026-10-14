@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.9...v0.5.10) - 2026-10-14
+
+### Fixed
+
+- *(deps)* read and write graphs with serde-saphyr and link the sibling releases that do ([#203](https://github.com/nickderobertis/oneagentgraph/pull/203))
+
 ## [0.5.8](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.7...v0.5.8) - 2026-10-13
 
 ### Fixed
