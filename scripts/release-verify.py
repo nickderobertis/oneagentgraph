@@ -59,19 +59,17 @@ def payload(what, data, target):
 
 
 def member(container, name, label):
-    """The bytes of regular-file member `name`, or Malformed when it is absent,
-    a directory, or a link `extractfile` would otherwise follow."""
+    """The bytes of member `name`, or Malformed when it is absent or, in a tar,
+    a directory or a link `extractfile` would otherwise follow."""
     try:
         info = container.getmember(name) if isinstance(container, tarfile.TarFile) else container.getinfo(name)
     except KeyError:
         raise Malformed(f'{label} has no {name}') from None
-    if isinstance(info, tarfile.TarInfo):
-        if not info.isfile():
-            raise Malformed(f'{label} member {name} is not a regular file')
-        return container.extractfile(info).read()
-    if info.is_dir():
+    if not isinstance(info, tarfile.TarInfo):
+        return container.read(info)  # a zip's only non-file is a directory, whose name ends in '/'
+    if not info.isfile():
         raise Malformed(f'{label} member {name} is not a regular file')
-    return container.read(info)
+    return container.extractfile(info).read()
 
 
 def verify(target):

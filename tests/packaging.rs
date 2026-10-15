@@ -337,7 +337,7 @@ with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
 import io, sys, tarfile, zipfile
 from pathlib import Path
 path, member, op, arg = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-data_arg = bytes.fromhex(arg) if op in ('replace', 'append', 'add') else None
+data_arg = sys.stdin.buffer.read() if op in ('replace', 'append', 'add') else None
 def edited(data):
     return data_arg if op == 'replace' else data + data_arg if op == 'append' else data
 if zipfile.is_zipfile(path):
@@ -374,24 +374,29 @@ else:
             info.size = len(data_arg)
             tar.addfile(info, io.BytesIO(data_arg))
 "#;
-        let hex =
-            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
-        let (op, arg) = match edit {
-            Edit::Replace(bytes) => ("replace", hex(bytes)),
-            Edit::Append(bytes) => ("append", hex(bytes)),
-            Edit::Delete => ("delete", String::new()),
-            Edit::Add(bytes) => ("add", hex(bytes)),
-            Edit::Chmod(mode) => ("chmod", format!("{mode:o}")),
-            Edit::Directory => ("directory", String::new()),
-            Edit::Symlink => ("symlink", String::new()),
+        let (op, arg, input): (&str, String, &[u8]) = match edit {
+            Edit::Replace(bytes) => ("replace", String::new(), bytes),
+            Edit::Append(bytes) => ("append", String::new(), bytes),
+            Edit::Delete => ("delete", String::new(), b""),
+            Edit::Add(bytes) => ("add", String::new(), bytes),
+            Edit::Chmod(mode) => ("chmod", format!("{mode:o}"), b""),
+            Edit::Directory => ("directory", String::new(), b""),
+            Edit::Symlink => ("symlink", String::new(), b""),
         };
+        // Member bytes go over stdin: a whole binary is too long for argv.
+        let mut child = Command::new("python3")
+            .args(["-I", "-c", REWRITE])
+            .arg(path)
+            .args([member, op, &arg])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("python runs");
+        std::io::Write::write_all(&mut child.stdin.take().expect("python stdin"), input)
+            .expect("member bytes write");
         succeeded(
-            &Command::new("python3")
-                .args(["-I", "-c", REWRITE])
-                .arg(path)
-                .args([member, op, &arg])
-                .output()
-                .expect("python runs"),
+            &child.wait_with_output().expect("python finishes"),
             "rewrite member",
         );
     }
@@ -636,6 +641,32 @@ else:
                 format!("{carrier} carries a different binary"),
             ),
         ];
+        // The binary this target built, recompiled in name only for the other
+        // CPU of its own format: right container, wrong architecture.
+        let wrong_cpu = || {
+            let mut bytes = std::fs::read(built_binary(target)).expect("built binary reads");
+            bytes[18..20].copy_from_slice(&183u16.to_le_bytes());
+            bytes
+        };
+        let mut cases = cases;
+        cases.push((
+            "wheel payload for another CPU",
+            Box::new(|dir: &Path| {
+                rewrite_member(&dir.join(wheel), &script, Edit::Replace(&wrong_cpu()))
+            }),
+            format!("{wheel} payload is built for elf/aarch64, not elf/x86_64"),
+        ));
+        cases.push((
+            "npm payload for another CPU",
+            Box::new(|dir: &Path| {
+                rewrite_member(
+                    &dir.join(carrier),
+                    "package/bin/oneagentgraph",
+                    Edit::Replace(&wrong_cpu()),
+                )
+            }),
+            format!("{carrier} payload is built for elf/aarch64, not elf/x86_64"),
+        ));
         for (index, (case, mutate, reason)) in cases.iter().enumerate() {
             let dir = work.join(format!("malformed-{index}"));
             copy_staged(staged, &dir);
