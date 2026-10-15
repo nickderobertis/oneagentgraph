@@ -961,9 +961,15 @@ fn nothing_in_a_release_publishes_until_the_mac_release_job_has_passed() {
     // than the release has — every crate, registry, and asset route is here.
     assert_eq!(
         publishers,
-        ["publish-crate", "publish-npm", "publish-pypi", "upload", "upload-darwin"]
-            .map(String::from)
-            .into(),
+        [
+            "publish-crate",
+            "publish-npm",
+            "publish-pypi",
+            "upload",
+            "upload-darwin"
+        ]
+        .map(String::from)
+        .into(),
         "release.yml's publishing jobs changed"
     );
     for id in &publishers {
