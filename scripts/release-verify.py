@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Hold a staged release directory to exactly the artifacts its targets publish.
 
-Run by release.yml's Darwin job before anything uploads, and by tests/packaging.rs
-over the same staged output. It reads every artifact rather than trusting the
+Run by release.yml's Darwin job (through scripts/release-rehearse.sh) before
+anything uploads, and by tests/packaging.rs over the Linux staged output. It reads every artifact rather than trusting the
 packager's receipt alone: the directory holds nothing but each target's archive,
 checksum, receipt, wheel and npm carrier, and every payload in them is the one
 compiled binary, built for that target's own format and CPU. Executes nothing.
@@ -41,6 +41,18 @@ staged = {path.name for path in args.dir.iterdir() if path.is_file()}
 expected = set()
 
 
+# A SemVer pre-release, spelled the way PEP 440 (and so maturin) writes it.
+PRE_RELEASES = {'alpha': 'a', 'a': 'a', 'beta': 'b', 'b': 'b', 'rc': 'rc', 'c': 'rc', 'pre': 'rc', 'preview': 'rc'}
+
+
+def wheel_version(release):
+    match = re.fullmatch(r'(\d+\.\d+\.\d+)(?:-([A-Za-z]+)\.?(\d*))?', release)
+    if not match or (match[2] and match[2].lower() not in PRE_RELEASES):
+        fail(f'{release} has no PEP 440 spelling a wheel can carry; release a X.Y.Z or X.Y.Z-rc.N version')
+    core, name, number = match.groups()
+    return core if not name else f'{core}{PRE_RELEASES[name.lower()]}{number or 0}'
+
+
 def payload(what, data, target):
     found = executable_format(data)
     if found != TARGETS[target]['executable']:
@@ -60,7 +72,7 @@ for target in args.target:
         fail(f'{receipt_name} records {receipt["target"]} {receipt["tag"]}, not {target} {args.tag}')
     archive = f'oneagentgraph-{args.tag}-{target}.tar.gz'
     wheel = receipt['wheel']
-    if receipt['archive'] != archive or not re.fullmatch(rf'oneagentgraph_cli-[A-Za-z0-9.+!_]+-py3-none-{re.escape(facts["wheel"])}\.whl', wheel):
+    if receipt['archive'] != archive or wheel != f'oneagentgraph_cli-{wheel_version(version)}-py3-none-{facts["wheel"]}.whl':
         fail(f'{receipt_name} names {receipt["archive"]} and {wheel}, not the {target} archive and {facts["wheel"]} wheel')
     carrier = f'oneagentgraph-cli-{facts["npm_os"]}-{facts["npm_cpu"]}-{version}.tgz'
     names = {receipt_name, archive, f'{archive}.sha256', wheel, carrier}
@@ -91,6 +103,9 @@ for target in args.target:
         tags = z.read(next(name for name in z.namelist() if name.endswith('.dist-info/WHEEL'))).decode()
         if 'Name: oneagentgraph-cli\n' not in metadata or f'Tag: py3-none-{facts["wheel"]}\n' not in tags:
             fail(f'{wheel} metadata is not oneagentgraph-cli tagged py3-none-{facts["wheel"]}')
+        declared = re.findall(r'^Version: (.*)$', metadata, re.M)
+        if declared != [wheel_version(version)]:
+            fail(f'{wheel} METADATA declares Version {", ".join(declared) or "none"}, not the release version {wheel_version(version)}')
 
     with tarfile.open(args.dir / carrier) as npm:
         manifest = json.load(npm.extractfile('package/package.json'))

@@ -512,6 +512,15 @@ jobs:
         run: |
           python3 scripts/release-verify.py --tag "$GITHUB_REF_NAME" --dir "$GITHUB_WORKSPACE/darwin" \
             $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log("--target", t))')
+      # The native packaging and publication journey, on this host: the host's
+      # own reading of each payload's architecture, the attach and npm publish
+      # scripts run with only their transport doubled, and the refusals that
+      # keep an Intel or wrong-CPU artifact out. Nothing is published here.
+      - name: Rehearse each Darwin target's publication natively before upload
+        run: |
+          for target in $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log(t))'); do
+            bash scripts/release-rehearse.sh "$target" "$GITHUB_WORKSPACE/darwin" "$GITHUB_REF_NAME"
+          done
       - name: Install and run staged ARM Darwin products before publication
         run: bash scripts/release-smoke.sh aarch64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
       - uses: actions/upload-artifact@v4
@@ -536,6 +545,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      # For scripts/release-attach.sh, the command the Darwin job rehearsed.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: archives-darwin
@@ -544,4 +555,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$GITHUB_REF_NAME" darwin/*.tar.gz darwin/*.sha256 --clobber
+        run: bash scripts/release-attach.sh "$GITHUB_REF_NAME" darwin

@@ -24,6 +24,9 @@
         "{workspaceRoot}/scripts/release-package.py",
         "{workspaceRoot}/scripts/release-verify.py",
         "{workspaceRoot}/scripts/release_artifacts.py",
+        "{workspaceRoot}/scripts/release-rehearse.sh",
+        "{workspaceRoot}/scripts/release-attach.sh",
+        "{workspaceRoot}/scripts/setup-packaging.sh",
         "{workspaceRoot}/scripts/release-smoke.sh",
         "sharedGlobals"
       ],

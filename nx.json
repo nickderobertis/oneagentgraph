@@ -48,6 +48,8 @@
       "{workspaceRoot}/scripts/release-verify.py",
       "{workspaceRoot}/scripts/release_artifacts.py",
       "{workspaceRoot}/scripts/publish-npm.sh",
+      "{workspaceRoot}/scripts/release-rehearse.sh",
+      "{workspaceRoot}/scripts/release-attach.sh",
       "{workspaceRoot}/scripts/release-build.sh",
       "{workspaceRoot}/scripts/release-smoke.sh",
       "{workspaceRoot}/scripts/setup-packaging.sh",

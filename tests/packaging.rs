@@ -125,12 +125,9 @@ fn package_list() -> Vec<String> {
         .collect()
 }
 
-/// The release packaging journeys below share this driver: the production
-/// scripts, run the way `release.yml` runs them, over one staging directory.
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+/// The release packaging journey below drives the production scripts the way
+/// `release.yml` runs them, over one staging directory.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 mod release {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
@@ -281,6 +278,43 @@ mod release {
         .expect("checksum writes");
     }
 
+    /// `scripts/release-rehearse.sh`, as the Mac release job runs it.
+    pub fn rehearse(target: &str, dir: &Path) -> Output {
+        Command::new("bash")
+            .current_dir(repo())
+            .args(["scripts/release-rehearse.sh", target])
+            .arg(dir)
+            .arg(tag())
+            .output()
+            .expect("release rehearsal runs")
+    }
+
+    /// Rewrite the staged wheel's `METADATA` to declare `version`, leaving its
+    /// name, payload and every other file as the packager wrote them.
+    pub fn restamp_wheel(dir: &Path, wheel: &str, version: &str) {
+        const RESTAMP: &str = r#"
+import re, sys, zipfile
+from pathlib import Path
+path, version = Path(sys.argv[1]), sys.argv[2]
+with zipfile.ZipFile(path) as z:
+    entries = [(info, z.read(info)) for info in z.infolist()]
+with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+    for info, data in entries:
+        if info.filename.endswith('.dist-info/METADATA'):
+            data = re.sub(rb'^Version: .*$', b'Version: ' + version.encode(), data, flags=re.M)
+        z.writestr(info, data)
+"#;
+        succeeded(
+            &Command::new("python3")
+                .args(["-I", "-c", RESTAMP])
+                .arg(dir.join(wheel))
+                .arg(version)
+                .output()
+                .expect("python runs"),
+            "restamp wheel",
+        );
+    }
+
     /// `.github/workflows/release.yml`, as data.
     pub fn workflow() -> serde_json::Value {
         let text = std::fs::read_to_string(repo().join(".github/workflows/release.yml"))
@@ -407,11 +441,12 @@ mod release {
 }
 
 /// The Linux release products: built by the release builder, verified to be
-/// exactly the native target's set carrying an x86_64 ELF, and installed and run
-/// from every distribution form. Darwin's products cannot be linked on this host,
-/// so its journey is the macOS test below; what Linux proves about Darwin is the
-/// declaration (`DARWIN_TARGETS` is arm64 alone) and the refusals that keep a
-/// wrong-architecture or Intel artifact out of a staged set.
+/// exactly the native target's set carrying an x86_64 ELF, rehearsed through the
+/// same publication script the Mac release job runs, and installed and run from
+/// every distribution form. Darwin's products cannot be linked on this host: the
+/// Mac release job runs `release-rehearse.sh` over them natively before upload.
+/// What Linux proves about Darwin is the declaration (`DARWIN_TARGETS` is arm64
+/// alone) and the refusals that keep a wrong-architecture or Intel artifact out.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
@@ -423,6 +458,15 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
     assert_eq!(
         verified_set(&verify(&[target], &staged)),
         expected_set(target, "linux_x86_64", "linux-x64")
+    );
+    let rehearsed = rehearse(target, &staged);
+    succeeded(&rehearsed, "release-rehearse");
+    assert!(
+        String::from_utf8_lossy(&rehearsed.stdout).contains(
+            "attach and npm publish would send exactly its archive, checksum and carrier; Intel and elf/aarch64 artifacts refused"
+        ),
+        "{}",
+        String::from_utf8_lossy(&rehearsed.stdout)
     );
     let smoke = Command::new("bash")
         .current_dir(repo())
@@ -467,6 +511,31 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         "elf/aarch64",
     );
     intel_is_refused(&built_binary(target), work.path());
+    // The rehearsal stops on a staged Intel artifact rather than publishing it.
+    let extra = work.path().join("rehearse-extra");
+    copy_staged(&staged, &extra);
+    std::fs::copy(
+        extra.join(format!("oneagentgraph-v{VERSION}-{target}.tar.gz")),
+        extra.join(format!(
+            "oneagentgraph-v{VERSION}-x86_64-apple-darwin.tar.gz"
+        )),
+    )
+    .expect("Intel archive stages");
+    refused(
+        &rehearse(target, &extra),
+        "release-rehearse with an Intel archive",
+        "would publish: oneagentgraph-v",
+    );
+    // A wheel whose metadata declares another version is not this release's.
+    let restamped = work.path().join("wheel-version");
+    copy_staged(&staged, &restamped);
+    let wheel = format!("oneagentgraph_cli-{VERSION}-py3-none-linux_x86_64.whl");
+    restamp_wheel(&restamped, &wheel, "9.9.9");
+    refused(
+        &verify(&[target], &restamped),
+        "release-verify with a mismatched wheel version",
+        &format!("METADATA declares Version 9.9.9, not the release version {VERSION}"),
+    );
 
     let wrong_tag = Command::new("python3")
         .current_dir(repo())
@@ -477,238 +546,4 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         .output()
         .expect("invalid tag packager runs");
     refused(&wrong_tag, "release-package", "release tag must equal");
-}
-
-/// The Mac release job's own journey, on the Apple Silicon host it runs on:
-/// `release-build.sh` for every `DARWIN_TARGETS` entry, the staged set verified
-/// to be exactly the arm64 one carrying an arm64 Mach-O, each publication route
-/// replayed from `release.yml` with only its transport doubled, and every
-/// distribution form installed and run natively.
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-#[test]
-fn darwin_release_products_are_the_arm64_set_and_run_natively() {
-    use release::*;
-    let work = workspace();
-    let workflow = workflow();
-    let targets = darwin_targets(&workflow);
-    assert_eq!(
-        targets,
-        ["aarch64-apple-darwin"],
-        "the Mac release job builds arm64 alone"
-    );
-    let target = "aarch64-apple-darwin";
-    let job = work.path().join("job");
-    let darwin = job.join("darwin");
-    succeeded(&build(target, &darwin), "release-build");
-    let expected = expected_set(target, "macosx_11_0_arm64", "darwin-arm64");
-    assert_eq!(verified_set(&verify(&[target], &darwin)), expected);
-
-    // The payload's own architecture, read by the host's toolchain rather than
-    // by the verifier under test.
-    let unpacked = work.path().join("unpacked");
-    std::fs::create_dir_all(&unpacked).expect("unpack directory");
-    succeeded(
-        &Command::new("tar")
-            .arg("-xzf")
-            .arg(darwin.join(format!("oneagentgraph-v{VERSION}-{target}.tar.gz")))
-            .arg("-C")
-            .arg(&unpacked)
-            .output()
-            .expect("tar runs"),
-        "unpack",
-    );
-    let archs = Command::new("lipo")
-        .arg("-archs")
-        .arg(unpacked.join("oneagentgraph"))
-        .output()
-        .expect("lipo runs");
-    succeeded(&archs, "lipo");
-    assert_eq!(String::from_utf8_lossy(&archs.stdout).trim(), "arm64");
-
-    // What each upload-artifact step of the Mac job carries out of it.
-    let steps = workflow["jobs"]["darwin"]["steps"]
-        .as_array()
-        .expect("darwin steps");
-    let mut uploaded = std::collections::BTreeMap::new();
-    for step in steps.iter().filter(|step| {
-        step["uses"]
-            .as_str()
-            .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
-    }) {
-        let mut files = Vec::new();
-        for pattern in step["with"]["path"]
-            .as_str()
-            .expect("artifact path")
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            let suffix = pattern
-                .strip_prefix("darwin/*")
-                .expect("artifact paths are darwin/*<suffix> globs");
-            for entry in std::fs::read_dir(&darwin).expect("staged directory lists") {
-                let entry = entry.expect("staged entry");
-                let name = entry.file_name().into_string().expect("utf-8 name");
-                if entry.file_type().expect("entry type").is_file() && name.ends_with(suffix) {
-                    files.push(name);
-                }
-            }
-        }
-        files.sort();
-        uploaded.insert(
-            step["with"]["name"]
-                .as_str()
-                .expect("artifact name")
-                .to_string(),
-            files,
-        );
-    }
-    let archive = format!("oneagentgraph-v{VERSION}-{target}.tar.gz");
-    let wheel = format!("oneagentgraph_cli-{VERSION}-py3-none-macosx_11_0_arm64.whl");
-    let carrier = format!("oneagentgraph-cli-darwin-arm64-{VERSION}.tgz");
-    assert_eq!(
-        uploaded["wheels-darwin"],
-        [wheel],
-        "PyPI receives exactly the arm64 wheel"
-    );
-    assert_eq!(uploaded["npm-darwin"], std::slice::from_ref(&carrier));
-    assert_eq!(
-        uploaded["archives-darwin"],
-        [
-            format!("{target}.json"),
-            archive.clone(),
-            format!("{archive}.sha256")
-        ],
-        "the forge receives the arm64 archive, checksum and receipt"
-    );
-
-    // Doubles for the forge and the registry: they record what would leave and
-    // hand everything else to the real npm.
-    let bin = work.path().join("doubles");
-    std::fs::create_dir_all(&bin).expect("doubles directory");
-    let real_npm = String::from_utf8(
-        Command::new("sh")
-            .args(["-c", "command -v npm"])
-            .output()
-            .expect("npm resolves")
-            .stdout,
-    )
-    .expect("npm path");
-    let record = work.path().join("published");
-    std::fs::write(
-        bin.join("gh"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$RECORD\"\n",
-    )
-    .expect("gh double");
-    std::fs::write(
-        bin.join("npm"),
-        format!("#!/bin/sh\ncase \"$1\" in\n  view) echo 'npm error code E404' >&2; exit 1 ;;\n  publish) printf 'npm publish %s\\n' \"$2\" >> \"$RECORD\"; exit 0 ;;\n  *) exec {} \"$@\" ;;\nesac\n", real_npm.trim()),
-    )
-    .expect("npm double");
-    for double in ["gh", "npm"] {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(bin.join(double), std::fs::Permissions::from_mode(0o755))
-            .expect("double is executable");
-    }
-    let run_step = |job_name: &str, step_name: &str, workspace: &std::path::Path| {
-        let script = workflow["jobs"][job_name]["steps"]
-            .as_array()
-            .expect("job steps")
-            .iter()
-            .find(|step| step["name"].as_str() == Some(step_name))
-            .and_then(|step| step["run"].as_str())
-            .unwrap_or_else(|| panic!("{job_name} has a {step_name:?} step"))
-            .to_string();
-        let output = Command::new("bash")
-            .current_dir(if job_name == "upload-darwin" {
-                workspace
-            } else {
-                repo()
-            })
-            .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", &script])
-            .env(
-                "PATH",
-                format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
-            )
-            .env("RECORD", &record)
-            .env("GITHUB_REF_NAME", tag())
-            .env("GITHUB_WORKSPACE", workspace)
-            .env("GH_TOKEN", "doubled")
-            .env("NODE_AUTH_TOKEN", "doubled")
-            .output()
-            .expect("workflow step runs");
-        succeeded(&output, step_name);
-    };
-    // upload-darwin downloads archives-darwin into `darwin/` and attaches it.
-    let forge = work.path().join("forge");
-    std::fs::create_dir_all(forge.join("darwin")).expect("forge workspace");
-    for name in &uploaded["archives-darwin"] {
-        std::fs::copy(darwin.join(name), forge.join("darwin").join(name))
-            .expect("artifact downloads");
-    }
-    run_step(
-        "upload-darwin",
-        "Attach prevalidated Darwin archives",
-        &forge,
-    );
-    // publish-npm merges every npm-* artifact into `npm-artifacts/`; this is the Mac job's share.
-    let registry = work.path().join("registry");
-    std::fs::create_dir_all(registry.join("npm-artifacts")).expect("registry workspace");
-    std::fs::copy(
-        darwin.join(&carrier),
-        registry.join("npm-artifacts").join(&carrier),
-    )
-    .expect("artifact downloads");
-    run_step(
-        "publish-npm",
-        "Publish the platform packages, then the launcher",
-        &registry,
-    );
-    let published = std::fs::read_to_string(&record).expect("doubles recorded");
-    let lines: Vec<&str> = published.lines().collect();
-    assert_eq!(
-        lines[..6],
-        [
-            "release",
-            "upload",
-            &tag(),
-            &format!("darwin/{archive}"),
-            &format!("darwin/{archive}.sha256"),
-            "--clobber"
-        ],
-        "the forge receives exactly the arm64 archive and checksum"
-    );
-    assert_eq!(
-        lines[6],
-        format!(
-            "npm publish {}",
-            registry.join("npm-artifacts").join(&carrier).display()
-        )
-    );
-    assert!(
-        lines[7].starts_with("npm publish ") && lines[7].ends_with("oneagentgraph-cli"),
-        "then the launcher: {}",
-        lines[7]
-    );
-    assert_eq!(lines.len(), 8, "nothing else publishes: {published}");
-
-    // Native execution, as the Mac job runs it before any upload.
-    let smoke = Command::new("bash")
-        .current_dir(repo())
-        .args(["scripts/release-smoke.sh", target])
-        .arg(&darwin)
-        .arg(VERSION)
-        .output()
-        .expect("native product installs run");
-    succeeded(&smoke, "release-smoke");
-
-    // Mach-O cputype 0x01000007 is x86_64.
-    defects_are_refused(
-        target,
-        &darwin,
-        work.path(),
-        |macho| macho[4..8].copy_from_slice(&0x0100_0007u32.to_le_bytes()),
-        "mach-o/x86_64",
-    );
-    intel_is_refused(&built_binary(target), work.path());
 }
