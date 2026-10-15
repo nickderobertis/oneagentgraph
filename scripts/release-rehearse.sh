@@ -30,6 +30,7 @@ case "$TARGET" in
   x86_64-apple-darwin) fail "Intel macOS is no longer a release target: $TARGET" ;;
   *) fail "unsupported release target: $TARGET" ;;
 esac
+real_npm=$(command -v npm) || fail 'npm is required to rehearse the registry upload'
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 work=$(mktemp -d "${ONEPIPELINE_NODE_SCRATCH_DIR:-${TMPDIR:-/tmp}}/release-rehearse.XXXXXXXX")
 trap 'rm -rf "$work"' EXIT
@@ -56,7 +57,6 @@ if [ "$(uname -s)" = Darwin ]; then
 fi
 
 mkdir "$work/bin"
-real_npm=$(command -v npm) || fail 'npm is required to rehearse the registry upload'
 printf '#!/bin/sh\nprintf "%%s\\n" "$@" >> "$RECORD"\n' >"$work/bin/gh"
 cat >"$work/bin/npm" <<DOUBLE
 #!/bin/sh

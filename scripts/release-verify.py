@@ -15,10 +15,12 @@ from pathlib import Path
 import re
 import sys
 import tarfile
+import tempfile
+import tomllib
 import zipfile
 
 sys.dont_write_bytecode = True  # leave no __pycache__ beside the scripts
-from release_artifacts import TARGETS, executable_format  # noqa: E402
+from release_artifacts import TARGETS, MaturinUnavailable, executable_format, maturin_dist_info  # noqa: E402
 
 
 def fail(message):
@@ -37,6 +39,9 @@ if not re.fullmatch(r'v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?', 
 if not args.dir.is_absolute() or not args.dir.is_dir():
     parser.error('--dir must be an existing absolute staged artifact directory')
 version = args.tag[1:]
+root = Path(__file__).resolve().parent.parent
+if tomllib.loads((root / 'Cargo.toml').read_text()).get('package', {}).get('version') != version:
+    fail(f'{args.tag} is not the version this checkout builds; verify from the checkout of the released commit')
 staged = {path.name for path in args.dir.iterdir() if path.is_file()}
 expected = set()
 
@@ -74,14 +79,20 @@ def verify(target):
     if (receipt['target'], receipt['version'], receipt['tag']) != (target, version, args.tag):
         fail(f'{receipt_name} records {receipt["target"]} {receipt["tag"]}, not {target} {args.tag}')
     archive = f'oneagentgraph-{args.tag}-{target}.tar.gz'
-    wheel = receipt['wheel']
-    # The wheel's version is maturin's PEP 440 spelling of the crate version,
-    # which the packager took from maturin itself; it is read back from there
-    # rather than re-derived. A plain X.Y.Z spells the same in both.
-    named = re.fullmatch(rf'oneagentgraph_cli-([0-9A-Za-z.!+]+)-py3-none-{re.escape(facts["wheel"])}\.whl', wheel)
-    if receipt['archive'] != archive or not named or (re.fullmatch(r'\d+\.\d+\.\d+', version) and named[1] != version):
-        fail(f'{receipt_name} names {receipt["archive"]} and {wheel}, not the {target} archive and {facts["wheel"]} wheel at {version}')
-    wheel_version = named[1]
+    # The wheel's version is maturin's PEP 440 spelling of the release version;
+    # ask maturin for it rather than trust the receipt or re-derive the spelling.
+    with tempfile.TemporaryDirectory() as metadata_dir:
+        try:
+            dist_info = maturin_dist_info(root, target, Path(metadata_dir))
+        except MaturinUnavailable as error:
+            fail(str(error))
+        declared = re.findall(r'^Version: (.*)$', (dist_info / 'METADATA').read_text(), re.M)
+    if len(declared) != 1:
+        fail(f'maturin declares {len(declared)} wheel versions for {target}; inspect project metadata')
+    wheel_version = declared[0]
+    wheel = f'oneagentgraph_cli-{wheel_version}-py3-none-{facts["wheel"]}.whl'
+    if (receipt['archive'], receipt['wheel']) != (archive, wheel):
+        fail(f'{receipt_name} names {receipt["archive"]} and {receipt["wheel"]}, not {archive} and {wheel}')
     carrier = f'oneagentgraph-cli-{facts["npm_os"]}-{facts["npm_cpu"]}-{version}.tgz'
     names = {receipt_name, archive, f'{archive}.sha256', wheel, carrier}
     missing = sorted(names - staged)

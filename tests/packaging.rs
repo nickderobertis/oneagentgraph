@@ -315,50 +315,92 @@ with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         );
     }
 
-    /// Rewrite one member of a staged wheel (zip) or npm carrier (tar.gz):
-    /// `contents` replaces its bytes, and `mode` its permission bits.
-    pub fn rewrite_member(path: &Path, member: &str, contents: Option<&[u8]>, mode: Option<u32>) {
+    /// One change to one member of a staged zip or tar.gz.
+    pub enum Edit<'a> {
+        Replace(&'a [u8]),
+        Append(&'a [u8]),
+        Delete,
+        /// A new member, beside the existing ones.
+        Add(&'a [u8]),
+        /// Permission bits, on a zip member.
+        Chmod(u32),
+        /// The member becomes a directory entry, on a tar member.
+        Directory,
+    }
+
+    /// Apply `edit` to `member` of a staged wheel (zip), archive or npm carrier
+    /// (tar.gz), leaving every other member as the packager wrote it.
+    pub fn rewrite_member(path: &Path, member: &str, edit: Edit<'_>) {
         const REWRITE: &str = r#"
 import io, sys, tarfile, zipfile
 from pathlib import Path
-path, member, contents, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
-new = bytes.fromhex(contents) if contents != '-' else None
+path, member, op, arg = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+data_arg = bytes.fromhex(arg) if op in ('replace', 'append', 'add') else None
+def edited(data):
+    return data_arg if op == 'replace' else data + data_arg if op == 'append' else data
 if zipfile.is_zipfile(path):
     with zipfile.ZipFile(path) as z:
         entries = [(info, z.read(info)) for info in z.infolist()]
     with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         for info, data in entries:
             if info.filename == member:
-                data = new if new is not None else data
-                if mode != '-':
-                    info.external_attr = int(mode, 8) << 16
+                if op == 'delete':
+                    continue
+                if op == 'chmod':
+                    info.external_attr = int(arg, 8) << 16
+                data = edited(data)
             z.writestr(info, data)
+        if op == 'add':
+            z.writestr(zipfile.ZipInfo(member), data_arg)
 else:
     with tarfile.open(path) as tar:
-        entries = [(info, tar.extractfile(info).read()) for info in tar.getmembers()]
+        entries = [(info, tar.extractfile(info).read() if info.isfile() else b'') for info in tar.getmembers()]
     with tarfile.open(path, 'w:gz') as tar:
         for info, data in entries:
             if info.name == member:
-                data = new if new is not None else data
+                if op == 'delete':
+                    continue
+                if op == 'directory':
+                    info.type, data = tarfile.DIRTYPE, b''
+                data = edited(data)
                 info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
+        if op == 'add':
+            info = tarfile.TarInfo(member)
+            info.size = len(data_arg)
+            tar.addfile(info, io.BytesIO(data_arg))
 "#;
-        let hex = contents.map_or("-".to_string(), |bytes| {
-            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-        });
+        let hex =
+            |bytes: &[u8]| -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() };
+        let (op, arg) = match edit {
+            Edit::Replace(bytes) => ("replace", hex(bytes)),
+            Edit::Append(bytes) => ("append", hex(bytes)),
+            Edit::Delete => ("delete", String::new()),
+            Edit::Add(bytes) => ("add", hex(bytes)),
+            Edit::Chmod(mode) => ("chmod", format!("{mode:o}")),
+            Edit::Directory => ("directory", String::new()),
+        };
         succeeded(
             &Command::new("python3")
                 .args(["-I", "-c", REWRITE])
                 .arg(path)
-                .args([
-                    member,
-                    &hex,
-                    &mode.map_or("-".to_string(), |m| format!("{m:o}")),
-                ])
+                .args([member, op, &arg])
                 .output()
                 .expect("python runs"),
             "rewrite member",
         );
+    }
+
+    /// Re-checksum a staged archive, so the only defect left is the one a case put in it.
+    pub fn rechecksum(dir: &Path, archive: &str) {
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(std::fs::read(dir.join(archive)).expect("archive reads"));
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        std::fs::write(
+            dir.join(format!("{archive}.sha256")),
+            format!("{hex}  {archive}\n"),
+        )
+        .expect("checksum writes");
     }
 
     /// Every way a staged set can differ from what its packager wrote is refused
@@ -374,6 +416,7 @@ else:
         let archive = format!("oneagentgraph-v{VERSION}-{target}.tar.gz");
         let receipt = format!("{target}.json");
         let dist_info = format!("oneagentgraph_cli-{VERSION}.dist-info");
+        let script = format!("oneagentgraph_cli-{VERSION}.data/scripts/oneagentgraph");
         let recorded: serde_json::Value =
             serde_json::from_slice(&std::fs::read(staged.join(&receipt)).expect("receipt reads"))
                 .expect("receipt parses");
@@ -382,12 +425,26 @@ else:
             changed[field] = serde_json::Value::String(value.to_string());
             changed.to_string()
         };
+        let malformed = format!("a staged {target} artifact is malformed");
         type Mutation<'a> = Box<dyn Fn(&Path) + 'a>;
         let write = |name: String, text: String| -> Mutation<'_> {
             Box::new(move |dir: &Path| {
                 std::fs::write(dir.join(&name), &text).expect("staged file writes")
             })
         };
+        let in_archive = |member: &'static str, edit: fn() -> Edit<'static>| -> Mutation<'_> {
+            let archive = archive.clone();
+            Box::new(move |dir: &Path| {
+                rewrite_member(&dir.join(&archive), member, edit());
+                rechecksum(dir, &archive);
+            })
+        };
+        let in_member =
+            |file: String, member: String, edit: fn() -> Edit<'static>| -> Mutation<'_> {
+                Box::new(move |dir: &Path| rewrite_member(&dir.join(&file), &member, edit()))
+            };
+        let other_version = "9.9.9";
+        let other_wheel = wheel.replace(VERSION, other_version);
         let cases: Vec<(&str, Mutation<'_>, String)> = vec![
             (
                 "no receipt",
@@ -399,7 +456,7 @@ else:
             (
                 "receipt not JSON",
                 write(receipt.clone(), "{".into()),
-                format!("a staged {target} artifact is malformed"),
+                malformed.clone(),
             ),
             (
                 "receipt schema",
@@ -417,7 +474,20 @@ else:
                     receipt.clone(),
                     with_receipt("wheel", "oneagentgraph_cli-9.9.9-py3-none-any.whl"),
                 ),
-                format!("not the {target} archive"),
+                format!("not {archive} and {wheel}"),
+            ),
+            // Receipt, file name and METADATA agree with each other, and maturin
+            // still says this checkout's wheel is another version.
+            (
+                "a wheel and receipt agreeing on another version",
+                Box::new(|dir: &Path| {
+                    std::fs::rename(dir.join(wheel), dir.join(&other_wheel))
+                        .expect("wheel renames");
+                    restamp_wheel(dir, &other_wheel, other_version);
+                    std::fs::write(dir.join(&receipt), with_receipt("wheel", &other_wheel))
+                        .expect("receipt writes");
+                }),
+                format!("not {archive} and {wheel}"),
             ),
             (
                 "receipt records another binary",
@@ -443,115 +513,110 @@ else:
                 format!("{archive}.sha256 does not match"),
             ),
             (
-                "archive without its documents",
-                Box::new(|dir: &Path| {
-                    tamper_archive(dir, &archive, |_| {});
-                    let unpacked = dir.join("only-binary");
-                    std::fs::create_dir_all(&unpacked).expect("unpack directory");
-                    succeeded(
-                        &Command::new("tar")
-                            .arg("-xzf")
-                            .arg(dir.join(&archive))
-                            .arg("-C")
-                            .arg(&unpacked)
-                            .output()
-                            .expect("tar runs"),
-                        "unpack",
-                    );
-                    succeeded(
-                        &Command::new("tar")
-                            .arg("-czf")
-                            .arg(dir.join(&archive))
-                            .arg("-C")
-                            .arg(&unpacked)
-                            .arg("oneagentgraph")
-                            .output()
-                            .expect("tar runs"),
-                        "repack",
-                    );
-                    std::fs::remove_dir_all(&unpacked).expect("unpack directory removes");
-                    use sha2::Digest;
-                    let digest = sha2::Sha256::digest(
-                        std::fs::read(dir.join(&archive)).expect("archive reads"),
-                    );
-                    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-                    std::fs::write(
-                        dir.join(format!("{archive}.sha256")),
-                        format!("{hex}  {archive}\n"),
-                    )
-                    .expect("checksum writes");
-                }),
+                "archive without its README",
+                in_archive("README.md", || Edit::Delete),
                 "not the binary and its three documents".into(),
+            ),
+            (
+                "archive binary not a regular file",
+                in_archive("oneagentgraph", || Edit::Directory),
+                format!("{archive} member oneagentgraph is not a regular file"),
             ),
             (
                 "corrupt wheel",
                 write(wheel.to_string(), "not a zip".into()),
-                format!("a staged {target} artifact is malformed"),
+                malformed.clone(),
+            ),
+            (
+                "wheel with a second script",
+                in_member(
+                    wheel.to_string(),
+                    format!("oneagentgraph_cli-{VERSION}.data/scripts/other"),
+                    || Edit::Add(b"#!/bin/sh\n"),
+                ),
+                format!("{wheel} must carry exactly one oneagentgraph script"),
+            ),
+            (
+                "wheel without its script",
+                in_member(wheel.to_string(), script.clone(), || Edit::Delete),
+                format!("{wheel} must carry exactly one oneagentgraph script"),
+            ),
+            (
+                "wheel payload from another build",
+                in_member(wheel.to_string(), script.clone(), || Edit::Append(b"\0")),
+                format!("{wheel} carries a different binary"),
             ),
             (
                 "wheel script not executable",
-                Box::new(|dir: &Path| {
-                    rewrite_member(
-                        &dir.join(wheel),
-                        &format!("oneagentgraph_cli-{VERSION}.data/scripts/oneagentgraph"),
-                        None,
-                        Some(0o644),
-                    )
-                }),
+                in_member(wheel.to_string(), script.clone(), || Edit::Chmod(0o644)),
                 "script is not executable".into(),
             ),
             (
                 "wheel METADATA for another package",
-                Box::new(|dir: &Path| {
-                    rewrite_member(
-                        &dir.join(wheel),
-                        &format!("{dist_info}/METADATA"),
-                        Some(b"Name: someone-else\n"),
-                        None,
-                    )
+                in_member(wheel.to_string(), format!("{dist_info}/METADATA"), || {
+                    Edit::Replace(b"Name: someone-else\n")
                 }),
                 "metadata is not oneagentgraph-cli".into(),
             ),
             (
+                "wheel without METADATA",
+                in_member(wheel.to_string(), format!("{dist_info}/METADATA"), || {
+                    Edit::Delete
+                }),
+                format!("{wheel} has no {dist_info}/METADATA"),
+            ),
+            (
                 "corrupt npm carrier",
                 write(carrier.to_string(), "not a tarball".into()),
-                format!("a staged {target} artifact is malformed"),
+                malformed.clone(),
             ),
             (
                 "npm manifest not JSON",
-                Box::new(|dir: &Path| {
-                    rewrite_member(
-                        &dir.join(carrier),
-                        "package/package.json",
-                        Some(b"[1"),
-                        None,
-                    )
+                in_member(carrier.to_string(), "package/package.json".into(), || {
+                    Edit::Replace(b"[1")
                 }),
-                format!("a staged {target} artifact is malformed"),
+                malformed.clone(),
             ),
             (
-                "npm manifest for another package",
-                Box::new(|dir: &Path| {
-                    rewrite_member(
-                        &dir.join(carrier),
-                        "package/package.json",
-                        Some(br#"{"name":"someone-else"}"#),
-                        None,
-                    )
+                "npm manifest not an object",
+                in_member(carrier.to_string(), "package/package.json".into(), || {
+                    Edit::Replace(b"[]")
                 }),
                 format!("{carrier} manifest is not the {target} carrier"),
             ),
             (
-                "npm carrier with another binary",
-                Box::new(|dir: &Path| {
-                    rewrite_member(
-                        &dir.join(carrier),
-                        "package/bin/oneagentgraph",
-                        Some(b"#!/bin/sh\n"),
-                        None,
-                    )
+                "npm manifest for another package",
+                in_member(carrier.to_string(), "package/package.json".into(), || {
+                    Edit::Replace(br#"{"name":"someone-else"}"#)
                 }),
+                format!("{carrier} manifest is not the {target} carrier"),
+            ),
+            (
+                "npm carrier without its binary",
+                in_member(
+                    carrier.to_string(),
+                    "package/bin/oneagentgraph".into(),
+                    || Edit::Delete,
+                ),
+                format!("{carrier} has no package/bin/oneagentgraph"),
+            ),
+            (
+                "npm carrier with a script for a binary",
+                in_member(
+                    carrier.to_string(),
+                    "package/bin/oneagentgraph".into(),
+                    || Edit::Replace(b"#!/bin/sh\n"),
+                ),
                 format!("{carrier} payload is built for unknown/?"),
+            ),
+            (
+                "npm payload from another build",
+                in_member(
+                    carrier.to_string(),
+                    "package/bin/oneagentgraph".into(),
+                    || Edit::Append(b"\0"),
+                ),
+                format!("{carrier} carries a different binary"),
             ),
         ];
         for (index, (case, mutate, reason)) in cases.iter().enumerate() {
@@ -567,6 +632,54 @@ else:
             );
             assert!(!stderr.contains("Traceback"), "{case}: {stderr}");
         }
+    }
+
+    /// `scripts/release-rehearse.sh` from a copy of this checkout whose
+    /// `scripts/` differ by `change`, with `doubles` (name, sh body) first on PATH.
+    pub fn rehearse_altered(
+        target: &str,
+        dir: &Path,
+        work: &Path,
+        change: impl Fn(&Path),
+        doubles: &[(&str, &str)],
+    ) -> Output {
+        let root = work.join("altered-checkout");
+        std::fs::create_dir_all(root.join("scripts")).expect("altered checkout");
+        for entry in std::fs::read_dir(repo()).expect("checkout lists") {
+            let entry = entry.expect("checkout entry");
+            if entry.file_name() != "scripts" {
+                std::os::unix::fs::symlink(entry.path(), root.join(entry.file_name()))
+                    .expect("checkout links");
+            }
+        }
+        copy_staged(&repo().join("scripts"), &root.join("scripts"));
+        change(&root.join("scripts"));
+        let bin = work.join("altered-bin");
+        std::fs::create_dir_all(&bin).expect("doubles directory");
+        for (name, body) in doubles {
+            let path = bin.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("double writes");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("double is executable");
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").expect("PATH is set")
+        );
+        let output = Command::new("bash")
+            .current_dir(repo())
+            .arg(root.join("scripts/release-rehearse.sh"))
+            .arg(target)
+            .arg(dir)
+            .arg(tag())
+            .env("PATH", path)
+            .output()
+            .expect("release rehearsal runs");
+        std::fs::remove_dir_all(&root).expect("altered checkout removes");
+        std::fs::remove_dir_all(&bin).expect("doubles directory removes");
+        output
     }
 
     /// `.github/workflows/release.yml`, as data.
@@ -765,6 +878,37 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         "elf/aarch64",
     );
     intel_is_refused(&built_binary(target), work.path());
+    // The host's own architecture reading (lipo, on macOS) is a refusal of its
+    // own; here `uname` and `lipo` are doubled to say Darwin and another CPU.
+    refused(
+        &rehearse_altered(
+            target,
+            &staged,
+            work.path(),
+            |_| {},
+            &[("uname", "echo Darwin"), ("lipo", "echo arm64")],
+        ),
+        "release-rehearse with lipo reading another architecture",
+        &format!("lipo reads 'arm64' from oneagentgraph-v{VERSION}-{target}.tar.gz, not x86_64"),
+    );
+    // An attach script that would send more than the archive and checksum is
+    // caught by the rehearsal before any upload.
+    refused(
+        &rehearse_altered(
+            target,
+            &staged,
+            work.path(),
+            |scripts| {
+                let attach = scripts.join("release-attach.sh");
+                let text = std::fs::read_to_string(&attach).expect("attach reads");
+                std::fs::write(&attach, text.replace("--clobber", "--clobber --draft"))
+                    .expect("attach writes");
+            },
+            &[],
+        ),
+        "release-rehearse with an attach that sends more",
+        "publication would send",
+    );
     malformed_sets_are_refused(
         target,
         &staged,

@@ -14,6 +14,9 @@ test('real release command boundaries refuse bad inputs before compiler or insta
    ['release-smoke',[],'three arguments'],['release-smoke',['x86_64-apple-darwin',dir,'1.2.3'],'Intel macOS is no longer a release target'],['release-smoke',['unknown',dir,'1.2.3'],'unsupported release target'],
    ['release-smoke',['aarch64-apple-darwin','relative','1.2.3'],'absolute'],
    ['release-smoke',['aarch64-apple-darwin',dir,'../other'],'release-version syntax'],
+   ['release-rehearse',[],'three arguments'],['release-rehearse',['aarch64-apple-darwin','relative','v1.2.3'],'must exist and be absolute'],
+   ['release-rehearse',['aarch64-apple-darwin',dir,'untrusted'],'tag must be a release version'],
+   ['release-rehearse',['x86_64-apple-darwin',dir,'v1.2.3'],'Intel macOS is no longer a release target'],['release-rehearse',['unknown',dir,'v1.2.3'],'unsupported release target'],
   ]) {
    const result=spawnSync('bash',[`scripts/${script}.sh`,...args],{encoding:'utf8'});
    assert.equal(result.status,2,`${script}: ${result.stderr}`);
@@ -93,8 +96,20 @@ test('real verifier refuses a bad tag or staged directory before reading artifac
   [['--tag','1.2.3','--dir',tmpdir()],'--tag must be a vX.Y.Z release tag'],
   [['--tag','v1.2.3','--dir','relative'],'--dir must be an existing absolute'],
   [['--tag','v1.2.3','--dir','/nonexistent-staged-directory'],'--dir must be an existing absolute'],
+  [['--tag','v0.0.1','--dir',tmpdir()],'v0.0.1 is not the version this checkout builds'],
  ]) {
   const result=spawnSync('python3',['scripts/release-verify.py','--target','aarch64-apple-darwin',...args],{encoding:'utf8'});
   assert.equal(result.status,2,result.stderr);assert.ok(result.stderr.includes(reason),result.stderr);
  }
+});
+
+test('real rehearsal refuses before any work on a runner without npm',()=>{
+ const dir=mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR??tmpdir(),'rehearse-npm-'));
+ try {
+  // A PATH with nothing on it: the refusal must come from the script's own
+  // check, before it reaches a tool it would need to verify or publish.
+  const result=spawnSync('/bin/bash',['scripts/release-rehearse.sh','aarch64-apple-darwin',dir,'v1.2.3'],{encoding:'utf8',env:{...process.env,PATH:join(dir,'empty')}});
+  assert.equal(result.status,2,result.stderr);
+  assert.ok(result.stderr.includes('npm is required to rehearse the registry upload'),result.stderr);
+ } finally {rmSync(dir,{recursive:true,force:true});}
 });

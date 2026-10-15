@@ -3,9 +3,15 @@
 Shared by scripts/release-package.py, which refuses to wrap a binary built for
 another target, and scripts/release-verify.py, which checks every staged payload
 before publication. Reading the header is what lets a Linux host hold a Darwin
-artifact to its contract without executing it.
+artifact to its contract without executing it. Both also take a wheel's metadata,
+and so its PEP 440 version, from maturin rather than deriving it themselves.
 """
+import os
+from pathlib import Path
+import shutil
 import struct
+import subprocess
+import sys
 
 # Rust target -> the (format, cpu) its executable must be, and its wheel / npm facts.
 TARGETS = {
@@ -30,3 +36,30 @@ def executable_format(data: bytes) -> tuple[str, str]:
     if data[:2] == b'MZ':
         return 'pe', '?'
     return 'unknown', '?'
+
+
+class MaturinUnavailable(Exception):
+    """maturin could not describe the wheel; the message says what to do."""
+
+
+def maturin_dist_info(root: Path, target: str, into: Path) -> Path:
+    """The dist-info maturin 1.14.1 writes for `target`, without a build.
+
+    Maturin's PEP 517 metadata producer is the one source of the wheel's name,
+    tags and PEP 440 version, so neither the packager nor the verifier keeps a
+    copy of those rules.
+    """
+    candidates = [shutil.which('maturin'), str(Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo'))) / 'bin/maturin')]
+    maturin = next((c for c in candidates if c and Path(c).is_file() and subprocess.check_output([c, '--version'], text=True).strip() == 'maturin 1.14.1'), None)
+    if not maturin:
+        raise MaturinUnavailable('maturin 1.14.1 is required; run bash scripts/setup-packaging.sh')
+    command = [maturin, 'pep517', 'write-dist-info', '--bindings', 'bin', '--target', target, '--locked', '--metadata-directory', str(into)]
+    if target == 'x86_64-unknown-linux-gnu':
+        command += ['--compatibility', 'linux']
+    # Its progress goes to stderr: a caller's stdout is its own result.
+    if subprocess.run(command, cwd=root, stdout=sys.stderr).returncode != 0:
+        raise MaturinUnavailable(f'maturin could not describe the {target} wheel; run its command above to see why')
+    infos = list(into.glob('*.dist-info'))
+    if len(infos) != 1:
+        raise MaturinUnavailable('maturin produced ambiguous metadata; inspect the metadata producer output')
+    return infos[0]

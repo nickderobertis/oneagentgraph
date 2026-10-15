@@ -7,9 +7,6 @@ import hashlib
 import io
 import json
 from email.parser import Parser
-import os
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 import re
@@ -19,7 +16,7 @@ import tomllib
 import zipfile
 
 sys.dont_write_bytecode = True  # leave no __pycache__ beside the scripts
-from release_artifacts import TARGETS, executable_format  # noqa: E402
+from release_artifacts import TARGETS, MaturinUnavailable, executable_format, maturin_dist_info  # noqa: E402
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--target', required=True, choices=sorted(TARGETS))
@@ -56,33 +53,22 @@ with tarfile.open(archive, 'w:gz') as tar:
 (args.out / f'{archive.name}.sha256').write_text(f'{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n')
 # Maturin's existing PEP 517 metadata producer exposes the packaging seam
 # without a build. Keep its metadata and version normalization authoritative.
-candidates = [shutil.which('maturin'), str(Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo'))) / 'bin/maturin')]
-maturin = None
-for candidate in candidates:
-    if candidate and Path(candidate).is_file() and subprocess.check_output([candidate, '--version'], text=True).strip() == 'maturin 1.14.1':
-        maturin = candidate
-        break
-if not maturin:
-    parser.error('maturin 1.14.1 is required; run bash scripts/setup-packaging.sh')
 with tempfile.TemporaryDirectory(dir=args.out) as metadata_dir:
-    command = [maturin, 'pep517', 'write-dist-info', '--bindings', 'bin', '--target', args.target, '--locked', '--metadata-directory', metadata_dir]
-    if args.target == 'x86_64-unknown-linux-gnu':
-        command += ['--compatibility', 'linux']
-    subprocess.run(command, cwd=root, check=True)
-    infos = list(Path(metadata_dir).glob('*.dist-info'))
-    if len(infos) != 1:
-        parser.error('maturin produced ambiguous metadata; inspect the metadata producer output')
-    info = infos[0].name
-    metadata = Parser().parsestr((infos[0] / 'METADATA').read_text())
+    try:
+        dist_info = maturin_dist_info(root, args.target, Path(metadata_dir))
+    except MaturinUnavailable as error:
+        parser.error(str(error))
+    info = dist_info.name
+    metadata = Parser().parsestr((dist_info / 'METADATA').read_text())
     wheel_version = metadata.get('Version')
     if not wheel_version or not re.fullmatch(r'[A-Za-z0-9.+!_-]+', wheel_version):
         parser.error('maturin produced no safe wheel version; inspect project metadata')
     name = info.removesuffix('.dist-info').removesuffix('-' + wheel_version)
-    tags = [line.removeprefix('Tag: ') for line in (infos[0] / 'WHEEL').read_text().splitlines() if line.startswith('Tag: ')]
+    tags = [line.removeprefix('Tag: ') for line in (dist_info / 'WHEEL').read_text().splitlines() if line.startswith('Tag: ')]
     if len(tags) != 1 or not re.fullmatch(r'py3-none-[A-Za-z0-9_.]+', tags[0]):
         parser.error('maturin produced an unsupported binary-wheel tag; inspect target metadata')
     tag = tags[0]
-    files = {f'{info}/{path.relative_to(infos[0]).as_posix()}': path.read_bytes() for path in infos[0].rglob('*') if path.is_file()}
+    files = {f'{info}/{path.relative_to(dist_info).as_posix()}': path.read_bytes() for path in dist_info.rglob('*') if path.is_file()}
 files[f'{name}-{wheel_version}.data/scripts/oneagentgraph'] = binary
 rows = [[path, 'sha256=' + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).decode().rstrip('='), str(len(data))] for path, data in files.items()]
 rows.append([f'{info}/RECORD', '', ''])
