@@ -366,6 +366,8 @@ else:
                     info.type, data = tarfile.DIRTYPE, b''
                 if op == 'symlink':
                     info.type, info.linkname, data = tarfile.SYMTYPE, 'README.md', b''
+                if op == 'chmod':
+                    info.mode = int(arg, 8)
                 data = edited(data)
                 info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
@@ -538,6 +540,11 @@ else:
                 format!("{archive} member oneagentgraph is not a regular file"),
             ),
             (
+                "archive binary not executable",
+                in_archive("oneagentgraph", || Edit::Chmod(0o644)),
+                format!("{archive} member oneagentgraph is not executable"),
+            ),
+            (
                 "corrupt wheel",
                 write(wheel.to_string(), "not a zip".into()),
                 malformed.clone(),
@@ -630,6 +637,15 @@ else:
                     || Edit::Replace(b"#!/bin/sh\n"),
                 ),
                 format!("{carrier} payload is built for unknown/?"),
+            ),
+            (
+                "npm payload not executable",
+                in_member(
+                    carrier.to_string(),
+                    "package/bin/oneagentgraph".into(),
+                    || Edit::Chmod(0o644),
+                ),
+                format!("{carrier} member package/bin/oneagentgraph is not executable"),
             ),
             (
                 "npm payload from another build",

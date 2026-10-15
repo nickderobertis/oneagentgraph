@@ -73,6 +73,14 @@ def member(container, name, label):
     return container.extractfile(info).read()
 
 
+def executable(tar, name, label):
+    """The bytes of tar member `name`, which must be a regular file a user can run."""
+    data = member(tar, name, label)
+    if not tar.getmember(name).mode & 0o111:
+        fail(f'{label} member {name} is not executable')
+    return data
+
+
 def verify(target):
     facts = TARGETS[target]
     receipt_name = f'{target}.json'
@@ -112,7 +120,7 @@ def verify(target):
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         if sorted(tar.getnames()) != ['CHANGELOG.md', 'LICENSE', 'README.md', 'oneagentgraph']:
             fail(f'{archive} carries {sorted(tar.getnames())}, not the binary and its three documents')
-        if payload(f'{archive} payload', member(tar, 'oneagentgraph', archive), target) != sha:
+        if payload(f'{archive} payload', executable(tar, 'oneagentgraph', archive), target) != sha:
             fail(f'{archive} carries a different binary than {receipt_name} records')
 
     with zipfile.ZipFile(args.dir / wheel) as z:
@@ -139,7 +147,7 @@ def verify(target):
         identity = tuple(manifest.get(key) for key in ['name', 'version', 'os', 'cpu']) if isinstance(manifest, dict) else None
         if identity != (f'oneagentgraph-cli-{facts["npm_os"]}-{facts["npm_cpu"]}', version, [facts['npm_os']], [facts['npm_cpu']]):
             fail(f'{carrier} manifest is not the {target} carrier at {version}')
-        if payload(f'{carrier} payload', member(npm, 'package/bin/oneagentgraph', carrier), target) != sha:
+        if payload(f'{carrier} payload', executable(npm, 'package/bin/oneagentgraph', carrier), target) != sha:
             fail(f'{carrier} carries a different binary than {receipt_name} records')
 
 
