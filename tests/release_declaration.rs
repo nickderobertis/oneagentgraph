@@ -218,7 +218,7 @@ fn targets(document: &mut DocumentMut) -> &mut toml_edit::ArrayOfTables {
 }
 
 /// Every covered npm carrier still has a real production builder in the release
-/// graph, including both targets built sequentially by the single Darwin job.
+/// graph, including the one arm64 target built by the single Darwin job.
 #[test]
 fn declared_carriers_are_reachable_from_the_release_builders() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));

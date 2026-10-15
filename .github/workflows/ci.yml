@@ -134,8 +134,7 @@ jobs:
   # The shared macOS job names an arm64 image outright rather than `macos-latest`,
   # whose architecture is GitHub's to change: Apple Silicon's CPU counters tick
   # in something other than nanoseconds, and the test that proves they are
-  # converted (`src/scratch.rs`) runs only on arm64. `macos-26` is arm64; its
-  # Intel twin is `macos-26-intel`.
+  # converted (`src/scratch.rs`) runs only on arm64. `macos-26` is arm64.
   #
   # Windows retains its path-sensitive matrix context. The single Mac lane
   # combines cross and install assertions; Linux result carriers below preserve

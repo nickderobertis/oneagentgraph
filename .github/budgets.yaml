@@ -5,7 +5,7 @@ budgets:
     description: >-
       Maximum resolved Mac job instances per workflow run, including matrix and
       reusable jobs, across 12 event classes, 3 diff classes, 2 PR ownership classes,
-      both Darwin architectures and all publish combinations. Explicit manual diagnostic
+      the one (arm64) Darwin target and all publish combinations. Explicit manual diagnostic
       included. inner_measure_reason: one run can occupy several shared Mac slots even
       when the lifecycle run count stays within its bound. The brief explicitly requests
       both jobs/run and Mac-spending runs/change bounds; the manager approved separate
@@ -22,7 +22,7 @@ budgets:
       Maximum distinct Mac-spending workflow runs over one PR push, base merge,
       version/changelog-only release PR and merge when used, tag, release build and
       every workflow_run descendant. Three diff classes, two PR ownership classes,
-      both Darwin architectures and all optional publishing combinations. Explicit
+      the one (arm64) Darwin target and all optional publishing combinations. Explicit
       manual diagnostics excluded. The brief explicitly requests both jobs/run and
       Mac-spending runs/change bounds; the manager approved separate budgets for these
       two scheduling constraints.

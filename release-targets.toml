@@ -69,7 +69,6 @@ manifest = "npm/oneagentgraph-cli/package.json"
 covers = [
   "npm:oneagentgraph-cli-linux-x64",
   "npm:oneagentgraph-cli-linux-arm64",
-  "npm:oneagentgraph-cli-darwin-x64",
   "npm:oneagentgraph-cli-darwin-arm64",
   "npm:oneagentgraph-cli-win32-x64",
 ]

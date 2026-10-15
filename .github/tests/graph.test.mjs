@@ -137,23 +137,27 @@ test('real carrier job remains scheduled with failed, cancelled or skipped prere
  }
 });
 
-test('release artifact routes retain every platform and gate Darwin publication on local smokes',()=>{
+test('release artifact routes retain every platform, build Darwin arm64 alone, and gate it on local smokes',()=>{
  const release=workflows().find(w=>w.path.endsWith('/release.yml')).doc;
  const targets=Object.keys(JSON.parse(readFileSync(join(root,'npm/oneagentgraph-cli/package.json'))).optionalDependencies);
  const targetPackages=target=>`oneagentgraph-cli-${target.includes('apple')?'darwin':target.includes('windows')?'win32':'linux'}-${target.startsWith('aarch64')?'arm64':'x64'}`;
  const darwin=JSON.parse(release.jobs.darwin.env.DARWIN_TARGETS);
+ assert.deepEqual(darwin,['aarch64-apple-darwin'],'the Mac release job builds Apple Silicon only');
+ assert.ok(!targets.includes('oneagentgraph-cli-darwin-x64'),'no Intel macOS carrier is published');
  for(const job of ['upload','build-wheels','build-npm']) {
   const built=[...release.jobs[job].strategy.matrix.include.map(row=>row.target),...darwin];
   assert.deepEqual(built.map(targetPackages).sort(),[...targets].sort(),job);
  }
  const recorded=resolveRun({path:'.github/workflows/release.yml',doc:release},{id:'target-detail',eventName:'release',action:'published',ref:'refs/tags/v0.5.7',event:{}},{macosRequired:false,isReleaseOnly:false}).find(row=>row.job==='darwin');
- assert.deepEqual(recorded.targets,darwin,'telemetry must identify both sequential target builds');
+ assert.deepEqual(recorded.targets,darwin,'telemetry must identify the Darwin target build');
  const steps=release.jobs.darwin.steps;
  const source=steps.filter(s=>s.run).map(s=>s.run).join('\n');
  for(const target of darwin) assert.ok(source.includes(`scripts/release-smoke.sh ${target}`));
- assert.match(source,/release-build\.sh/);assert.match(source,/install-rosetta/);
+ assert.match(source,/release-build\.sh/);assert.doesNotMatch(JSON.stringify(steps),/rosetta|x86_64|architecture":"x64/i,'native arm64 only: no Rosetta or Intel step');
  const firstUpload=steps.findIndex(s=>s.uses?.startsWith('actions/upload-artifact@'));
  assert.ok(steps.slice(0,firstUpload).filter(s=>s.run?.includes('scripts/release-smoke.sh')).length===darwin.length);
+ const verifyAt=steps.findIndex(s=>s.run?.includes('scripts/release-verify.py'));
+ assert.ok(verifyAt>steps.findIndex(s=>s.run?.includes('scripts/release-build.sh'))&&verifyAt<firstUpload,'the staged set is verified after it is built and before anything uploads');
  for(const publisher of ['publish-pypi','publish-npm','upload-darwin']) {
   assert.ok([].concat(release.jobs[publisher].needs).includes('darwin'),publisher);
   assert.equal(release.jobs[publisher]['runs-on'],'ubuntu-latest');

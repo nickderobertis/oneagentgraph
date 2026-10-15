@@ -955,6 +955,82 @@ fn a_release_is_gated_by_its_own_test_job_before_anything_publishes() {
     }
 }
 
+/// Whether a job takes a publication route: a token that can write the
+/// Release, or a step that runs one of the commands or actions below — the
+/// routes this release publishes through, plus the common direct ones a new
+/// publisher would reach for. Read from what the job does rather than from its
+/// name; a route outside this list is not recognised, which is why the test
+/// below also pins the set it finds.
+fn takes_a_publication_route(job: &Value) -> bool {
+    const ROUTES: [&str; 9] = [
+        "cargo publish",
+        "npm publish",
+        "twine upload",
+        "gh release",
+        "scripts/publish-npm.sh",
+        "scripts/release-attach.sh",
+        "pypa/gh-action-pypi-publish@",
+        "taiki-e/upload-rust-binary-action@",
+        "softprops/action-gh-release@",
+    ];
+    job["permissions"]["contents"] == "write"
+        || job["steps"].as_array().is_some_and(|steps| {
+            steps.iter().any(|step| {
+                let text = format!(
+                    "{}\n{}",
+                    step["uses"].as_str().unwrap_or(""),
+                    step["run"].as_str().unwrap_or("")
+                );
+                ROUTES.iter().any(|route| text.contains(route))
+            })
+        })
+}
+
+#[test]
+fn nothing_in_a_release_publishes_until_the_mac_release_job_has_passed() {
+    let release = workflow("release.yml");
+    let jobs = release.doc["jobs"].as_object().expect("release.yml jobs");
+    let publishers: BTreeSet<String> = jobs
+        .iter()
+        .filter(|(_, job)| takes_a_publication_route(job))
+        .map(|(id, _)| id.clone())
+        .collect();
+    // Pinned so the structural read above cannot quietly find fewer publishers
+    // than the release has — every crate, registry, and asset route is here.
+    assert_eq!(
+        publishers,
+        [
+            "publish-crate",
+            "publish-npm",
+            "publish-pypi",
+            "upload",
+            "upload-darwin"
+        ]
+        .map(String::from)
+        .into(),
+        "release.yml's publishing jobs changed"
+    );
+    for id in &publishers {
+        assert!(
+            release.waits_on(id).contains("darwin"),
+            "release.yml's `{id}` can publish before the Mac release job `darwin` succeeds"
+        );
+        // A status function in `if:` replaces the implicit `success()`, and
+        // would let the job run after `darwin` failed or was skipped.
+        let condition = release.job(id)["if"].as_str().unwrap_or("");
+        assert!(
+            !["always()", "failure()", "cancelled()", "!cancelled()"]
+                .iter()
+                .any(|f| condition.contains(f)),
+            "release.yml's `{id}` runs regardless of `darwin`'s result: {condition}"
+        );
+    }
+    assert!(
+        !takes_a_publication_route(release.job("darwin")),
+        "the Mac release job itself publishes; its proof must come first"
+    );
+}
+
 /// The run group a workflow's `concurrency` puts `context` in, and whether a
 /// newer run in that group cancels this one.
 fn concurrency(w: &Workflow, context: &Context) -> (String, bool) {

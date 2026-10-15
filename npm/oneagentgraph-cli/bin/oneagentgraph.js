@@ -24,9 +24,17 @@ const { spawnSync } = require("node:child_process");
 const PACKAGES = {
   "linux-x64": "oneagentgraph-cli-linux-x64",
   "linux-arm64": "oneagentgraph-cli-linux-arm64",
-  "darwin-x64": "oneagentgraph-cli-darwin-x64",
   "darwin-arm64": "oneagentgraph-cli-darwin-arm64",
   "win32-x64": "oneagentgraph-cli-win32-x64",
+};
+
+// Platforms a release used to ship and no longer does. Each is refused by name
+// rather than reported as a platform that never existed, so a user on one learns
+// it was dropped on purpose and that no reinstall will bring a package back.
+const DISCONTINUED = {
+  "darwin-x64":
+    "Intel macOS (darwin-x64) is no longer supported: prebuilt binaries ship " +
+    "for Apple silicon (darwin-arm64) only",
 };
 
 // Every failure here is a failed install, so say what to do about it rather than
@@ -42,19 +50,19 @@ function fail(message) {
 
 function binaryPath() {
   const key = `${process.platform}-${process.arch}`;
+  if (DISCONTINUED[key]) {
+    fail(
+      `${DISCONTINUED[key]}. Build from source instead: ` +
+        "'cargo install oneagentgraph --locked'.",
+    );
+  }
   const pkg = PACKAGES[key];
-  // llmlint: ignore-block[changed_behavior_has_e2e] reaching this branch means running
-  // where no prebuilt package exists, and a test could only get there by lying to node
-  // about process.platform — which would prove the lie. The sibling branches are driven
-  // for real by npm/test/launcher.test.mjs, and npm's own os/cpu fields keep a user from
-  // installing a platform package this map does not name.
   if (!pkg) {
     fail(
       `unsupported platform ${key}. Prebuilt binaries exist for: ` +
         `${Object.keys(PACKAGES).join(", ")}. ${OTHER_INSTALLS}`,
     );
   }
-  // llmlint: ignore-end[changed_behavior_has_e2e]
 
   const binName = process.platform === "win32" ? "oneagentgraph.exe" : "oneagentgraph";
   try {

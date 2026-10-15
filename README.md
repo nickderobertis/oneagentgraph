@@ -25,7 +25,7 @@ repository:
 cargo install --git https://github.com/nickderobertis/oneagentgraph --locked
 ```
 
-Prebuilt archives for Linux (x86-64, arm64), macOS (Intel, Apple silicon), and
+Prebuilt archives for Linux (x86-64, arm64), macOS (Apple silicon), and
 Windows (x86-64) are attached to every [release], with `sha256` checksums.
 
 [onejudge] is a **library dependency**, linked into this binary — there is

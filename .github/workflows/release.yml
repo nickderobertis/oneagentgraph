@@ -16,6 +16,11 @@ name: Release
 #
 #   * test          — the complete deterministic gate, so untested artifacts
 #                     never publish.
+#   * darwin        — the one macOS job: build, verify, rehearse and smoke the
+#                     Apple Silicon artifacts natively. Every publishing job below
+#                     — crate, PyPI, npm, and every release-asset upload, Linux and
+#                     Windows included — waits on it, so nothing publishes until
+#                     the Darwin proof has passed.
 #   * upload        — build each target on a native runner and attach the archive
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
@@ -125,7 +130,10 @@ jobs:
 
   upload:
     name: upload (${{ matrix.target }})
-    needs: test
+    # Attaching an asset is publication, so it waits for the Darwin proof like
+    # every other publisher: a release must not go half-public on Linux and
+    # Windows while its macOS artifacts are still unproven.
+    needs: [test, darwin]
     permissions:
       contents: write
     strategy:
@@ -161,12 +169,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # crates.io publishing: runs whenever CARGO_REGISTRY_TOKEN is set. Gated on the
-  # same `test` job as the binary upload, but NOT on `upload` — a flaky
-  # per-platform upload must not block the immutable crate publish, and vice
-  # versa. Kept out of release-plz (publish = false there) so versioning/tagging
-  # stays decoupled from the registry push.
+  # same `test` and `darwin` jobs as the binary upload, but NOT on `upload` — a
+  # flaky per-platform upload must not block the immutable crate publish, and
+  # vice versa. Kept out of release-plz (publish = false there) so
+  # versioning/tagging stays decoupled from the registry push.
   publish-crate:
-    needs: [guard, test]
+    needs: [guard, test, darwin]
     if: ${{ needs.guard.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     permissions:
@@ -269,10 +277,10 @@ jobs:
   # goes to scripts/smoke-published.sh — the same script ci.yml runs against the
   # build under test, so what a release asserts cannot drift from what ships.
   #
-  # Four legs for five targets: `pip install` resolves a *different wheel* per
-  # platform AND architecture. `macos-latest` is arm64; `macos-15-intel` is the
-  # leg that installs the x86_64 Darwin wheel. The one target with no leg is
-  # aarch64 Linux, which the matrices above still build.
+  # Linux and Windows legs: `pip install` resolves a *different wheel* per
+  # platform AND architecture. The arm64 Darwin wheel is installed and run by
+  # the `darwin` job before it publishes, and aarch64 Linux by no leg, though
+  # the matrices above still build it.
   verify-pypi:
     name: verify-pypi (${{ matrix.os }})
     needs: publish-pypi
@@ -478,44 +486,49 @@ jobs:
     permissions:
       contents: read
     env:
-      DARWIN_TARGETS: '["x86_64-apple-darwin","aarch64-apple-darwin"]'
+      # Apple Silicon only: Intel macOS artifacts are discontinued, so the one
+      # target this job builds is native to its arm64 host.
+      DARWIN_TARGETS: '["aarch64-apple-darwin"]'
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      # Pinned to arm64 so the staged smoke runs the products natively.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          architecture: arm64
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          architecture: arm64
       - uses: taiki-e/install-action@v2
         with:
           tool: maturin@1.14.1
-      - name: Enable Rosetta for Intel product smokes
-        run: softwareupdate --install-rosetta --agree-to-license
-      - name: Build every Darwin distribution from one binary per target
+      - name: Build every Darwin distribution from one binary
         run: |
           mkdir -p "$GITHUB_WORKSPACE/darwin"
           for target in $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log(t))'); do
             bash scripts/release-build.sh "$target" "$GITHUB_REF_NAME" "$GITHUB_WORKSPACE/darwin"
           done
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          architecture: x64
-      - name: Install and run staged Intel Darwin products before publication
-        run: bash scripts/release-smoke.sh x86_64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          architecture: arm64
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          architecture: arm64
+      # Every upload below takes its files from this directory, so it must hold
+      # exactly the declared targets' artifacts, each carrying a binary of that
+      # target's own format and CPU.
+      - name: Verify the staged Darwin artifacts are exactly the declared targets'
+        run: |
+          python3 scripts/release-verify.py --tag "$GITHUB_REF_NAME" --dir "$GITHUB_WORKSPACE/darwin" \
+            $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log("--target", t))')
+      # The native packaging and publication journey, on this host: the host's
+      # own reading of each payload's architecture, the attach and npm publish
+      # scripts run with only their transport doubled, and the refusals that
+      # keep an Intel or wrong-CPU artifact out. Nothing is published here.
+      - name: Rehearse each Darwin target's publication natively before upload
+        run: |
+          for target in $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log(t))'); do
+            bash scripts/release-rehearse.sh "$target" "$GITHUB_WORKSPACE/darwin" "$GITHUB_REF_NAME"
+          done
       - name: Install and run staged ARM Darwin products before publication
         run: bash scripts/release-smoke.sh aarch64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
       - uses: actions/upload-artifact@v4
@@ -540,6 +553,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      # For scripts/release-attach.sh, the command the Darwin job rehearsed.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: archives-darwin
@@ -548,4 +563,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "$GITHUB_REF_NAME" darwin/*.tar.gz darwin/*.sha256 --clobber
+        run: bash scripts/release-attach.sh "$GITHUB_REF_NAME" "$GITHUB_WORKSPACE/darwin"

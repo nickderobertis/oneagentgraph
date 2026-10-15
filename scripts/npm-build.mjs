@@ -8,7 +8,6 @@
 //     optionalDependencies:           one per Rust target in release.yml's matrix
 //       oneagentgraph-cli-linux-x64
 //       oneagentgraph-cli-linux-arm64
-//       oneagentgraph-cli-darwin-x64
 //       oneagentgraph-cli-darwin-arm64
 //       oneagentgraph-cli-win32-x64   each carries the matching prebuilt binary
 //
@@ -53,7 +52,6 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TARGETS = {
   "x86_64-unknown-linux-gnu": { platform: "linux", arch: "x64", exe: false },
   "aarch64-unknown-linux-gnu": { platform: "linux", arch: "arm64", exe: false },
-  "x86_64-apple-darwin": { platform: "darwin", arch: "x64", exe: false },
   "aarch64-apple-darwin": { platform: "darwin", arch: "arm64", exe: false },
   "x86_64-pc-windows-msvc": { platform: "win32", arch: "x64", exe: true },
 };

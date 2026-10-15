@@ -33,10 +33,12 @@ function withoutVersion(path, source) {
     removeVersion(value);
     if (path === 'package-lock.json' && value.packages?.['']) removeVersion(value.packages['']);
     // Optional dependency pins in the generated launcher are release versions,
-    // but their names must remain unchanged.
+    // but their names must remain unchanged: the names stay as keys, so base and
+    // head compare unequal when one is added, dropped or renamed. The platform
+    // set itself is the launcher manifest's, never restated here.
     if (path === 'npm/oneagentgraph-cli/package.json') {
       for (const name of Object.keys(value.optionalDependencies ?? {})) {
-        if (!/^oneagentgraph-cli-(linux-(x64|arm64)|darwin-(x64|arm64)|win32-x64)$/.test(name) || !version.test(value.optionalDependencies[name])) throw Error('non-version launcher dependency');
+        if (!version.test(value.optionalDependencies[name])) throw Error('non-version launcher dependency');
         value.optionalDependencies[name] = '<version>';
       }
     }
