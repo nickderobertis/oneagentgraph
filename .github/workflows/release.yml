@@ -563,4 +563,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: bash scripts/release-attach.sh "$GITHUB_REF_NAME" darwin
+        run: bash scripts/release-attach.sh "$GITHUB_REF_NAME" "$GITHUB_WORKSPACE/darwin"

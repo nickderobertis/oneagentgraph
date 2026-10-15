@@ -58,6 +58,7 @@ test('real attach script refuses bad input before gh is reached',()=>{
    [[],'two arguments'],
    [['--repo=elsewhere',staged],'release tag must be a vX.Y.Z version'],
    [['v1.2.3',join(dir,'absent')],'staged artifact directory does not exist'],
+   [['v1.2.3','--repo=elsewhere'],'staged artifact directory must be absolute'],
    [['v1.2.3',staged],'no archive or checksum is staged'],
   ]) {
    const result=spawnSync('bash',['scripts/release-attach.sh',...args],{encoding:'utf8',env:{...process.env,PATH:`${bin}:${process.env.PATH}`}});
