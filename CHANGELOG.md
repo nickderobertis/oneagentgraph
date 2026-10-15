@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.11](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.10...v0.5.11) - 2026-10-15
+
+### Fixed
+
+- *(deps)* update rustls past RUSTSEC-2026-0346 and -0347 ([#207](https://github.com/nickderobertis/oneagentgraph/pull/207))
+
 ## [0.5.10](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.9...v0.5.10) - 2026-10-14
 
 ### Fixed
