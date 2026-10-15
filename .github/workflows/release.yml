@@ -16,6 +16,11 @@ name: Release
 #
 #   * test          — the complete deterministic gate, so untested artifacts
 #                     never publish.
+#   * darwin        — the one macOS job: build, verify, rehearse and smoke the
+#                     Apple Silicon artifacts natively. Every publishing job below
+#                     — crate, PyPI, npm, and every release-asset upload, Linux and
+#                     Windows included — waits on it, so nothing publishes until
+#                     the Darwin proof has passed.
 #   * upload        — build each target on a native runner and attach the archive
 #                     + sha256 checksum to the Release.
 #   * publish-crate — idempotent crates.io publish; self-activates the day
@@ -125,7 +130,10 @@ jobs:
 
   upload:
     name: upload (${{ matrix.target }})
-    needs: test
+    # Attaching an asset is publication, so it waits for the Darwin proof like
+    # every other publisher: a release must not go half-public on Linux and
+    # Windows while its macOS artifacts are still unproven.
+    needs: [test, darwin]
     permissions:
       contents: write
     strategy:
@@ -161,12 +169,12 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # crates.io publishing: runs whenever CARGO_REGISTRY_TOKEN is set. Gated on the
-  # same `test` job as the binary upload, but NOT on `upload` — a flaky
-  # per-platform upload must not block the immutable crate publish, and vice
-  # versa. Kept out of release-plz (publish = false there) so versioning/tagging
-  # stays decoupled from the registry push.
+  # same `test` and `darwin` jobs as the binary upload, but NOT on `upload` — a
+  # flaky per-platform upload must not block the immutable crate publish, and
+  # vice versa. Kept out of release-plz (publish = false there) so
+  # versioning/tagging stays decoupled from the registry push.
   publish-crate:
-    needs: [guard, test]
+    needs: [guard, test, darwin]
     if: ${{ needs.guard.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     permissions:

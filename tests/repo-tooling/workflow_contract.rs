@@ -924,6 +924,69 @@ fn a_release_is_gated_by_its_own_test_job_before_anything_publishes() {
     }
 }
 
+/// Whether a job writes anything outside this workflow run: a crate, a
+/// registry package, or a Release asset. Read from what the job does rather
+/// than from its name, so a new publisher is caught without being listed.
+fn publishes(job: &Value) -> bool {
+    const PUBLISHING: [&str; 5] = [
+        "cargo publish",
+        "scripts/publish-npm.sh",
+        "scripts/release-attach.sh",
+        "pypa/gh-action-pypi-publish@",
+        "taiki-e/upload-rust-binary-action@",
+    ];
+    job["permissions"]["contents"] == "write"
+        || job["steps"].as_array().is_some_and(|steps| {
+            steps.iter().any(|step| {
+                let text = format!(
+                    "{}\n{}",
+                    step["uses"].as_str().unwrap_or(""),
+                    step["run"].as_str().unwrap_or("")
+                );
+                PUBLISHING.iter().any(|marker| text.contains(marker))
+            })
+        })
+}
+
+#[test]
+fn nothing_in_a_release_publishes_until_the_mac_release_job_has_passed() {
+    let release = workflow("release.yml");
+    let jobs = release.doc["jobs"].as_object().expect("release.yml jobs");
+    let publishers: BTreeSet<String> = jobs
+        .iter()
+        .filter(|(_, job)| publishes(job))
+        .map(|(id, _)| id.clone())
+        .collect();
+    // Pinned so the structural read above cannot quietly find fewer publishers
+    // than the release has — every crate, registry, and asset route is here.
+    assert_eq!(
+        publishers,
+        ["publish-crate", "publish-npm", "publish-pypi", "upload", "upload-darwin"]
+            .map(String::from)
+            .into(),
+        "release.yml's publishing jobs changed"
+    );
+    for id in &publishers {
+        assert!(
+            release.waits_on(id).contains("darwin"),
+            "release.yml's `{id}` can publish before the Mac release job `darwin` succeeds"
+        );
+        // A status function in `if:` replaces the implicit `success()`, and
+        // would let the job run after `darwin` failed or was skipped.
+        let condition = release.job(id)["if"].as_str().unwrap_or("");
+        assert!(
+            !["always()", "failure()", "cancelled()", "!cancelled()"]
+                .iter()
+                .any(|f| condition.contains(f)),
+            "release.yml's `{id}` runs regardless of `darwin`'s result: {condition}"
+        );
+    }
+    assert!(
+        !publishes(release.job("darwin")),
+        "the Mac release job itself publishes; its proof must come first"
+    );
+}
+
 /// The run group a workflow's `concurrency` puts `context` in, and whether a
 /// newer run in that group cancels this one.
 fn concurrency(w: &Workflow, context: &Context) -> (String, bool) {

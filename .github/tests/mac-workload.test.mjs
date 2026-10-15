@@ -57,7 +57,7 @@ test('the Mac release job runs the native packaging journey before anything publ
  assert.match(steps[rehearse].run, /DARWIN_TARGETS/, 'every declared Darwin target is rehearsed');
  assert.deepEqual(JSON.parse(darwin.env.DARWIN_TARGETS), ['aarch64-apple-darwin']);
  // No publisher runs before the Mac job, so none runs before its rehearsal.
- for (const publisher of ['publish-pypi', 'publish-npm', 'upload-darwin']) assert.ok([].concat(job('release.yml', publisher).needs).includes('darwin'), publisher);
+ for (const publisher of ['publish-crate', 'upload', 'publish-pypi', 'publish-npm', 'upload-darwin']) assert.ok([].concat(job('release.yml', publisher).needs).includes('darwin'), publisher);
  // The rehearsal doubles only the transport of the scripts the publishers run.
  const rehearsal = readFileSync(join(root, 'scripts/release-rehearse.sh'), 'utf8');
  assert.match(job('release.yml', 'upload-darwin').steps.at(-1).run, /^bash scripts\/release-attach\.sh /);
