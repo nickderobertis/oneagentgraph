@@ -315,6 +315,260 @@ with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         );
     }
 
+    /// Rewrite one member of a staged wheel (zip) or npm carrier (tar.gz):
+    /// `contents` replaces its bytes, and `mode` its permission bits.
+    pub fn rewrite_member(path: &Path, member: &str, contents: Option<&[u8]>, mode: Option<u32>) {
+        const REWRITE: &str = r#"
+import io, sys, tarfile, zipfile
+from pathlib import Path
+path, member, contents, mode = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
+new = bytes.fromhex(contents) if contents != '-' else None
+if zipfile.is_zipfile(path):
+    with zipfile.ZipFile(path) as z:
+        entries = [(info, z.read(info)) for info in z.infolist()]
+    with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
+        for info, data in entries:
+            if info.filename == member:
+                data = new if new is not None else data
+                if mode != '-':
+                    info.external_attr = int(mode, 8) << 16
+            z.writestr(info, data)
+else:
+    with tarfile.open(path) as tar:
+        entries = [(info, tar.extractfile(info).read()) for info in tar.getmembers()]
+    with tarfile.open(path, 'w:gz') as tar:
+        for info, data in entries:
+            if info.name == member:
+                data = new if new is not None else data
+                info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+"#;
+        let hex = contents.map_or("-".to_string(), |bytes| {
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+        });
+        succeeded(
+            &Command::new("python3")
+                .args(["-I", "-c", REWRITE])
+                .arg(path)
+                .args([
+                    member,
+                    &hex,
+                    &mode.map_or("-".to_string(), |m| format!("{m:o}")),
+                ])
+                .output()
+                .expect("python runs"),
+            "rewrite member",
+        );
+    }
+
+    /// Every way a staged set can differ from what its packager wrote is refused
+    /// at the verifier's boundary (exit 2) with an ACTION, never a traceback, and
+    /// so never reaches an upload.
+    pub fn malformed_sets_are_refused(
+        target: &str,
+        staged: &Path,
+        work: &Path,
+        wheel: &str,
+        carrier: &str,
+    ) {
+        let archive = format!("oneagentgraph-v{VERSION}-{target}.tar.gz");
+        let receipt = format!("{target}.json");
+        let dist_info = format!("oneagentgraph_cli-{VERSION}.dist-info");
+        let recorded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(staged.join(&receipt)).expect("receipt reads"))
+                .expect("receipt parses");
+        let with_receipt = |field: &str, value: &str| {
+            let mut changed = recorded.clone();
+            changed[field] = serde_json::Value::String(value.to_string());
+            changed.to_string()
+        };
+        type Mutation<'a> = Box<dyn Fn(&Path) + 'a>;
+        let write = |name: String, text: String| -> Mutation<'_> {
+            Box::new(move |dir: &Path| {
+                std::fs::write(dir.join(&name), &text).expect("staged file writes")
+            })
+        };
+        let cases: Vec<(&str, Mutation<'_>, String)> = vec![
+            (
+                "no receipt",
+                Box::new(|dir: &Path| {
+                    std::fs::remove_file(dir.join(&receipt)).expect("receipt removes")
+                }),
+                format!("missing receipt {receipt}"),
+            ),
+            (
+                "receipt not JSON",
+                write(receipt.clone(), "{".into()),
+                format!("a staged {target} artifact is malformed"),
+            ),
+            (
+                "receipt schema",
+                write(receipt.clone(), "{}".into()),
+                "does not have the packager receipt schema".into(),
+            ),
+            (
+                "receipt for another tag",
+                write(receipt.clone(), with_receipt("tag", "v0.0.1")),
+                format!("records {target} v0.0.1"),
+            ),
+            (
+                "receipt names another wheel",
+                write(
+                    receipt.clone(),
+                    with_receipt("wheel", "oneagentgraph_cli-9.9.9-py3-none-any.whl"),
+                ),
+                format!("not the {target} archive"),
+            ),
+            (
+                "receipt records another binary",
+                write(
+                    receipt.clone(),
+                    with_receipt("binarySha256", &"0".repeat(64)),
+                ),
+                format!("{archive} carries a different binary"),
+            ),
+            (
+                "no npm carrier",
+                Box::new(|dir: &Path| {
+                    std::fs::remove_file(dir.join(carrier)).expect("carrier removes")
+                }),
+                format!("missing staged {target} artifacts: {carrier}"),
+            ),
+            (
+                "checksum mismatch",
+                write(
+                    format!("{archive}.sha256"),
+                    format!("{}  {archive}\n", "0".repeat(64)),
+                ),
+                format!("{archive}.sha256 does not match"),
+            ),
+            (
+                "archive without its documents",
+                Box::new(|dir: &Path| {
+                    tamper_archive(dir, &archive, |_| {});
+                    let unpacked = dir.join("only-binary");
+                    std::fs::create_dir_all(&unpacked).expect("unpack directory");
+                    succeeded(
+                        &Command::new("tar")
+                            .arg("-xzf")
+                            .arg(dir.join(&archive))
+                            .arg("-C")
+                            .arg(&unpacked)
+                            .output()
+                            .expect("tar runs"),
+                        "unpack",
+                    );
+                    succeeded(
+                        &Command::new("tar")
+                            .arg("-czf")
+                            .arg(dir.join(&archive))
+                            .arg("-C")
+                            .arg(&unpacked)
+                            .arg("oneagentgraph")
+                            .output()
+                            .expect("tar runs"),
+                        "repack",
+                    );
+                    std::fs::remove_dir_all(&unpacked).expect("unpack directory removes");
+                    use sha2::Digest;
+                    let digest = sha2::Sha256::digest(
+                        std::fs::read(dir.join(&archive)).expect("archive reads"),
+                    );
+                    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+                    std::fs::write(
+                        dir.join(format!("{archive}.sha256")),
+                        format!("{hex}  {archive}\n"),
+                    )
+                    .expect("checksum writes");
+                }),
+                "not the binary and its three documents".into(),
+            ),
+            (
+                "corrupt wheel",
+                write(wheel.to_string(), "not a zip".into()),
+                format!("a staged {target} artifact is malformed"),
+            ),
+            (
+                "wheel script not executable",
+                Box::new(|dir: &Path| {
+                    rewrite_member(
+                        &dir.join(wheel),
+                        &format!("oneagentgraph_cli-{VERSION}.data/scripts/oneagentgraph"),
+                        None,
+                        Some(0o644),
+                    )
+                }),
+                "script is not executable".into(),
+            ),
+            (
+                "wheel METADATA for another package",
+                Box::new(|dir: &Path| {
+                    rewrite_member(
+                        &dir.join(wheel),
+                        &format!("{dist_info}/METADATA"),
+                        Some(b"Name: someone-else\n"),
+                        None,
+                    )
+                }),
+                "metadata is not oneagentgraph-cli".into(),
+            ),
+            (
+                "corrupt npm carrier",
+                write(carrier.to_string(), "not a tarball".into()),
+                format!("a staged {target} artifact is malformed"),
+            ),
+            (
+                "npm manifest not JSON",
+                Box::new(|dir: &Path| {
+                    rewrite_member(
+                        &dir.join(carrier),
+                        "package/package.json",
+                        Some(b"[1"),
+                        None,
+                    )
+                }),
+                format!("a staged {target} artifact is malformed"),
+            ),
+            (
+                "npm manifest for another package",
+                Box::new(|dir: &Path| {
+                    rewrite_member(
+                        &dir.join(carrier),
+                        "package/package.json",
+                        Some(br#"{"name":"someone-else"}"#),
+                        None,
+                    )
+                }),
+                format!("{carrier} manifest is not the {target} carrier"),
+            ),
+            (
+                "npm carrier with another binary",
+                Box::new(|dir: &Path| {
+                    rewrite_member(
+                        &dir.join(carrier),
+                        "package/bin/oneagentgraph",
+                        Some(b"#!/bin/sh\n"),
+                        None,
+                    )
+                }),
+                format!("{carrier} payload is built for unknown/?"),
+            ),
+        ];
+        for (index, (case, mutate, reason)) in cases.iter().enumerate() {
+            let dir = work.join(format!("malformed-{index}"));
+            copy_staged(staged, &dir);
+            mutate(&dir);
+            let output = verify(&[target], &dir);
+            refused(&output, &format!("release-verify with {case}"), reason);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains("ACTION: rebuild the staged directory"),
+                "{case}: {stderr}"
+            );
+            assert!(!stderr.contains("Traceback"), "{case}: {stderr}");
+        }
+    }
+
     /// `.github/workflows/release.yml`, as data.
     pub fn workflow() -> serde_json::Value {
         let text = std::fs::read_to_string(repo().join(".github/workflows/release.yml"))
@@ -511,6 +765,13 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         "elf/aarch64",
     );
     intel_is_refused(&built_binary(target), work.path());
+    malformed_sets_are_refused(
+        target,
+        &staged,
+        work.path(),
+        &format!("oneagentgraph_cli-{VERSION}-py3-none-linux_x86_64.whl"),
+        &format!("oneagentgraph-cli-linux-x64-{VERSION}.tgz"),
+    );
     // The rehearsal stops on a staged Intel artifact rather than publishing it.
     let extra = work.path().join("rehearse-extra");
     copy_staged(&staged, &extra);

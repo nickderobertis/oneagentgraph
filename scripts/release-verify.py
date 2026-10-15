@@ -41,16 +41,8 @@ staged = {path.name for path in args.dir.iterdir() if path.is_file()}
 expected = set()
 
 
-# A SemVer pre-release, spelled the way PEP 440 (and so maturin) writes it.
-PRE_RELEASES = {'alpha': 'a', 'a': 'a', 'beta': 'b', 'b': 'b', 'rc': 'rc', 'c': 'rc', 'pre': 'rc', 'preview': 'rc'}
-
-
-def wheel_version(release):
-    match = re.fullmatch(r'(\d+\.\d+\.\d+)(?:-([A-Za-z]+)\.?(\d*))?', release)
-    if not match or (match[2] and match[2].lower() not in PRE_RELEASES):
-        fail(f'{release} has no PEP 440 spelling a wheel can carry; release a X.Y.Z or X.Y.Z-rc.N version')
-    core, name, number = match.groups()
-    return core if not name else f'{core}{PRE_RELEASES[name.lower()]}{number or 0}'
+class Malformed(Exception):
+    """A staged artifact that cannot be read as the format its name claims."""
 
 
 def payload(what, data, target):
@@ -60,7 +52,18 @@ def payload(what, data, target):
     return hashlib.sha256(data).hexdigest()
 
 
-for target in args.target:
+def member(read, name, container):
+    """The bytes of `name` in an archive, or Malformed when it is not a regular file there."""
+    try:
+        handle = read(name)
+    except KeyError:
+        raise Malformed(f'{container} has no {name}') from None
+    if handle is None:
+        raise Malformed(f'{container} member {name} is not a regular file')
+    return handle if isinstance(handle, bytes) else handle.read()
+
+
+def verify(target):
     facts = TARGETS[target]
     receipt_name = f'{target}.json'
     if receipt_name not in staged:
@@ -72,14 +75,19 @@ for target in args.target:
         fail(f'{receipt_name} records {receipt["target"]} {receipt["tag"]}, not {target} {args.tag}')
     archive = f'oneagentgraph-{args.tag}-{target}.tar.gz'
     wheel = receipt['wheel']
-    if receipt['archive'] != archive or wheel != f'oneagentgraph_cli-{wheel_version(version)}-py3-none-{facts["wheel"]}.whl':
-        fail(f'{receipt_name} names {receipt["archive"]} and {wheel}, not the {target} archive and {facts["wheel"]} wheel')
+    # The wheel's version is maturin's PEP 440 spelling of the crate version,
+    # which the packager took from maturin itself; it is read back from there
+    # rather than re-derived. A plain X.Y.Z spells the same in both.
+    named = re.fullmatch(rf'oneagentgraph_cli-([0-9A-Za-z.!+]+)-py3-none-{re.escape(facts["wheel"])}\.whl', wheel)
+    if receipt['archive'] != archive or not named or (re.fullmatch(r'\d+\.\d+\.\d+', version) and named[1] != version):
+        fail(f'{receipt_name} names {receipt["archive"]} and {wheel}, not the {target} archive and {facts["wheel"]} wheel at {version}')
+    wheel_version = named[1]
     carrier = f'oneagentgraph-cli-{facts["npm_os"]}-{facts["npm_cpu"]}-{version}.tgz'
     names = {receipt_name, archive, f'{archive}.sha256', wheel, carrier}
     missing = sorted(names - staged)
     if missing:
         fail(f'missing staged {target} artifacts: {", ".join(missing)}')
-    expected |= names
+    expected.update(names)
     sha = receipt['binarySha256']
 
     data = (args.dir / archive).read_bytes()
@@ -88,31 +96,42 @@ for target in args.target:
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         if sorted(tar.getnames()) != ['CHANGELOG.md', 'LICENSE', 'README.md', 'oneagentgraph']:
             fail(f'{archive} carries {sorted(tar.getnames())}, not the binary and its three documents')
-        if payload(f'{archive} payload', tar.extractfile('oneagentgraph').read(), target) != sha:
+        if payload(f'{archive} payload', member(tar.extractfile, 'oneagentgraph', archive), target) != sha:
             fail(f'{archive} carries a different binary than {receipt_name} records')
 
     with zipfile.ZipFile(args.dir / wheel) as z:
         scripts = [name for name in z.namelist() if '.data/scripts/' in name]
         if len(scripts) != 1 or not scripts[0].endswith('/oneagentgraph'):
             fail(f'{wheel} must carry exactly one oneagentgraph script')
-        if payload(f'{wheel} payload', z.read(scripts[0]), target) != sha:
+        if payload(f'{wheel} payload', member(z.read, scripts[0], wheel), target) != sha:
             fail(f'{wheel} carries a different binary than {receipt_name} records')
         if not z.getinfo(scripts[0]).external_attr >> 16 & 0o111:
             fail(f'{wheel} script is not executable')
-        metadata = z.read(next(name for name in z.namelist() if name.endswith('.dist-info/METADATA'))).decode()
-        tags = z.read(next(name for name in z.namelist() if name.endswith('.dist-info/WHEEL'))).decode()
+        dist_info = f'oneagentgraph_cli-{wheel_version}.dist-info'
+        metadata = member(z.read, f'{dist_info}/METADATA', wheel).decode()
+        tags = member(z.read, f'{dist_info}/WHEEL', wheel).decode()
         if 'Name: oneagentgraph-cli\n' not in metadata or f'Tag: py3-none-{facts["wheel"]}\n' not in tags:
             fail(f'{wheel} metadata is not oneagentgraph-cli tagged py3-none-{facts["wheel"]}')
         declared = re.findall(r'^Version: (.*)$', metadata, re.M)
-        if declared != [wheel_version(version)]:
-            fail(f'{wheel} METADATA declares Version {", ".join(declared) or "none"}, not the release version {wheel_version(version)}')
+        if declared != [wheel_version]:
+            fail(f'{wheel} METADATA declares Version {", ".join(declared) or "none"}, not the release version {wheel_version}')
 
     with tarfile.open(args.dir / carrier) as npm:
-        manifest = json.load(npm.extractfile('package/package.json'))
-        if (manifest.get('name'), manifest.get('version'), manifest.get('os'), manifest.get('cpu')) != (f'oneagentgraph-cli-{facts["npm_os"]}-{facts["npm_cpu"]}', version, [facts['npm_os']], [facts['npm_cpu']]):
+        manifest = json.loads(member(npm.extractfile, 'package/package.json', carrier))
+        identity = tuple(manifest.get(key) for key in ['name', 'version', 'os', 'cpu']) if isinstance(manifest, dict) else None
+        if identity != (f'oneagentgraph-cli-{facts["npm_os"]}-{facts["npm_cpu"]}', version, [facts['npm_os']], [facts['npm_cpu']]):
             fail(f'{carrier} manifest is not the {target} carrier at {version}')
-        if payload(f'{carrier} payload', npm.extractfile('package/bin/oneagentgraph').read(), target) != sha:
+        if payload(f'{carrier} payload', member(npm.extractfile, 'package/bin/oneagentgraph', carrier), target) != sha:
             fail(f'{carrier} carries a different binary than {receipt_name} records')
+
+
+for target in args.target:
+    # Each artifact is external input here; one that is truncated, corrupt or
+    # not the format its name claims is a refusal like any other, not a traceback.
+    try:
+        verify(target)
+    except (Malformed, OSError, ValueError, tarfile.TarError, zipfile.BadZipFile, EOFError) as error:
+        fail(f'a staged {target} artifact is malformed: {error}')
 
 extra = sorted(staged - expected)
 if extra:

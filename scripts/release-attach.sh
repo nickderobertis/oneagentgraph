@@ -9,6 +9,9 @@ fail() {
   exit 2
 }
 [ "$#" -eq 2 ] || fail 'two arguments are required'
+# The tag reaches `gh` as an argument, so it must be a release version and
+# nothing an option parser could read as a flag.
+[[ "$1" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || fail "release tag must be a vX.Y.Z version: $1"
 [ -d "$2" ] || fail "staged artifact directory does not exist: $2"
 shopt -s nullglob
 files=("$2"/*.tar.gz "$2"/*.sha256)
