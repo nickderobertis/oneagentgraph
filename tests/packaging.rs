@@ -326,6 +326,8 @@ with zipfile.ZipFile(path, 'w', zipfile.ZIP_DEFLATED) as z:
         Chmod(u32),
         /// The member becomes a directory entry, on a tar member.
         Directory,
+        /// The member becomes a symbolic link to `README.md`, on a tar member.
+        Symlink,
     }
 
     /// Apply `edit` to `member` of a staged wheel (zip), archive or npm carrier
@@ -362,6 +364,8 @@ else:
                     continue
                 if op == 'directory':
                     info.type, data = tarfile.DIRTYPE, b''
+                if op == 'symlink':
+                    info.type, info.linkname, data = tarfile.SYMTYPE, 'README.md', b''
                 data = edited(data)
                 info.size = len(data)
             tar.addfile(info, io.BytesIO(data))
@@ -379,6 +383,7 @@ else:
             Edit::Add(bytes) => ("add", hex(bytes)),
             Edit::Chmod(mode) => ("chmod", format!("{mode:o}")),
             Edit::Directory => ("directory", String::new()),
+            Edit::Symlink => ("symlink", String::new()),
         };
         succeeded(
             &Command::new("python3")
@@ -523,6 +528,11 @@ else:
                 format!("{archive} member oneagentgraph is not a regular file"),
             ),
             (
+                "archive binary a link to another member",
+                in_archive("oneagentgraph", || Edit::Symlink),
+                format!("{archive} member oneagentgraph is not a regular file"),
+            ),
+            (
                 "corrupt wheel",
                 write(wheel.to_string(), "not a zip".into()),
                 malformed.clone(),
@@ -557,6 +567,13 @@ else:
                     Edit::Replace(b"Name: someone-else\n")
                 }),
                 "metadata is not oneagentgraph-cli".into(),
+            ),
+            (
+                "wheel tagged for another platform",
+                in_member(wheel.to_string(), format!("{dist_info}/WHEEL"), || {
+                    Edit::Replace(b"Wheel-Version: 1.0\nTag: py3-none-any\n")
+                }),
+                "metadata is not oneagentgraph-cli tagged py3-none-linux_x86_64".into(),
             ),
             (
                 "wheel without METADATA",

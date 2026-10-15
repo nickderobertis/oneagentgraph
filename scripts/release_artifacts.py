@@ -8,6 +8,7 @@ and so its PEP 440 version, from maturin rather than deriving it themselves.
 """
 import os
 from pathlib import Path
+import shlex
 import shutil
 import struct
 import subprocess
@@ -50,16 +51,29 @@ def maturin_dist_info(root: Path, target: str, into: Path) -> Path:
     copy of those rules.
     """
     candidates = [shutil.which('maturin'), str(Path(os.environ.get('CARGO_HOME', str(Path.home() / '.cargo'))) / 'bin/maturin')]
-    maturin = next((c for c in candidates if c and Path(c).is_file() and subprocess.check_output([c, '--version'], text=True).strip() == 'maturin 1.14.1'), None)
+    maturin = next((c for c in candidates if c and Path(c).is_file() and _version(c) == 'maturin 1.14.1'), None)
     if not maturin:
         raise MaturinUnavailable('maturin 1.14.1 is required; run bash scripts/setup-packaging.sh')
     command = [maturin, 'pep517', 'write-dist-info', '--bindings', 'bin', '--target', target, '--locked', '--metadata-directory', str(into)]
     if target == 'x86_64-unknown-linux-gnu':
         command += ['--compatibility', 'linux']
     # Its progress goes to stderr: a caller's stdout is its own result.
-    if subprocess.run(command, cwd=root, stdout=sys.stderr).returncode != 0:
-        raise MaturinUnavailable(f'maturin could not describe the {target} wheel; run its command above to see why')
+    rerun = f'rerun `{shlex.join(command)}` from {root} to see why'
+    try:
+        status = subprocess.run(command, cwd=root, stdout=sys.stderr).returncode
+    except OSError as error:
+        raise MaturinUnavailable(f'maturin could not run ({error}); {rerun}') from None
+    if status != 0:
+        raise MaturinUnavailable(f'maturin could not describe the {target} wheel (exit {status}); {rerun}')
     infos = list(into.glob('*.dist-info'))
     if len(infos) != 1:
         raise MaturinUnavailable('maturin produced ambiguous metadata; inspect the metadata producer output')
     return infos[0]
+
+
+def _version(maturin: str) -> str | None:
+    """What `maturin --version` prints, or None when that maturin cannot run."""
+    try:
+        return subprocess.run([maturin, '--version'], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None

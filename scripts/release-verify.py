@@ -57,15 +57,20 @@ def payload(what, data, target):
     return hashlib.sha256(data).hexdigest()
 
 
-def member(read, name, container):
-    """The bytes of `name` in an archive, or Malformed when it is not a regular file there."""
+def member(container, name, label):
+    """The bytes of regular-file member `name`, or Malformed when it is absent,
+    a directory, or a link `extractfile` would otherwise follow."""
     try:
-        handle = read(name)
+        info = container.getmember(name) if isinstance(container, tarfile.TarFile) else container.getinfo(name)
     except KeyError:
-        raise Malformed(f'{container} has no {name}') from None
-    if handle is None:
-        raise Malformed(f'{container} member {name} is not a regular file')
-    return handle if isinstance(handle, bytes) else handle.read()
+        raise Malformed(f'{label} has no {name}') from None
+    if isinstance(info, tarfile.TarInfo):
+        if not info.isfile():
+            raise Malformed(f'{label} member {name} is not a regular file')
+        return container.extractfile(info).read()
+    if info.is_dir():
+        raise Malformed(f'{label} member {name} is not a regular file')
+    return container.read(info)
 
 
 def verify(target):
@@ -107,20 +112,20 @@ def verify(target):
     with tarfile.open(fileobj=io.BytesIO(data)) as tar:
         if sorted(tar.getnames()) != ['CHANGELOG.md', 'LICENSE', 'README.md', 'oneagentgraph']:
             fail(f'{archive} carries {sorted(tar.getnames())}, not the binary and its three documents')
-        if payload(f'{archive} payload', member(tar.extractfile, 'oneagentgraph', archive), target) != sha:
+        if payload(f'{archive} payload', member(tar, 'oneagentgraph', archive), target) != sha:
             fail(f'{archive} carries a different binary than {receipt_name} records')
 
     with zipfile.ZipFile(args.dir / wheel) as z:
         scripts = [name for name in z.namelist() if '.data/scripts/' in name]
         if len(scripts) != 1 or not scripts[0].endswith('/oneagentgraph'):
             fail(f'{wheel} must carry exactly one oneagentgraph script')
-        if payload(f'{wheel} payload', member(z.read, scripts[0], wheel), target) != sha:
+        if payload(f'{wheel} payload', member(z, scripts[0], wheel), target) != sha:
             fail(f'{wheel} carries a different binary than {receipt_name} records')
         if not z.getinfo(scripts[0]).external_attr >> 16 & 0o111:
             fail(f'{wheel} script is not executable')
         dist_info = f'oneagentgraph_cli-{wheel_version}.dist-info'
-        metadata = member(z.read, f'{dist_info}/METADATA', wheel).decode()
-        tags = member(z.read, f'{dist_info}/WHEEL', wheel).decode()
+        metadata = member(z, f'{dist_info}/METADATA', wheel).decode()
+        tags = member(z, f'{dist_info}/WHEEL', wheel).decode()
         if 'Name: oneagentgraph-cli\n' not in metadata or f'Tag: py3-none-{facts["wheel"]}\n' not in tags:
             fail(f'{wheel} metadata is not oneagentgraph-cli tagged py3-none-{facts["wheel"]}')
         declared = re.findall(r'^Version: (.*)$', metadata, re.M)
@@ -128,11 +133,11 @@ def verify(target):
             fail(f'{wheel} METADATA declares Version {", ".join(declared) or "none"}, not the release version {wheel_version}')
 
     with tarfile.open(args.dir / carrier) as npm:
-        manifest = json.loads(member(npm.extractfile, 'package/package.json', carrier))
+        manifest = json.loads(member(npm, 'package/package.json', carrier))
         identity = tuple(manifest.get(key) for key in ['name', 'version', 'os', 'cpu']) if isinstance(manifest, dict) else None
         if identity != (f'oneagentgraph-cli-{facts["npm_os"]}-{facts["npm_cpu"]}', version, [facts['npm_os']], [facts['npm_cpu']]):
             fail(f'{carrier} manifest is not the {target} carrier at {version}')
-        if payload(f'{carrier} payload', member(npm.extractfile, 'package/bin/oneagentgraph', carrier), target) != sha:
+        if payload(f'{carrier} payload', member(npm, 'package/bin/oneagentgraph', carrier), target) != sha:
             fail(f'{carrier} carries a different binary than {receipt_name} records')
 
 

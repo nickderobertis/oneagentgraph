@@ -113,3 +113,25 @@ test('real rehearsal refuses before any work on a runner without npm',()=>{
   assert.ok(result.stderr.includes('npm is required to rehearse the registry upload'),result.stderr);
  } finally {rmSync(dir,{recursive:true,force:true});}
 });
+
+test('real packager turns an unusable maturin into an actionable refusal',()=>{
+ const dir=mkdtempSync(join(process.env.ONEPIPELINE_NODE_SCRATCH_DIR??tmpdir(),'maturin-boundary-'));
+ try {
+  const version=readFileSync('Cargo.toml','utf8').match(/^version = "([^"]+)"/m)[1];
+  // An x86_64 ELF header is all the packager reads before it asks maturin.
+  const elf=Buffer.alloc(64);elf.write('\x7fELF',0,'latin1');elf[4]=2;elf[5]=1;elf.writeUInt16LE(62,18);
+  writeFileSync(join(dir,'binary'),elf);
+  for(const [name,double,reason] of [
+   ['broken',`exit 3`,'maturin 1.14.1 is required; run bash scripts/setup-packaging.sh'],
+   ['wrong-version',`echo maturin 1.0.0`,'maturin 1.14.1 is required'],
+   ['failing',`[ "$1" = --version ] && echo maturin 1.14.1 && exit 0; exit 4`,'could not describe the x86_64-unknown-linux-gnu wheel (exit 4); rerun `'],
+  ]) {
+   const bin=join(dir,`bin-${name}`);mkdirSync(bin);
+   writeFileSync(join(bin,'maturin'),`#!/bin/sh\n${double}\n`);chmodSync(join(bin,'maturin'),0o755);
+   const result=spawnSync('python3',['scripts/release-package.py','--target','x86_64-unknown-linux-gnu','--binary',join(dir,'binary'),'--tag',`v${version}`,'--out',join(dir,`out-${name}`)],{encoding:'utf8',env:{...process.env,PATH:`${bin}:${process.env.PATH}`,CARGO_HOME:join(dir,'no-cargo-home')}});
+   assert.equal(result.status,2,`${name}: ${result.stderr}`);
+   assert.ok(result.stderr.includes(reason),`${name}: ${result.stderr}`);
+   assert.doesNotMatch(result.stderr,/Traceback/);
+  }
+ } finally {rmSync(dir,{recursive:true,force:true});}
+});
