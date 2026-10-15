@@ -61,6 +61,10 @@ impl Host {
         let host = Self {
             dir: tempfile::tempdir().expect("a scratch host"),
         };
+        // Keep the real just executable without admitting its sibling tools into
+        // the controlled PATH (CI installs the real pruner beside just).
+        std::fs::copy(just_dir().join("just"), host.path("just"))
+            .expect("copy the real just executable");
         write_script(
             &host.path("tools/cargo"),
             r#"mkdir -p "$CARGO_HOME/bin"
@@ -86,16 +90,11 @@ chmod +x "$CARGO_HOME/bin/cargo-prune-superseded""#,
     }
 
     /// Run the real recipe with `PATH` set to `dirs`, then the stand-in tools,
-    /// `just`, and the system directories.
+    /// and the system directories. The real just runs by absolute path.
     fn ensure(&self, dirs: &[PathBuf]) -> Output {
         let mut path: Vec<PathBuf> = dirs.to_vec();
-        path.extend([
-            self.path("tools"),
-            just_dir(),
-            "/usr/bin".into(),
-            "/bin".into(),
-        ]);
-        Command::new(just_dir().join("just"))
+        path.extend([self.path("tools"), "/usr/bin".into(), "/bin".into()]);
+        Command::new(self.path("just"))
             .arg("--justfile")
             .arg(Path::new(REPO).join("justfile"))
             .arg("--working-directory")
