@@ -8,7 +8,7 @@
 // `published-smoke.yml` cover that against the real npm.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -24,7 +24,6 @@ function hostTarget() {
   const targets = {
     "linux-x64": "x86_64-unknown-linux-gnu",
     "linux-arm64": "aarch64-unknown-linux-gnu",
-    "darwin-x64": "x86_64-apple-darwin",
     "darwin-arm64": "aarch64-apple-darwin",
     "win32-x64": "x86_64-pc-windows-msvc",
   };
@@ -75,10 +74,10 @@ function installInto(project, packages) {
 }
 
 /// Invoke the installed launcher, returning its exit code, stdout, and stderr.
-function launch(project, args) {
+function launch(project, args, env = process.env) {
   const bin = join(project, "node_modules", ".bin", "oneagentgraph");
   try {
-    const stdout = run(bin, args, { cwd: project, stdio: ["ignore", "pipe", "pipe"] });
+    const stdout = run(bin, args, { cwd: project, env, stdio: ["ignore", "pipe", "pipe"] });
     return { code: 0, stdout, stderr: "" };
   } catch (error) {
     return {
@@ -174,5 +173,54 @@ describe("the npm distribution", () => {
     assert.match(failed.stderr, /platform package oneagentgraph-cli-/);
     assert.match(failed.stderr, /Reinstall with optional/);
     assert.match(failed.stderr, /pip install oneagentgraph-cli/);
+  });
+
+  // A host this test cannot be is reached by doubling the host's identity and
+  // nothing else: a preload reports another platform/arch to the installed
+  // launcher, which is otherwise the real package npm put on PATH.
+  function launchAs(project, platform, arch) {
+    const preload = join(project, `${platform}-${arch}.cjs`);
+    writeFileSync(
+      preload,
+      `Object.defineProperty(process, "platform", { value: ${JSON.stringify(platform)} });\n` +
+        `Object.defineProperty(process, "arch", { value: ${JSON.stringify(arch)} });\n`,
+    );
+    return launch(project, ["--version"], {
+      ...process.env,
+      NODE_OPTIONS: `--require ${JSON.stringify(preload)}`,
+    });
+  }
+
+  // The install matches what npm does on an Intel Mac: the launcher pins no
+  // darwin-x64 package, so only the launcher lands.
+  it("refuses Intel macOS as discontinued instead of looking for a package", () => {
+    const project = mkdtempSync(join(work, "app-"));
+    installInto(project, [launcherTgz]);
+    const manifest = JSON.parse(
+      readFileSync(join(project, "node_modules", "oneagentgraph-cli", "package.json"), "utf8"),
+    );
+    assert.ok(
+      !Object.keys(manifest.optionalDependencies).some((name) => name.includes("darwin-x64")),
+      "the launcher must not pin an Intel macOS package",
+    );
+
+    const refused = launchAs(project, "darwin", "x64");
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.match(refused.stderr, /Intel macOS \(darwin-x64\) is no longer supported/);
+    assert.match(refused.stderr, /cargo install oneagentgraph --locked/);
+    assert.doesNotMatch(refused.stderr, /platform package/, "no package lookup is attempted");
+    assert.equal(refused.stdout, "");
+  });
+
+  it("names the supported platforms on one no release ever built", () => {
+    const project = mkdtempSync(join(work, "app-"));
+    installInto(project, [launcherTgz]);
+
+    const refused = launchAs(project, "freebsd", "x64");
+    assert.equal(refused.code, 1, refused.stderr);
+    assert.match(refused.stderr, /unsupported platform freebsd-x64/);
+    assert.match(refused.stderr, /darwin-arm64/);
+    assert.doesNotMatch(refused.stderr, /darwin-x64/);
+    assert.match(refused.stderr, /pip install oneagentgraph-cli/);
   });
 });

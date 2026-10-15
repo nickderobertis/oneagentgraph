@@ -269,10 +269,10 @@ jobs:
   # goes to scripts/smoke-published.sh — the same script ci.yml runs against the
   # build under test, so what a release asserts cannot drift from what ships.
   #
-  # Four legs for five targets: `pip install` resolves a *different wheel* per
-  # platform AND architecture. `macos-latest` is arm64; `macos-15-intel` is the
-  # leg that installs the x86_64 Darwin wheel. The one target with no leg is
-  # aarch64 Linux, which the matrices above still build.
+  # Linux and Windows legs: `pip install` resolves a *different wheel* per
+  # platform AND architecture. The arm64 Darwin wheel is installed and run by
+  # the `darwin` job before it publishes, and aarch64 Linux by no leg, though
+  # the matrices above still build it.
   verify-pypi:
     name: verify-pypi (${{ matrix.os }})
     needs: publish-pypi
@@ -478,44 +478,33 @@ jobs:
     permissions:
       contents: read
     env:
-      DARWIN_TARGETS: '["x86_64-apple-darwin","aarch64-apple-darwin"]'
+      # Apple Silicon only: Intel macOS artifacts are discontinued, so the one
+      # target this job builds is native to its arm64 host.
+      DARWIN_TARGETS: '["aarch64-apple-darwin"]'
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      # Pinned to arm64 so the staged smoke runs the products natively.
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+          architecture: arm64
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          architecture: arm64
       - uses: taiki-e/install-action@v2
         with:
           tool: maturin@1.14.1
-      - name: Enable Rosetta for Intel product smokes
-        run: softwareupdate --install-rosetta --agree-to-license
-      - name: Build every Darwin distribution from one binary per target
+      - name: Build every Darwin distribution from one binary
         run: |
           mkdir -p "$GITHUB_WORKSPACE/darwin"
           for target in $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log(t))'); do
             bash scripts/release-build.sh "$target" "$GITHUB_REF_NAME" "$GITHUB_WORKSPACE/darwin"
           done
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          architecture: x64
-      - name: Install and run staged Intel Darwin products before publication
-        run: bash scripts/release-smoke.sh x86_64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          architecture: arm64
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-          architecture: arm64
       - name: Install and run staged ARM Darwin products before publication
         run: bash scripts/release-smoke.sh aarch64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
       - uses: actions/upload-artifact@v4

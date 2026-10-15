@@ -29,7 +29,6 @@
   "optionalDependencies": {
     "oneagentgraph-cli-linux-x64": "0.0.0-managed",
     "oneagentgraph-cli-linux-arm64": "0.0.0-managed",
-    "oneagentgraph-cli-darwin-x64": "0.0.0-managed",
     "oneagentgraph-cli-darwin-arm64": "0.0.0-managed",
     "oneagentgraph-cli-win32-x64": "0.0.0-managed"
   }

@@ -127,7 +127,9 @@ fn package_list() -> Vec<String> {
 
 /// The edited release packager carries the same compiled binary through all
 /// distribution forms. Linux executes only its native products; Darwin payloads
-/// are inspected as artifact contracts, never executed on this host.
+/// are inspected as artifact contracts, never executed on this host. The Darwin
+/// targets come from the Mac release job itself, which builds Apple Silicon
+/// alone: Intel macOS is refused by every packaging entry point.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
@@ -161,11 +163,21 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
     );
     let native_binary = target_dir.join(native_target).join("debug/oneagentgraph");
     let binary = native_binary.to_str().expect("native binary path");
-    for target in [
-        "x86_64-unknown-linux-gnu",
-        "x86_64-apple-darwin",
-        "aarch64-apple-darwin",
-    ] {
+    let workflow = std::fs::read_to_string(repo.join(".github/workflows/release.yml"))
+        .expect("release workflow reads");
+    let declared = workflow
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("DARWIN_TARGETS: '"))
+        .and_then(|rest| rest.strip_suffix('\''))
+        .expect("the Mac release job declares DARWIN_TARGETS");
+    let darwin: Vec<String> =
+        serde_json::from_str(declared).expect("DARWIN_TARGETS is a JSON list");
+    assert_eq!(
+        darwin,
+        ["aarch64-apple-darwin"],
+        "the Mac release job builds arm64 alone"
+    );
+    for target in std::iter::once(native_target).chain(darwin.iter().map(String::as_str)) {
         let out = work.path().join(target);
         if target != native_target {
             let result = Command::new("python3")
@@ -237,6 +249,32 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
             "{}",
             String::from_utf8_lossy(&inspected.stderr)
         );
+        if target != native_target {
+            // Exactly what the Mac job uploads for publication, and nothing Intel.
+            let mut staged: Vec<String> = std::fs::read_dir(&out)
+                .expect("staged artifacts list")
+                .map(|entry| {
+                    entry
+                        .expect("staged entry")
+                        .file_name()
+                        .into_string()
+                        .expect("utf-8 name")
+                })
+                .filter(|name| name != "npm")
+                .collect();
+            staged.sort();
+            let wheel_version = version.replace('-', "_");
+            assert_eq!(
+                staged,
+                [
+                    "aarch64-apple-darwin.json".to_string(),
+                    format!("oneagentgraph-cli-darwin-arm64-{version}.tgz"),
+                    format!("oneagentgraph-v{version}-aarch64-apple-darwin.tar.gz"),
+                    format!("oneagentgraph-v{version}-aarch64-apple-darwin.tar.gz.sha256"),
+                    format!("oneagentgraph_cli-{wheel_version}-py3-none-macosx_11_0_arm64.whl"),
+                ]
+            );
+        }
     }
     let result = Command::new("bash")
         .current_dir(repo)
@@ -256,7 +294,7 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         .args([
             "scripts/release-package.py",
             "--target",
-            "x86_64-apple-darwin",
+            "aarch64-apple-darwin",
             "--binary",
             binary,
             "--tag",
@@ -268,4 +306,56 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         .expect("invalid tag packager runs");
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("release tag must equal"));
+    // Intel macOS is discontinued: each entry point refuses it before building
+    // or writing anything, rather than producing an artifact nobody publishes.
+    let intel = work.path().join("intel");
+    for (program, args) in [
+        (
+            "bash",
+            vec!["scripts/release-build.sh", "x86_64-apple-darwin", "v1.2.3"],
+        ),
+        (
+            "python3",
+            vec![
+                "scripts/release-package.py",
+                "--target",
+                "x86_64-apple-darwin",
+                "--binary",
+                binary,
+                "--tag",
+                "v1.2.3",
+                "--out",
+            ],
+        ),
+    ] {
+        let refused = Command::new(program)
+            .current_dir(repo)
+            .args(args)
+            .arg(&intel)
+            .output()
+            .expect("Intel target request runs");
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "{program} accepted Intel macOS"
+        );
+        assert!(String::from_utf8_lossy(&refused.stderr).contains("x86_64-apple-darwin"));
+        assert!(!intel.exists(), "{program} wrote output for Intel macOS");
+    }
+    let npm = Command::new("node")
+        .current_dir(repo)
+        .args([
+            "scripts/npm-build.mjs",
+            "platform",
+            "--target",
+            "x86_64-apple-darwin",
+            "--binary",
+            binary,
+            "--out",
+        ])
+        .arg(&intel)
+        .output()
+        .expect("npm builder runs for Intel macOS");
+    assert!(!npm.status.success(), "npm-build accepted Intel macOS");
+    assert!(!intel.exists(), "npm-build wrote output for Intel macOS");
 }

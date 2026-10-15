@@ -18,7 +18,7 @@ import tomllib
 import zipfile
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--target', required=True, choices=['x86_64-apple-darwin', 'aarch64-apple-darwin', 'x86_64-unknown-linux-gnu'])
+parser.add_argument('--target', required=True, choices=['aarch64-apple-darwin', 'x86_64-unknown-linux-gnu'])
 parser.add_argument('--binary', required=True, type=Path)
 parser.add_argument('--out', required=True, type=Path)
 parser.add_argument('--tag', required=True)

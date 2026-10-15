@@ -45,7 +45,7 @@ test('real reporters and SDK checker emit measurements and propagate a refused b
    const summary=JSON.parse(result.stdout),measurement=JSON.parse(readFileSync(reported,'utf8'));
    assert.equal(summary.metric,metric);assert.equal(summary.value,measurement.value);
    const detail=JSON.parse(measurement.detail);
-   assert.ok(detail.worst.length>0);assert.match(measurement.detail,/x86_64-apple-darwin/);assert.match(measurement.detail,/aarch64-apple-darwin/);
+   assert.ok(detail.worst.length>0);assert.doesNotMatch(measurement.detail,/x86_64-apple-darwin/);assert.match(measurement.detail,/aarch64-apple-darwin/);
   }
   const accepted=run('node',['.github/check-budgets.mjs']);
   assert.equal(accepted.status,0,accepted.stderr);

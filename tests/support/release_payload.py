@@ -11,7 +11,7 @@ if len(sys.argv) != 5:
     raise SystemExit('ACTION: pass binary, supported Rust target, X.Y.Z version and absolute artifact directory')
 binary, target, version, directory = sys.argv[1:]
 out = Path(directory)
-if target not in ['x86_64-unknown-linux-gnu', 'x86_64-apple-darwin', 'aarch64-apple-darwin'] or not re.fullmatch(r'\d+\.\d+\.\d+', version) or not out.is_absolute() or not out.is_dir() or not Path(binary).is_file():
+if target not in ['x86_64-unknown-linux-gnu', 'aarch64-apple-darwin'] or not re.fullmatch(r'\d+\.\d+\.\d+', version) or not out.is_absolute() or not out.is_dir() or not Path(binary).is_file():
     raise SystemExit('ACTION: pass an existing binary, supported target, plain release version and absolute directory')
 expected = hashlib.sha256(Path(binary).read_bytes()).hexdigest()
 receipt = json.loads((out / f'{target}.json').read_text())
@@ -32,7 +32,7 @@ with zipfile.ZipFile(out / receipt['wheel']) as wheel:
     assert wheel.getinfo(path).external_attr >> 16 & 0o111
     metadata = wheel.read(next(p for p in wheel.namelist() if p.endswith('/METADATA'))).decode()
     assert f'Version: {version}\n' in metadata and 'Name: oneagentgraph-cli\n' in metadata
-    tag = {'x86_64-apple-darwin':'macosx_10_12_x86_64', 'aarch64-apple-darwin':'macosx_11_0_arm64', 'x86_64-unknown-linux-gnu':'linux_x86_64'}[target]
+    tag = {'aarch64-apple-darwin':'macosx_11_0_arm64', 'x86_64-unknown-linux-gnu':'linux_x86_64'}[target]
     assert f'Tag: py3-none-{tag}\n' in wheel.read(next(p for p in wheel.namelist() if p.endswith('/WHEEL'))).decode()
 carriers = list(out.glob('*.tgz'))
 if len(carriers) != 1 or not carriers[0].is_file():

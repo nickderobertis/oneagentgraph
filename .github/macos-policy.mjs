@@ -36,7 +36,7 @@ function withoutVersion(path, source) {
     // but their names must remain unchanged.
     if (path === 'npm/oneagentgraph-cli/package.json') {
       for (const name of Object.keys(value.optionalDependencies ?? {})) {
-        if (!/^oneagentgraph-cli-(linux-(x64|arm64)|darwin-(x64|arm64)|win32-x64)$/.test(name) || !version.test(value.optionalDependencies[name])) throw Error('non-version launcher dependency');
+        if (!/^oneagentgraph-cli-(linux-(x64|arm64)|darwin-arm64|win32-x64)$/.test(name) || !version.test(value.optionalDependencies[name])) throw Error('non-version launcher dependency');
         value.optionalDependencies[name] = '<version>';
       }
     }
