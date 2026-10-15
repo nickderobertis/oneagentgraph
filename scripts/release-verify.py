@@ -2,7 +2,8 @@
 """Hold a staged release directory to exactly the artifacts its targets publish.
 
 Run by release.yml's Darwin job (through scripts/release-rehearse.sh) before
-anything uploads, and by tests/packaging.rs over the Linux staged output. It reads every artifact rather than trusting the
+anything uploads, and by tests/packaging.rs over the Linux staged output and an
+arm64 Darwin set packaged on Linux. It reads every artifact rather than trusting the
 packager's receipt alone: the directory holds nothing but each target's archive,
 checksum, receipt, wheel and npm carrier, and every payload in them is the one
 compiled binary, built for that target's own format and CPU. It never executes

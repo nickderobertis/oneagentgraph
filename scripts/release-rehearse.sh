@@ -10,7 +10,8 @@
 #   4. An Intel artifact, a wrong-CPU payload, and the Intel target are refused.
 #
 # release.yml's Darwin job runs this natively before uploading; tests/packaging.rs
-# runs it over the Linux set inside `just check`. It never publishes.
+# runs it over the Linux set and over an arm64 Darwin set packaged from a Mach-O
+# linked on Linux, inside `just check`. It never publishes.
 set -euo pipefail
 fail() {
   echo "release-rehearse: $1" >&2

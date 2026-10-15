@@ -825,6 +825,174 @@ else:
         serde_json::from_str(declared).expect("DARWIN_TARGETS is a JSON list")
     }
 
+    /// The `upload-artifact` steps of release.yml's `darwin` job, as (artifact
+    /// name, file-name suffixes it uploads from `darwin/`).
+    pub fn darwin_uploads(workflow: &serde_json::Value) -> Vec<(String, Vec<String>)> {
+        workflow["jobs"]["darwin"]["steps"]
+            .as_array()
+            .expect("the Mac release job has steps")
+            .iter()
+            .filter(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+            })
+            .map(|step| {
+                let name = step["with"]["name"].as_str().expect("upload is named");
+                let globs = step["with"]["path"]
+                    .as_str()
+                    .expect("upload names its paths")
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(|glob| {
+                        glob.strip_prefix("darwin/*")
+                            .unwrap_or_else(|| {
+                                panic!("{name} uploads {glob}, not darwin/*<suffix>")
+                            })
+                            .to_owned()
+                    })
+                    .collect();
+                (name.to_owned(), globs)
+            })
+            .collect()
+    }
+
+    /// The artifact-name pattern a publishing job downloads, e.g. `wheels-*`.
+    pub fn downloads(workflow: &serde_json::Value, job: &str) -> Vec<String> {
+        workflow["jobs"][job]["steps"]
+            .as_array()
+            .unwrap_or_else(|| panic!("release.yml has a `{job}` job"))
+            .iter()
+            .filter(|step| {
+                step["uses"]
+                    .as_str()
+                    .is_some_and(|uses| uses.starts_with("actions/download-artifact@"))
+            })
+            .map(|step| {
+                step["with"]["pattern"]
+                    .as_str()
+                    .or_else(|| step["with"]["name"].as_str())
+                    .expect("download names an artifact or pattern")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// A real Mach-O executable for `target`, linked on this host by the
+    /// toolchain's own `rust-lld`. It stands in for `oneagentgraph`, which links
+    /// against the macOS SDK and so only the Mac release job can build; what the
+    /// packaging contract reads from it — format and CPU — is the real thing.
+    pub fn link_mach_o(target: &str, work: &Path) -> PathBuf {
+        let source = work.join("stand-in.rs");
+        std::fs::write(
+            &source,
+            "#![no_std]\n#![no_main]\n\
+             #[panic_handler]\nfn panic(_: &core::panic::PanicInfo) -> ! { loop {} }\n\
+             #[no_mangle]\npub extern \"C\" fn main() -> i32 { 0 }\n",
+        )
+        .expect("stand-in source writes");
+        let binary = work.join(format!("stand-in-{target}"));
+        // `rustc` through the repository's pinned toolchain, whose target list
+        // carries this target's `core`.
+        let output = Command::new("rustc")
+            .current_dir(repo())
+            .args([
+                "--target",
+                target,
+                "-C",
+                "panic=abort",
+                "-C",
+                "linker=rust-lld",
+            ])
+            .args(["-C", "linker-flavor=ld64.lld"])
+            .args(["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"])
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("rustc runs");
+        succeeded(&output, "linking the Mach-O stand-in");
+        binary
+    }
+
+    /// `scripts/release-build.sh` packaging an already-linked `binary`.
+    pub fn build_prebuilt(target: &str, out: &Path, binary: &Path) -> Output {
+        Command::new("bash")
+            .current_dir(repo())
+            .args(["scripts/release-build.sh", target, &tag()])
+            .arg(out)
+            .arg("--binary")
+            .arg(binary)
+            .output()
+            .expect("release builder runs")
+    }
+
+    /// The (format, cpu) a Mach-O header declares, read here rather than by the
+    /// scripts under test.
+    pub fn mach_o_cpu(bytes: &[u8]) -> Option<&'static str> {
+        if bytes.get(..4)? != [0xcf, 0xfa, 0xed, 0xfe] {
+            return None;
+        }
+        match u32::from_le_bytes(bytes.get(4..8)?.try_into().ok()?) {
+            0x0100_000C => Some("arm64"),
+            0x0100_0007 => Some("x86_64"),
+            _ => Some("other"),
+        }
+    }
+
+    /// Files a `tar` archive carries, extracted into `into`.
+    pub fn untar(archive: &Path, into: &Path) {
+        std::fs::create_dir_all(into).expect("extract directory");
+        succeeded(
+            &Command::new("tar")
+                .arg("-xzf")
+                .arg(archive)
+                .arg("-C")
+                .arg(into)
+                .output()
+                .expect("tar runs"),
+            "extracting an artifact",
+        );
+    }
+
+    /// Doubles for the publication transport: `gh` records its arguments, and
+    /// `npm` reports every package unpublished and records what it would publish.
+    /// Every other `npm` command is the real one.
+    pub fn transport_doubles(work: &Path) -> (PathBuf, PathBuf) {
+        let bin = work.join("transport");
+        std::fs::create_dir_all(&bin).expect("doubles directory");
+        let record = work.join("published");
+        let real_npm = String::from_utf8(
+            Command::new("bash")
+                .args(["-c", "command -v npm"])
+                .output()
+                .expect("npm resolves")
+                .stdout,
+        )
+        .expect("npm path is text");
+        let gh = bin.join("gh");
+        std::fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$RECORD\"\n")
+            .expect("gh double");
+        let npm = bin.join("npm");
+        std::fs::write(
+            &npm,
+            format!(
+                "#!/bin/sh\ncase \"$1\" in\n  view) echo 'npm error code E404' >&2; exit 1 ;;\n  \
+                 publish) printf 'npm publish %s\\n' \"$2\" >> \"$RECORD\"; exit 0 ;;\n  \
+                 *) exec {} \"$@\" ;;\nesac\n",
+                real_npm.trim()
+            ),
+        )
+        .expect("npm double");
+        for double in [&gh, &npm] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(double, std::fs::Permissions::from_mode(0o755))
+                .expect("double is executable");
+        }
+        (bin, record)
+    }
+
     /// Every packaging entry point refuses Intel macOS before writing anything.
     pub fn intel_is_refused(binary: &Path, work: &Path) {
         let intel = work.join("intel");
@@ -1080,4 +1248,230 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         .output()
         .expect("invalid tag packager runs");
     refused(&wrong_tag, "release-package", "release tag must equal");
+}
+
+/// The macOS release set, through the packaging interface release.yml's `darwin`
+/// job runs: for every target in that job's own `DARWIN_TARGETS`, the release
+/// builder packages a real arm64 Mach-O (linked here by `rust-lld`; Linux runs
+/// no Darwin binary), the verifier holds the staged directory to it, the job's
+/// own `upload-artifact` paths split it into the artifacts its publishers
+/// download, and the attach and npm publish scripts run with only `gh` and
+/// `npm view`/`npm publish` doubled. The set is exactly the aarch64 Darwin one —
+/// by name, wheel tag, npm os/cpu and each payload's Mach-O CPU — and Intel macOS
+/// is absent from the declared targets and refused by every entry point.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[test]
+fn the_darwin_release_set_is_exactly_arm64_through_the_release_packaging() {
+    use release::*;
+    let work = workspace();
+    let workflow = workflow();
+    let targets = darwin_targets(&workflow);
+    assert!(
+        !targets.iter().any(|target| target == "x86_64-apple-darwin"),
+        "the Mac release job still declares Intel macOS: {targets:?}"
+    );
+    let arm = link_mach_o("aarch64-apple-darwin", work.path());
+    assert_eq!(
+        mach_o_cpu(&std::fs::read(&arm).expect("stand-in reads")),
+        Some("arm64")
+    );
+
+    let staged = work.path().join("darwin");
+    for target in &targets {
+        succeeded(&build_prebuilt(target, &staged, &arm), "release-build");
+    }
+    let target = "aarch64-apple-darwin";
+    let archive = format!("oneagentgraph-v{VERSION}-{target}.tar.gz");
+    let wheel = format!("oneagentgraph_cli-{VERSION}-py3-none-macosx_11_0_arm64.whl");
+    let carrier = format!("oneagentgraph-cli-darwin-arm64-{VERSION}.tgz");
+    let expected = expected_set(target, "macosx_11_0_arm64", "darwin-arm64");
+    let declared: Vec<&str> = targets.iter().map(String::as_str).collect();
+    assert_eq!(verified_set(&verify(&declared, &staged)), expected);
+
+    // Each artifact carries the arm64 payload, read here independently.
+    untar(&staged.join(&archive), &work.path().join("archive"));
+    assert_eq!(
+        mach_o_cpu(&std::fs::read(work.path().join("archive/oneagentgraph")).expect("payload")),
+        Some("arm64"),
+        "{archive} payload"
+    );
+    untar(&staged.join(&carrier), &work.path().join("carrier"));
+    assert_eq!(
+        mach_o_cpu(
+            &std::fs::read(work.path().join("carrier/package/bin/oneagentgraph")).expect("payload")
+        ),
+        Some("arm64"),
+        "{carrier} payload"
+    );
+    let manifest: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(work.path().join("carrier/package/package.json"))
+            .expect("carrier manifest"),
+    )
+    .expect("carrier manifest parses");
+    assert_eq!(
+        (&manifest["name"], &manifest["os"], &manifest["cpu"]),
+        (
+            &serde_json::json!("oneagentgraph-cli-darwin-arm64"),
+            &serde_json::json!(["darwin"]),
+            &serde_json::json!(["arm64"])
+        )
+    );
+    let unzip = Command::new("python3")
+        .args(["-I", "-c"])
+        .arg(
+            "import sys, zipfile\n\
+             z = zipfile.ZipFile(sys.argv[1])\n\
+             [z.extract(n, sys.argv[2]) for n in z.namelist() if n.endswith(('/WHEEL', '/scripts/oneagentgraph'))]",
+        )
+        .arg(staged.join(&wheel))
+        .arg(work.path().join("wheel"))
+        .output()
+        .expect("python runs");
+    succeeded(&unzip, "reading the wheel");
+    let wheel_dir = work.path().join("wheel");
+    assert_eq!(
+        mach_o_cpu(
+            &std::fs::read(wheel_dir.join(format!(
+                "oneagentgraph_cli-{VERSION}.data/scripts/oneagentgraph"
+            )))
+            .expect("wheel payload")
+        ),
+        Some("arm64"),
+        "{wheel} payload"
+    );
+    let tags = std::fs::read_to_string(
+        wheel_dir.join(format!("oneagentgraph_cli-{VERSION}.dist-info/WHEEL")),
+    )
+    .expect("wheel tags");
+    assert!(tags.contains("Tag: py3-none-macosx_11_0_arm64\n"), "{tags}");
+
+    // What leaves the job: its own upload paths partition the staged set, and
+    // each artifact is the one its publisher downloads.
+    let mut uploaded = std::collections::BTreeMap::new();
+    for (name, suffixes) in darwin_uploads(&workflow) {
+        let mut files: Vec<String> = expected
+            .iter()
+            .filter(|file| {
+                suffixes
+                    .iter()
+                    .any(|suffix| file.ends_with(suffix.as_str()))
+            })
+            .cloned()
+            .collect();
+        files.sort();
+        uploaded.insert(name, files);
+    }
+    let sorted = |mut names: Vec<String>| {
+        names.sort();
+        names
+    };
+    assert_eq!(
+        uploaded,
+        std::collections::BTreeMap::from([
+            ("wheels-darwin".to_owned(), vec![wheel.clone()]),
+            ("npm-darwin".to_owned(), vec![carrier.clone()]),
+            (
+                "archives-darwin".to_owned(),
+                sorted(vec![
+                    archive.clone(),
+                    format!("{archive}.sha256"),
+                    format!("{target}.json")
+                ])
+            ),
+        ])
+    );
+    let matches = |pattern: &str, name: &str| match pattern.strip_suffix('*') {
+        Some(prefix) => name.starts_with(prefix),
+        None => pattern == name,
+    };
+    for (publisher, artifact) in [
+        ("publish-pypi", "wheels-darwin"),
+        ("publish-npm", "npm-darwin"),
+        ("upload-darwin", "archives-darwin"),
+    ] {
+        assert!(
+            downloads(&workflow, publisher)
+                .iter()
+                .any(|pattern| matches(pattern, artifact)),
+            "release.yml's {publisher} does not download {artifact}"
+        );
+    }
+
+    // Publication with only the transport doubled sends exactly the arm64 files.
+    let (doubles, record) = transport_doubles(work.path());
+    let path = format!(
+        "{}:{}",
+        doubles.display(),
+        std::env::var("PATH").expect("PATH is set")
+    );
+    let attach_dir = work.path().join("archives-darwin");
+    std::fs::create_dir_all(&attach_dir).expect("attach directory");
+    for file in &uploaded["archives-darwin"] {
+        std::fs::copy(staged.join(file), attach_dir.join(file)).expect("archive artifact copies");
+    }
+    succeeded(
+        &Command::new("bash")
+            .current_dir(repo())
+            .arg("scripts/release-attach.sh")
+            .arg(tag())
+            .arg(&attach_dir)
+            .env("PATH", &path)
+            .env("RECORD", &record)
+            .output()
+            .expect("attach runs"),
+        "release-attach",
+    );
+    succeeded(
+        &Command::new("bash")
+            .current_dir(repo())
+            .arg("scripts/publish-npm.sh")
+            .arg(staged.join(&carrier))
+            .env("PATH", &path)
+            .env("RECORD", &record)
+            .output()
+            .expect("npm publish runs"),
+        "publish-npm",
+    );
+    assert_eq!(
+        std::fs::read_to_string(&record).expect("publication record"),
+        format!(
+            "release\nupload\n{}\n{}\n{}\n--clobber\nnpm publish {}\n",
+            tag(),
+            attach_dir.join(&archive).display(),
+            attach_dir.join(format!("{archive}.sha256")).display(),
+            staged.join(&carrier).display()
+        )
+    );
+
+    // The Mac job's own rehearsal accepts this set on a non-Darwin host too.
+    succeeded(&rehearse(target, &staged), "release-rehearse");
+
+    // Intel macOS: refused by the builder even with a binary in hand, and an
+    // x86_64 Mach-O is refused as an arm64 payload.
+    let mut intel_bytes = std::fs::read(&arm).expect("stand-in reads");
+    intel_bytes[4..8].copy_from_slice(&0x0100_0007u32.to_le_bytes());
+    let intel = work.path().join("stand-in-x86_64");
+    std::fs::write(&intel, intel_bytes).expect("x86_64 Mach-O writes");
+    refused(
+        &build_prebuilt("x86_64-apple-darwin", &work.path().join("intel"), &intel),
+        "release-build for Intel macOS",
+        "Intel macOS is no longer a release target",
+    );
+    refused(
+        &build_prebuilt(target, &work.path().join("intel-as-arm"), &intel),
+        "release-build with an x86_64 Mach-O",
+        "built for mach-o/x86_64, not mach-o/arm64",
+    );
+    refused(
+        &build_prebuilt(
+            target,
+            &work.path().join("relative"),
+            std::path::Path::new("stand-in"),
+        ),
+        "release-build with a relative binary",
+        "--binary must name an existing absolute file",
+    );
+    assert!(!work.path().join("intel").exists());
+    assert!(!work.path().join("intel-as-arm").exists());
+    intel_is_refused(&arm, work.path());
 }
