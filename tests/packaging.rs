@@ -1213,7 +1213,8 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         &format!("oneagentgraph_cli-{VERSION}-py3-none-linux_x86_64.whl"),
         &format!("oneagentgraph-cli-linux-x64-{VERSION}.tgz"),
     );
-    // The rehearsal stops on a staged Intel artifact rather than publishing it.
+    // The rehearsal, not only the verifier it calls, must stop here: it is the
+    // last step before the Mac job's uploads.
     let extra = work.path().join("rehearse-extra");
     copy_staged(&staged, &extra);
     std::fs::copy(
@@ -1228,7 +1229,8 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         "release-rehearse with an Intel archive",
         "would publish: oneagentgraph-v",
     );
-    // A wheel whose metadata declares another version is not this release's.
+    // The file name still says this release; only METADATA, which is what pip
+    // records as the installed version, disagrees.
     let restamped = work.path().join("wheel-version");
     copy_staged(&staged, &restamped);
     let wheel = format!("oneagentgraph_cli-{VERSION}-py3-none-linux_x86_64.whl");
@@ -1443,7 +1445,8 @@ fn the_darwin_release_set_is_exactly_arm64_through_the_release_packaging() {
         )
     );
 
-    // The Mac job's own rehearsal accepts this set on a non-Darwin host too.
+    // Without `lipo` this host skips only the rehearsal's native architecture read;
+    // its attach, publish and Intel refusals all run over the Darwin set.
     succeeded(&rehearse(target, &staged), "release-rehearse");
 
     // Intel macOS: refused by the builder even with a binary in hand, and an
