@@ -115,12 +115,14 @@ def verify(target):
             fail(f'{archive} carries a different binary than {receipt_name} records')
 
     with zipfile.ZipFile(args.dir / wheel) as z:
+        # pip installs a command only from the top-level data directory.
+        script = f'oneagentgraph_cli-{wheel_version}.data/scripts/oneagentgraph'
         scripts = [name for name in z.namelist() if '.data/scripts/' in name]
-        if len(scripts) != 1 or not scripts[0].endswith('/oneagentgraph'):
-            fail(f'{wheel} must carry exactly one oneagentgraph script')
-        if payload(f'{wheel} payload', member(z, scripts[0], wheel), target) != sha:
+        if scripts != [script]:
+            fail(f'{wheel} must carry exactly one script, {script}, not {", ".join(scripts) or "none"}')
+        if payload(f'{wheel} payload', member(z, script, wheel), target) != sha:
             fail(f'{wheel} carries a different binary than {receipt_name} records')
-        if not z.getinfo(scripts[0]).external_attr >> 16 & 0o111:
+        if not z.getinfo(script).external_attr >> 16 & 0o111:
             fail(f'{wheel} script is not executable')
         dist_info = f'oneagentgraph_cli-{wheel_version}.dist-info'
         metadata = member(z, f'{dist_info}/METADATA', wheel).decode()

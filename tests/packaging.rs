@@ -549,12 +549,12 @@ else:
                     format!("oneagentgraph_cli-{VERSION}.data/scripts/other"),
                     || Edit::Add(b"#!/bin/sh\n"),
                 ),
-                format!("{wheel} must carry exactly one oneagentgraph script"),
+                format!("{wheel} must carry exactly one script, {script}, not"),
             ),
             (
                 "wheel without its script",
                 in_member(wheel.to_string(), script.clone(), || Edit::Delete),
-                format!("{wheel} must carry exactly one oneagentgraph script"),
+                format!("{wheel} must carry exactly one script, {script}, not"),
             ),
             (
                 "wheel payload from another build",
@@ -650,6 +650,19 @@ else:
         };
         let mut cases = cases;
         cases.push((
+            "wheel script nested where pip would not install it",
+            Box::new(|dir: &Path| {
+                let bytes = std::fs::read(built_binary(target)).expect("built binary reads");
+                rewrite_member(&dir.join(wheel), &script, Edit::Delete);
+                rewrite_member(
+                    &dir.join(wheel),
+                    &format!("nested/{script}"),
+                    Edit::Add(&bytes),
+                );
+            }),
+            format!("{wheel} must carry exactly one script, {script}, not nested/{script}"),
+        ));
+        cases.push((
             "wheel payload for another CPU",
             Box::new(|dir: &Path| {
                 rewrite_member(&dir.join(wheel), &script, Edit::Replace(&wrong_cpu()))
@@ -679,6 +692,73 @@ else:
                 "{case}: {stderr}"
             );
             assert!(!stderr.contains("Traceback"), "{case}: {stderr}");
+        }
+    }
+
+    /// The verifier refuses, with the command to rerun, when the maturin it asks
+    /// for the wheel version fails, cannot start, or declares no version.
+    pub fn unusable_maturin_is_refused(target: &str, staged: &Path, work: &Path) {
+        let cases = [
+            ("failing", "", "exit 4", "(exit 4); rerun `"),
+            // The version probe succeeds, then the binary stops being executable.
+            (
+                "unstartable",
+                r#"[ "$1" = --version ] && chmod -x "$0""#,
+                "exit 0",
+                "maturin could not run (",
+            ),
+            (
+                "versionless",
+                "",
+                r#"while [ "$1" != --metadata-directory ]; do shift; done; mkdir -p "$2/x.dist-info"; echo 'Name: oneagentgraph-cli' > "$2/x.dist-info/METADATA""#,
+                "maturin declares 0 wheel versions",
+            ),
+        ];
+        for (name, first, body, reason) in cases {
+            let bin = work.join(format!("maturin-{name}"));
+            std::fs::create_dir_all(&bin).expect("double directory");
+            let path = bin.join("maturin");
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\n{first}\n[ \"$1\" = --version ] && echo maturin 1.14.1 && exit 0\n{body}\n"
+                ),
+            )
+            .expect("double writes");
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("double is executable");
+            let mut command = Command::new("python3");
+            command
+                .current_dir(repo())
+                .args([
+                    "scripts/release-verify.py",
+                    "--target",
+                    target,
+                    "--tag",
+                    &tag(),
+                    "--dir",
+                ])
+                .arg(staged)
+                .env(
+                    "PATH",
+                    format!(
+                        "{}:{}",
+                        bin.display(),
+                        std::env::var("PATH").expect("PATH is set")
+                    ),
+                )
+                .env("CARGO_HOME", work.join("no-cargo-home"));
+            let output = command.output().expect("release verifier runs");
+            refused(
+                &output,
+                &format!("release-verify with a {name} maturin"),
+                reason,
+            );
+            assert!(
+                !String::from_utf8_lossy(&output.stderr).contains("Traceback"),
+                "{name}"
+            );
         }
     }
 
@@ -957,6 +1037,7 @@ fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
         "release-rehearse with an attach that sends more",
         "publication would send",
     );
+    unusable_maturin_is_refused(target, &staged, work.path());
     malformed_sets_are_refused(
         target,
         &staged,
