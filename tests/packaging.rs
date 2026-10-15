@@ -125,237 +125,590 @@ fn package_list() -> Vec<String> {
         .collect()
 }
 
-/// The edited release packager carries the same compiled binary through all
-/// distribution forms. Linux executes only its native products; Darwin payloads
-/// are inspected as artifact contracts, never executed on this host. The Darwin
-/// targets come from the Mac release job itself, which builds Apple Silicon
-/// alone: Intel macOS is refused by every packaging entry point.
+/// The release packaging journeys below share this driver: the production
+/// scripts, run the way `release.yml` runs them, over one staging directory.
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+mod release {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Output};
+
+    pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    pub fn repo() -> &'static Path {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    pub fn tag() -> String {
+        format!("v{VERSION}")
+    }
+
+    pub fn workspace() -> tempfile::TempDir {
+        let scratch = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        tempfile::tempdir_in(scratch).expect("packaging workspace")
+    }
+
+    pub fn succeeded(output: &Output, what: &str) {
+        assert!(
+            output.status.success(),
+            "{what} failed\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Refused at the boundary (exit 2) with `reason` in its diagnostic.
+    pub fn refused(output: &Output, what: &str, reason: &str) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{what} was not refused: {stderr}"
+        );
+        assert!(
+            stderr.contains(reason),
+            "{what} did not say {reason:?}: {stderr}"
+        );
+    }
+
+    /// `scripts/release-build.sh`, as the Mac job calls it, at the dev profile.
+    pub fn build(target: &str, out: &Path) -> Output {
+        Command::new("bash")
+            .current_dir(repo())
+            .env("CARGO_TARGET_DIR", repo().join("target/release-packaging"))
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .args(["scripts/release-build.sh", target, &tag()])
+            .arg(out)
+            .args(["--profile", "dev"])
+            .output()
+            .expect("release builder runs")
+    }
+
+    pub fn built_binary(target: &str) -> PathBuf {
+        repo()
+            .join("target/release-packaging")
+            .join(target)
+            .join("debug/oneagentgraph")
+    }
+
+    /// `scripts/release-verify.py` over a staged directory.
+    pub fn verify(targets: &[&str], dir: &Path) -> Output {
+        let mut command = Command::new("python3");
+        command.current_dir(repo()).arg("scripts/release-verify.py");
+        for target in targets {
+            command.args(["--target", target]);
+        }
+        command
+            .args(["--tag", &tag(), "--dir"])
+            .arg(dir)
+            .output()
+            .expect("release verifier runs")
+    }
+
+    /// Exactly the files a target stages for publication.
+    pub fn expected_set(target: &str, wheel: &str, npm: &str) -> Vec<String> {
+        let archive = format!("oneagentgraph-v{VERSION}-{target}.tar.gz");
+        let mut names = vec![
+            format!("{target}.json"),
+            format!("{archive}.sha256"),
+            archive,
+            format!("oneagentgraph_cli-{VERSION}-py3-none-{wheel}.whl"),
+            format!("oneagentgraph-cli-{npm}-{VERSION}.tgz"),
+        ];
+        names.sort();
+        names
+    }
+
+    pub fn verified_set(output: &Output) -> Vec<String> {
+        succeeded(output, "release-verify");
+        serde_json::from_slice(&output.stdout).expect("release-verify prints the verified set")
+    }
+
+    /// A copy of a staged directory's files, to mutate without touching the original.
+    pub fn copy_staged(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("copy directory");
+        for entry in std::fs::read_dir(from).expect("staged directory lists") {
+            let entry = entry.expect("staged entry");
+            if entry.file_type().expect("staged entry type").is_file() {
+                std::fs::copy(entry.path(), to.join(entry.file_name()))
+                    .expect("staged file copies");
+            }
+        }
+    }
+
+    /// Rewrite `archive` in `dir` with its binary's header changed by `patch`,
+    /// re-checksummed so the only defect left is the payload's architecture.
+    pub fn tamper_archive(dir: &Path, archive: &str, patch: impl Fn(&mut [u8])) {
+        use sha2::Digest;
+        let unpacked = dir.join("unpacked");
+        std::fs::create_dir_all(&unpacked).expect("unpack directory");
+        succeeded(
+            &Command::new("tar")
+                .arg("-xzf")
+                .arg(dir.join(archive))
+                .arg("-C")
+                .arg(&unpacked)
+                .output()
+                .expect("tar runs"),
+            "unpack",
+        );
+        let binary = unpacked.join("oneagentgraph");
+        let mut bytes = std::fs::read(&binary).expect("payload reads");
+        patch(&mut bytes);
+        std::fs::write(&binary, bytes).expect("payload writes");
+        succeeded(
+            &Command::new("tar")
+                .arg("-czf")
+                .arg(dir.join(archive))
+                .arg("-C")
+                .arg(&unpacked)
+                .args(["oneagentgraph", "README.md", "LICENSE", "CHANGELOG.md"])
+                .output()
+                .expect("tar runs"),
+            "repack",
+        );
+        std::fs::remove_dir_all(&unpacked).expect("unpack directory removes");
+        let digest = sha2::Sha256::digest(std::fs::read(dir.join(archive)).expect("archive reads"));
+        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+        std::fs::write(
+            dir.join(format!("{archive}.sha256")),
+            format!("{hex}  {archive}\n"),
+        )
+        .expect("checksum writes");
+    }
+
+    /// `.github/workflows/release.yml`, as data.
+    pub fn workflow() -> serde_json::Value {
+        let text = std::fs::read_to_string(repo().join(".github/workflows/release.yml"))
+            .expect("release workflow reads");
+        serde_saphyr::from_str(&text).expect("release workflow parses")
+    }
+
+    /// The Mac release job's targets.
+    pub fn darwin_targets(workflow: &serde_json::Value) -> Vec<String> {
+        let declared = workflow["jobs"]["darwin"]["env"]["DARWIN_TARGETS"]
+            .as_str()
+            .expect("the Mac release job declares DARWIN_TARGETS");
+        serde_json::from_str(declared).expect("DARWIN_TARGETS is a JSON list")
+    }
+
+    /// Every packaging entry point refuses Intel macOS before writing anything.
+    pub fn intel_is_refused(binary: &Path, work: &Path) {
+        let intel = work.join("intel");
+        refused(
+            &build("x86_64-apple-darwin", &intel),
+            "release-build",
+            "Intel macOS is no longer a release target",
+        );
+        let package = Command::new("python3")
+            .current_dir(repo())
+            .args([
+                "scripts/release-package.py",
+                "--target",
+                "x86_64-apple-darwin",
+                "--binary",
+            ])
+            .arg(binary)
+            .args(["--tag", &tag(), "--out"])
+            .arg(&intel)
+            .output()
+            .expect("packager runs");
+        refused(
+            &package,
+            "release-package",
+            "invalid choice: 'x86_64-apple-darwin'",
+        );
+        std::fs::create_dir_all(work.join("staged-intel")).expect("verify directory");
+        refused(
+            &verify(&["x86_64-apple-darwin"], &work.join("staged-intel")),
+            "release-verify",
+            "invalid choice: 'x86_64-apple-darwin'",
+        );
+        let npm = Command::new("node")
+            .current_dir(repo())
+            .args([
+                "scripts/npm-build.mjs",
+                "platform",
+                "--target",
+                "x86_64-apple-darwin",
+                "--binary",
+            ])
+            .arg(binary)
+            .arg("--out")
+            .arg(&intel)
+            .output()
+            .expect("npm builder runs");
+        assert!(!npm.status.success(), "npm-build accepted Intel macOS");
+        assert!(!intel.exists(), "an Intel request wrote output");
+    }
+
+    /// A verified staged directory stops verifying once it holds an Intel
+    /// artifact or a payload of the wrong architecture.
+    pub fn defects_are_refused(
+        target: &str,
+        staged: &Path,
+        work: &Path,
+        wrong_cpu: impl Fn(&mut [u8]),
+        wrong: &str,
+    ) {
+        let extra = work.join("extra-intel");
+        copy_staged(staged, &extra);
+        let intel = format!("oneagentgraph-v{VERSION}-x86_64-apple-darwin.tar.gz");
+        std::fs::copy(
+            extra.join(format!("oneagentgraph-v{VERSION}-{target}.tar.gz")),
+            extra.join(&intel),
+        )
+        .expect("Intel archive stages");
+        refused(
+            &verify(&[target], &extra),
+            "release-verify with an Intel archive",
+            &format!("would publish: {intel}"),
+        );
+
+        let tampered = work.join("wrong-architecture");
+        copy_staged(staged, &tampered);
+        tamper_archive(
+            &tampered,
+            &format!("oneagentgraph-v{VERSION}-{target}.tar.gz"),
+            &wrong_cpu,
+        );
+        refused(
+            &verify(&[target], &tampered),
+            "release-verify with a wrong-architecture payload",
+            &format!("built for {wrong}"),
+        );
+
+        let binary = work.join("wrong-architecture-binary");
+        let mut bytes = std::fs::read(built_binary(target)).expect("built binary reads");
+        wrong_cpu(&mut bytes);
+        std::fs::write(&binary, bytes).expect("wrong binary writes");
+        let package = Command::new("python3")
+            .current_dir(repo())
+            .args(["scripts/release-package.py", "--target", target, "--binary"])
+            .arg(&binary)
+            .args(["--tag", &tag(), "--out"])
+            .arg(work.join("wrong-package"))
+            .output()
+            .expect("packager runs");
+        refused(
+            &package,
+            "release-package with a wrong-architecture binary",
+            &format!("built for {wrong}"),
+        );
+        assert!(
+            !work.join("wrong-package").exists(),
+            "the packager wrote a wrong-architecture artifact"
+        );
+    }
+}
+
+/// The Linux release products: built by the release builder, verified to be
+/// exactly the native target's set carrying an x86_64 ELF, and installed and run
+/// from every distribution form. Darwin's products cannot be linked on this host,
+/// so its journey is the macOS test below; what Linux proves about Darwin is the
+/// declaration (`DARWIN_TARGETS` is arm64 alone) and the refusals that keep a
+/// wrong-architecture or Intel artifact out of a staged set.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 #[test]
 fn release_products_reuse_the_binary_and_the_native_wheel_installs_and_runs() {
-    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let scratch = std::env::var_os("ONEPIPELINE_NODE_SCRATCH_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let work = tempfile::tempdir_in(scratch).expect("packaging workspace");
-    let version = env!("CARGO_PKG_VERSION");
-    let native_target = "x86_64-unknown-linux-gnu";
-    let native = work.path().join(native_target);
-    let target_dir = repo.join("target/release-packaging");
-    let built = Command::new("bash")
-        .current_dir(repo)
-        .env("CARGO_TARGET_DIR", &target_dir)
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .args([
-            "scripts/release-build.sh",
-            native_target,
-            &format!("v{version}"),
-        ])
-        .arg(&native)
-        .args(["--profile", "dev"])
-        .output()
-        .expect("real production builder runs for the native target");
-    assert!(
-        built.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&built.stdout),
-        String::from_utf8_lossy(&built.stderr)
-    );
-    let native_binary = target_dir.join(native_target).join("debug/oneagentgraph");
-    let binary = native_binary.to_str().expect("native binary path");
-    let workflow = std::fs::read_to_string(repo.join(".github/workflows/release.yml"))
-        .expect("release workflow reads");
-    let declared = workflow
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("DARWIN_TARGETS: '"))
-        .and_then(|rest| rest.strip_suffix('\''))
-        .expect("the Mac release job declares DARWIN_TARGETS");
-    let darwin: Vec<String> =
-        serde_json::from_str(declared).expect("DARWIN_TARGETS is a JSON list");
+    use release::*;
+    let work = workspace();
+    let target = "x86_64-unknown-linux-gnu";
+    let staged = work.path().join(target);
+    succeeded(&build(target, &staged), "release-build");
     assert_eq!(
-        darwin,
+        verified_set(&verify(&[target], &staged)),
+        expected_set(target, "linux_x86_64", "linux-x64")
+    );
+    let smoke = Command::new("bash")
+        .current_dir(repo())
+        .args(["scripts/release-smoke.sh", target])
+        .arg(&staged)
+        .arg(VERSION)
+        .output()
+        .expect("native product installs run");
+    succeeded(&smoke, "release-smoke");
+
+    assert_eq!(
+        darwin_targets(&workflow()),
         ["aarch64-apple-darwin"],
         "the Mac release job builds arm64 alone"
     );
-    for target in std::iter::once(native_target).chain(darwin.iter().map(String::as_str)) {
-        let out = work.path().join(target);
-        if target != native_target {
-            let result = Command::new("python3")
-                .current_dir(repo)
-                .args([
-                    "scripts/release-package.py",
-                    "--target",
-                    target,
-                    "--binary",
-                    binary,
-                    "--tag",
-                    &format!("v{version}"),
-                    "--out",
-                ])
-                .arg(&out)
-                .output()
-                .expect("release packager runs");
-            assert!(
-                result.status.success(),
-                "{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            let package = Command::new("node")
-                .current_dir(repo)
-                .args([
-                    "scripts/npm-build.mjs",
-                    "platform",
-                    "--target",
-                    target,
-                    "--binary",
-                    binary,
-                    "--out",
-                ])
-                .arg(out.join("npm"))
-                .output()
-                .expect("npm package builder runs");
-            assert!(
-                package.status.success(),
-                "{}",
-                String::from_utf8_lossy(&package.stderr)
-            );
-            let dir = String::from_utf8(package.stdout).expect("npm package path");
-            let packed = Command::new("npm")
-                .current_dir(dir.trim())
-                .args(["pack", "--pack-destination"])
-                .arg(&out)
-                .output()
-                .expect("npm pack runs");
-            assert!(
-                packed.status.success(),
-                "{}",
-                String::from_utf8_lossy(&packed.stderr)
-            );
-        }
-        let inspected = Command::new("python3")
-            .current_dir(repo)
-            .args([
-                "-c",
-                include_str!("support/release_payload.py"),
-                binary,
-                target,
-                version,
-            ])
-            .arg(&out)
-            .output()
-            .expect("artifact inspector runs");
-        assert!(
-            inspected.status.success(),
-            "{}",
-            String::from_utf8_lossy(&inspected.stderr)
-        );
-        if target != native_target {
-            // Exactly what the Mac job uploads for publication, and nothing Intel.
-            let mut staged: Vec<String> = std::fs::read_dir(&out)
-                .expect("staged artifacts list")
-                .map(|entry| {
-                    entry
-                        .expect("staged entry")
-                        .file_name()
-                        .into_string()
-                        .expect("utf-8 name")
-                })
-                .filter(|name| name != "npm")
-                .collect();
-            staged.sort();
-            let wheel_version = version.replace('-', "_");
-            assert_eq!(
-                staged,
-                [
-                    "aarch64-apple-darwin.json".to_string(),
-                    format!("oneagentgraph-cli-darwin-arm64-{version}.tgz"),
-                    format!("oneagentgraph-v{version}-aarch64-apple-darwin.tar.gz"),
-                    format!("oneagentgraph-v{version}-aarch64-apple-darwin.tar.gz.sha256"),
-                    format!("oneagentgraph_cli-{wheel_version}-py3-none-macosx_11_0_arm64.whl"),
-                ]
-            );
-        }
-    }
-    let result = Command::new("bash")
-        .current_dir(repo)
-        .args(["scripts/release-smoke.sh", native_target])
-        .arg(&native)
-        .arg(version)
-        .output()
-        .expect("native product installs run");
-    assert!(
-        result.status.success(),
-        "{}\n{}",
-        String::from_utf8_lossy(&result.stdout),
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let rejected = Command::new("python3")
-        .current_dir(repo)
+    // This host's ELF is not a Darwin payload, and the packager says so rather
+    // than wrapping it in a Darwin wheel.
+    let mislabelled = Command::new("python3")
+        .current_dir(repo())
         .args([
             "scripts/release-package.py",
             "--target",
             "aarch64-apple-darwin",
             "--binary",
-            binary,
-            "--tag",
-            "v999.0.0",
-            "--out",
         ])
+        .arg(built_binary(target))
+        .args(["--tag", &tag(), "--out"])
+        .arg(work.path().join("mislabelled"))
+        .output()
+        .expect("packager runs");
+    refused(
+        &mislabelled,
+        "release-package",
+        "built for elf/x86_64, not mach-o/arm64",
+    );
+    // ELF e_machine 183 is aarch64.
+    defects_are_refused(
+        target,
+        &staged,
+        work.path(),
+        |elf| elf[18..20].copy_from_slice(&183u16.to_le_bytes()),
+        "elf/aarch64",
+    );
+    intel_is_refused(&built_binary(target), work.path());
+
+    let wrong_tag = Command::new("python3")
+        .current_dir(repo())
+        .args(["scripts/release-package.py", "--target", target, "--binary"])
+        .arg(built_binary(target))
+        .args(["--tag", "v999.0.0", "--out"])
         .arg(work.path().join("wrong-tag"))
         .output()
         .expect("invalid tag packager runs");
-    assert!(!rejected.status.success());
-    assert!(String::from_utf8_lossy(&rejected.stderr).contains("release tag must equal"));
-    // Intel macOS is discontinued: each entry point refuses it before building
-    // or writing anything, rather than producing an artifact nobody publishes.
-    let intel = work.path().join("intel");
-    for (program, args) in [
-        (
-            "bash",
-            vec!["scripts/release-build.sh", "x86_64-apple-darwin", "v1.2.3"],
-        ),
-        (
-            "python3",
-            vec![
-                "scripts/release-package.py",
-                "--target",
-                "x86_64-apple-darwin",
-                "--binary",
-                binary,
-                "--tag",
-                "v1.2.3",
-                "--out",
-            ],
-        ),
-    ] {
-        let refused = Command::new(program)
-            .current_dir(repo)
-            .args(args)
-            .arg(&intel)
+    refused(&wrong_tag, "release-package", "release tag must equal");
+}
+
+/// The Mac release job's own journey, on the Apple Silicon host it runs on:
+/// `release-build.sh` for every `DARWIN_TARGETS` entry, the staged set verified
+/// to be exactly the arm64 one carrying an arm64 Mach-O, each publication route
+/// replayed from `release.yml` with only its transport doubled, and every
+/// distribution form installed and run natively.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[test]
+fn darwin_release_products_are_the_arm64_set_and_run_natively() {
+    use release::*;
+    let work = workspace();
+    let workflow = workflow();
+    let targets = darwin_targets(&workflow);
+    assert_eq!(
+        targets,
+        ["aarch64-apple-darwin"],
+        "the Mac release job builds arm64 alone"
+    );
+    let target = "aarch64-apple-darwin";
+    let job = work.path().join("job");
+    let darwin = job.join("darwin");
+    succeeded(&build(target, &darwin), "release-build");
+    let expected = expected_set(target, "macosx_11_0_arm64", "darwin-arm64");
+    assert_eq!(verified_set(&verify(&[target], &darwin)), expected);
+
+    // The payload's own architecture, read by the host's toolchain rather than
+    // by the verifier under test.
+    let unpacked = work.path().join("unpacked");
+    std::fs::create_dir_all(&unpacked).expect("unpack directory");
+    succeeded(
+        &Command::new("tar")
+            .arg("-xzf")
+            .arg(darwin.join(format!("oneagentgraph-v{VERSION}-{target}.tar.gz")))
+            .arg("-C")
+            .arg(&unpacked)
             .output()
-            .expect("Intel target request runs");
-        assert_eq!(
-            refused.status.code(),
-            Some(2),
-            "{program} accepted Intel macOS"
-        );
-        assert!(String::from_utf8_lossy(&refused.stderr).contains("x86_64-apple-darwin"));
-        assert!(!intel.exists(), "{program} wrote output for Intel macOS");
-    }
-    let npm = Command::new("node")
-        .current_dir(repo)
-        .args([
-            "scripts/npm-build.mjs",
-            "platform",
-            "--target",
-            "x86_64-apple-darwin",
-            "--binary",
-            binary,
-            "--out",
-        ])
-        .arg(&intel)
+            .expect("tar runs"),
+        "unpack",
+    );
+    let archs = Command::new("lipo")
+        .arg("-archs")
+        .arg(unpacked.join("oneagentgraph"))
         .output()
-        .expect("npm builder runs for Intel macOS");
-    assert!(!npm.status.success(), "npm-build accepted Intel macOS");
-    assert!(!intel.exists(), "npm-build wrote output for Intel macOS");
+        .expect("lipo runs");
+    succeeded(&archs, "lipo");
+    assert_eq!(String::from_utf8_lossy(&archs.stdout).trim(), "arm64");
+
+    // What each upload-artifact step of the Mac job carries out of it.
+    let steps = workflow["jobs"]["darwin"]["steps"]
+        .as_array()
+        .expect("darwin steps");
+    let mut uploaded = std::collections::BTreeMap::new();
+    for step in steps.iter().filter(|step| {
+        step["uses"]
+            .as_str()
+            .is_some_and(|uses| uses.starts_with("actions/upload-artifact@"))
+    }) {
+        let mut files = Vec::new();
+        for pattern in step["with"]["path"]
+            .as_str()
+            .expect("artifact path")
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            let suffix = pattern
+                .strip_prefix("darwin/*")
+                .expect("artifact paths are darwin/*<suffix> globs");
+            for entry in std::fs::read_dir(&darwin).expect("staged directory lists") {
+                let entry = entry.expect("staged entry");
+                let name = entry.file_name().into_string().expect("utf-8 name");
+                if entry.file_type().expect("entry type").is_file() && name.ends_with(suffix) {
+                    files.push(name);
+                }
+            }
+        }
+        files.sort();
+        uploaded.insert(
+            step["with"]["name"]
+                .as_str()
+                .expect("artifact name")
+                .to_string(),
+            files,
+        );
+    }
+    let archive = format!("oneagentgraph-v{VERSION}-{target}.tar.gz");
+    let wheel = format!("oneagentgraph_cli-{VERSION}-py3-none-macosx_11_0_arm64.whl");
+    let carrier = format!("oneagentgraph-cli-darwin-arm64-{VERSION}.tgz");
+    assert_eq!(
+        uploaded["wheels-darwin"],
+        [wheel],
+        "PyPI receives exactly the arm64 wheel"
+    );
+    assert_eq!(uploaded["npm-darwin"], std::slice::from_ref(&carrier));
+    assert_eq!(
+        uploaded["archives-darwin"],
+        [
+            format!("{target}.json"),
+            archive.clone(),
+            format!("{archive}.sha256")
+        ],
+        "the forge receives the arm64 archive, checksum and receipt"
+    );
+
+    // Doubles for the forge and the registry: they record what would leave and
+    // hand everything else to the real npm.
+    let bin = work.path().join("doubles");
+    std::fs::create_dir_all(&bin).expect("doubles directory");
+    let real_npm = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v npm"])
+            .output()
+            .expect("npm resolves")
+            .stdout,
+    )
+    .expect("npm path");
+    let record = work.path().join("published");
+    std::fs::write(
+        bin.join("gh"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$RECORD\"\n",
+    )
+    .expect("gh double");
+    std::fs::write(
+        bin.join("npm"),
+        format!("#!/bin/sh\ncase \"$1\" in\n  view) echo 'npm error code E404' >&2; exit 1 ;;\n  publish) printf 'npm publish %s\\n' \"$2\" >> \"$RECORD\"; exit 0 ;;\n  *) exec {} \"$@\" ;;\nesac\n", real_npm.trim()),
+    )
+    .expect("npm double");
+    for double in ["gh", "npm"] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(bin.join(double), std::fs::Permissions::from_mode(0o755))
+            .expect("double is executable");
+    }
+    let run_step = |job_name: &str, step_name: &str, workspace: &std::path::Path| {
+        let script = workflow["jobs"][job_name]["steps"]
+            .as_array()
+            .expect("job steps")
+            .iter()
+            .find(|step| step["name"].as_str() == Some(step_name))
+            .and_then(|step| step["run"].as_str())
+            .unwrap_or_else(|| panic!("{job_name} has a {step_name:?} step"))
+            .to_string();
+        let output = Command::new("bash")
+            .current_dir(if job_name == "upload-darwin" {
+                workspace
+            } else {
+                repo()
+            })
+            .args(["--noprofile", "--norc", "-eo", "pipefail", "-c", &script])
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH")),
+            )
+            .env("RECORD", &record)
+            .env("GITHUB_REF_NAME", tag())
+            .env("GITHUB_WORKSPACE", workspace)
+            .env("GH_TOKEN", "doubled")
+            .env("NODE_AUTH_TOKEN", "doubled")
+            .output()
+            .expect("workflow step runs");
+        succeeded(&output, step_name);
+    };
+    // upload-darwin downloads archives-darwin into `darwin/` and attaches it.
+    let forge = work.path().join("forge");
+    std::fs::create_dir_all(forge.join("darwin")).expect("forge workspace");
+    for name in &uploaded["archives-darwin"] {
+        std::fs::copy(darwin.join(name), forge.join("darwin").join(name))
+            .expect("artifact downloads");
+    }
+    run_step(
+        "upload-darwin",
+        "Attach prevalidated Darwin archives",
+        &forge,
+    );
+    // publish-npm merges every npm-* artifact into `npm-artifacts/`; this is the Mac job's share.
+    let registry = work.path().join("registry");
+    std::fs::create_dir_all(registry.join("npm-artifacts")).expect("registry workspace");
+    std::fs::copy(
+        darwin.join(&carrier),
+        registry.join("npm-artifacts").join(&carrier),
+    )
+    .expect("artifact downloads");
+    run_step(
+        "publish-npm",
+        "Publish the platform packages, then the launcher",
+        &registry,
+    );
+    let published = std::fs::read_to_string(&record).expect("doubles recorded");
+    let lines: Vec<&str> = published.lines().collect();
+    assert_eq!(
+        lines[..6],
+        [
+            "release",
+            "upload",
+            &tag(),
+            &format!("darwin/{archive}"),
+            &format!("darwin/{archive}.sha256"),
+            "--clobber"
+        ],
+        "the forge receives exactly the arm64 archive and checksum"
+    );
+    assert_eq!(
+        lines[6],
+        format!(
+            "npm publish {}",
+            registry.join("npm-artifacts").join(&carrier).display()
+        )
+    );
+    assert!(
+        lines[7].starts_with("npm publish ") && lines[7].ends_with("oneagentgraph-cli"),
+        "then the launcher: {}",
+        lines[7]
+    );
+    assert_eq!(lines.len(), 8, "nothing else publishes: {published}");
+
+    // Native execution, as the Mac job runs it before any upload.
+    let smoke = Command::new("bash")
+        .current_dir(repo())
+        .args(["scripts/release-smoke.sh", target])
+        .arg(&darwin)
+        .arg(VERSION)
+        .output()
+        .expect("native product installs run");
+    succeeded(&smoke, "release-smoke");
+
+    // Mach-O cputype 0x01000007 is x86_64.
+    defects_are_refused(
+        target,
+        &darwin,
+        work.path(),
+        |macho| macho[4..8].copy_from_slice(&0x0100_0007u32.to_le_bytes()),
+        "mach-o/x86_64",
+    );
+    intel_is_refused(&built_binary(target), work.path());
 }

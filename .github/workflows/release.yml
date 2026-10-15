@@ -505,6 +505,13 @@ jobs:
           for target in $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log(t))'); do
             bash scripts/release-build.sh "$target" "$GITHUB_REF_NAME" "$GITHUB_WORKSPACE/darwin"
           done
+      # Every upload below takes its files from this directory, so it must hold
+      # exactly the declared targets' artifacts, each carrying a binary of that
+      # target's own format and CPU.
+      - name: Verify the staged Darwin artifacts are exactly the declared targets'
+        run: |
+          python3 scripts/release-verify.py --tag "$GITHUB_REF_NAME" --dir "$GITHUB_WORKSPACE/darwin" \
+            $(node -e 'JSON.parse(process.env.DARWIN_TARGETS).forEach(t => console.log("--target", t))')
       - name: Install and run staged ARM Darwin products before publication
         run: bash scripts/release-smoke.sh aarch64-apple-darwin "$GITHUB_WORKSPACE/darwin" "${GITHUB_REF_NAME#v}"
       - uses: actions/upload-artifact@v4

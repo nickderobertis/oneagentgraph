@@ -156,6 +156,8 @@ test('release artifact routes retain every platform, build Darwin arm64 alone, a
  assert.match(source,/release-build\.sh/);assert.doesNotMatch(JSON.stringify(steps),/rosetta|x86_64|architecture":"x64/i,'native arm64 only: no Rosetta or Intel step');
  const firstUpload=steps.findIndex(s=>s.uses?.startsWith('actions/upload-artifact@'));
  assert.ok(steps.slice(0,firstUpload).filter(s=>s.run?.includes('scripts/release-smoke.sh')).length===darwin.length);
+ const verifyAt=steps.findIndex(s=>s.run?.includes('scripts/release-verify.py'));
+ assert.ok(verifyAt>steps.findIndex(s=>s.run?.includes('scripts/release-build.sh'))&&verifyAt<firstUpload,'the staged set is verified after it is built and before anything uploads');
  for(const publisher of ['publish-pypi','publish-npm','upload-darwin']) {
   assert.ok([].concat(release.jobs[publisher].needs).includes('darwin'),publisher);
   assert.equal(release.jobs[publisher]['runs-on'],'ubuntu-latest');

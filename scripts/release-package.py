@@ -13,12 +13,16 @@ import subprocess
 import tempfile
 from pathlib import Path
 import re
+import sys
 import tarfile
 import tomllib
 import zipfile
 
+sys.dont_write_bytecode = True  # leave no __pycache__ beside the scripts
+from release_artifacts import TARGETS, executable_format  # noqa: E402
+
 parser = argparse.ArgumentParser()
-parser.add_argument('--target', required=True, choices=['aarch64-apple-darwin', 'x86_64-unknown-linux-gnu'])
+parser.add_argument('--target', required=True, choices=sorted(TARGETS))
 parser.add_argument('--binary', required=True, type=Path)
 parser.add_argument('--out', required=True, type=Path)
 parser.add_argument('--tag', required=True)
@@ -40,6 +44,9 @@ if args.tag != f'v{version}' or not re.fullmatch(r'\d+\.\d+\.\d+(?:-[0-9A-Za-z.-
 if not args.binary.is_file():
     parser.error('--binary must name an existing regular file; compile the requested target before packaging')
 binary = args.binary.read_bytes()
+found = executable_format(binary)
+if found != TARGETS[args.target]['executable']:
+    parser.error(f'--binary is built for {"/".join(found)}, not {"/".join(TARGETS[args.target]["executable"])} as {args.target} ships; build it with --target {args.target}')
 args.out.mkdir(parents=True, exist_ok=True)
 archive = args.out / f'oneagentgraph-{args.tag}-{args.target}.tar.gz'
 with tarfile.open(archive, 'w:gz') as tar:
