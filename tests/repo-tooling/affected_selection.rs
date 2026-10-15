@@ -388,6 +388,59 @@ fn with_neither_base_a_local_run_scopes_against_main() {
     );
 }
 
+/// Fail if the gate's plan holds any task of the project that measures the pool
+/// maintenance budget: that measurement builds the repository twice, and only
+/// the release PR's sweep runs it (`ci.yml`).
+fn assert_no_pool_maintenance_task(tasks: &BTreeSet<String>, why: &str) {
+    let selected: Vec<_> = tasks
+        .iter()
+        .filter(|task| task.starts_with("pool-maintenance:"))
+        .collect();
+    assert!(
+        selected.is_empty(),
+        "{why}: the gate selected {selected:?}; the plan was {tasks:?}"
+    );
+}
+
+#[test]
+fn no_gate_run_selects_the_pool_maintenance_measurement() {
+    // Every project: a build with no base fails closed to `run-many -t check`.
+    let repo = Repo::new();
+    let (tasks, stderr) = repo.gate_tasks(&[("CI", "true"), ("GITHUB_EVENT_NAME", "push")]);
+    assert!(
+        stderr.contains("running every project"),
+        "a build with no base did not run every project:\n{stderr}"
+    );
+    assert_selects(&tasks, &[UNIT, REPO_TOOLING], &[], "the full gate");
+    assert_no_pool_maintenance_task(&tasks, "the full gate");
+
+    // The affected tier, over a source change and over changes to the
+    // measurement, its budget, and its project's configuration.
+    for file in [
+        "src/lib.rs",
+        "pool-maintenance/measure.sh",
+        "pool-maintenance/budgets.yaml",
+    ] {
+        let repo = Repo::new();
+        repo.change(file);
+        let (tasks, _) = repo.gate_tasks(AGAINST_MAIN);
+        assert_no_pool_maintenance_task(&tasks, &format!("a change to {file}"));
+    }
+    let repo = Repo::new();
+    let path = repo.root.join("pool-maintenance/project.json");
+    let mut project: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("read its project.json"))
+            .expect("its project.json is JSON");
+    project["tags"]
+        .as_array_mut()
+        .expect("its project.json has tags")
+        .push("changed:by-a-selection-journey".into());
+    std::fs::write(&path, project.to_string()).expect("change its project.json");
+    repo.commit("change pool-maintenance/project.json");
+    let (tasks, _) = repo.gate_tasks(AGAINST_MAIN);
+    assert_no_pool_maintenance_task(&tasks, "a change to pool-maintenance/project.json");
+}
+
 #[test]
 fn a_push_build_scopes_to_the_commit_it_replaced_and_fails_closed_without_one() {
     let repo = Repo::new();

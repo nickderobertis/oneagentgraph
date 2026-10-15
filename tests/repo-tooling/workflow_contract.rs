@@ -828,6 +828,37 @@ fn the_release_pr_runs_the_full_sweep_and_every_other_build_the_affected_tier() 
 }
 
 #[test]
+fn only_the_release_pr_sweep_checks_the_pool_maintenance_budget_after_its_gate() {
+    const BUDGET: &str = "just pool-maintenance-budget";
+    let ci = workflow("ci.yml");
+    let sweep = ci.runs("sweep", &release_pr(true));
+    let gate = sweep.iter().position(|run| run.trim() == "just check");
+    let budget = sweep.iter().position(|run| run.trim() == BUDGET);
+    assert!(
+        matches!((gate, budget), (Some(gate), Some(budget)) if gate < budget),
+        "the release PR's sweep does not run `{BUDGET}` after `just check`: {sweep:?}"
+    );
+
+    // The measurement builds the repository twice: no other job, on any event,
+    // reaches the budget or the project that measures it.
+    for w in workflows() {
+        for (id, job) in w.jobs() {
+            if w.file == "ci.yml" && id == "sweep" {
+                continue;
+            }
+            for step in job["steps"].as_array().into_iter().flatten() {
+                let run = step["run"].as_str().unwrap_or_default();
+                assert!(
+                    !run.contains("pool-maintenance"),
+                    "{}:{id} runs the pool-maintenance measurement: {run:?}",
+                    w.file
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn a_push_to_main_keys_its_affected_tier_to_the_commit_it_replaced() {
     let ci = workflow("ci.yml");
     for (id, run) in [

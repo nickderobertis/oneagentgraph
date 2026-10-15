@@ -1,0 +1,20 @@
+# This repository's own warm-pool maintenance, declared for onevcs.
+#
+# onevcs pool maintenance reads this file from the repository's publication
+# checkout on its base branch — never from a session's branch — and runs
+# `command` in the worktree of each idle slot of this repository, never in a slot
+# a session holds. Without it no slot of this repository is ever maintained.
+#
+# `just pool-maintenance` runs the released `cargo-prune-superseded` (installed
+# at its pinned version by `just bootstrap`) over every directory this
+# repository's cargo builds write to. It removes superseded builds — older
+# metadata-hash builds of a unit in each profile's `deps/`, `.fingerprint/`,
+# `build/` and `incremental/` — and keeps each unit's newest build and every
+# build modified within the last 2 days, so a rebuild stays warm. How long one
+# pass takes is the `oneagentgraph-pool-maintenance-seconds` budget
+# (`pool-maintenance/budgets.yaml`).
+schema_version = 1
+
+[pool.maintain]
+command = ["just", "pool-maintenance"]
+timeout = "30m"

@@ -728,6 +728,10 @@ path = "tests/repo-tooling/workflow_contract.rs"
 name = "recipe_arguments"
 path = "tests/repo-tooling/recipe_arguments.rs"
 
+[[test]]
+name = "prune_superseded_install"
+path = "tests/repo-tooling/prune_superseded_install.rs"
+
 # A CLI binary: optimize for a small, fast-starting artifact.
 [profile.release]
 strip = true

@@ -123,6 +123,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
       - name: Quality gate (every project)
         run: just check
+      # The pool-maintenance pass's budget builds the repository twice, so no
+      # per-change path selects it; the release PR checks it once, after its gate.
+      - name: Pool maintenance budget
+        run: just pool-maintenance-budget
 
   # Prove the artifact builds and its tests pass on macOS and Windows (without
   # the coverage threshold, which is enforced on Linux).
