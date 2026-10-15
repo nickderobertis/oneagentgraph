@@ -5,7 +5,8 @@ Run by release.yml's Darwin job (through scripts/release-rehearse.sh) before
 anything uploads, and by tests/packaging.rs over the Linux staged output. It reads every artifact rather than trusting the
 packager's receipt alone: the directory holds nothing but each target's archive,
 checksum, receipt, wheel and npm carrier, and every payload in them is the one
-compiled binary, built for that target's own format and CPU. Executes nothing.
+compiled binary, built for that target's own format and CPU. It never executes
+a staged payload; the one process it runs is maturin, to learn the wheel version.
 """
 import argparse
 import hashlib

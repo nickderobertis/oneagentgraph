@@ -924,16 +924,23 @@ fn a_release_is_gated_by_its_own_test_job_before_anything_publishes() {
     }
 }
 
-/// Whether a job writes anything outside this workflow run: a crate, a
-/// registry package, or a Release asset. Read from what the job does rather
-/// than from its name, so a new publisher is caught without being listed.
-fn publishes(job: &Value) -> bool {
-    const PUBLISHING: [&str; 5] = [
+/// Whether a job takes a publication route: a token that can write the
+/// Release, or a step that runs one of the commands or actions below — the
+/// routes this release publishes through, plus the common direct ones a new
+/// publisher would reach for. Read from what the job does rather than from its
+/// name; a route outside this list is not recognised, which is why the test
+/// below also pins the set it finds.
+fn takes_a_publication_route(job: &Value) -> bool {
+    const ROUTES: [&str; 9] = [
         "cargo publish",
+        "npm publish",
+        "twine upload",
+        "gh release",
         "scripts/publish-npm.sh",
         "scripts/release-attach.sh",
         "pypa/gh-action-pypi-publish@",
         "taiki-e/upload-rust-binary-action@",
+        "softprops/action-gh-release@",
     ];
     job["permissions"]["contents"] == "write"
         || job["steps"].as_array().is_some_and(|steps| {
@@ -943,7 +950,7 @@ fn publishes(job: &Value) -> bool {
                     step["uses"].as_str().unwrap_or(""),
                     step["run"].as_str().unwrap_or("")
                 );
-                PUBLISHING.iter().any(|marker| text.contains(marker))
+                ROUTES.iter().any(|route| text.contains(route))
             })
         })
 }
@@ -954,7 +961,7 @@ fn nothing_in_a_release_publishes_until_the_mac_release_job_has_passed() {
     let jobs = release.doc["jobs"].as_object().expect("release.yml jobs");
     let publishers: BTreeSet<String> = jobs
         .iter()
-        .filter(|(_, job)| publishes(job))
+        .filter(|(_, job)| takes_a_publication_route(job))
         .map(|(id, _)| id.clone())
         .collect();
     // Pinned so the structural read above cannot quietly find fewer publishers
@@ -988,7 +995,7 @@ fn nothing_in_a_release_publishes_until_the_mac_release_job_has_passed() {
         );
     }
     assert!(
-        !publishes(release.job("darwin")),
+        !takes_a_publication_route(release.job("darwin")),
         "the Mac release job itself publishes; its proof must come first"
     );
 }
