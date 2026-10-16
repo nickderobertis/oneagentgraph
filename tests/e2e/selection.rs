@@ -943,12 +943,39 @@ fn codex_launches_under(config: &str) -> Vec<Vec<String>> {
 
     let recorded = std::fs::read_to_string(&record)
         .expect("the codex on PATH recorded its argv, so it is what the turn started");
+    // The core probes `codex --version` before a turn to key its shared model
+    // catalog (oneharness-core 0.27.0). That probe starts no session and takes no
+    // feature flags, so it is not one of the launches these journeys judge.
     let launches: Vec<Vec<String>> = recorded
         .split_terminator(&format!("{END}\n"))
-        .map(|launch| launch.lines().map(str::to_string).collect())
+        .map(|launch| launch.lines().map(str::to_string).collect::<Vec<_>>())
+        .filter(|argv| argv != &["--version"])
         .collect();
-    assert!(!launches.is_empty(), "codex was never started: {recorded}");
+    assert!(
+        !launches.is_empty(),
+        "codex never started a turn: {recorded}"
+    );
     launches
+}
+
+/// A member whose config has no `app_server` key runs its turn as one
+/// uncontrolled `codex exec` and never starts `codex app-server`: the request
+/// this crate builds leaves `control` unset, so the linked core's shared
+/// app-server pool is never reached and this binary has no idle server to sweep.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_names_no_app_server_runs_its_turn_as_codex_exec() {
+    let launches = codex_launches_under(CODEX_CHAIN);
+    assert!(
+        launches
+            .iter()
+            .all(|argv| argv.first().map(String::as_str) == Some("exec")),
+        "a turn was not started as `codex exec`: {launches:?}"
+    );
+    assert!(
+        !launches.iter().flatten().any(|arg| arg == "app-server"),
+        "the turn started a Codex app-server: {launches:?}"
+    );
 }
 
 /// Where in `argv` a plugins override sits, and whether it turns plugins on.

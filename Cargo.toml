@@ -387,7 +387,17 @@ test-doubles = []
 # the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
 # still `^0.18.0`.
 #
-# **0.19.1 is what is linked**, and moves in lockstep with oneharness-core
+# **0.19.5 is what is linked**, and moves in lockstep with oneharness-core
+# 0.28.1 below: its published requirement is `^0.28.1`, a pre-1.0 minor past
+# the `^0.26.0` 0.19.1 and 0.19.2 asked for, so the two are edited together or
+# the graph carries two cores — the state `tests/inventory.rs` refuses. Every
+# call above compiles against it unchanged; what moved is the core it links,
+# whose shared Codex app-server the `oneharness-core` block below says this
+# crate's turns do not reach. 0.19.5's library is 0.19.4's; only its own
+# `onejudge` binary changed, to host that pool's sweeper, and this crate links
+# the library, not that binary.
+#
+# 0.19.1 moved in lockstep with oneharness-core
 # 0.26.0 below: its published requirement is `^0.26.0`, a pre-1.0 minor the
 # `^0.24.0` 0.19.0 asked for excludes, so the two are edited together or the
 # graph carries two cores — the state `tests/inventory.rs` refuses. Its `src/` is
@@ -443,7 +453,7 @@ test-doubles = []
 #      the engine and reads no CLI output.
 #   4. 0.19.2 reads and writes its YAML through serde-saphyr, so no libyaml
 #      translation reaches this graph through onejudge.
-onejudge = { version = "0.19.2", features = ["cli"] }
+onejudge = { version = "0.19.5", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -478,12 +488,27 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `io::run::run_supervised` and `io::runner::ProcessSupervisor` — the hooks that
 # put each harness child into the member's process group / job object — so below
 # it `src/harness.rs` deliberately does not build. Both names are unchanged at
-# 0.26.0; that was re-measured for this bump rather than assumed, and
+# 0.28.1; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.26.0 is what is linked, and it is linked exactly once**, in lockstep with
-# onejudge 0.19.1 above, which asks for `^0.26.0`. It is the release that starts
-# Codex with plugins off — `-c features.plugins=false` on every `exec` and
+# **0.28.1 is what is linked, and it is linked exactly once**, in lockstep with
+# onejudge 0.19.5 above, which asks for `^0.28.1`. Its controlled Codex turns
+# share one pooled app-server, yet no turn this crate runs reaches it: a
+# `kind: oneharness` member's `RunRequest` (`src/harness.rs`) leaves `control`
+# unset, so its turn is an uncontrolled `codex exec`, and a two-party member's
+# sides run in the `oneharness` CLI through `src/judge.rs`'s spawn hook, which
+# pools and sweeps its own servers. So the `oneagentgraph` binary hosts no
+# sweeper (`io::app_server::serve_sweeper_if_requested`): it never pools.
+#
+# 0.27.0, carried along, shares one Codex model catalog per Codex home — a
+# launch first probes `codex --version` to key it — and starts Codex with
+# `-c analytics.enabled=false` unless the config opts in. Both are breaking for
+# config keys and `BuildCtx` fields this crate neither builds nor restates; the
+# probe is a launch of the configured `codex` that starts no turn, which is why
+# `tests/e2e/selection.rs` judges the launches it records without it.
+#
+# 0.26.0 moved in lockstep with onejudge 0.19.1 above. It is the release that
+# starts Codex with plugins off — `-c features.plugins=false` on every `exec` and
 # `app-server` launch — unless the config opts in with `plugins = true` under
 # `[harness.codex]` (or a codex variant), where every earlier core let Codex
 # download its whole remote plugin catalog on each process start. A
@@ -608,7 +633,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # requirement. The rule that went with the split is retired with it, because
 # there is no longer a second set of types to confuse this one with; what remains
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.26.0"
+oneharness-core = "0.28.1"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

@@ -533,7 +533,7 @@ impl Bounds {
 /// call it is dressed up as.
 ///
 /// **A message event resets this clock; a token-level stream does not, because
-/// nothing delivers one here.** Re-read on 2026-09-30 against the two engines
+/// nothing delivers one here.** Re-read on 2026-10-16 against the two engines
 /// this crate links. The stamp is a date rather than a release of this crate on
 /// purpose: it records when the upstream channels were last actually read,
 /// which a version bumped by the release automation would silently claim on
@@ -543,24 +543,25 @@ impl Bounds {
 /// holds each against `Cargo.toml`. It is named in prose rather than linked
 /// because it is a `#[cfg(test)]` item, which rustdoc cannot resolve:
 ///
-/// * `oneharness_core` 0.26.0 delivers a streaming run's events to an
+/// * `oneharness_core` 0.28.1 delivers a streaming run's events to an
 ///   `EventSink` as `ActionEvent`s whose `kind` is `tool_call`, `tool_result`,
 ///   `message` (the agent's own text, in `output`) or `reasoning`. A `message`
 ///   or `reasoning` event is one finished item, never a token delta, so a
 ///   single-sided member that talks as it works stamps this clock at each item
 ///   it finishes — while one spending ten minutes generating a single reply,
 ///   with no tool call and no finished item in between, still hands it nothing.
-/// * `onejudge` 0.19.2 delivers the worker's same normalized events **live**,
+/// * `onejudge` 0.19.5 delivers the worker's same normalized events **live**,
 ///   from inside `respond_observing`, as `Observation::Action` — a tool event as
 ///   `Observation::Tool` first and then as `Action`, the agent's words as
 ///   `Action` alone — so a two-party member's worker turn stamps this clock at
 ///   each finished item exactly as a single-sided member's does.
 ///   `Observation::Message` is still the turn's finished text, published after
 ///   the call has returned, and so still a turn boundary rather than progress
-///   within one. A judge's own tool events arrive live too, as
-///   `Observation::JudgeTool`, and stamp the clock like any observation, though
-///   they are not relayed; the panel's `Observation::JudgeDecided` is still one
-///   per judge, delivered only once its supervisor call has returned.
+///   within one. A judge's own tool events are not live: the engine takes them
+///   once the supervisor call has returned and delivers each as
+///   `Observation::JudgeTool` just before that judge's
+///   `Observation::JudgeDecided`, so they stamp the clock like any observation,
+///   though they are not relayed, but only at the decision's end.
 /// * The `alive N ago` an operator-facing view prints is `member-heartbeat`,
 ///   which [`crate::harness`] and [`crate::judge`] emit on their supervisor's
 ///   own timer whatever the member is doing. It is this process saying it is
