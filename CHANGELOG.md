@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.12...v0.5.13) - 2026-10-16
+
+### Fixed
+
+- *(deps)* link onejudge and the oneharness-core that shares one Codex app-server across dispatches ([#211](https://github.com/nickderobertis/oneagentgraph/pull/211))
+
 ## [0.5.11](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.10...v0.5.11) - 2026-10-15
 
 ### Fixed
