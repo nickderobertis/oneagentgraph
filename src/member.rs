@@ -533,7 +533,7 @@ impl Bounds {
 /// call it is dressed up as.
 ///
 /// **A message event resets this clock; a token-level stream does not, because
-/// nothing delivers one here.** Re-read on 2026-09-30 against the two engines
+/// nothing delivers one here.** Re-read on 2026-10-16 against the two engines
 /// this crate links. The stamp is a date rather than a release of this crate on
 /// purpose: it records when the upstream channels were last actually read,
 /// which a version bumped by the release automation would silently claim on
@@ -550,7 +550,7 @@ impl Bounds {
 ///   single-sided member that talks as it works stamps this clock at each item
 ///   it finishes — while one spending ten minutes generating a single reply,
 ///   with no tool call and no finished item in between, still hands it nothing.
-/// * `onejudge` 0.19.4 delivers the worker's same normalized events **live**,
+/// * `onejudge` 0.19.5 delivers the worker's same normalized events **live**,
 ///   from inside `respond_observing`, as `Observation::Action` — a tool event as
 ///   `Observation::Tool` first and then as `Action`, the agent's words as
 ///   `Action` alone — so a two-party member's worker turn stamps this clock at

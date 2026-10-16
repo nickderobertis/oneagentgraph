@@ -387,13 +387,15 @@ test-doubles = []
 # the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
 # still `^0.18.0`.
 #
-# **0.19.4 is what is linked**, and moves in lockstep with oneharness-core
+# **0.19.5 is what is linked**, and moves in lockstep with oneharness-core
 # 0.28.1 below: its published requirement is `^0.28.1`, a pre-1.0 minor past
 # the `^0.26.0` 0.19.1 and 0.19.2 asked for, so the two are edited together or
 # the graph carries two cores — the state `tests/inventory.rs` refuses. Every
 # call above compiles against it unchanged; what moved is the core it links,
 # whose shared Codex app-server the `oneharness-core` block below says this
-# crate's turns do not reach.
+# crate's turns do not reach. 0.19.5's library is 0.19.4's; only its own
+# `onejudge` binary changed, to host that pool's sweeper, and this crate links
+# the library, not that binary.
 #
 # 0.19.1 moved in lockstep with oneharness-core
 # 0.26.0 below: its published requirement is `^0.26.0`, a pre-1.0 minor the
@@ -451,7 +453,7 @@ test-doubles = []
 #      the engine and reads no CLI output.
 #   4. 0.19.2 reads and writes its YAML through serde-saphyr, so no libyaml
 #      translation reaches this graph through onejudge.
-onejudge = { version = "0.19.4", features = ["cli"] }
+onejudge = { version = "0.19.5", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -490,7 +492,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
 # **0.28.1 is what is linked, and it is linked exactly once**, in lockstep with
-# onejudge 0.19.4 above, which asks for `^0.28.1`. Its controlled Codex turns
+# onejudge 0.19.5 above, which asks for `^0.28.1`. Its controlled Codex turns
 # share one pooled app-server, yet no turn this crate runs reaches it: a
 # `kind: oneharness` member's `RunRequest` (`src/harness.rs`) leaves `control`
 # unset, so its turn is an uncontrolled `codex exec`, and a two-party member's

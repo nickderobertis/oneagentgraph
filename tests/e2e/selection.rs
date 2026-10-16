@@ -958,6 +958,26 @@ fn codex_launches_under(config: &str) -> Vec<Vec<String>> {
     launches
 }
 
+/// A member whose config has no `app_server` key runs its turn as one
+/// uncontrolled `codex exec` and never starts `codex app-server`: the request
+/// this crate builds leaves `control` unset, so the linked core's shared
+/// app-server pool is never reached and this binary has no idle server to sweep.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_names_no_app_server_runs_its_turn_as_codex_exec() {
+    let launches = codex_launches_under(CODEX_CHAIN);
+    assert!(
+        launches
+            .iter()
+            .all(|argv| argv.first().map(String::as_str) == Some("exec")),
+        "a turn was not started as `codex exec`: {launches:?}"
+    );
+    assert!(
+        !launches.iter().flatten().any(|arg| arg == "app-server"),
+        "the turn started a Codex app-server: {launches:?}"
+    );
+}
+
 /// Where in `argv` a plugins override sits, and whether it turns plugins on.
 #[cfg(unix)]
 fn plugins_flags(argv: &[String]) -> Vec<(usize, bool)> {
