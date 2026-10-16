@@ -943,11 +943,18 @@ fn codex_launches_under(config: &str) -> Vec<Vec<String>> {
 
     let recorded = std::fs::read_to_string(&record)
         .expect("the codex on PATH recorded its argv, so it is what the turn started");
+    // The core probes `codex --version` before a turn to key its shared model
+    // catalog (oneharness-core 0.27.0). That probe starts no session and takes no
+    // feature flags, so it is not one of the launches these journeys judge.
     let launches: Vec<Vec<String>> = recorded
         .split_terminator(&format!("{END}\n"))
-        .map(|launch| launch.lines().map(str::to_string).collect())
+        .map(|launch| launch.lines().map(str::to_string).collect::<Vec<_>>())
+        .filter(|argv| argv != &["--version"])
         .collect();
-    assert!(!launches.is_empty(), "codex was never started: {recorded}");
+    assert!(
+        !launches.is_empty(),
+        "codex never started a turn: {recorded}"
+    );
     launches
 }
 

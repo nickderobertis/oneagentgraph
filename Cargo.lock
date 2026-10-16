@@ -481,7 +481,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1275,9 +1275,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.26.0"
+version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82bfb0569aa25329c151994f1ebc96c20a0ccf27f70464608b9b640c1f4aec1a"
+checksum = "ca843b7528af3669112528459ab4713e87a62544cc3c66b3f1dc348e99857f3c"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",
@@ -1296,9 +1296,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.19.2"
+version = "0.19.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5566de7945e7c4bae28d310d141c972bd10329e3dd9faeaf0af751efed528837"
+checksum = "acae5d88bca5500eb4d25476d21d5ba5c8f6444deb73a36d376e59a49900fba5"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1646,7 +1646,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1703,7 +1703,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2021,7 +2021,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2420,7 +2420,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
