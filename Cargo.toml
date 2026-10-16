@@ -393,7 +393,7 @@ test-doubles = []
 # the graph carries two cores — the state `tests/inventory.rs` refuses. Every
 # call above compiles against it unchanged; what moved is the core it links,
 # whose shared Codex app-server the `oneharness-core` block below says this
-# crate's turns do not reach. 0.19.3 refreshed only onejudge's own lockfile.
+# crate's turns do not reach.
 #
 # 0.19.1 moved in lockstep with oneharness-core
 # 0.26.0 below: its published requirement is `^0.26.0`, a pre-1.0 minor the
@@ -490,18 +490,14 @@ schemars = { version = "1", features = ["preserve_order"] }
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
 # **0.28.1 is what is linked, and it is linked exactly once**, in lockstep with
-# onejudge 0.19.4 above, which asks for `^0.28.1`. 0.28.0 is the release that
-# runs every controlled Codex turn whose config names no `app_server` (or
-# `app_server = "shared"`) on one pooled `codex app-server` per pool key, rather
-# than one server per dispatch, and stops that server once its last lease has
-# ended and its linger has passed; 0.28.1 reports a refused upgrade and
-# releases the caller's output on macOS.
-# No turn this crate runs reaches that pool through this requirement: a
+# onejudge 0.19.4 above, which asks for `^0.28.1`. Its controlled Codex turns
+# share one pooled app-server, yet no turn this crate runs reaches it: a
 # `kind: oneharness` member's `RunRequest` (`src/harness.rs`) leaves `control`
 # unset, so its turn is an uncontrolled `codex exec`, and a two-party member's
 # sides run in the `oneharness` CLI through `src/judge.rs`'s spawn hook, which
 # pools and sweeps its own servers. So the `oneagentgraph` binary hosts no
 # sweeper (`io::app_server::serve_sweeper_if_requested`): it never pools.
+#
 # 0.27.0, carried along, shares one Codex model catalog per Codex home — a
 # launch first probes `codex --version` to key it — and starts Codex with
 # `-c analytics.enabled=false` unless the config opts in. Both are breaking for
