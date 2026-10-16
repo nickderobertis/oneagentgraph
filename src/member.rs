@@ -557,10 +557,11 @@ impl Bounds {
 ///   each finished item exactly as a single-sided member's does.
 ///   `Observation::Message` is still the turn's finished text, published after
 ///   the call has returned, and so still a turn boundary rather than progress
-///   within one. A judge's own tool events arrive live too, as
-///   `Observation::JudgeTool`, and stamp the clock like any observation, though
-///   they are not relayed; the panel's `Observation::JudgeDecided` is still one
-///   per judge, delivered only once its supervisor call has returned.
+///   within one. A judge's own tool events are not live: the engine takes them
+///   once the supervisor call has returned and delivers each as
+///   `Observation::JudgeTool` just before that judge's
+///   `Observation::JudgeDecided`, so they stamp the clock like any observation,
+///   though they are not relayed, but only at the decision's end.
 /// * The `alive N ago` an operator-facing view prints is `member-heartbeat`,
 ///   which [`crate::harness`] and [`crate::judge`] emit on their supervisor's
 ///   own timer whatever the member is doing. It is this process saying it is
