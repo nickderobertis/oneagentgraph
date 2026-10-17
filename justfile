@@ -549,4 +549,4 @@ lint-llm-validate *args:
 # once Nx collects run-commands output on `close`.
 # llmlint scoped to the files this branch changed since it forked from main.
 lint-llm-diff base="origin/main" *nx_args:
-    @base_sha=$(git rev-parse --verify --quiet "$1^{commit}") || { echo "lint-llm-diff: '$1' does not resolve to a commit; fetch it or pass an existing base" >&2; exit 1; }; echo "lint-llm-diff: base $base_sha"; NX_RUN_COMMANDS_DIRECTLY=false LLMLINT_DIFF_BASE_SHA="$base_sha" ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run oneagentgraph-workspace:lint-llm-diff "${@:2}"
+    @base_sha=$(git rev-parse --verify --quiet "$1^{commit}") || { echo "lint-llm-diff: '$1' does not resolve to a commit" >&2; exit 1; }; echo "lint-llm-diff: base $base_sha"; NX_RUN_COMMANDS_DIRECTLY=false LLMLINT_DIFF_BASE_SHA="$base_sha" ONEAGENTGRAPH_NX_SHOW_OUTPUT=1 bash scripts/nx.sh run oneagentgraph-workspace:lint-llm-diff "${@:2}"

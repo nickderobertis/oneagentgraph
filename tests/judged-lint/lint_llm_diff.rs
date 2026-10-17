@@ -528,7 +528,17 @@ fn an_unresolvable_base_is_refused_before_any_judge_call() {
         "an unresolvable base was judged:\n{}",
         refused.output
     );
-    refused.assert_says("'no-such-base' does not resolve to a commit");
+    let refusal: Vec<&str> = refused
+        .output
+        .lines()
+        .filter(|line| line.contains("no-such-base"))
+        .collect();
+    assert_eq!(
+        refusal,
+        ["lint-llm-diff: 'no-such-base' does not resolve to a commit"],
+        "the refusal is not one line naming the base, with no advice:\n{}",
+        refused.output
+    );
     assert!(
         !refused.says("nx run"),
         "Nx ran for a refused base:\n{}",
