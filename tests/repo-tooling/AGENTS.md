@@ -1,15 +1,16 @@
 # The repository's own tooling (`oneagentgraph-repo-tooling`)
 
 These journeys prove the gate rather than the crate: the justfile, `scripts/`,
-the Nx graph and its affected selection, the judged tier's cache, and what the
-workflows schedule. They exercise no line of the crate, so this tier runs
+the Nx graph and its affected selection, and what the workflows schedule. The
+judged tier is plain llmlint under Nx's own cache, and its journeys live in
+`tests/judged-lint/`, a project whose inputs are only what that tier reads. They exercise no line of the crate, so this tier runs
 uninstrumented and counts toward no coverage floor.
 
 - **Drive the real thing in a throwaway copy.** `checkout.rs` copies what git
   would commit into a temporary directory and links this checkout's
   `node_modules`; journeys commit there, never here. The real justfile,
   `scripts/nx.sh`, `scripts/nx-affected.sh`, Nx, and git run; only a paid or
-  non-deterministic boundary (the `llmlint` judge) is stood in for.
+  non-deterministic boundary is stood in for.
 - **The inputs are the tooling.** `repoToolingReads` in `nx.json` names
   `scripts/**`, every `project.json`, the workflows, and `.gitignore`; the
   justfile and `nx.json` arrive through `sharedGlobals`. A journey that reads

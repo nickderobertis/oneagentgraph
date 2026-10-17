@@ -32,6 +32,8 @@ const COVERAGE: &str = "oneagentgraph:coverage";
 const CONTRACT: &str = "oneagentgraph-contract:test";
 const E2E: &str = "oneagentgraph-e2e:test";
 const REPO_TOOLING: &str = "oneagentgraph-repo-tooling:test";
+/// The `just lint-llm-diff` journeys, which read only what the judged tier reads.
+const JUDGED_LINT: &str = "oneagentgraph-judged-lint:test";
 
 /// A commit nothing in any checkout can name: GitHub's `before` on a first push.
 const NO_COMMIT: &str = "0000000000000000000000000000000000000000";
@@ -182,7 +184,7 @@ fn assert_selects(tasks: &BTreeSet<String>, wanted: &[&str], unwanted: &[&str], 
 #[test]
 fn a_script_only_the_repo_tooling_journeys_read_selects_that_tier_alone() {
     let repo = Repo::new();
-    repo.change("scripts/llmlint-judge.sh");
+    repo.change("scripts/session-setup.sh");
 
     let (tasks, _) = repo.gate_tasks(AGAINST_MAIN);
     assert_selects(
@@ -373,7 +375,7 @@ fn a_base_branch_git_would_refuse_fails_closed_and_names_it() {
 #[test]
 fn with_neither_base_a_local_run_scopes_against_main() {
     let repo = Repo::new();
-    repo.change("scripts/llmlint-judge.sh");
+    repo.change("scripts/session-setup.sh");
 
     let (tasks, stderr) = repo.gate_tasks(&[]);
     assert_selects(
@@ -445,7 +447,7 @@ fn no_gate_run_selects_the_pool_maintenance_measurement() {
 fn a_push_build_scopes_to_the_commit_it_replaced_and_fails_closed_without_one() {
     let repo = Repo::new();
     let before = git(&repo.root, &["rev-parse", "HEAD"]).trim().to_string();
-    repo.change("scripts/llmlint-judge.sh");
+    repo.change("scripts/session-setup.sh");
 
     // What ci.yml passes on a push to main: no base branch, and the commit the
     // push replaced.
@@ -622,7 +624,7 @@ fn the_repo_tooling_test_cache_reruns_on_a_script_and_replays_over_crate_source(
     assert_test_target_keys_on_its_inputs(
         "tests/repo-tooling/project.json",
         REPO_TOOLING,
-        "scripts/llmlint-judge.sh",
+        "scripts/session-setup.sh",
         "src/lib.rs",
     );
 }
@@ -633,6 +635,39 @@ fn the_e2e_test_cache_reruns_on_a_journey_and_replays_over_a_tooling_script() {
         "tests/e2e/project.json",
         E2E,
         "tests/e2e/verbs.rs",
-        "scripts/llmlint-judge.sh",
+        "scripts/session-setup.sh",
+    );
+}
+
+#[test]
+fn the_judged_lint_test_cache_reruns_on_the_nx_launcher_and_replays_over_another_script() {
+    assert_test_target_keys_on_its_inputs(
+        "tests/judged-lint/project.json",
+        JUDGED_LINT,
+        "scripts/nx.sh",
+        "scripts/session-setup.sh",
+    );
+}
+
+#[test]
+fn only_a_change_to_what_the_judged_tier_reads_selects_its_journeys() {
+    let repo = Repo::new();
+    repo.change("src/lib.rs");
+    let (tasks, _) = repo.gate_tasks(AGAINST_MAIN);
+    assert_selects(
+        &tasks,
+        &[UNIT],
+        &[JUDGED_LINT],
+        "a change to the crate's source",
+    );
+
+    let repo = Repo::new();
+    repo.change("llmlint.yml");
+    let (tasks, _) = repo.gate_tasks(AGAINST_MAIN);
+    assert_selects(
+        &tasks,
+        &[JUDGED_LINT],
+        &[UNIT, CONTRACT, E2E, REPO_TOOLING],
+        "a change to the judged tier's rules",
     );
 }

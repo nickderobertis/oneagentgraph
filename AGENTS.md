@@ -93,19 +93,18 @@ across every project; what a target *does* stays with its project. Never loop
 over projects by hand in a recipe, and declare a cross-project dependency in the
 consuming `project.json` — an undeclared one silently drops that project out of
 `nx affected`, so a pull request runs a gate that never touched it. The crate's
-suite is split into Nx test-tier projects (unit, contract, e2e, repo tooling)
+suite is split into Nx test-tier projects (unit, contract, e2e, repo tooling,
+judged lint)
 under one Cargo package, with one 95% coverage floor merged across the
 instrumented tiers by `oneagentgraph:coverage`.
 `msrv` and `deps-check` run through repo-level Nx targets
 (`oneagentgraph-workspace:msrv`, `:deps-check`) that no `check` depends on.
 
 **The judged tier is memoized, because the judge is not deterministic.**
-`just lint-llm-diff` runs through a cached Nx target keyed on the whole workspace,
-the resolved base commit, and a fingerprint of the judge configuration, so one tree
-against one base gets one verdict. Only a green is cached — findings and a
-toolchain that never reached a verdict both re-judge. `--skip-nx-cache` is the one
-supported re-judge lever; an ambient `NX_SKIP_NX_CACHE` is reported and ignored by
-this tier alone. Read the verdict at `.logs/llmlint-diff.report`.
+`just lint-llm-diff` runs llmlint itself as a cached Nx target keyed on the tracked
+tree, the resolved base commit, and `llmlint fingerprint`, so a pass replays only
+for the same tree, base, and judge, and Nx never caches a failure; what you read is
+llmlint's and Nx's own output. `--skip-nx-cache` re-judges.
 
 ## Invariants (non-negotiable)
 

@@ -11,6 +11,7 @@
     ],
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
     "production": ["default"],
+    "trackedTree": ["{projectRoot}/**/*"],
     "screenshotSource": [
       "{workspaceRoot}/src/**/*",
       "{workspaceRoot}/personas/**/*",
@@ -70,6 +71,16 @@
       "{workspaceRoot}/rust-toolchain.toml",
       "sharedGlobals"
     ],
+    "judgedLintSource": ["{projectRoot}/**/*", "{workspaceRoot}/tests/repo-tooling/checkout.rs"],
+    "judgedLintReads": [
+      "{workspaceRoot}/nx.json",
+      "{workspaceRoot}/project.json",
+      "{workspaceRoot}/justfile",
+      "{workspaceRoot}/scripts/nx.sh",
+      "{workspaceRoot}/package-lock.json",
+      "{workspaceRoot}/llmlint.yml",
+      "{workspaceRoot}/oneharness.toml"
+    ],
     "repoToolingReads": [
       "{workspaceRoot}/.githooks/**/*",
       "{workspaceRoot}/scripts/**/*",
@@ -105,9 +116,9 @@
     "lint-llm-diff": {
       "cache": true,
       "inputs": [
-        { "runtime": "bash scripts/workspace-digest.sh" },
+        { "input": "trackedTree", "projects": ["*"] },
         { "env": "LLMLINT_DIFF_BASE_SHA" },
-        { "runtime": "./scripts/llmlint-fingerprint.sh" }
+        { "runtime": "llmlint fingerprint" }
       ]
     }
   }

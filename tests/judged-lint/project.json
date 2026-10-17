@@ -1,0 +1,29 @@
+{
+  "name": "oneagentgraph-judged-lint",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "library",
+  "sourceRoot": "tests/judged-lint",
+  "tags": ["scope:repo", "lang:rust"],
+  "implicitDependencies": [],
+  "targets": {
+    "bootstrap": { "executor": "nx:noop" },
+    "format": { "command": "just _tier-format judged-lint" },
+    "format-check": {
+      "command": "just _tier-fmt-check judged-lint",
+      "inputs": ["judgedLintSource", "{workspaceRoot}/rustfmt.toml"]
+    },
+    "lint": {
+      "command": "just _tier-lint judged-lint",
+      "inputs": ["judgedLintSource", "{workspaceRoot}/clippy.toml"]
+    },
+    "test": {
+      "command": "just _tier-test-quick judged-lint",
+      "inputs": ["judgedLintSource", "judgedLintReads"],
+      "parallelism": false
+    },
+    "check": {
+      "executor": "nx:noop",
+      "dependsOn": ["format-check", "lint", "test"]
+    }
+  }
+}

@@ -1,8 +1,8 @@
 //! Every integration-test target runs in exactly one tier.
 //!
 //! The suite is split into Nx projects, and the justfile's `contract-tests`,
-//! `e2e-tests`, and `repo-tooling-tests` lists are what each tier's targets hand
-//! to cargo. Cargo discovers a new `tests/*.rs` on its own, so a target missing
+//! `e2e-tests`, `repo-tooling-tests`, and `judged-lint-tests` lists are what each
+//! tier's targets hand to cargo. Cargo discovers a new `tests/*.rs` on its own, so a target missing
 //! from every list would compile and then run nowhere — a test that silently
 //! stopped gating. This holds the lists to what Cargo actually builds (asked of
 //! `cargo metadata`, not restated), and each listed target to the directory its
@@ -21,6 +21,7 @@ const TIERS: &[(&str, &str, &str)] = &[
     ("contract", "contract-tests", "tests"),
     ("e2e", "e2e-tests", "tests/e2e"),
     ("repo-tooling", "repo-tooling-tests", "tests/repo-tooling"),
+    ("judged-lint", "judged-lint-tests", "tests/judged-lint"),
 ];
 
 /// The package's integration-test targets, by name, with their source file.
