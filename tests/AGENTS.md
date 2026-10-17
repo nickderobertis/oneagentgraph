@@ -10,19 +10,21 @@ split is in which test binaries each project's targets hand to cargo.
 | `oneagentgraph-contract` | `tests/` (this directory) | `tests/*.rs`: the contract, schema, golden, inventory, release-declaration, and packaging tests | yes |
 | `oneagentgraph-e2e` | `tests/e2e/` | the binary journeys | yes |
 | `oneagentgraph-repo-tooling` | `tests/repo-tooling/` | the justfile, `scripts/`, Nx, and workflow journeys | no |
+| `oneagentgraph-judged-lint` | `tests/judged-lint/` | `just lint-llm-diff` through real Nx and the installed llmlint, in `check` only (Linux CI installs llmlint for it); its inputs are only what that tier reads (`judgedLintReads`) | no |
 
 Rules that hold as this grows:
 
 - **A test target belongs to exactly one tier.** The justfile's `contract-tests`,
-  `e2e-tests`, and `repo-tooling-tests` lists are the assignment, and
-  `tests/repo-tooling/tier_partition.rs` fails the gate on a target in no list,
-  in two, or outside the directory its tier's project owns. Cargo discovers a new
+  `e2e-tests`, `repo-tooling-tests`, and `judged-lint-tests` lists are the
+  assignment, and `tests/repo-tooling/tier_partition.rs` fails the gate on a
+  target in no list, in two, or outside the directory its tier's project owns. Cargo discovers a new
   `tests/*.rs` by itself; add its name to `contract-tests` in the same change.
 - **A file a test reads is an input of that tier's `test` target.** Nx cannot see
   through `include_str!` or a path joined onto `CARGO_MANIFEST_DIR`, so the
   repository files each tier reads are named in `nx.json` (`contractReads`,
-  `e2eReads`, `repoToolingReads`). A file missing there is a change that replays a
-  stale green from the cache, and one Nx does not count as reaching the tier.
+  `e2eReads`, `repoToolingReads`, `judgedLintReads`). A file missing there is a
+  change that replays a stale green from the cache, and one Nx does not count as
+  reaching the tier.
 - **Coverage is one floor over the three instrumented tiers.** Each writes its
   raw profiles under its own name (`target/llvm-cov-target/oneagentgraph-<tier>-*`,
   declared as its `outputs`), and `oneagentgraph:coverage` merges them at 95%

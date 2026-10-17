@@ -4,10 +4,7 @@
   "projectType": "application",
   "tags": ["scope:repo", "lang:rust"],
   "targets": {
-    "lint-llm-diff": {
-      "command": "bash scripts/llmlint-judge.sh",
-      "outputs": ["{workspaceRoot}/.logs/llmlint-diff.report"]
-    },
+    "lint-llm-diff": { "command": "llmlint --diff --diff-base \"$LLMLINT_DIFF_BASE_SHA\"" },
     "screenshots": {
       "command": "just _crate-screenshots",
       "inputs": ["screenshotSource"],

@@ -87,6 +87,10 @@ jobs:
       # tests/e2e/history_store.rs records a run's file-system calls with it.
       - name: Install strace
         run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+      # tests/judged-lint drives `just lint-llm-diff` through the installed llmlint.
+      - uses: astral-sh/setup-uv@v6
+      - name: Install llmlint toolchain
+        run: just setup-llmlint
       - name: Quality gate (affected projects)
         env:
           ONEAGENTGRAPH_NX_BASE_SHA: ${{ github.event_name == 'push' && github.event.before || '' }}
@@ -121,6 +125,10 @@ jobs:
       # tests/e2e/history_store.rs records a run's file-system calls with it.
       - name: Install strace
         run: sudo apt-get update -qq && sudo apt-get install -y -qq strace
+      # tests/judged-lint drives `just lint-llm-diff` through the installed llmlint.
+      - uses: astral-sh/setup-uv@v6
+      - name: Install llmlint toolchain
+        run: just setup-llmlint
       - name: Quality gate (every project)
         run: just check
       # The pool-maintenance pass's budget builds the repository twice, so no
