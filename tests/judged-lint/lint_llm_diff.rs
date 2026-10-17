@@ -70,7 +70,6 @@ process.stdout.write(JSON.stringify({ schema_version: "0.1",
 ' -- "$@"
 "#;
 
-/// What one command printed and returned.
 struct Run {
     ok: bool,
     stdout: String,
@@ -243,11 +242,12 @@ impl Workspace {
         command
     }
 
-    /// `just lint-llm-diff <base>`, as CI and the gate call it.
-    fn lint(&self, base: &str, env: &[(&str, &str)]) -> Run {
+    /// `just lint-llm-diff <base> [nx_args]`, as CI and the gate call it.
+    fn lint(&self, base: &str, nx_args: &[&str], env: &[(&str, &str)]) -> Run {
         let output = self
             .command("just")
             .args(["lint-llm-diff", base])
+            .args(nx_args)
             .envs(env.iter().copied())
             .output()
             .expect("`just` runs the recipe — install it and retry");
@@ -289,7 +289,6 @@ impl Workspace {
         git(&self.root, &["rev-parse", "HEAD~1"]).trim().to_string()
     }
 
-    /// Add a line to [`JUDGED`], creating it the first time.
     fn change_judged_file(&self) {
         let path = self.root.join(JUDGED);
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
@@ -309,7 +308,7 @@ impl Workspace {
 
     /// Judge once and expect a pass the stand-in recorded.
     fn judged_pass(&self, base: &str, calls_before: usize) -> Run {
-        let run = self.lint(base, &[]);
+        let run = self.lint(base, &[], &[]);
         assert!(run.ok, "the judged run should have passed:\n{}", run.output);
         assert_eq!(
             self.judge_calls().len(),
@@ -328,7 +327,7 @@ impl Workspace {
     /// Run again and expect Nx to replay the earlier pass with no judge call.
     fn replayed_pass(&self, base: &str, judged: &Run) -> Run {
         let calls = self.judge_calls().len();
-        let run = self.lint(base, &[]);
+        let run = self.lint(base, &[], &[]);
         assert!(
             run.ok,
             "the replayed run should have passed:\n{}",
@@ -457,14 +456,14 @@ fn a_failing_verdict_reaches_a_piped_caller_and_is_judged_again() {
     let base = workspace.base();
     let ci = [("CI", "true"), ("CLAUDECODE", "1")];
 
-    let failed = workspace.lint(&base, &[ci[0], ci[1], ("STANDIN_REPLY", "fail")]);
+    let failed = workspace.lint(&base, &[], &[ci[0], ci[1], ("STANDIN_REPLY", "fail")]);
     assert!(!failed.ok, "a failing verdict passed:\n{}", failed.output);
     failed
         .assert_says("FAIL comments_explain_why")
         .assert_says("JUDGED.md:1: stand-in finding");
     assert_eq!(workspace.judge_calls().len(), 1);
 
-    let again = workspace.lint(&base, &ci);
+    let again = workspace.lint(&base, &[], &ci);
     assert!(
         again.ok,
         "the re-judged run should have passed:\n{}",
@@ -484,7 +483,7 @@ fn assert_an_incomplete_reply_fails_and_is_judged_again(reply: &str, unanswered:
     let workspace = Workspace::new();
     let base = workspace.base();
 
-    let refused = workspace.lint(&base, &[("STANDIN_REPLY", reply)]);
+    let refused = workspace.lint(&base, &[], &[("STANDIN_REPLY", reply)]);
     assert!(
         !refused.ok,
         "an incomplete reply passed:\n{}",
@@ -523,7 +522,7 @@ fn a_reply_answering_some_rules_fails_naming_the_rest_and_is_judged_again() {
 fn an_unresolvable_base_is_refused_before_any_judge_call() {
     let workspace = Workspace::new();
 
-    let refused = workspace.lint("no-such-base", &[]);
+    let refused = workspace.lint("no-such-base", &[], &[]);
     assert!(
         !refused.ok,
         "an unresolvable base was judged:\n{}",
@@ -536,4 +535,38 @@ fn an_unresolvable_base_is_refused_before_any_judge_call() {
         refused.output
     );
     assert!(workspace.judge_calls().is_empty());
+}
+
+#[test]
+fn an_explicit_or_ambient_cache_skip_judges_again() {
+    let workspace = Workspace::new();
+    let base = workspace.base();
+    workspace.judged_pass(&base, 0);
+
+    for (nx_args, env, what) in [
+        (
+            &["--skip-nx-cache"][..],
+            &[][..],
+            "`--skip-nx-cache` after the base",
+        ),
+        (
+            &[][..],
+            &[("NX_SKIP_NX_CACHE", "true")][..],
+            "an exported NX_SKIP_NX_CACHE",
+        ),
+    ] {
+        let calls = workspace.judge_calls().len();
+        let run = workspace.lint(&base, nx_args, env);
+        assert!(
+            run.ok,
+            "the run under {what} should have passed:\n{}",
+            run.output
+        );
+        assert_eq!(
+            workspace.judge_calls().len(),
+            calls + 1,
+            "{what} replayed the cached pass instead of judging again:\n{}",
+            run.output
+        );
+    }
 }
