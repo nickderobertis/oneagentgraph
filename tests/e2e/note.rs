@@ -2015,3 +2015,222 @@ fn a_caller_that_waits_after_the_member_settled_reads_what_became_of_its_note() 
         "a caller asking after the member settled was not told what became of its note"
     );
 }
+
+/// A wait bounded by a deadline returns the conversation's answer whenever the
+/// note was taken before that deadline — however late the answer comes. A note
+/// to the supervisor is taken the moment it redirects the judge's live decision,
+/// but answered only once that decision is taken, which the journey holds past
+/// the deadline.
+#[cfg(unix)]
+#[test]
+fn a_note_taken_before_its_deadline_is_answered_however_late_the_answer_comes() {
+    let _serial = serial();
+    let workspace = Workspace::new();
+    let gate = workspace.at("judge-gate");
+    let entered = workspace.at("judge-gate.entered");
+    let running = start(
+        &workspace,
+        "",
+        &format!("fake:should-fail fake:supervisor-hold={}", gate.display()),
+    );
+    until("the judge's own turn to be in flight", || entered.exists());
+    std::fs::remove_file(&entered).expect("clear the judge's marker");
+
+    let offer = admitted(
+        &workspace,
+        &running,
+        &Note::new(
+            Addressee::Supervisor,
+            "the bar now includes a rollback plan",
+        )
+        .expect("a note with text in it"),
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let (answered, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answered.send(offer.wait_until(deadline).expect("a wait answers"));
+    });
+    until("the redirected decision to be in flight", || {
+        entered.exists()
+    });
+    std::thread::sleep(deadline.saturating_duration_since(std::time::Instant::now()));
+    wait_the_ordering_margin();
+    assert!(
+        answer.try_recv().is_err(),
+        "the decision the note redirected was answered before it was taken"
+    );
+    std::fs::write(&gate, "go").expect("release the judge");
+    assert_eq!(
+        answer
+            .recv_timeout(ANSWER_BOUND)
+            .expect("the note was answered"),
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Supervisor
+        }),
+        "a note taken before its deadline was not answered once the decision came back"
+    );
+    running.run.wait().expect("the member settles");
+}
+
+/// A member whose conversation ends with notes no turn took answers every one of
+/// them as undelivered — a wait already in flight, bounded by a deadline that has
+/// not passed, as the conversation ends, and a caller that waits only afterwards
+/// from the answer the member wrote down — and publishes each on its stream.
+///
+/// The member is cancelled while both notes wait for its held turn to end, which
+/// ends the conversation with neither taken.
+#[cfg(unix)]
+#[test]
+fn a_member_that_ends_with_notes_untaken_answers_each_as_undelivered() {
+    let _serial = serial();
+    let workspace = Workspace::new();
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let running = start(
+        &workspace,
+        "",
+        &format!(
+            "fake:should-fail fake:entered={} fake:hold={}",
+            began.display(),
+            release.display()
+        ),
+    );
+    until("the worker's turn to be in flight", || began.exists());
+    let events = running.run.started().events_path.clone();
+    let turn_end = |text: &str| {
+        Note::new(Addressee::Worker, text)
+            .expect("a note with text in it")
+            .with_delivery(NoteDeliveryMode::TurnEnd)
+    };
+    let waited = admitted(
+        &workspace,
+        &running,
+        &turn_end("first, the open review comments"),
+    );
+    let late = admitted(&workspace, &running, &turn_end("then, the changelog"));
+    let (waited_id, late_id) = (waited.id().to_string(), late.id().to_string());
+    let deadline = std::time::Instant::now() + ANSWER_BOUND;
+    let (answered, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = answered.send(waited.wait_until(deadline).expect("a wait answers"));
+    });
+    wait_the_ordering_margin();
+
+    running.run.cancel().expect("the run takes the cancel");
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+    let _ = running.run.wait();
+
+    assert!(
+        matches!(
+            answer
+                .recv_timeout(ANSWER_BOUND)
+                .expect("the in-flight wait was answered"),
+            NoteDelivery::Undelivered(_)
+        ),
+        "a wait in flight as the conversation ended was not told its note was undelivered"
+    );
+    assert!(
+        matches!(
+            late.wait().expect("a wait answers"),
+            NoteDelivery::Undelivered(_)
+        ),
+        "a caller waiting after the member ended was not told its note was undelivered"
+    );
+    for id in [&waited_id, &late_id] {
+        let answered = naming(&events, "turn-interrupted", id);
+        assert_eq!(
+            answered.len(),
+            1,
+            "{id} was not answered on the stream once"
+        );
+        assert_eq!(answered[0]["payload"]["delivered"], false);
+        assert!(
+            answered[0]["payload"]["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("was not delivered")),
+            "{}",
+            answered[0]
+        );
+        assert!(answered[0]["payload"].get("accepted").is_none());
+    }
+}
+
+/// `--output text` renders a note's life as a person watching the run reads it:
+/// its admission, naming the offer and whom it is for, and its answer, saying how
+/// the note was accepted.
+#[cfg(unix)]
+#[test]
+fn a_text_rendering_shows_a_note_admitted_and_how_it_was_accepted() {
+    use crate::support::Hermetic;
+
+    let workspace = Workspace::new();
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let child = std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+        .args([
+            "run",
+            "./graph.yaml",
+            "--output",
+            "text",
+            "--task",
+            &format!(
+                "fake:entered={} fake:hold={}",
+                began.display(),
+                release.display()
+            ),
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ])
+        .current_dir(workspace.path())
+        .env("ONEAGENTGRAPH_STATE_DIR", workspace.state())
+        .env("ONEAGENTGRAPH_ONEHARNESS_BIN", oneharness_bin())
+        .env("XDG_STATE_HOME", workspace.session_store())
+        .hermetic()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the run starts");
+    until("the worker's turn to be in flight", || began.exists());
+    let run_id = run::RunId::parse(
+        workspace.record()["run_id"]
+            .as_str()
+            .expect("the run recorded its id"),
+    )
+    .expect("a run id");
+    let member = MemberName::parse("worker").expect("a member name");
+    let offered = control::offer_note(
+        &workspace.state(),
+        &run_id,
+        &member,
+        &Note::new(Addressee::Worker, "fake:complete-now ship the fix first")
+            .expect("a note with text in it"),
+        &oneharness_bin(),
+    )
+    .expect("the run and its member are addressable");
+    let NoteOffered::Admitted(offer) = offered else {
+        panic!("the note was not admitted: {offered:?}");
+    };
+    let id = offer.id().to_string();
+    assert_eq!(
+        offer.wait().expect("a wait answers"),
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Worker
+        })
+    );
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+    let output = child.wait_with_output().expect("the run finishes");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains(&format!("note-admitted {id} for worker"))),
+        "the admission was not rendered:\n{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains("turn-interrupted delivered interrupted (worker)")),
+        "how the note was accepted was not rendered:\n{stdout}"
+    );
+}

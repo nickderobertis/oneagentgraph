@@ -653,10 +653,13 @@ fn anchor(
 /// the bar has to land: without a lever there, a note to the supervisor waits for
 /// the decision it was meant to change and costs a second judge invocation to
 /// re-take it. The two sides run on separate session handles (`<base>-skill`,
-/// `<base>-user`), so the two sockets never share an address; in a split
-/// provider each harness judge asks on its own entry, and onejudge redirects a
-/// panel's turn only when the panel is one judge — several judges deciding at
-/// once are never redirected one at a time.
+/// `<base>-user`), so the two sockets never share an address. One `control` on
+/// the `kind: oneharness` block is the ask for both parties. A `split` block's
+/// judge entries do not ask: a split always seats a panel — one harness judge is
+/// the plain block above — and onejudge never redirects a panel's turn, because
+/// several judges deciding at once cannot be redirected one at a time. Asking
+/// there would open sockets nothing dials, and move a Codex judge onto its
+/// app-server to do it.
 const ASK_FOR_CONTROL: bool = true;
 
 /// The onejudge `provider` block for a two-party member.
@@ -736,7 +739,6 @@ fn provider_block(
                     "kind": "oneharness",
                     "bin": context.oneharness_bin,
                     "judge_config": path.display().to_string(),
-                    "control": ASK_FOR_CONTROL,
                 })
             }
             JudgeSide::Llmlint(llmlint) => {
@@ -2146,13 +2148,12 @@ mod tests {
             block["judges"],
             serde_json::json!([
                 {"kind": "oneharness", "bin": "oneharness",
-                 "judge_config": reviewer.display().to_string(), "control": true,
-                 "label": "reviewer"},
+                 "judge_config": reviewer.display().to_string(), "label": "reviewer"},
                 {"kind": "llmlint", "config": llmlint_config.display().to_string(),
                  "diff_base": "origin/main", "args": ["--rule", "no_todo"]},
                 {"kind": "command", "command": ["my-judge"]},
                 {"kind": "oneharness", "bin": "oneharness",
-                 "judge_config": second.display().to_string(), "control": true},
+                 "judge_config": second.display().to_string()},
                 {"kind": "llmlint", "bin": "/opt/llmlint", "label": "lint"},
             ])
         );

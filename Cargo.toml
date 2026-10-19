@@ -401,16 +401,6 @@ test-doubles = []
 # requirements are `^0.28.4` and `^0.9.2`, so the three are edited together or
 # the graph carries two copies — the state `tests/inventory.rs` refuses.
 #
-# 0.19.5 moved in lockstep with oneharness-core
-# 0.28.1 below: its published requirement is `^0.28.1`, a pre-1.0 minor past
-# the `^0.26.0` 0.19.1 and 0.19.2 asked for, so the two are edited together or
-# the graph carries two cores — the state `tests/inventory.rs` refuses. Every
-# call above compiles against it unchanged; what moved is the core it links,
-# whose shared Codex app-server the `oneharness-core` block below says this
-# crate's turns do not reach. 0.19.5's library is 0.19.4's; only its own
-# `onejudge` binary changed, to host that pool's sweeper, and this crate links
-# the library, not that binary.
-#
 # 0.19.1 moved in lockstep with oneharness-core
 # 0.26.0 below: its published requirement is `^0.26.0`, a pre-1.0 minor the
 # `^0.24.0` 0.19.0 asked for excludes, so the two are edited together or the

@@ -172,14 +172,14 @@ pub enum NoteOffered {
 /// stream.
 #[derive(Debug)]
 pub struct NoteOffer {
-    id: String,
+    id: OfferId,
     state: OfferState,
 }
 
 #[derive(Debug)]
 enum OfferState {
-    /// Held by the member's relay, reached through its spool.
-    Relayed { scratch: PathBuf, offer: OfferId },
+    /// Held by the member's relay, reached through the spool in this scratch.
+    Relayed { scratch: PathBuf },
     /// Answered already, by a member that has no offer to hold: a run started by
     /// a build whose endpoint took a bare note, or a single-sided member whose one
     /// lever answered at once. There is nothing to take back.
@@ -190,7 +190,7 @@ impl NoteOffer {
     /// An offer whose answer is already known, with nothing to take back.
     pub(crate) fn answered(delivery: NoteDelivery) -> Self {
         Self {
-            id: OfferId::mint().0,
+            id: OfferId::mint(),
             state: OfferState::Answered(delivery),
         }
     }
@@ -199,7 +199,7 @@ impl NoteOffer {
     /// `note-admitted`, `turn-interrupted` and `note-withdrawn` events name it by.
     #[must_use]
     pub fn id(&self) -> &str {
-        &self.id
+        &self.id.0
     }
 
     /// Block until the conversation has answered the note.
@@ -212,14 +212,14 @@ impl NoteOffer {
     pub fn wait(self) -> Result<NoteDelivery, crate::error::Error> {
         Ok(match self.state {
             OfferState::Answered(delivery) => delivery,
-            OfferState::Relayed { scratch, offer } => {
+            OfferState::Relayed { scratch } => {
                 let asked = ask(
                     &scratch,
                     Request::Wait {
-                        offer: offer.clone(),
+                        offer: self.id.clone(),
                     },
                 );
-                resolve(&scratch, &offer, asked)
+                resolve(&scratch, &self.id, asked)
             }
         })
     }
@@ -235,7 +235,7 @@ impl NoteOffer {
     pub fn wait_until(self, deadline: Instant) -> Result<NoteDelivery, crate::error::Error> {
         Ok(match self.state {
             OfferState::Answered(delivery) => delivery,
-            OfferState::Relayed { scratch, offer } => {
+            OfferState::Relayed { scratch } => {
                 // Named as an instant on the clock both processes read, never as
                 // a span: a span would restart when the member received it, and
                 // the time the request spent crossing the spool would extend the
@@ -244,11 +244,11 @@ impl NoteOffer {
                 let asked = ask(
                     &scratch,
                     Request::WaitUntil {
-                        offer: offer.clone(),
+                        offer: self.id.clone(),
                         deadline_unix_ms: unix_millis(SystemTime::now() + left),
                     },
                 );
-                resolve(&scratch, &offer, asked)
+                resolve(&scratch, &self.id, asked)
             }
         })
     }
@@ -262,13 +262,13 @@ impl NoteOffer {
     /// took the note first — or when that cannot be established, which reads as
     /// taken.
     pub fn withdraw(self) -> Result<(), Self> {
-        let OfferState::Relayed { scratch, offer } = &self.state else {
+        let OfferState::Relayed { scratch } = &self.state else {
             return Err(self);
         };
         match ask(
             scratch,
             Request::Withdraw {
-                offer: offer.clone(),
+                offer: self.id.clone(),
             },
         ) {
             Ok(Reply::Withdrawn) => Ok(()),
@@ -457,10 +457,9 @@ pub(crate) fn offer(scratch: &Path, note: &Note) -> NoteOffered {
         },
     ) {
         Ok(Reply::Admitted) => NoteOffered::Admitted(NoteOffer {
-            id: offer.0.clone(),
+            id: offer,
             state: OfferState::Relayed {
                 scratch: scratch.to_path_buf(),
-                offer,
             },
         }),
         Ok(Reply::Undelivered(undelivered)) | Err(undelivered) => {
