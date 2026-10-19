@@ -592,12 +592,15 @@ fn long_named(graph: &str) -> String {
 /// score of bytes longer than the link — enough to carry an address fitted to
 /// the link past the budget, not so much that none fits the target — which is
 /// that host's shape on any unix, so the Linux legs drive what the macOS leg
-/// does.
+/// does. Both sit in the journey's short session store rather than the
+/// workspace: macOS puts a workspace under `/var/folders/…/T/`, which resolves
+/// so long that no socket name fits under it, so a target there leaves the turn
+/// without a lever however the link is resolved.
 #[cfg(unix)]
 fn redirected_through_a_link(graph: &str, member: &str) -> (PathBuf, serde_json::Value) {
     let workspace = Workspace::new();
     workspace.graph(&long_named(graph));
-    let target = workspace.path().join("store-behind-a-link");
+    let target = workspace.session_store().join("store-behind-a-link");
     std::fs::create_dir_all(&target).expect("the store the link resolves to");
     let link = workspace.session_store().join("l");
     std::os::unix::fs::symlink(&target, &link).expect("the link the run is handed");
