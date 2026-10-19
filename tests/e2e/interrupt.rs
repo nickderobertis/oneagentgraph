@@ -478,6 +478,53 @@ fn a_single_sided_member_on_a_codex_chain_stays_on_exec_and_opens_no_controllabl
 }
 // llmlint: ignore-end[tests_mirror_real_usage]
 
+/// A single-sided member whose chain holds one candidate oneharness interrupts
+/// in place and one it does not opens **no** controllable turn: one `--control`
+/// covers the whole chain, so asking would move the Codex candidate onto its
+/// app-server should it serve. The member still runs — on the candidate that
+/// serves it — and `interrupt` answers exit 3 naming the candidate that kept it
+/// uncontrolled.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_on_a_mixed_chain_runs_uncontrolled_and_says_which_candidate() {
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    ));
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"codex\"]\n",
+    );
+    workspace
+        .run_task("fake:complete-now: report in")
+        .expect_code(0);
+    let report: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "report.json"))
+            .expect("the report is JSON");
+    assert_eq!(report["fallback"]["ran"], "claude-code", "{report}");
+    let record: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "control.json"))
+            .expect("the control record is JSON");
+    assert_eq!(record["turn"]["state"], "unavailable", "{record}");
+
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let interrupted = workspace.run(&["interrupt", &run_id, "reporter", "--input", "instead"]);
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        reason.contains("opened no controllable turn")
+            && reason.contains("codex")
+            && !reason.contains("claude-code"),
+        "{reason}"
+    );
+}
+
 /// A single-sided member on a harness oneharness interrupts in place opens its
 /// turn with control, and an `interrupt` redirects it exactly as it redirects a
 /// two-party member's agent side: the parked turn stops, and the redirection is
