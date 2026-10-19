@@ -26,9 +26,10 @@ use oneagentgraph::error::{
 use oneagentgraph::event::{
     session_label, Artifact, AttemptedCandidate, Cause, Dimensions, Disposition, Envelope,
     EventFilter, EventKind, FallbackAdvanced, Labels, MatchFields, Matcher, MemberDied,
-    MemberStarted, OneharnessSession, Origin, Party, PreTurnContext, PreTurnOutcome, Role, Runner,
-    Source, TurnActivity, TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, Usage,
-    ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
+    MemberStarted, NoteAccepted, NoteAdmitted, NoteWithdrawn, OneharnessSession, Origin, Party,
+    PreTurnContext, PreTurnOutcome, Role, Runner, Source, TurnActivity, TurnCompleted,
+    TurnInterrupted, TurnMessage, TurnStarted, Usage, WithdrawnReason, ENVELOPE_VERSION,
+    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
     ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL, SOURCE_WORD,
 };
 use oneagentgraph::liveness::{
@@ -59,6 +60,8 @@ const ALL_EVENT_KINDS: &[EventKind] = &[
     EventKind::TurnCompleted,
     EventKind::JudgeDecided,
     EventKind::TurnInterrupted,
+    EventKind::NoteAdmitted,
+    EventKind::NoteWithdrawn,
     EventKind::MemberHeartbeat,
     EventKind::FallbackAdvanced,
     EventKind::OneharnessSession,
@@ -813,6 +816,130 @@ fn a_turn_interrupted_payload_names_the_member_and_whether_it_landed() {
         serde_json::from_value::<TurnInterrupted>(serialized).expect("parses"),
         refused
     );
+}
+
+/// The three note payloads are exactly what the contract shows, each driven
+/// through the type this build publishes — and an answer to an offered note
+/// carries `accepted` and `party` only when it was accepted, so a turn-end
+/// delivery and an interrupted one read apart on `accepted` while `delivered`
+/// stays the boolean every consumer already reads.
+#[test]
+fn the_documented_note_payloads_are_the_ones_this_build_publishes() {
+    let admitted: NoteAdmitted =
+        serde_json::from_str(&fenced_block("json note-admitted")).expect("note-admitted parses");
+    assert_eq!(
+        admitted.addressee,
+        oneagentgraph::note::Addressee::Supervisor
+    );
+    assert_eq!(
+        serde_json::to_value(&admitted).expect("serializes"),
+        serde_json::from_str::<Value>(&fenced_block("json note-admitted")).expect("JSON")
+    );
+
+    let withdrawn: NoteWithdrawn =
+        serde_json::from_str(&fenced_block("json note-withdrawn")).expect("note-withdrawn parses");
+    assert_eq!(withdrawn.reason, WithdrawnReason::Expired);
+    assert_eq!(
+        withdrawn.offer, admitted.offer,
+        "the two examples name one offer"
+    );
+    for (reason, word) in [
+        (WithdrawnReason::Expired, "expired"),
+        (WithdrawnReason::Withdrawn, "withdrawn"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(reason).expect("serializes"),
+            json!(word)
+        );
+        assert!(
+            CONTRACT.contains(&format!("`{word}`")),
+            "the contract does not name the `{word}` reason"
+        );
+    }
+
+    let documented: Value =
+        serde_json::from_str(&fenced_block("json turn-interrupted-note")).expect("JSON");
+    let answered: TurnInterrupted =
+        serde_json::from_value(documented.clone()).expect("the documented answer parses");
+    assert_eq!(answered.accepted, Some(NoteAccepted::AtTurnEnd));
+    assert_eq!(answered.party, Some(oneagentgraph::note::Party::Worker));
+    assert_eq!(answered.offer.as_deref(), Some(admitted.offer.as_str()));
+    assert_eq!(
+        serde_json::to_value(&answered).expect("serializes"),
+        documented
+    );
+    for (accepted, word) in [
+        (NoteAccepted::Queued, "queued"),
+        (NoteAccepted::Interrupted, "interrupted"),
+        (NoteAccepted::AtTurnEnd, "at-turn-end"),
+        (NoteAccepted::JudgedWith, "judged-with"),
+    ] {
+        assert_eq!(
+            serde_json::to_value(accepted).expect("serializes"),
+            json!(word)
+        );
+        assert!(
+            CONTRACT.contains(word),
+            "the contract does not name the `{word}` answer"
+        );
+    }
+
+    // An interrupt, which offers nothing, gains no field.
+    let interrupt = TurnInterrupted {
+        member: "worker".to_string(),
+        delivered: true,
+        input_bytes: 3,
+        reason: None,
+        truncated: false,
+        offer: None,
+        accepted: None,
+        party: None,
+    };
+    assert_eq!(
+        serde_json::to_value(&interrupt).expect("serializes"),
+        json!({"member": "worker", "delivered": true, "input_bytes": 3})
+    );
+}
+
+/// The offer surface the contract states is the one this build exports,
+/// signature for signature: each documented item is bound to the exact type the
+/// contract gives it, so a drift in either is a compile failure here.
+#[test]
+fn the_documented_offer_surface_is_the_one_this_build_exports() {
+    use oneagentgraph::control::{self, Note, NoteDelivery, NoteOffer, NoteOffered};
+    let _: fn(
+        &std::path::Path,
+        &RunId,
+        &oneagentgraph::run::MemberName,
+        &Note,
+        &str,
+    ) -> Result<NoteOffered, Error> = control::offer_note;
+    let _: fn(
+        &std::path::Path,
+        &RunId,
+        &oneagentgraph::run::MemberName,
+        &Note,
+        &str,
+    ) -> Result<NoteDelivery, Error> = control::note;
+    let _: fn(&NoteOffer) -> &str = NoteOffer::id;
+    let _: fn(NoteOffer) -> Result<NoteDelivery, Error> = NoteOffer::wait;
+    let _: fn(NoteOffer, std::time::Instant) -> Result<NoteDelivery, Error> = NoteOffer::wait_until;
+    let _: fn(NoteOffer) -> Result<(), NoteOffer> = NoteOffer::withdraw;
+    let expired = NoteDelivery::Expired;
+    assert!(matches!(expired, NoteDelivery::Expired));
+    for item in [
+        "pub fn offer_note(state_dir: &Path, run_id: &RunId, member: &MemberName, note: &Note, \
+         oneharness_bin: &str) -> Result<NoteOffered, Error>;",
+        "pub enum NoteOffered { Admitted(NoteOffer), Undelivered(Undelivered) }",
+        "pub fn wait_until(self, deadline: std::time::Instant) -> Result<NoteDelivery, Error>;",
+        "pub fn withdraw(self) -> Result<(), NoteOffer>;",
+        "pub enum NoteDelivery { Accepted(Accepted), Undelivered(Undelivered), Expired }",
+    ] {
+        assert!(
+            fenced_block("rust").contains(item),
+            "the contract no longer states `{item}`"
+        );
+    }
 }
 
 /// The four exit codes `interrupt` assigns, and the one that is a *fact* rather
