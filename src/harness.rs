@@ -319,6 +319,12 @@ fn refused_control(err: &oneharness_core::errors::OneharnessError) -> bool {
             | E::ControlModeUnsupported { .. }
             | E::ControlOutputFormat { .. }
             | E::ControlSocketAddress { .. }
+            // The socket could not be bound — an address resolving past the
+            // budget, one already served — which oneharness decides before the
+            // harness spawns; onejudge's ladder drops the ask on it for the same
+            // reason. The one other place it is raised is a listener path that
+            // is not absolute after `bind` canonicalized it, which cannot occur.
+            | E::ControlSocket { .. }
             | E::ControlNoSessionDir
             | E::MultiModelConflict { .. }
             | E::SessionMultipleHarnesses { .. }
@@ -1736,6 +1742,10 @@ mod tests {
             supported: "claude-code".into(),
         }));
         assert!(refused_control(&E::SessionBatch));
+        assert!(refused_control(&E::ControlSocket {
+            path: "/private/tmp/store/control/run-reporter.sock".into(),
+            source: std::io::Error::other("past this platform's 104-byte limit"),
+        }));
         assert!(!refused_control(&E::NoSelection));
     }
 }

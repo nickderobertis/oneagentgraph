@@ -31,6 +31,9 @@
 //!   onejudge never passes it, so a run and an `interrupt` that both say nothing
 //!   resolve the same store — recomputing that platform default here would be a
 //!   second source for one fact, and wrong for any run whose store *was* named.
+//!   Both ends do resolve it through any link, with oneharness's own resolver
+//!   ([`default_store`]), because a socket's name is fitted to the store's
+//!   spelled length.
 //!
 //! The record is written twice: [`Turn::Open`] when the member starts, so the
 //! lever exists while the turn an operator wants to redirect is the one in flight,
@@ -526,6 +529,24 @@ fn settled(record: &crate::run::Record, member: &str) -> bool {
 /// by a binary this build does not choose.
 #[must_use]
 pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
+    // A record naming no store left the run on oneharness's default, which the
+    // run spelled as it resolves before its first member started
+    // ([`crate::run`]'s `settle_session_store`): a socket's file name is fitted
+    // to the store's length, so dialling the default as this process's
+    // environment spells it — through a link the run resolved — would name a
+    // different file. The same resolution here is what keeps a run and an
+    // `interrupt` that both say nothing on one store.
+    let resolved;
+    let address = match (&address.session_dir, default_store()) {
+        (None, Some(store)) => {
+            resolved = Address {
+                session_dir: Some(store),
+                ..address.clone()
+            };
+            &resolved
+        }
+        _ => address,
+    };
     let mut command = std::process::Command::new(bin);
     command.args(argv(address, input));
     let output = match command.output() {
@@ -567,6 +588,40 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
             "`{bin} interrupt` answered nothing this build could read ({err}); its standard error \
              said: {stderr}"
         )),
+    }
+}
+
+/// oneharness's default session store as a run binds sockets under it: the
+/// directory oneharness resolves when it is named none, with the part of it that
+/// exists resolved through any link. `None` off unix, where there is no
+/// `sun_path` for a spelling to overrun, and where no default resolves at all.
+pub(crate) fn default_store() -> Option<PathBuf> {
+    if !cfg!(unix) {
+        return None;
+    }
+    oneharness_core::io::session::resolve_dir(None).map(|store| resolve_existing(&store))
+}
+
+/// `path` with its deepest existing ancestor resolved and the rest kept as
+/// written — the directory a later `create_dir_all` and `canonicalize` of it
+/// would produce, without creating anything.
+pub(crate) fn resolve_existing(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(at) {
+            return rest
+                .iter()
+                .rev()
+                .fold(resolved, |built, part| built.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 

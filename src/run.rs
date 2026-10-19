@@ -1240,6 +1240,7 @@ fn run_announcing(
     }
     let bounds = Bounds::from_env(&member_env).map_err(Error::InvalidConfig)?;
     export(&graph.env, env)?;
+    settle_session_store();
 
     let file = std::fs::File::create(&events_path).map_err(|err| {
         Error::InvalidConfig(format!("cannot create {}: {err}", events_path.display()))
@@ -1991,6 +1992,41 @@ fn export(block: &BTreeMap<String, String>, env: &BTreeMap<String, String>) -> R
         std::env::set_var(key, value);
     }
     Ok(())
+}
+
+/// Name oneharness's state root as it resolves, so every member's control
+/// socket is fitted to the address it is really bound at.
+///
+/// oneharness fits a socket's file name to the platform's `sun_path` budget
+/// against the store directory it is handed, then binds through the *resolved*
+/// directory. Where the root is reached through a symlink — on macOS `/tmp` and
+/// `/var` both are, into `/private` — the bound address comes out longer than the
+/// one that was budgeted, and the bind is refused: a single-sided member dies
+/// unstartable, and a two-party member's sides lose their lever, for control
+/// they merely asked for. Neither engine is handed a store — onejudge passes no
+/// `--session-dir` and resolves the same default the run does — so the one
+/// place both read it is this process's environment, and the one moment it can
+/// be written is this one, after the graph's own block and before the first
+/// member thread starts (see [`export`] for why only then).
+///
+/// The root is oneharness's own default, read back off the store it resolves,
+/// and is rewritten only when resolving it changes it, to the same directory
+/// spelled the way it is bound. Only its existing part is resolved, so nothing
+/// is created here. Unix only: elsewhere there is no `sun_path` to overrun.
+fn settle_session_store() {
+    if !cfg!(unix) {
+        return;
+    }
+    let Some(store) = oneharness_core::io::session::resolve_dir(None) else {
+        return;
+    };
+    let Some(root) = store.parent().and_then(Path::parent) else {
+        return;
+    };
+    let resolved = crate::control::resolve_existing(root);
+    if resolved != root {
+        std::env::set_var("XDG_STATE_HOME", resolved);
+    }
 }
 
 /// Expand `${VAR}` references in a graph's `env` value.
