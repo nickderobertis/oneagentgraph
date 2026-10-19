@@ -2156,8 +2156,8 @@ fn a_member_that_ends_with_notes_untaken_answers_each_as_undelivered() {
 }
 
 /// `--output text` renders a note's life as a person watching the run reads it:
-/// its admission, naming the offer and whom it is for, and its answer, saying how
-/// the note was accepted.
+/// its admission, naming the offer and whom it is for; its answer, saying how the
+/// note was accepted; and a withdrawal, naming why no turn will take it.
 #[cfg(unix)]
 #[test]
 fn a_text_rendering_shows_a_note_admitted_and_how_it_was_accepted() {
@@ -2166,6 +2166,8 @@ fn a_text_rendering_shows_a_note_admitted_and_how_it_was_accepted() {
     let workspace = Workspace::new();
     let began = workspace.at("worker-began");
     let release = workspace.at("worker-release");
+    let gate = workspace.at("judge-gate");
+    let judging = workspace.at("judge-gate.entered");
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
         .args([
             "run",
@@ -2174,9 +2176,10 @@ fn a_text_rendering_shows_a_note_admitted_and_how_it_was_accepted() {
             "text",
             "--task",
             &format!(
-                "fake:entered={} fake:hold={}",
+                "fake:entered={} fake:hold={} fake:supervisor-hold={}",
                 began.display(),
-                release.display()
+                release.display(),
+                gate.display()
             ),
             "--dir",
             &workspace.dir().display().to_string(),
@@ -2198,6 +2201,20 @@ fn a_text_rendering_shows_a_note_admitted_and_how_it_was_accepted() {
     )
     .expect("a run id");
     let member = MemberName::parse("worker").expect("a member name");
+    let offer_to_run = |note: &Note| match control::offer_note(
+        &workspace.state(),
+        &run_id,
+        &member,
+        note,
+        &oneharness_bin(),
+    )
+    .expect("the run and its member are addressable")
+    {
+        NoteOffered::Admitted(offer) => offer,
+        NoteOffered::Undelivered(undelivered) => {
+            panic!("the note was not admitted: {undelivered}")
+        }
+    };
     let offered = control::offer_note(
         &workspace.state(),
         &run_id,
@@ -2217,6 +2234,22 @@ fn a_text_rendering_shows_a_note_admitted_and_how_it_was_accepted() {
             party: Party::Worker
         })
     );
+    // A note taken back while the judge's turn is held — one that turn's watch
+    // hands back, since it is the worker's — so its withdrawal is rendered too.
+    // It comes after the interrupt because a turn-end note stops a live turn's
+    // watch for the rest of that turn.
+    until("the judge's own turn to be in flight", || judging.exists());
+    let withdrawn = offer_to_run(
+        &Note::new(Addressee::Worker, "never mind the changelog")
+            .expect("a note with text in it")
+            .with_delivery(NoteDeliveryMode::TurnEnd),
+    );
+    let withdrawn_id = withdrawn.id().to_string();
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    withdrawn
+        .withdraw()
+        .expect("a note no turn had taken was not taken back");
+    std::fs::write(&gate, "go").expect("release the judge");
     std::fs::write(&release, "go").expect("release the worker's held turn");
     let output = child.wait_with_output().expect("the run finishes");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2232,5 +2265,11 @@ fn a_text_rendering_shows_a_note_admitted_and_how_it_was_accepted() {
             .lines()
             .any(|line| line.contains("turn-interrupted delivered interrupted (worker)")),
         "how the note was accepted was not rendered:\n{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|line| line.contains(&format!("note-withdrawn {withdrawn_id} withdrawn"))),
+        "the withdrawal was not rendered:\n{stdout}"
     );
 }

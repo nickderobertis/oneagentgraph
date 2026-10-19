@@ -395,8 +395,9 @@ test-doubles = []
 # it redirected; and the engine takes a note out of its inbox only when it is
 # about to present it, which is what lets `control::offer_note`'s withdrawal and
 # deadline hold until then. Its `kind: oneharness` provider asks for a
-# controllable turn on **both** parties under one `control: true`, and a `split`
-# judge entry asks on its own — `src/invoke.rs` sets both. It moves in lockstep
+# controllable turn on **both** parties under one `control: true`, which
+# `src/invoke.rs` sets; a `split` panel is never redirected, so its judge
+# entries do not ask. It moves in lockstep
 # with oneharness-core 0.28.4 and onemessagebus 0.9.2 below: its published
 # requirements are `^0.28.4` and `^0.9.2`, so the three are edited together or
 # the graph carries two copies — the state `tests/inventory.rs` refuses.

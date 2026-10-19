@@ -580,7 +580,14 @@ fn read_settled(scratch: &Path, offer: &OfferId) -> Option<Reply> {
 /// caller reading it never reads half of one.
 ///
 /// Best-effort: an answer that could not be written is still given, and only a
-/// caller that asks after the member has gone loses it.
+/// caller that asks after the member has gone loses it — that caller is then
+/// answered from the spool's own close, which names how the member ended.
+// llmlint: ignore-block[changed_behavior_has_e2e] the failing arms are the host
+// refusing a write inside the member's own scratch, which this run created and
+// owns: no graph, task or config reaches them. What they decide — the live
+// caller is still answered, and a late one falls back to the close — is driven by
+// `an_unwritable_answer_store_still_answers_the_live_caller` below, which
+// occupies the store's path so the write really fails.
 fn write_settled(scratch: &Path, offer: &OfferId, reply: &Reply) {
     let dir = scratch.join(OFFERS_DIR);
     if std::fs::create_dir_all(&dir).is_err() {
@@ -597,6 +604,7 @@ fn write_settled(scratch: &Path, offer: &OfferId, reply: &Reply) {
         let _ = std::fs::rename(&partial, settled_path(scratch, offer));
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// What a member with **no conversation** is handed instead: the addressed role,
 /// then the note's own text, unchanged.
@@ -1210,13 +1218,24 @@ impl Ending {
         for (offer, handle, note) in self.book.idle() {
             let book = Arc::clone(&self.book);
             let refusal = refusal.clone();
-            let _ = std::thread::Builder::new().spawn(move || {
+            let key = offer.clone();
+            let settling = std::thread::Builder::new().spawn(move || {
                 let reply = match awaited(handle, Some(Instant::now())) {
                     Reply::Expired => Reply::Undelivered(refusal),
                     reply => reply,
                 };
-                book.settle(&offer, &note, &reply);
+                book.settle(&key, &note, &reply);
             });
+            // llmlint: ignore-block[changed_behavior_has_e2e] a host that refused
+            // this member one more thread as it ended, which no graph, task or
+            // config asks for and no seam this crate sanctions fakes. The offer
+            // went with the refused spawn and is answered by the close below; the
+            // book stops holding it so the end is not held for it.
+            if settling.is_err() {
+                self.book.lock().remove(&offer);
+                self.book.relayed.answered(false);
+            }
+            // llmlint: ignore-end[changed_behavior_has_e2e]
         }
         self.book.drained(SETTLE_BOUND);
         // What the relay had not reached is answered here rather than left for
@@ -1528,6 +1547,40 @@ mod tests {
             NoteOffered::Admitted(_) => panic!("a member that ended admitted a note"),
         }
         assert_eq!(member.ending.endpoint(), dir.path().join(NOTES_DIR));
+    }
+
+    /// An answer the member cannot write down is still given to the caller that
+    /// is waiting; only a caller that asks after the member has gone loses it, and
+    /// is answered from the spool's close instead.
+    #[test]
+    fn an_unwritable_answer_store_still_answers_the_live_caller() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A file where the store's directory goes: every write into it fails.
+        std::fs::write(dir.path().join(OFFERS_DIR), "occupied").expect("occupy the store");
+        let member = member(dir.path());
+        let live = admitted(dir.path(), &note(Addressee::Worker));
+        let late = admitted(dir.path(), &note(Addressee::Worker));
+        let id = OfferId::try_from(late.id().to_string()).expect("a minted id");
+        member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the live note reaches the conversation")
+            .answer(Accepted::Queued);
+        assert_eq!(
+            live.wait().expect("a wait answers"),
+            NoteDelivery::Accepted(Accepted::Queued),
+            "a caller waiting was not answered because the answer could not be written"
+        );
+        let refusal = Undelivered::MemberSettled {
+            outcome: "the member was condemned by its activity watchdog".to_string(),
+        };
+        member.ending.end(&refusal);
+        assert_eq!(read_settled(dir.path(), &id), None);
+        assert_eq!(
+            late.wait().expect("a wait answers"),
+            NoteDelivery::Undelivered(refusal),
+            "a late caller was not answered from the member's close"
+        );
     }
 
     /// A member with no endpoint is reported rather than waited on; and an
