@@ -488,7 +488,12 @@ onejudge = { version = "0.20.0", features = ["cli"] }
 # admitted the message — `wait`, `wait_until(deadline)` and `withdraw`, with
 # taking and withdrawing atomic in process and across the spool — which a
 # two-party member's relay holds for the caller of `control::offer_note`.
-onemessagebus = "0.9.2"
+#
+# **0.9.3 is a compile floor too**: `Offer::try_answer`, the non-consuming look a
+# turn being announced takes at every held offer, so a note is attributed to the
+# turn that carried it when the engine answers it rather than when its caller
+# next waits — with withdrawal and expiry still atomic while it is untaken.
+onemessagebus = "0.9.3"
 # The payload structs are registered with the bus's schema registry as
 # `Message` types, which is a `schemars` derivation. The same major and feature
 # the bus itself takes, so the one `JsonSchema` trait is the bus's.

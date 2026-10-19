@@ -1393,6 +1393,118 @@ fn a_delivery_is_attributed_by_the_conversations_record_and_never_by_its_text() 
     );
 }
 
+/// A note is attributed to the turn that carried it when the engine answers it —
+/// not when its caller gets round to waiting, and whether or not it ever does.
+///
+/// Two turn-end notes are offered into a held worker turn and neither is waited
+/// on while the engine takes them. The engine answers both as it opens the
+/// worker's next turn, and that turn is the delivery. One caller waits only once
+/// a *later* worker turn has started, and the other never waits at all; a relay
+/// that counted a note only as its caller waited would announce the carrying
+/// turn unstamped and then stamp whichever turn came after the late wait. Both
+/// answers are on the run's stream before that later turn opens, which is what
+/// the stamp is read from.
+#[cfg(unix)]
+#[test]
+fn a_note_is_attributed_to_the_turn_that_carried_it_however_late_its_caller_waits() {
+    let _serial = serial();
+    let workspace = Workspace::new();
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let running = start(
+        &workspace,
+        "",
+        &format!(
+            "fake:should-fail fake:entered={} fake:hold={}",
+            began.display(),
+            release.display()
+        ),
+    );
+    let events = running.run.started().events_path.clone();
+    until("the worker's turn to be in flight", || began.exists());
+
+    let waited_text = "the schema change ships behind a flag";
+    let unwaited_text = "keep the old endpoint answering until Friday";
+    let turn_end = |text: &str| {
+        Note::new(Addressee::Worker, text)
+            .expect("a note with text in it")
+            .with_delivery(NoteDeliveryMode::TurnEnd)
+    };
+    let waited = admitted(&workspace, &running, &turn_end(waited_text));
+    let unwaited = admitted(&workspace, &running, &turn_end(unwaited_text));
+    let (waited_id, unwaited_id) = (waited.id().to_string(), unwaited.id().to_string());
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+
+    let worker_turns = || -> Vec<serde_json::Value> {
+        published_of_kind(
+            &std::fs::read_to_string(&events).unwrap_or_default(),
+            "turn-started",
+        )
+        .into_iter()
+        .filter(|event| event["payload"]["role"] == "assistant")
+        .collect()
+    };
+    until("a worker turn after the one carrying the notes", || {
+        worker_turns().len() >= 3
+    });
+    // Read the moment the later turn has opened, before anybody has waited.
+    let answered_before_any_wait = |offer: &str| naming(&events, "turn-interrupted", offer);
+    assert_eq!(
+        answered_before_any_wait(&waited_id).len(),
+        1,
+        "the note was not answered on the stream until its caller waited"
+    );
+    assert_eq!(
+        answered_before_any_wait(&unwaited_id).len(),
+        1,
+        "a note nobody waited on was not answered on the stream when the engine took it"
+    );
+
+    assert_eq!(
+        waited.wait().expect("a wait answers"),
+        NoteDelivery::Accepted(Accepted::AtTurnEnd {
+            party: Party::Worker
+        }),
+        "the late wait did not read the turn-end delivery the engine made"
+    );
+    drop(unwaited);
+    running.run.wait().expect("the member settles");
+
+    let turns = worker_turns();
+    let instruction = |event: &serde_json::Value| -> String {
+        event["payload"]["instruction"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        instruction(&turns[1]).contains(waited_text)
+            && instruction(&turns[1]).contains(unwaited_text),
+        "the worker's next turn did not carry both notes: {}",
+        turns[1]
+    );
+    assert_eq!(
+        origin(&turns[1]).as_deref(),
+        Some("delivered"),
+        "the turn that carried the notes was not stamped as their delivery: {}",
+        turns[1]
+    );
+    for later in &turns[2..] {
+        assert_ne!(
+            origin(later).as_deref(),
+            Some("delivered"),
+            "a turn after the late wait was stamped for a note it never carried: {later}"
+        );
+    }
+    // Each answer is published once, by whichever of the engine's answer and the
+    // late wait settled it — never by both.
+    for offer in [&waited_id, &unwaited_id] {
+        let answered = naming(&events, "turn-interrupted", offer);
+        assert_eq!(answered.len(), 1, "{offer} was answered {answered:#?}");
+        assert_eq!(answered[0]["payload"]["accepted"], "at-turn-end");
+    }
+}
+
 /// How long a journey waits for an answer it expects, before failing rather than
 /// hanging the suite on a wait that will never return.
 #[cfg(unix)]

@@ -73,7 +73,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use onemessagebus::{Closed, Delivered, Disposition, Inbox, Message, SchemaId, Unanswered};
@@ -125,10 +125,11 @@ const SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// conversation to be answered, before it is announced without one.
 ///
 /// The engine answers a note it takes *before* it announces the turn that
-/// carries it, and the relay learns that answer on its own thread a moment later
-/// — so the wait is that moment, and this bound is only ever reached by a note
-/// that arrived after the engine last looked, which the announced turn does not
-/// carry.
+/// carries it, and the turn being announced looks for that answer itself
+/// ([`Book::probe`]) — or, for a note a caller's wait holds, lets that wait's
+/// thread report it a moment later — so the wait is that moment, and this bound
+/// is only ever reached by a note that arrived after the engine last looked,
+/// which the announced turn does not carry.
 const DELIVERY_SETTLE: Duration = Duration::from_secs(1);
 
 /// The longest offer id a member accepts — the id names a file.
@@ -679,10 +680,14 @@ impl Endpoint {
 
 /// What the [`Relay`] has handed to the conversation: how many notes are with it
 /// unanswered, and how many it took.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(crate) struct Relayed {
     state: Mutex<Handed>,
     answered: Condvar,
+    /// The offers behind the count, once the relay is open: what a turn being
+    /// announced asks whether the engine has answered, so a note is counted
+    /// when the engine answers it rather than when its caller next waits.
+    book: OnceLock<Weak<Book>>,
 }
 
 #[derive(Debug, Default)]
@@ -716,13 +721,28 @@ impl Relayed {
     /// How many notes the conversation has taken, once every note it was handed
     /// has been answered — or once [`DELIVERY_SETTLE`] says the one still out is
     /// not an answer this moment is waiting on.
+    ///
+    /// Each look first settles every held offer the engine has already answered
+    /// ([`Book::probe`]), so a note nobody is waiting on is counted for the turn
+    /// that carries it, not for whichever turn is announced after its caller
+    /// finally waits.
     fn taken(&self, within: Duration) -> usize {
-        let state = self.lock();
-        let (state, _) = self
-            .answered
-            .wait_timeout_while(state, within, |state| state.in_flight > 0)
-            .unwrap_or_else(PoisonError::into_inner);
-        state.taken
+        let deadline = Instant::now() + within;
+        loop {
+            if let Some(book) = self.book.get().and_then(Weak::upgrade) {
+                book.probe();
+            }
+            let state = self.lock();
+            let left = deadline.saturating_duration_since(Instant::now());
+            if state.in_flight == 0 || left.is_zero() {
+                return state.taken;
+            }
+            drop(
+                self.answered
+                    .wait_timeout(state, left.min(RELAY_POLL))
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+        }
     }
 }
 
@@ -837,13 +857,52 @@ impl Book {
     /// after the member has gone reads this; then published, counted, and let go.
     fn settle(&self, offer: &OfferId, note: &Note, reply: &Reply) {
         write_settled(&self.scratch, offer, reply);
+        self.lock().remove(offer);
+        self.announce(offer, note, reply);
+    }
+
+    /// Publish and count an answer already written down and let go of.
+    fn announce(&self, offer: &OfferId, note: &Note, reply: &Reply) {
         self.publish(offer, note, reply);
         self.relayed.answered(match reply {
             Reply::Accepted(accepted) => opens_a_later_turn(accepted),
             _ => false,
         });
-        self.lock().remove(offer);
         self.emptied.notify_all();
+    }
+
+    /// Settle every held offer the engine has already answered, without waiting
+    /// and without taking any offer out of the book.
+    ///
+    /// Looked in place under the book's lock, through the bus's non-consuming
+    /// `try_answer`: an offer still untaken keeps every guarantee it had, so a
+    /// withdrawal or a deadline racing this still settles it atomically. One
+    /// that answered is written down and dropped from the book before the lock
+    /// is let go, so a wait or a withdrawal arriving next reads the written
+    /// answer rather than settling it a second time. One a wait has taken out is
+    /// that wait's to settle, and is left to it.
+    fn probe(&self) {
+        let answered: Vec<(OfferId, Note, Reply)> = {
+            let mut held = self.lock();
+            let answered: Vec<(OfferId, Note, Reply)> = held
+                .iter_mut()
+                .filter_map(|(id, entry)| {
+                    let reply = match entry.offer.as_mut()?.try_answer()? {
+                        Ok(accepted) => Reply::Accepted(accepted),
+                        Err(undelivered) => Reply::Undelivered(Undelivered::from(undelivered)),
+                    };
+                    Some((id.clone(), entry.note.clone(), reply))
+                })
+                .collect();
+            for (offer, _, reply) in &answered {
+                write_settled(&self.scratch, offer, reply);
+                held.remove(offer);
+            }
+            answered
+        };
+        for (offer, note, reply) in &answered {
+            self.announce(offer, note, reply);
+        }
     }
 
     /// Publish what became of `offer` on the run's own stream.
@@ -997,6 +1056,7 @@ impl Relay {
             held: Mutex::default(),
             emptied: Condvar::new(),
         });
+        let _ = book.relayed.book.set(Arc::downgrade(&book));
         let stop = Arc::new(Stop::default());
         let relay = Self {
             requests: Arc::clone(&requests),
