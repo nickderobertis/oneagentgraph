@@ -241,12 +241,17 @@ impl NoteOffer {
                 // a span: a span would restart when the member received it, and
                 // the time the request spent crossing the spool would extend the
                 // deadline the caller set.
+                // A deadline past what the wall clock can represent is one no
+                // caller lives to see, so it is asked as the latest instant the
+                // wire can name rather than allowed to overflow the clock.
                 let left = deadline.saturating_duration_since(Instant::now());
                 let asked = ask(
                     &scratch,
                     Request::WaitUntil {
                         offer: self.id.clone(),
-                        deadline_unix_ms: unix_millis(SystemTime::now() + left),
+                        deadline_unix_ms: SystemTime::now()
+                            .checked_add(left)
+                            .map_or(u64::MAX, unix_millis),
                     },
                 );
                 resolve(&scratch, &self.id, asked)
@@ -1091,7 +1096,11 @@ impl Relay {
                     let left = Duration::from_millis(
                         deadline_unix_ms.saturating_sub(unix_millis(SystemTime::now())),
                     );
-                    self.answer_once_answered(&offer, Some(Instant::now() + left), delivered);
+                    // The deadline arrives off the spool from another process,
+                    // so one this host's monotonic clock cannot represent is
+                    // read as none rather than allowed to panic the relay: it is
+                    // past any instant the wait could reach.
+                    self.answer_once_answered(&offer, Instant::now().checked_add(left), delivered);
                 }
                 Request::Withdraw { offer } => self.withdraw(&offer, delivered),
             }
@@ -1467,6 +1476,111 @@ mod tests {
         assert_eq!(withdrawn[0]["payload"]["offer"], id.as_str());
         assert_eq!(withdrawn[0]["payload"]["reason"], "expired");
         assert_eq!(member.relayed.taken(Duration::ZERO), 0);
+    }
+
+    /// A deadline off the spool as late as the wire can name is a wait with no
+    /// deadline, never a relay that dies converting it: the conversation's answer
+    /// still arrives, and the relay still serves the next request.
+    #[test]
+    fn a_deadline_past_any_clock_waits_like_no_deadline_and_the_relay_lives_on() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let id = OfferId::try_from(offer.id().to_string()).expect("a minted id is one");
+        let scratch = dir.path().to_path_buf();
+        let asked = {
+            let id = id.clone();
+            std::thread::spawn(move || {
+                ask(
+                    &scratch,
+                    Request::WaitUntil {
+                        offer: id,
+                        deadline_unix_ms: u64::MAX,
+                    },
+                )
+            })
+        };
+        let delivered = member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the note is in the conversation's inbox");
+        delivered.answer(Accepted::Queued);
+        assert_eq!(
+            asked.join().expect("the asking thread"),
+            Ok(Reply::Accepted(Accepted::Queued))
+        );
+
+        let next = admitted(dir.path(), &note(Addressee::Worker));
+        next.withdraw()
+            .expect("the relay still serves a withdrawal");
+    }
+
+    /// The note protocol's wire forms and the written-down answer, held to a
+    /// committed golden rather than only to a round trip through today's types:
+    /// a member started by an older build answers a caller from this one over
+    /// these bytes, and a late caller reads an answer an older member wrote, so a
+    /// change to either shape under an unchanged schema version fails here.
+    /// Each golden value must read as its type and write back byte-for-byte, and
+    /// the golden must carry every request and reply variant — the matches below
+    /// are exhaustive, so a new variant cannot ship without a golden entry.
+    #[test]
+    fn the_note_wire_and_its_written_down_answer_match_the_committed_golden() {
+        fn request_tag(request: &Request) -> &'static str {
+            match request {
+                Request::Offer { .. } => "offer",
+                Request::Wait { .. } => "wait",
+                Request::WaitUntil { .. } => "wait_until",
+                Request::Withdraw { .. } => "withdraw",
+            }
+        }
+        fn reply_tag(reply: &Reply) -> &'static str {
+            match reply {
+                Reply::Admitted => "admitted",
+                Reply::Accepted(_) => "accepted",
+                Reply::Undelivered(_) => "undelivered",
+                Reply::Expired => "expired",
+                Reply::Withdrawn => "withdrawn",
+                Reply::Taken => "taken",
+                Reply::Refused { .. } => "refused",
+            }
+        }
+        let golden: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/golden/note-wire.v1.json"))
+                .expect("the golden is JSON");
+        let mut requests = std::collections::BTreeSet::new();
+        for value in golden["requests"].as_array().expect("requests") {
+            let request: Request = serde_json::from_value(value.clone()).expect("a request");
+            assert_eq!(&serde_json::to_value(&request).expect("serializes"), value);
+            requests.insert(request_tag(&request));
+        }
+        assert_eq!(
+            requests.into_iter().collect::<Vec<_>>(),
+            ["offer", "wait", "wait_until", "withdraw"]
+        );
+        let mut replies = std::collections::BTreeSet::new();
+        for value in golden["replies"].as_array().expect("replies") {
+            let reply: Reply = serde_json::from_value(value.clone()).expect("a reply");
+            assert_eq!(&serde_json::to_value(&reply).expect("serializes"), value);
+            replies.insert(reply_tag(&reply));
+        }
+        assert_eq!(
+            replies.into_iter().collect::<Vec<_>>(),
+            [
+                "accepted",
+                "admitted",
+                "expired",
+                "refused",
+                "taken",
+                "undelivered",
+                "withdrawn"
+            ]
+        );
+        for value in golden["settled"].as_array().expect("settled") {
+            let settled: Settled = serde_json::from_value(value.clone()).expect("a settled");
+            assert_eq!(settled.schema_version, SETTLED_SCHEMA_VERSION);
+            assert_eq!(&serde_json::to_value(&settled).expect("serializes"), value);
+        }
+        assert_eq!(Request::SCHEMA.to_string(), "oneagentgraph.note-request@1");
     }
 
     /// A note withdrawn before any turn takes it is gone — and one a turn has
