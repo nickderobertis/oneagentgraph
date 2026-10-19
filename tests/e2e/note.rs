@@ -2011,51 +2011,19 @@ fn a_withdrawn_note_is_taken_back_once_and_never_presented() {
 fn an_interrupting_note_to_a_turn_with_no_lever_expires_at_its_deadline_and_is_never_presented() {
     let _serial = serial();
     let workspace = Workspace::new();
-    workspace.write("oneharness.toml", QWEN_CHAIN);
-    workspace.write("oneharness.judge.toml", QWEN_CHAIN);
     let recorded = workspace.at("prompts");
     let began = workspace.at("worker-began");
     let release = workspace.at("worker-release");
-    workspace.write(
-        "base.yaml",
-        &base_with(&format!("fake:record-prompt={}", recorded.display())),
-    );
-    workspace.graph(&two_party_graph(
-        &crate::support::fake_harness(),
-        &[
-            ("ONEHARNESS_BIN_QWEN", crate::support::fake_harness()),
-            (
-                "XDG_STATE_HOME",
-                workspace.session_store().display().to_string(),
-            ),
-        ],
-    ));
-    let mut env = BTreeMap::new();
-    env.insert(
-        "XDG_STATE_HOME".to_string(),
-        workspace.session_store().display().to_string(),
-    );
-    let request = Request {
-        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
-        task: Some(format!(
+    let running = start_without_lever(
+        &workspace,
+        &format!("fake:record-prompt={}", recorded.display()),
+        &format!(
             "fake:record-prompt={} fake:should-fail fake:entered={} fake:hold={}",
             recorded.display(),
             began.display(),
             release.display()
-        )),
-        dir: workspace.dir(),
-        labels: Vec::new(),
-        overrides: Vec::new(),
-        filter: None,
-        state_dir: workspace.state(),
-        oneharness_bin: oneharness_bin(),
-    };
-    let run = run::start(&request, &env).expect("the graph starts");
-    let running = Running {
-        id: run.started().run_id.clone(),
-        run,
-        member: MemberName::parse("worker").expect("a member name"),
-    };
+        ),
+    );
     until("the worker's turn to be in flight", || began.exists());
     let events = running.run.started().events_path.clone();
 
@@ -2082,6 +2050,280 @@ fn an_interrupting_note_to_a_turn_with_no_lever_expires_at_its_deadline_and_is_n
         !ever_presented(&events, &[&recorded], text),
         "an expired note was presented once the turn it waited for ended"
     );
+}
+
+/// [`start`], on a chain whose harness opens no controllable turn on either
+/// side — the doubled harness standing in as `qwen`, which oneharness gives no
+/// in-place control mechanism.
+///
+/// A live turn with no lever is one onejudge's watch never takes a note from:
+/// until a control socket listens, it takes nothing. So a note offered into
+/// such a held turn stays untaken, and withdrawable, for exactly as long as the
+/// journey holds the turn — with no instant in which the watch holds it to read
+/// its delivery and a withdrawal reads as taken.
+#[cfg(unix)]
+fn start_without_lever(workspace: &Workspace, system: &str, task: &str) -> Running {
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.write("oneharness.judge.toml", QWEN_CHAIN);
+    workspace.write("base.yaml", &base_with(system));
+    workspace.graph(&two_party_graph(
+        &crate::support::fake_harness(),
+        &[
+            ("ONEHARNESS_BIN_QWEN", crate::support::fake_harness()),
+            (
+                "XDG_STATE_HOME",
+                workspace.session_store().display().to_string(),
+            ),
+        ],
+    ));
+    let mut env = BTreeMap::new();
+    env.insert(
+        "XDG_STATE_HOME".to_string(),
+        workspace.session_store().display().to_string(),
+    );
+    let request = Request {
+        graph: ConfigRef(workspace.at("graph.yaml").display().to_string()),
+        task: Some(task.to_string()),
+        dir: workspace.dir(),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter: None,
+        state_dir: workspace.state(),
+        oneharness_bin: oneharness_bin(),
+    };
+    let run = run::start(&request, &env).expect("the graph starts");
+    Running {
+        id: run.started().run_id.clone(),
+        run,
+        member: MemberName::parse("worker").expect("a member name"),
+    }
+}
+
+/// Whether the member's relay holds a request it has not answered yet: in its
+/// notes spool, a request the relay's inbox has claimed — the bus writes
+/// `<id>.claimed` as its receiver takes one — beside no `<id>.answer.json`.
+///
+/// What a journey waits on before it races a withdrawal against a wait, so the
+/// wait is in the relay's hands rather than still crossing the spool.
+#[cfg(unix)]
+fn a_request_in_hand(workspace: &Workspace, running: &Running) -> bool {
+    let notes = workspace
+        .state()
+        .join(running.id.as_str())
+        .join("members")
+        .join(running.member.as_str())
+        .join("notes");
+    let names: Vec<String> = std::fs::read_dir(notes)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.iter().any(|name| {
+        name.strip_suffix(".claimed")
+            .is_some_and(|id| !names.contains(&format!("{id}.answer.json")))
+    })
+}
+
+/// Start `offer`'s wait — or its `wait_until(deadline)` — on a thread of its
+/// own, and return once that wait's request is in the member's relay's hands,
+/// or once the wait has already been answered: a note the conversation answered
+/// before the wait was asked is answered as the relay takes the request, in
+/// less than one of the spool's polls, so its claim is not always there to see.
+#[cfg(unix)]
+fn waiting_in_hand(
+    workspace: &Workspace,
+    running: &Running,
+    offer: NoteOffer,
+    deadline: Option<std::time::Instant>,
+) -> std::sync::mpsc::Receiver<NoteDelivery> {
+    assert!(
+        !a_request_in_hand(workspace, running),
+        "a request was already in the relay's hands before the wait was asked"
+    );
+    let (answered, answer) = std::sync::mpsc::channel();
+    let requeue = answered.clone();
+    std::thread::spawn(move || {
+        let _ = answered.send(
+            match deadline {
+                None => offer.wait(),
+                Some(deadline) => offer.wait_until(deadline),
+            }
+            .expect("a wait answers"),
+        );
+    });
+    let early = std::cell::RefCell::new(None);
+    until("the wait to reach the member's relay", || {
+        if let Ok(delivery) = answer.try_recv() {
+            *early.borrow_mut() = Some(delivery);
+        }
+        early.borrow().is_some() || a_request_in_hand(workspace, running)
+    });
+    if let Some(delivery) = early.into_inner() {
+        requeue
+            .send(delivery)
+            .expect("the journey still holds the receiver");
+    }
+    answer
+}
+
+/// A `TurnEnd` note offered into a held worker turn is withdrawn **while its
+/// answer is being waited on** — with no deadline, and then with one that has
+/// not passed: each withdrawal returns `Ok`, each wait it overtook answers
+/// [`NoteDelivery::Withdrawn`] rather than `Expired` or `Undelivered`, the run's
+/// stream says each once with reason `withdrawn`, and once the turn is released
+/// no turn of the run is ever handed either note.
+///
+/// This is the engine's case: it waits on a live manager note so its outcome
+/// is recorded the moment it happens, and takes that same note back when a
+/// later decision makes it obsolete.
+#[cfg(unix)]
+#[test]
+fn a_note_withdrawn_while_its_wait_is_in_flight_is_answered_withdrawn_and_never_presented() {
+    let _serial = serial();
+    let workspace = Workspace::new();
+    let agent_prompts = workspace.at("agent-prompts");
+    let judge_prompts = workspace.at("judge-prompts");
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let running = start_without_lever(
+        &workspace,
+        &format!("fake:record-prompt={}", agent_prompts.display()),
+        &format!(
+            "fake:record-supervisor-prompt={} fake:should-fail fake:entered={} fake:hold={}",
+            judge_prompts.display(),
+            began.display(),
+            release.display()
+        ),
+    );
+    until("the worker's turn to be in flight", || began.exists());
+    let events = running.run.started().events_path.clone();
+
+    let notes = [
+        ("never mind the migration, it was already reversible", None),
+        (
+            "drop the rollback plan, the release was cancelled",
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(600)),
+        ),
+    ];
+    for (text, deadline) in notes {
+        let offer = admitted(
+            &workspace,
+            &running,
+            &Note::new(Addressee::Worker, text)
+                .expect("a note with text in it")
+                .with_delivery(NoteDeliveryMode::TurnEnd),
+        );
+        let id = offer.id().to_string();
+        let withdrawer = offer.withdrawer();
+        assert_eq!(withdrawer.id(), id, "the withdrawer names another offer");
+        let answer = waiting_in_hand(&workspace, &running, offer, deadline);
+        let taker = std::thread::spawn(move || withdrawer.withdraw());
+        taker
+            .join()
+            .expect("the withdrawing thread")
+            .expect("a note no turn had taken was not taken back while its wait was in flight");
+        assert_eq!(
+            answer
+                .recv_timeout(ANSWER_BOUND)
+                .expect("the wait was answered"),
+            NoteDelivery::Withdrawn,
+            "the wait in flight (deadline {deadline:?}) did not read the withdrawal"
+        );
+
+        let withdrawn = naming(&events, "note-withdrawn", &id);
+        assert_eq!(withdrawn.len(), 1, "the withdrawal was not published once");
+        assert_eq!(withdrawn[0]["payload"]["reason"], "withdrawn");
+        assert_eq!(withdrawn[0]["payload"]["member"], "worker");
+    }
+    assert!(
+        !release.exists(),
+        "the turn was released before the withdrawals, so this proves nothing"
+    );
+
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+    running.run.wait().expect("the member settles");
+    let published = std::fs::read_to_string(&events).expect("the run's own stream");
+    let withdrawals = published_of_kind(&published, "note-withdrawn");
+    assert_eq!(withdrawals.len(), 2, "{published}");
+    assert!(
+        withdrawals
+            .iter()
+            .all(|event| event["payload"]["reason"] == "withdrawn"),
+        "a withdrawal in flight was published as an expiry: {withdrawals:#?}"
+    );
+    assert!(
+        published_of_kind(&published, "turn-interrupted").is_empty(),
+        "a withdrawn note was also answered as delivered"
+    );
+    for (text, _) in notes {
+        assert!(
+            !ever_presented(&events, &[&agent_prompts, &judge_prompts], text),
+            "a note withdrawn while its wait was in flight was presented to a turn"
+        );
+    }
+}
+
+/// A default note interrupts the held worker turn while its wait is in flight,
+/// and from then on it is that turn's: a withdrawer called after the
+/// interruption is refused, the wait answers [`Accepted::Interrupted`] naming
+/// the worker, and nothing on the run's stream says the note was withdrawn.
+#[cfg(unix)]
+#[test]
+fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_the_interruption() {
+    let _serial = serial();
+    let workspace = Workspace::new();
+    let agent_prompts = workspace.at("agent-prompts");
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let running = start(
+        &workspace,
+        &format!("fake:record-prompt={}", agent_prompts.display()),
+        &format!(
+            "fake:entered={} fake:hold={}",
+            began.display(),
+            release.display()
+        ),
+    );
+    until("the worker's turn to be in flight", || began.exists());
+    let events = running.run.started().events_path.clone();
+
+    let text = "fake:complete-now stop and ship what you have";
+    let offer = admitted(
+        &workspace,
+        &running,
+        &Note::new(Addressee::Worker, text).expect("a note with text in it"),
+    );
+    let id = offer.id().to_string();
+    let withdrawer = offer.withdrawer();
+    let answer = waiting_in_hand(&workspace, &running, offer, None);
+    until("the replacement turn to open carrying the note", || {
+        prompts(&agent_prompts)
+            .iter()
+            .any(|prompt| prompt.contains(text))
+    });
+    let taker = std::thread::spawn(move || withdrawer.withdraw());
+    taker
+        .join()
+        .expect("the withdrawing thread")
+        .expect_err("a note that interrupted a turn was taken back");
+    assert_eq!(
+        answer
+            .recv_timeout(ANSWER_BOUND)
+            .expect("the wait was answered"),
+        NoteDelivery::Accepted(Accepted::Interrupted {
+            party: Party::Worker
+        }),
+    );
+    std::fs::write(&release, "go").expect("release the held turn, if anything still holds it");
+    running.run.wait().expect("the member settles");
+    assert!(
+        naming(&events, "note-withdrawn", &id).is_empty(),
+        "a note that interrupted a turn was published as withdrawn"
+    );
+    assert_eq!(naming(&events, "turn-interrupted", &id).len(), 1);
 }
 
 /// A caller that waits only after the member has settled still reads what became
@@ -2116,9 +2358,13 @@ fn a_caller_that_waits_after_the_member_settled_reads_what_became_of_its_note() 
         .expect("a note with text in it")
         .with_delivery(NoteDeliveryMode::TurnEnd),
     );
+    let withdrawer = offer.withdrawer();
     std::fs::write(&release, "go").expect("release the worker's held turn");
     running.run.wait().expect("the member settles");
 
+    withdrawer
+        .withdraw()
+        .expect_err("a member that had settled gave its note back");
     assert_eq!(
         offer.wait().expect("a wait answers"),
         NoteDelivery::Accepted(Accepted::AtTurnEnd {
