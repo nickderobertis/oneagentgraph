@@ -953,7 +953,8 @@ impl Book {
             || settled_path(&self.scratch, offer).exists()
     }
 
-    /// The answer `offer` was given, if it has one.
+    /// The answer `offer` was given — in memory first, because the copy in
+    /// [`OFFERS_DIR`] is best-effort and may never have been written.
     fn answer(&self, offer: &OfferId) -> Option<Reply> {
         let given = self.lock().answered.get(offer).cloned();
         given.or_else(|| read_settled(&self.scratch, offer))
@@ -982,8 +983,6 @@ impl Book {
         ledger.answered.insert(offer.clone(), reply.clone());
     }
 
-    /// [`record`](Self::record) and [`announce`](Self::announce) `offer`'s
-    /// answer.
     fn settle(&self, offer: &OfferId, note: &Note, reply: &Reply) {
         self.record(&mut self.lock(), offer, reply);
         self.announce(offer, note, reply);
@@ -1433,7 +1432,6 @@ fn opens_a_later_turn(accepted: &Accepted) -> bool {
     }
 }
 
-/// What the bus answered about one offer, as a [`Reply`].
 fn reply_of(outcome: Result<Accepted, onemessagebus::Undelivered>) -> Reply {
     match outcome {
         Ok(accepted) => Reply::Accepted(accepted),
@@ -2030,6 +2028,55 @@ mod tests {
             NoteDelivery::Accepted(Accepted::Queued)
         );
         assert!(member.recorder.of_kind("note-withdrawn").is_empty());
+    }
+
+    /// A withdrawal that overtakes a wait still reaches that wait when the
+    /// member cannot write answers down: the wait reads the answer the member
+    /// keeps in memory, not the store's absence.
+    #[test]
+    fn a_withdrawal_reaches_its_wait_where_the_answer_store_is_unwritable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(OFFERS_DIR), "occupied").expect("occupy the store");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let withdrawer = offer.withdrawer();
+        let waiting = waiting_in_hand(&member, offer, None);
+        withdrawer.withdraw().expect("an untaken note withdraws");
+        assert_eq!(
+            waiting.join().expect("the waiting thread"),
+            NoteDelivery::Withdrawn
+        );
+    }
+
+    /// A deadline that passes while a turn holds the note only to read it is
+    /// not given up: when that turn hands the note back untaken, the wait
+    /// withdraws it then and answers `Expired`, as the bus's own deadline would.
+    #[test]
+    fn a_note_handed_back_after_its_deadline_expires_then() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let id = offer.id().to_string();
+        let held = member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the note reaches the conversation");
+        let deadline = Instant::now() + Duration::from_millis(50);
+        let waiting = waiting_in_hand(&member, offer, Some(deadline));
+        while Instant::now() < deadline + 4 * ANSWER_POLL {
+            std::thread::sleep(ANSWER_POLL);
+        }
+        held.release();
+        assert_eq!(
+            waiting.join().expect("the waiting thread"),
+            NoteDelivery::Expired,
+            "a note handed back past its deadline was not expired"
+        );
+        assert!(member.conversation.take().is_none());
+        let withdrawn = member.recorder.of_kind("note-withdrawn");
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(withdrawn[0]["payload"]["offer"], id.as_str());
+        assert_eq!(withdrawn[0]["payload"]["reason"], "expired");
     }
 
     /// An offer answered as it was made — by an endpoint that takes a bare note

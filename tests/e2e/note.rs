@@ -710,16 +710,16 @@ fn a_note_to_a_single_sided_member_interrupts_it_when_its_lever_reports_the_redi
         format!("fake:record-prompt={} {phrase}", recorded.display()),
     )
     .expect("a note with text in it");
-    let delivery = control::note(
-        &workspace.state(),
-        &running.id,
-        &running.member,
-        &note,
-        &oneharness_bin(),
-    )
-    .expect("the run and its member are addressable");
+    // The lever answers as the note is offered, so the offer has nothing left
+    // for a withdrawer to take back.
+    let offer = admitted(&workspace, &running, &note);
+    let withdrawer = offer.withdrawer();
+    assert_eq!(withdrawer.id(), offer.id());
+    withdrawer
+        .withdraw()
+        .expect_err("a note its lever already carried was taken back");
     assert_eq!(
-        delivery,
+        offer.wait().expect("a wait answers"),
         NoteDelivery::Accepted(Accepted::Interrupted {
             party: Party::Worker
         }),
@@ -1913,12 +1913,16 @@ fn a_note_whose_deadline_passes_while_the_turn_is_held_expires_and_is_never_pres
             .with_delivery(NoteDeliveryMode::TurnEnd),
     );
     let id = offer.id().to_string();
+    let withdrawer = offer.withdrawer();
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1500);
     assert_eq!(
         offer.wait_until(deadline).expect("a wait answers"),
         NoteDelivery::Expired,
         "a note untaken at its deadline did not expire"
     );
+    withdrawer
+        .withdraw()
+        .expect_err("a note that expired was taken back as well");
     assert!(
         !release.exists(),
         "the turn was released before the deadline, so this proves nothing"
@@ -2174,7 +2178,10 @@ fn waiting_in_hand(
 /// not passed: each withdrawal returns `Ok`, each wait it overtook answers
 /// [`NoteDelivery::Withdrawn`] rather than `Expired` or `Undelivered`, the run's
 /// stream says each once with reason `withdrawn`, and once the turn is released
-/// no turn of the run is ever handed either note.
+/// no turn of the run is ever handed either note. No second withdrawal of one
+/// note succeeds, through the same withdrawer or a clone of it; and a third
+/// note, withdrawn before anything waits on it, is answered `Withdrawn` by the
+/// wait begun afterwards.
 ///
 /// This is the engine's case: it waits on a live manager note so its outcome
 /// is recorded the moment it happens, and takes that same note back when a
@@ -2220,11 +2227,17 @@ fn a_note_withdrawn_while_its_wait_is_in_flight_is_answered_withdrawn_and_never_
         let withdrawer = offer.withdrawer();
         assert_eq!(withdrawer.id(), id, "the withdrawer names another offer");
         let answer = waiting_in_hand(&workspace, &running, offer, deadline);
-        let taker = std::thread::spawn(move || withdrawer.withdraw());
+        let taker = {
+            let withdrawer = withdrawer.clone();
+            std::thread::spawn(move || withdrawer.withdraw())
+        };
         taker
             .join()
             .expect("the withdrawing thread")
             .expect("a note no turn had taken was not taken back while its wait was in flight");
+        withdrawer
+            .withdraw()
+            .expect_err("one note was withdrawn twice through clones of one withdrawer");
         assert_eq!(
             answer
                 .recv_timeout(ANSWER_BOUND)
@@ -2238,6 +2251,31 @@ fn a_note_withdrawn_while_its_wait_is_in_flight_is_answered_withdrawn_and_never_
         assert_eq!(withdrawn[0]["payload"]["reason"], "withdrawn");
         assert_eq!(withdrawn[0]["payload"]["member"], "worker");
     }
+
+    // Withdrawn before anything waits on it: a wait begun afterwards reads the
+    // withdrawal, and the same withdrawer takes nothing back a second time.
+    let later = "skip the changelog, docs will write it";
+    let offer = admitted(
+        &workspace,
+        &running,
+        &Note::new(Addressee::Worker, later)
+            .expect("a note with text in it")
+            .with_delivery(NoteDeliveryMode::TurnEnd),
+    );
+    let id = offer.id().to_string();
+    let withdrawer = offer.withdrawer();
+    withdrawer
+        .withdraw()
+        .expect("a note no turn had taken was not taken back");
+    withdrawer
+        .withdraw()
+        .expect_err("one note was withdrawn twice through one withdrawer");
+    assert_eq!(
+        offer.wait().expect("a wait answers"),
+        NoteDelivery::Withdrawn,
+        "a wait begun after the withdrawal did not read it"
+    );
+    assert_eq!(naming(&events, "note-withdrawn", &id).len(), 1);
     assert!(
         !release.exists(),
         "the turn was released before the withdrawals, so this proves nothing"
@@ -2247,7 +2285,7 @@ fn a_note_withdrawn_while_its_wait_is_in_flight_is_answered_withdrawn_and_never_
     running.run.wait().expect("the member settles");
     let published = std::fs::read_to_string(&events).expect("the run's own stream");
     let withdrawals = published_of_kind(&published, "note-withdrawn");
-    assert_eq!(withdrawals.len(), 2, "{published}");
+    assert_eq!(withdrawals.len(), 3, "{published}");
     assert!(
         withdrawals
             .iter()
@@ -2258,7 +2296,7 @@ fn a_note_withdrawn_while_its_wait_is_in_flight_is_answered_withdrawn_and_never_
         published_of_kind(&published, "turn-interrupted").is_empty(),
         "a withdrawn note was also answered as delivered"
     );
-    for (text, _) in notes {
+    for text in notes.map(|(text, _)| text).into_iter().chain([later]) {
         assert!(
             !ever_presented(&events, &[&agent_prompts, &judge_prompts], text),
             "a note withdrawn while its wait was in flight was presented to a turn"
@@ -2304,7 +2342,10 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
             .iter()
             .any(|prompt| prompt.contains(text))
     });
-    let taker = std::thread::spawn(move || withdrawer.withdraw());
+    let taker = {
+        let withdrawer = withdrawer.clone();
+        std::thread::spawn(move || withdrawer.withdraw())
+    };
     taker
         .join()
         .expect("the withdrawing thread")
@@ -2317,6 +2358,9 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
             party: Party::Worker
         }),
     );
+    withdrawer
+        .withdraw()
+        .expect_err("a note whose wait was answered accepted was taken back");
     std::fs::write(&release, "go").expect("release the held turn, if anything still holds it");
     running.run.wait().expect("the member settles");
     assert!(
