@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.14...v0.6.0) - 2026-10-19
+
+### Added
+
+- [**breaking**] offer notes with admission, a deadline and withdrawal, interrupting either party ([#220](https://github.com/nickderobertis/oneagentgraph/pull/220))
+
 ## [0.5.13](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.12...v0.5.13) - 2026-10-16
 
 ### Fixed
