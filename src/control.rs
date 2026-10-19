@@ -32,7 +32,7 @@
 //!   resolve the same store — recomputing that platform default here would be a
 //!   second source for one fact, and wrong for any run whose store *was* named.
 //!   Both ends do resolve it through any link, with oneharness's own resolver
-//!   ([`default_store`]), because a socket's name is fitted to the store's
+//!   (`default_store`), because a socket's name is fitted to the store's
 //!   spelled length.
 //!
 //! The record is written twice: [`Turn::Open`] when the member starts, so the
