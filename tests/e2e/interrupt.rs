@@ -54,11 +54,17 @@ impl Parked {
 /// addressed at a turn oneharness has already opened a socket for — waiting for
 /// the process instead would race the bind.
 fn parked(workspace: &Workspace, task: &str) -> Parked {
+    parked_in(workspace, task, workspace.session_store())
+}
+
+/// [`parked`], with oneharness's per-user state at `xdg` instead of the
+/// workspace's own store.
+fn parked_in(workspace: &Workspace, task: &str, xdg: &std::path::Path) -> Parked {
     let run = {
         let workspace_dir = workspace.path().to_path_buf();
         let state = workspace.state();
         let dir = workspace.dir();
-        let xdg = workspace.session_store().to_path_buf();
+        let xdg = xdg.to_path_buf();
         let task = task.to_string();
         std::thread::spawn(move || {
             std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
@@ -272,6 +278,14 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
         settled["turn"]["address"]["session_dir"].is_string(),
         "the report's own store directory did not replace the default: {settled}"
     );
+    // The same gate for the judge side, which asks for a controllable turn of its
+    // own: the handle written down while the member ran is the one the report
+    // says its supervisor turns were bound under.
+    assert_eq!(live["supervisor"]["state"], "open", "{live}");
+    assert_eq!(
+        settled["supervisor"]["address"]["session"], live["supervisor"]["address"]["session"],
+        "the supervisor session a live note addresses is not the one the report says was bound"
+    );
 
     // And the same lever on the same member, now that it is over: the run's own
     // record says it settled, so the answer is that fact rather than a socket
@@ -343,13 +357,26 @@ fn a_member_with_no_control_mechanism_is_reported_as_a_fact_rather_than_a_failur
     );
 }
 
-/// A single-sided member opens no controllable turn at all, and says so rather
-/// than reaching for a socket nothing ever bound.
+/// A single-sided member whose chain oneharness cannot interrupt in place opens
+/// no controllable turn, and says so — naming the candidate — rather than
+/// reaching for a socket nothing ever bound.
+///
+/// `qwen` declares no control mechanism at all, so the member's turn runs exactly
+/// as it did before single-sided members could be redirected, and the exit-3 fact
+/// is what `interrupt` reports for it: a member still settles its record with the
+/// reason, so this answer beats the run's own "already settled".
 #[test]
-fn a_single_sided_member_says_it_opens_no_controllable_turn() {
+fn a_single_sided_member_it_cannot_interrupt_in_place_opens_no_controllable_turn() {
     let workspace = Workspace::new();
-    workspace.graph(&crate::support::single_sided_graph(
-        &crate::support::fake_harness(),
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
     ));
     workspace
         .run_task("fake:complete-now: one agent")
@@ -365,9 +392,348 @@ fn a_single_sided_member_says_it_opens_no_controllable_turn() {
     assert!(
         events[0]["payload"]["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("opened no controllable turn")),
+            .is_some_and(
+                |reason| reason.contains("opened no controllable turn") && reason.contains("qwen")
+            ),
         "{}",
         interrupted.stdout
+    );
+}
+
+/// A single-sided member on a **Codex** chain keeps its turn on `codex exec`, as
+/// it always ran: oneharness would interrupt Codex only by moving the turn onto
+/// its app-server, so the member opens no controllable turn, and `interrupt`
+/// answers exit 3 naming the candidate — never a lever it does not have.
+///
+/// The `codex` is found on `PATH` the way an operator's is and records every
+/// launch's argv before handing it to the harness double, which is how the
+/// transport the turn really took is read.
+// llmlint: ignore-block[tests_mirror_real_usage] the argv a `codex` on `PATH`
+// recorded is the one witness of which transport the turn took: an `exec` turn
+// and an app-server turn settle identically on the stream. The exit code and the
+// `interrupt` answer are still read through the CLI.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_on_a_codex_chain_stays_on_exec_and_opens_no_controllable_turn() {
+    const END: &str = "--end-of-launch--";
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let record = workspace.at("codex-argv.txt");
+    let codex = workspace.write(
+        "bin/codex",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" {END} >> '{}'\nexec '{}' \"$@\"\n",
+            record.display(),
+            crate::support::fake_harness()
+        ),
+    );
+    crate::support::make_executable(&codex);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        crate::support::NO_ENV,
+    ));
+    let path = format!(
+        "{}:{}",
+        workspace.at("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    workspace
+        .run_task_with("fake:complete-now: start codex", &[("PATH", &path)])
+        .expect_code(0);
+    let recorded = std::fs::read_to_string(&record).expect("the codex on PATH recorded its argv");
+    let turns: Vec<&str> = recorded
+        .split_terminator(&format!("{END}\n"))
+        .filter(|launch| launch.trim() != "--version")
+        .collect();
+    assert!(!turns.is_empty(), "codex never started a turn: {recorded}");
+    for launch in &turns {
+        assert!(
+            launch.lines().next() == Some("exec"),
+            "a single-sided Codex turn left `codex exec`: {launch}"
+        );
+    }
+
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let interrupted = workspace.run(&["interrupt", &run_id, "reporter", "--input", "instead"]);
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        reason.contains("opened no controllable turn") && reason.contains("codex"),
+        "{reason}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
+/// A single-sided member whose chain holds one candidate oneharness interrupts
+/// in place and one it does not opens **no** controllable turn: one `--control`
+/// covers the whole chain, so asking would move the Codex candidate onto its
+/// app-server should it serve. The member still runs — on the candidate that
+/// serves it — and `interrupt` answers exit 3 naming the candidate that kept it
+/// uncontrolled.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_on_a_mixed_chain_runs_uncontrolled_and_says_which_candidate() {
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    ));
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"codex\"]\n",
+    );
+    workspace
+        .run_task("fake:complete-now: report in")
+        .expect_code(0);
+    let report: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "report.json"))
+            .expect("the report is JSON");
+    assert_eq!(report["fallback"]["ran"], "claude-code", "{report}");
+    let record: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "control.json"))
+            .expect("the control record is JSON");
+    assert_eq!(record["turn"]["state"], "unavailable", "{record}");
+
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let interrupted = workspace.run(&["interrupt", &run_id, "reporter", "--input", "instead"]);
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        reason.contains("opened no controllable turn")
+            && reason.contains("codex")
+            && !reason.contains("claude-code"),
+        "{reason}"
+    );
+}
+
+/// A single-sided member on a harness oneharness interrupts in place opens its
+/// turn with control, and an `interrupt` redirects it exactly as it redirects a
+/// two-party member's agent side: the parked turn stops, and the redirection is
+/// the turn that does the work.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_it_can_interrupt_in_place_is_redirected() {
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    ));
+    let original_work = workspace.at("did-original-work");
+    let redirected_work = workspace.at("did-redirected-work");
+    let member = parked(&workspace, &parking_task(&workspace, Some(&original_work)));
+
+    let redirection = format!(
+        "fake:did-work={} write the summary instead",
+        redirected_work.display()
+    );
+    let interrupted =
+        workspace.run(&["interrupt", &member.id, "reporter", "--input", &redirection]);
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["delivered"], true);
+
+    let output = member.settled();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the redirected member did not settle\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !original_work.exists(),
+        "the interrupted turn went on and did the work it was parked before"
+    );
+    let did = std::fs::read_to_string(&redirected_work)
+        .expect("the redirected turn never did the new work");
+    assert!(did.contains("write the summary instead"), "{did:?}");
+}
+
+/// A graph name of the length a real workstream gives its nodes, so the run id
+/// every session handle and socket name is built from is too.
+#[cfg(unix)]
+const LONG_GRAPH_NAME: &str = "manager-notes-reach-live-turns-oag-note-offers-attempt-2";
+
+/// `graph` renamed to [`LONG_GRAPH_NAME`].
+#[cfg(unix)]
+fn long_named(graph: &str) -> String {
+    graph.replacen("name: node-scope", &format!("name: {LONG_GRAPH_NAME}"), 1)
+}
+
+/// Park `member` of `graph` on a long run id with oneharness's state reached
+/// through a short link to a longer directory, redirect its turn, and answer
+/// the directory the link resolves to and the member's settled control record.
+///
+/// oneharness fits a socket's file name to the `sun_path` budget against the
+/// store it is handed and binds through the resolved one. On macOS every
+/// temporary store is reached that way — `/tmp` and `/var` are links into
+/// `/private` — so an address fitted to the link came out past the budget at
+/// bind: a single-sided member died unstartable and a two-party member's sides
+/// lost their lever, for control they merely asked for. The target here is a
+/// score of bytes longer than the link — enough to carry an address fitted to
+/// the link past the budget, not so much that none fits the target — which is
+/// that host's shape on any unix, so the Linux legs drive what the macOS leg
+/// does. Both sit in the journey's short session store rather than the
+/// workspace: macOS puts a workspace under `/var/folders/…/T/`, which resolves
+/// so long that no socket name fits under it, so a target there leaves the turn
+/// without a lever however the link is resolved.
+#[cfg(unix)]
+fn redirected_through_a_link(graph: &str, member: &str) -> (PathBuf, serde_json::Value) {
+    let workspace = Workspace::new();
+    workspace.graph(&long_named(graph));
+    let target = workspace.session_store().join("store-behind-a-link");
+    std::fs::create_dir_all(&target).expect("the store the link resolves to");
+    let link = workspace.session_store().join("l");
+    std::os::unix::fs::symlink(&target, &link).expect("the link the run is handed");
+    let original_work = workspace.at("did-original-work");
+    let redirected_work = workspace.at("did-redirected-work");
+    let parked = parked_in(
+        &workspace,
+        &parking_task(&workspace, Some(&original_work)),
+        &link,
+    );
+    assert!(
+        parked.id.starts_with(LONG_GRAPH_NAME),
+        "the run id is not the long one: {}",
+        parked.id
+    );
+
+    let redirection = format!(
+        "fake:did-work={} write the summary instead",
+        redirected_work.display()
+    );
+    let interrupted = workspace.run_with(
+        &["interrupt", &parked.id, member, "--input", &redirection],
+        &[("XDG_STATE_HOME", &link.display().to_string())],
+    );
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["delivered"], true);
+
+    let output = parked.settled();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the redirected member did not settle\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !original_work.exists(),
+        "the interrupted turn went on and did the work it was parked before"
+    );
+    assert!(
+        redirected_work.exists(),
+        "the redirected turn never did the new work"
+    );
+    let record = workspace.member_file(member, "control.json");
+    let record = serde_json::from_str(&record).expect("the control record is JSON");
+    (
+        std::fs::canonicalize(&target).expect("the target resolves"),
+        record,
+    )
+}
+
+/// A single-sided member on a long run id whose session store is reached
+/// through a link is still controlled, and still redirected — at the store as
+/// it resolves.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_whose_store_is_reached_through_a_link_is_still_redirected() {
+    let (resolved, record) = redirected_through_a_link(
+        &crate::support::single_sided_graph(&crate::support::fake_harness()),
+        "reporter",
+    );
+    assert_eq!(record["turn"]["state"], "open", "{record}");
+    assert_eq!(
+        record["turn"]["address"]["session_dir"],
+        resolved
+            .join("oneharness")
+            .join("sessions")
+            .display()
+            .to_string(),
+        "{record}"
+    );
+}
+
+/// A two-party member on a long run id whose session store is reached through a
+/// link keeps a lever on **both** sides: its worker turn is redirected, and the
+/// supervisor's turn was controllable too, each at the store as it resolves.
+#[cfg(unix)]
+#[test]
+fn a_two_party_member_whose_store_is_reached_through_a_link_keeps_both_levers() {
+    let (resolved, record) = redirected_through_a_link(
+        &crate::support::two_party_graph(&crate::support::fake_harness(), crate::support::NO_ENV),
+        "worker",
+    );
+    let store = resolved
+        .join("oneharness")
+        .join("sessions")
+        .display()
+        .to_string();
+    for side in ["turn", "supervisor"] {
+        assert_eq!(record[side]["state"], "open", "{side}: {record}");
+        assert_eq!(
+            record[side]["address"]["session_dir"], store,
+            "{side}: {record}"
+        );
+    }
+}
+
+/// A member whose store is too deep to host any control socket is never made
+/// unstartable by the control it asked for: it runs uncontrolled and settles,
+/// and its record says why it had no lever.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_whose_store_cannot_host_a_socket_still_runs() {
+    let workspace = Workspace::new();
+    workspace.graph(&long_named(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    )));
+    let deep = workspace
+        .path()
+        .join("a-state-root-nested-so-deep-that-no-unix-socket-address-under-it-fits")
+        .join("the-platform-limit-on-any-host-this-suite-runs-on");
+    let ran = workspace.run_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: report in",
+        ],
+        &[("XDG_STATE_HOME", &deep.display().to_string())],
+    );
+    ran.expect_code(0);
+    assert!(ran.of_kind("member-died").is_empty(), "{}", ran.stdout);
+    let record: serde_json::Value =
+        serde_json::from_str(&workspace.member_file("reporter", "control.json"))
+            .expect("the control record is JSON");
+    assert_eq!(record["turn"]["state"], "unavailable", "{record}");
+    assert!(
+        record["turn"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("unix-socket address limit")),
+        "{record}"
     );
 }
 

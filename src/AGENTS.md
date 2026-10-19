@@ -22,7 +22,7 @@ Rules that hold as this grows:
 | `invoke` | one member's launch, its generated configs, and the model pairing rule |
 | `member` | a single-sided member's child process: its stream, its watchdogs, its death |
 | `judge` | a two-party member, driven through onejudge's library in this process |
-| `control` / `note` | where an in-flight turn is addressed, and the transport that carries a role-addressed note into the conversation's own inbox |
+| `control` / `note` | where an in-flight turn is addressed, and the offer that carries a role-addressed note into the conversation's own inbox — admitted, waited on, bounded, or withdrawn |
 | `run` | dependency order, cron members, the merged stream, the exit code |
 | `scratch` | `owner.lock` ownership, proven descendant reaping |
 | `event` / `render` | the wire envelope, the shared filter over it (`docs/event-filter-notes.md`), and the text rendering of the same events |

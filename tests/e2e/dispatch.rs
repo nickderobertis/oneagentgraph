@@ -3959,6 +3959,39 @@ fn a_single_sided_member_answers_with_the_structured_document_its_config_asks_fo
         "the stored report carries no structured answer: {result}"
     );
 
+    // The drafter's chain is one oneharness interrupts in place, so its turn asked
+    // for control — and a schema run is one oneharness refuses that ask for,
+    // before anything spawns. The turn above is the same turn asked again without
+    // it, and the member's control record carries the refusal as the reason it
+    // has no lever; the reporter beside it, with no schema, kept its lever —
+    // where there is one to keep: a lever is a unix domain socket, so on Windows
+    // the reporter's turn is recorded without one too.
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let control_of = |member: &str| -> serde_json::Value {
+        let path = workspace
+            .state()
+            .join(&run_id)
+            .join("members")
+            .join(member)
+            .join("control.json");
+        serde_json::from_str(&std::fs::read_to_string(&path).expect("a control record"))
+            .expect("the control record is JSON")
+    };
+    let drafter = control_of("drafter");
+    assert_eq!(drafter["turn"]["state"], "unavailable", "{drafter}");
+    assert!(
+        drafter["turn"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("--schema")),
+        "the refusal the turn was asked again after is not the one recorded: {drafter}"
+    );
+    let reporter = control_of("reporter");
+    let lever = if cfg!(unix) { "open" } else { "unavailable" };
+    assert_eq!(reporter["turn"]["state"], lever, "{reporter}");
+
     // Every path in that config was anchored, not just the one the schema run
     // needed: the history this member was told to keep landed beside the config
     // that asked for it, which is the only directory its author named.

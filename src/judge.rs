@@ -414,14 +414,25 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         session_dir: None,
         cwd: launch.worktree.clone(),
     };
+    // The judge side asks for a controllable turn of its own — see
+    // `crate::invoke::ASK_FOR_CONTROL` — so its address is written down beside
+    // the agent's, on the session onejudge threads that side's turns under.
+    let supervisor = crate::control::Address {
+        session: supervisor_session(&launch.session),
+        session_dir: None,
+        cwd: launch.worktree.clone(),
+    };
     // The record names the endpoint bound above — the spool's address as the
     // backend states it — so a caller that reads the record and offers a note
     // has somewhere to offer it into.
-    crate::control::write_with_notes(
+    crate::control::write_parties(
         scratch,
         &crate::control::Turn::Open {
             address: address.clone(),
         },
+        Some(&crate::control::Turn::Open {
+            address: supervisor,
+        }),
         endpoint.as_ref().map(crate::note::Endpoint::address),
     );
 
@@ -1292,8 +1303,9 @@ fn cancellation_requested(scratch: &Path) -> bool {
 ///
 /// A member names one session and onejudge's engine gives each party its own
 /// under it — `<base>-skill` for the side that does the work and `<base>-user`
-/// for the one that supervises it, "always", per `onejudge::cli::Settings`. Only
-/// the agent side opens a controllable turn, so only its handle addresses one.
+/// for the one that supervises it, "always", per `onejudge::cli::Settings`. Each
+/// side opens a controllable turn under its own, so each handle addresses one —
+/// this is the agent's, and [`supervisor_session`] is the judge's.
 ///
 /// This is the single place that derivation is written down here, and it is a
 /// *provisional* answer with a gate under it: the report replaces the whole
@@ -1302,6 +1314,16 @@ fn cancellation_requested(scratch: &Path) -> bool {
 /// upstream fails a journey rather than silently addressing nothing.
 fn agent_session(member_session: &str) -> String {
     format!("{member_session}-skill")
+}
+
+/// The handle onejudge threads a member's **supervisor** turns under: the
+/// `<base>-user` its engine derives beside `<base>-skill`.
+///
+/// Provisional on [`agent_session`]'s terms, and replaced the same way: the
+/// report's `supervisor_control` names the handle oneharness actually bound, and
+/// [`record_control`] writes that one.
+fn supervisor_session(member_session: &str) -> String {
+    format!("{member_session}-user")
 }
 
 /// Replace this member's provisional control record with what its report says.
@@ -1313,7 +1335,26 @@ fn agent_session(member_session: &str) -> String {
 /// one that names oneharness's own store directory — and a `control: null` is the
 /// contract's exit-3 case, carrying the reason `control_unavailable` gave.
 fn record_control(report: &onejudge::Report, scratch: &Path, notes: Option<&Path>) {
-    let turn = match &report.control {
+    let turn = control_turn(
+        report.control.as_ref(),
+        report.control_unavailable.as_deref(),
+        "this member's report named no controllable turn",
+    );
+    let supervisor = control_turn(
+        report.supervisor_control.as_ref(),
+        report.supervisor_control_unavailable.as_deref(),
+        "this member's report named no controllable supervisor turn",
+    );
+    crate::control::write_parties(scratch, &turn, Some(&supervisor), notes);
+}
+
+/// One side's control, as its report block and its refusal state it.
+fn control_turn(
+    address: Option<&onejudge::ControlAddress>,
+    unavailable: Option<&str>,
+    unstated: &str,
+) -> crate::control::Turn {
+    match address {
         Some(address) => crate::control::Turn::Open {
             address: crate::control::Address {
                 session: address.session.clone(),
@@ -1322,13 +1363,9 @@ fn record_control(report: &onejudge::Report, scratch: &Path, notes: Option<&Path
             },
         },
         None => crate::control::Turn::Unavailable {
-            reason: report
-                .control_unavailable
-                .clone()
-                .unwrap_or_else(|| "this member's report named no controllable turn".to_string()),
+            reason: unavailable.unwrap_or(unstated).to_string(),
         },
-    };
-    crate::control::write_with_notes(scratch, &turn, notes);
+    }
 }
 
 /// The classified cause of a failed run.

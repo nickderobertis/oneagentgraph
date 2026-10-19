@@ -481,7 +481,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1275,9 +1275,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.28.1"
+version = "0.28.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca843b7528af3669112528459ab4713e87a62544cc3c66b3f1dc348e99857f3c"
+checksum = "bf6e72a30e3db4ebe6670cfc8b38f9ef5aabb680ea40142ddd3020a960be5a6f"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",
@@ -1296,9 +1296,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.19.5"
+version = "0.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14b557991e27288656dbcb174b53d1719df475942baa909b1a4b332b5048fc50"
+checksum = "92b548adb9384026074ff201a3efbfa30f996b355b489e3f836e7ba2ca88a806"
 dependencies = [
  "clap",
  "oneharness-core",
@@ -1313,12 +1313,13 @@ dependencies = [
 
 [[package]]
 name = "onemessagebus"
-version = "0.9.1"
+version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ae7dfd47a38b52451c6b00288604d0c4c3f640a0192a302fd00732f805d3729"
+checksum = "1effacbb1c8759badd2a060053c4631bafef9a26dc910095f471fb0f429b5da5"
 dependencies = [
  "getrandom 0.3.4",
  "jsonschema 0.56.0",
+ "rustix",
  "rustls",
  "rustls-native-certs",
  "schemars",
@@ -1646,7 +1647,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1703,7 +1704,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2021,7 +2022,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2420,7 +2421,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

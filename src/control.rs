@@ -6,10 +6,12 @@
 //! a turn that keeps running, which is the difference between correcting a worker
 //! and restarting it.
 //!
-//! **This crate owns none of the mechanism.** onejudge asks its agent side for a
-//! controllable turn (`provider.control`), oneharness opens the socket and knows
-//! which harnesses have a lever at all, and a separate `oneharness interrupt`
-//! process delivers the redirection. What lives here is the composition: the
+//! **This crate owns none of the mechanism.** onejudge asks both sides of a
+//! two-party member for a controllable turn (`provider.control`), a single-sided
+//! member's turn asks through `RunRequest::control` where oneharness's registry
+//! says its whole chain is interrupted in place (`crate::harness`), oneharness
+//! opens the socket and knows which harnesses have a lever at all, and a separate
+//! `oneharness interrupt` process delivers the redirection. What lives here is the composition: the
 //! address a run recorded for one member, and the mapping from oneharness's own
 //! answer onto the verb's exit codes.
 //!
@@ -29,6 +31,9 @@
 //!   onejudge never passes it, so a run and an `interrupt` that both say nothing
 //!   resolve the same store — recomputing that platform default here would be a
 //!   second source for one fact, and wrong for any run whose store *was* named.
+//!   Both ends do resolve it through any link, with oneharness's own resolver
+//!   (`default_store`), because a socket's name is fitted to the store's
+//!   spelled length.
 //!
 //! The record is written twice: [`Turn::Open`] when the member starts, so the
 //! lever exists while the turn an operator wants to redirect is the one in flight,
@@ -55,7 +60,7 @@ pub const CONTROL_FILE: &str = "control.json";
 /// from a run that may have started under an earlier version. A record from a
 /// *later* one is refused by number rather than parsed, because those were
 /// written by a build that knew something this one does not.
-pub const CONTROL_SCHEMA_VERSION: u32 = 2;
+pub const CONTROL_SCHEMA_VERSION: u32 = 3;
 
 /// The oldest shape this build can read, which is also the first this file ever
 /// had — there is no unversioned `control.json`, so anything below it is a value
@@ -65,7 +70,8 @@ pub const CONTROL_SCHEMA_VERSION: u32 = 2;
 /// buys: a run that started under a build with no note seam recorded no
 /// [`Record::notes`], and an `interrupt` against it goes on working exactly as it
 /// did. A record naming version `2` and no endpoint says the same thing about a
-/// member of *this* build — a single-sided one binds none.
+/// member of *this* build — a single-sided one binds none. Version `3` added
+/// [`Record::supervisor`].
 const FIRST_CONTROL_SCHEMA_VERSION: u32 = 1;
 
 /// Where an `oneharness interrupt` process addresses a member's controllable
@@ -108,7 +114,8 @@ pub struct Address {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Turn {
-    /// The member's agent side asked for a controllable turn, addressed here.
+    /// The member's turn — a two-party member's agent side, or a single-sided
+    /// member's one turn — asked for control, and is addressed here.
     Open {
         /// Where to reach it.
         address: Address,
@@ -135,10 +142,18 @@ pub struct Record {
     ///
     /// Absent for a member that binds none: a single-sided `kind: oneharness`
     /// member has no second party for a note to be addressed *away* from, so
-    /// [`note`] falls through to [`interrupt`] for it; and so does a record
+    /// [`offer_note`] falls through to [`interrupt`] for it; and so does a record
     /// written by a build that had no note seam at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<PathBuf>,
+    /// What the run knew about the member's **supervisor** turn — the judge
+    /// side of a two-party member, which asks for a controllable turn of its own
+    /// so a note can redirect a decision in flight.
+    ///
+    /// Absent for a member with no supervisor, and in a record written before
+    /// the judge side asked (versions `1` and `2`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supervisor: Option<Turn>,
 }
 
 /// Write what this run knows about `member`'s turn control into its scratch.
@@ -157,10 +172,19 @@ pub fn write(scratch: &Path, turn: &Turn) {
 /// could not be written is a member with no lever and no endpoint, which both
 /// verbs report as the fact it is.
 pub fn write_with_notes(scratch: &Path, turn: &Turn, notes: Option<&Path>) {
+    write_parties(scratch, turn, None, notes);
+}
+
+/// [`write_with_notes()`], additionally naming where the member's supervisor
+/// turn is addressed — see [`Record::supervisor`].
+///
+/// Best-effort on the same terms as [`write()`].
+pub fn write_parties(scratch: &Path, turn: &Turn, supervisor: Option<&Turn>, notes: Option<&Path>) {
     let record = Record {
         schema_version: CONTROL_SCHEMA_VERSION,
         turn: turn.clone(),
         notes: notes.map(Path::to_path_buf),
+        supervisor: supervisor.cloned(),
     };
     if let Ok(rendered) = serde_json::to_string(&record) {
         let _ = std::fs::write(path(scratch), rendered);
@@ -188,8 +212,7 @@ pub fn record(scratch: &Path) -> Result<Record, String> {
     let path = path(scratch);
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return Err(
-            "this member opened no controllable turn: only a two-party member's agent side does, \
-             and this run recorded none for it"
+            "this member opened no controllable turn: this run recorded no turn control for it"
                 .to_string(),
         );
     };
@@ -300,52 +323,76 @@ pub fn interrupt(
     })
 }
 
-/// What [`note()`] takes and what it answers, reachable beside the verb that
-/// uses them rather than declared a second time.
+/// What [`offer_note()`] and [`note()`] take and what they answer, reachable
+/// beside the verbs that use them rather than declared a second time.
 ///
 /// [`crate::note`] is where they live, because the member's own end of the seam
 /// reads and writes the same shapes: one definition on both ends is what keeps a
 /// caller's reading of an outcome the member's own answer rather than a
 /// translation of it.
 pub use crate::note::{
-    Accepted, Addressee, Criterion, DeliveredNote, Note, NoteDelivery, NoteRefused, NoteText,
-    Party, Undelivered,
+    Accepted, Addressee, Criterion, DeliveredNote, Delivery as NoteDeliveryMode, Note,
+    NoteDelivery, NoteOffer, NoteOffered, NoteRefused, NoteText, Party, Undelivered,
 };
 
 /// Route one role-addressed note to whichever side of `member`'s conversation is
-/// live, and answer what became of it.
-///
-/// The sibling of [`interrupt`], not a replacement for it, and the difference is
-/// the whole point. `interrupt` aims one redirection at the **agent** side's
-/// socket, which is why a note delivered that way has only ever reached the
-/// worker: the judge has no socket, so a ruling reached the party doing the work
-/// and never the party judging it. This routes instead — the note is offered to
-/// the member itself, which is the only thing that knows which side of its
-/// conversation is taking a turn right now — and it carries the addressed role
-/// through unchanged, so the receiving party knows whose task the update belongs
-/// to.
+/// live, and answer what became of it: [`offer_note`], then [`NoteOffer::wait`].
 ///
 /// The answers a caller acts on, and they are the conversation's own — see
 /// [`crate::note`] for which side of a member each one means:
 ///
-/// * [`Accepted::Interrupted`] — it reached that party's live turn.
-///   [`Party::Worker`] means the worker's turn was reopened carrying it before
-///   the supervisor was consulted, so the judge reads it with the worker's
-///   response; [`Party::Supervisor`] means the judge's decision was re-taken with
-///   the note in hand and the note rides that response to the worker.
-/// * [`Accepted::JudgedWith`] — it reached the supervisor's live turn and that
-///   re-taken decision was completion: the work was passed with the note in hand,
-///   and there was no next worker turn to deliver it into.
+/// * [`Accepted::Interrupted`] — it reached that party's live turn by
+///   interrupting it: the turn was redirected and its replacement opened with the
+///   note.
+/// * [`Accepted::AtTurnEnd`] — it reached a live turn only once that turn ended,
+///   in the turn that followed.
+/// * [`Accepted::JudgedWith`] — the supervisor passed the work with it in hand.
 /// * [`Accepted::Queued`] — nobody was taking a turn, so the next turn to open
 ///   took it.
-/// * [`NoteDelivery::Undelivered`] — it was **not** delivered, naming why. The
-///   member has settled, or its conversation reached completion. Never a silent
-///   acceptance: that is the failure this verb exists to remove.
+/// * [`NoteDelivery::Undelivered`] — it was **not** delivered, naming why.
+///
+/// # Errors
+///
+/// As [`offer_note`].
+pub fn note(
+    state_dir: &Path,
+    run_id: &RunId,
+    member: &MemberName,
+    note: &Note,
+    oneharness_bin: &str,
+) -> Result<NoteDelivery, Error> {
+    match offer_note(state_dir, run_id, member, note, oneharness_bin)? {
+        NoteOffered::Admitted(offer) => offer.wait(),
+        NoteOffered::Undelivered(undelivered) => Ok(NoteDelivery::Undelivered(undelivered)),
+    }
+}
+
+/// Offer one role-addressed note to `member`, and answer whether it is in —
+/// before any turn has answered it.
+///
+/// The sibling of [`interrupt`], not a replacement for it. `interrupt` aims one
+/// redirection at the agent side's socket; this offers the note to the member
+/// itself, which is the only thing that knows which side of its conversation is
+/// taking a turn right now, and carries the addressed role through unchanged.
+///
+/// [`NoteOffered::Admitted`] means the note sits in the member's onejudge inbox,
+/// untaken, and the run's stream has published `note-admitted` naming
+/// [`NoteOffer::id`]. What the caller does next is the offer's:
+/// [`NoteOffer::wait`] for the conversation's answer,
+/// [`NoteOffer::wait_until`] to bound that wait — [`NoteDelivery::Expired`]
+/// exactly when the deadline passed with the note untaken, which then no turn
+/// ever takes — or [`NoteOffer::withdraw`] to take it back, which succeeds only
+/// while no turn has taken it.
 ///
 /// A single-sided `kind: oneharness` member binds no note endpoint — it has no
-/// second party for a note to be addressed away from — so a note to one falls
-/// through to [`interrupt`], and a caller holding one API reaches both member
-/// kinds.
+/// second party for a note to be addressed away from — so a note to one is
+/// carried by the lever it does have, [`interrupt`]: a default
+/// [`NoteDeliveryMode::Interrupt`] note is answered [`Accepted::Interrupted`]
+/// naming [`Party::Worker`] only when that interrupt reports the redirection
+/// delivered, and [`Undelivered`] carrying the refusal's reason otherwise. A
+/// [`NoteDeliveryMode::TurnEnd`] note to one is refused rather than turned into an
+/// interrupt it asked not to be: holding a note for a turn's end is the
+/// conversation's to do, and such a member has none.
 ///
 /// `oneharness_bin` is a parameter for [`interrupt`]'s reason, unchanged: there
 /// is no environment a library call may consult for it.
@@ -358,13 +405,13 @@ pub use crate::note::{
 /// `non_exhaustive` and carries a [`NoteText`], which refuses blank text in the
 /// constructors *and* in the conversion it deserializes through, so an unreadable
 /// note cannot reach this call to be refused by it.
-pub fn note(
+pub fn offer_note(
     state_dir: &Path,
     run_id: &RunId,
     member: &MemberName,
     note: &Note,
     oneharness_bin: &str,
-) -> Result<NoteDelivery, Error> {
+) -> Result<NoteOffered, Error> {
     let record = crate::history::show(state_dir, run_id.as_str())?;
     record.require_member(member.as_str())?;
     // Derived from the run's *id*, exactly as [`interrupt`] derives it and for
@@ -377,7 +424,7 @@ pub fn note(
     // give: a settled member is not servicing anything, and a note left in its
     // spool would be an acceptance nobody reads.
     if settled(&record, member.as_str()) {
-        return Ok(NoteDelivery::Undelivered(Undelivered::MemberSettled {
+        return Ok(NoteOffered::Undelivered(Undelivered::MemberSettled {
             outcome: outcome(&record, member.as_str()),
         }));
     }
@@ -386,48 +433,40 @@ pub fn note(
     // for [`interrupt`]'s reason: following a path out of a file the run wrote
     // would let a record point this call at any directory the process can reach.
     let bound = self::record(&scratch).is_ok_and(|record| record.notes.is_some());
-    if !bound {
-        // No endpoint: a single-sided member, or a run from a build that had
-        // none. The lever that member *does* have is the one it always had.
-        //
-        // llmlint: ignore-block[changed_behavior_has_e2e] the `Delivered` arm
-        // below is unreachable from a run *this* build starts, which is why no
-        // journey drives it: a two-party member always binds an endpoint and
-        // never reaches here, and a single-sided one never asks for a
-        // controllable turn — `crate::invoke::ASK_FOR_CONTROL` is the two-party
-        // agent side's ask alone — so `oneharness interrupt` can only answer it a
-        // refusal. What can reach it is a run started by a build with no note
-        // seam at all, whose two-party member recorded a schema-1 control record;
-        // producing one would mean running a *previous release* of this binary
-        // inside a journey. The refusing arms are driven live and settled by
-        // `a_note_to_a_single_sided_member_falls_through_to_the_lever_it_has`,
-        // and `deliver` itself — the call this maps — is driven end to end by
-        // `tests/e2e/interrupt.rs`.
-        return Ok(
-            match interrupt(
-                state_dir,
-                run_id,
-                member,
-                Some(&crate::note::framed(note)),
-                oneharness_bin,
-            )? {
-                // A single-sided member has one party, and it is the one doing
-                // the work — there is no supervisor for a delivery to have
-                // reached instead.
-                Delivery::Delivered => NoteDelivery::Accepted(Accepted::Interrupted {
+    if bound {
+        return Ok(crate::note::offer(&scratch, note));
+    }
+    // No endpoint: a single-sided member, or a run from a build that had none.
+    if note.delivery == NoteDeliveryMode::TurnEnd {
+        return Ok(NoteOffered::Undelivered(Undelivered::NoConversation {
+            reason: "turn-end delivery needs a two-party member: this member has no conversation \
+                     to hold a note until its turn ends, and its one lever, `interrupt`, would \
+                     redirect the turn this note asked not to interrupt"
+                .to_string(),
+        }));
+    }
+    // The lever that member *does* have is the one it always had.
+    Ok(
+        match interrupt(
+            state_dir,
+            run_id,
+            member,
+            Some(&crate::note::framed(note)),
+            oneharness_bin,
+        )? {
+            // A single-sided member has one party, and it is the one doing the
+            // work — there is no supervisor for a delivery to have reached
+            // instead.
+            Delivery::Delivered => NoteOffered::Admitted(NoteOffer::answered(
+                NoteDelivery::Accepted(Accepted::Interrupted {
                     party: Party::Worker,
                 }),
-                Delivery::NoTurn(reason) | Delivery::Failed(reason) | Delivery::Invalid(reason) => {
-                    NoteDelivery::Undelivered(Undelivered::NoConversation { reason })
-                }
-            },
-        );
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-    }
-    Ok(match crate::note::submit(&scratch, note) {
-        Ok(accepted) => NoteDelivery::Accepted(accepted),
-        Err(undelivered) => NoteDelivery::Undelivered(undelivered),
-    })
+            )),
+            Delivery::NoTurn(reason) | Delivery::Failed(reason) | Delivery::Invalid(reason) => {
+                NoteOffered::Undelivered(Undelivered::NoConversation { reason })
+            }
+        },
+    )
 }
 
 /// What the run recorded for a member it has already settled, in the words the
@@ -490,6 +529,24 @@ fn settled(record: &crate::run::Record, member: &str) -> bool {
 /// by a binary this build does not choose.
 #[must_use]
 pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
+    // A record naming no store left the run on oneharness's default, which the
+    // run spelled as it resolves before its first member started
+    // ([`crate::run`]'s `settle_session_store`): a socket's file name is fitted
+    // to the store's length, so dialling the default as this process's
+    // environment spells it — through a link the run resolved — would name a
+    // different file. The same resolution here is what keeps a run and an
+    // `interrupt` that both say nothing on one store.
+    let resolved;
+    let address = match (&address.session_dir, default_store()) {
+        (None, Some(store)) => {
+            resolved = Address {
+                session_dir: Some(store),
+                ..address.clone()
+            };
+            &resolved
+        }
+        _ => address,
+    };
     let mut command = std::process::Command::new(bin);
     command.args(argv(address, input));
     let output = match command.output() {
@@ -506,10 +563,20 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
     // into one undifferentiated failure — which is exactly the distinction this
     // verb's exit 3 exists to make.
     match serde_json::from_slice::<ControlResponse>(&output.stdout) {
-        Ok(answer) => match answer.reason() {
-            None => Delivery::Delivered,
-            Some(reason) => Delivery::NoTurn(explain(reason)),
-        },
+        // A redirection is delivered only when the run says it wrote it as the
+        // replacement turn's prompt: an abort served without it is a turn that
+        // stopped and a message nobody will read.
+        Ok(ControlResponse::Served {
+            redirected: false, ..
+        }) if input.is_some() => Delivery::NoTurn(
+            "the turn was stopped but the run did not deliver the redirection, so nothing will \
+             read it"
+                .to_string(),
+        ),
+        Ok(ControlResponse::Served { .. }) => Delivery::Delivered,
+        Ok(ControlResponse::Refused { reason, error }) => {
+            Delivery::NoTurn(format!("{} ({error})", explain(reason)))
+        }
         // No frame at all. oneharness answers a redirection it will not take
         // before it opens anything, on stderr and with its own usage code, and
         // that is an argument this caller got wrong rather than a lever that
@@ -521,6 +588,40 @@ pub fn deliver(bin: &str, address: &Address, input: Option<&str>) -> Delivery {
             "`{bin} interrupt` answered nothing this build could read ({err}); its standard error \
              said: {stderr}"
         )),
+    }
+}
+
+/// oneharness's default session store as a run binds sockets under it: the
+/// directory oneharness resolves when it is named none, with the part of it that
+/// exists resolved through any link. `None` off unix, where there is no
+/// `sun_path` for a spelling to overrun, and where no default resolves at all.
+pub(crate) fn default_store() -> Option<PathBuf> {
+    if !cfg!(unix) {
+        return None;
+    }
+    oneharness_core::io::session::resolve_dir(None).map(|store| resolve_existing(&store))
+}
+
+/// `path` with its deepest existing ancestor resolved and the rest kept as
+/// written — the directory a later `create_dir_all` and `canonicalize` of it
+/// would produce, without creating anything.
+pub(crate) fn resolve_existing(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(at) {
+            return rest
+                .iter()
+                .rev()
+                .fold(resolved, |built, part| built.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_os_string());
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
     }
 }
 

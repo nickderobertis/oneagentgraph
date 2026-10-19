@@ -219,6 +219,7 @@ fn every_upstream_field_the_inventory_names_is_still_there() {
         field!(RunRequest, stream),
         field!(RunRequest, prompt),
         field!(RunRequest, control),
+        field!(RunRequest, session),
         field!(RunRequest, no_config),
         field!(RunRequest, bin),
         field!(RunControls<'_>, events),

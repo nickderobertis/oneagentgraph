@@ -35,6 +35,8 @@ fn the_package_carries_every_file_the_crate_is_built_from() {
     // that proves an old record still reads — is caught here too.
     needed.push("tests/golden/record.v1.json".into());
     needed.push("tests/golden/record.v2.json".into());
+    // The note protocol's golden, which `src/note.rs`'s own tests read.
+    needed.push("tests/golden/note-wire.v1.json".into());
     // The YAML `tests/yaml_corpus.rs` reads, and what it holds that YAML to.
     needed.push("tests/golden/graph.v10.yaml".into());
     needed.push("tests/yaml-corpus/expected.json".into());

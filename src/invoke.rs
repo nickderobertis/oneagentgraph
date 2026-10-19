@@ -155,6 +155,15 @@ pub struct HarnessLaunch {
     /// than re-derived at the call, because a run that asked the config twice
     /// could answer differently the second time.
     pub reporting: Reporting,
+    // llmlint: ignore-block[invalid_states_unrepresentable] a `String` for the
+    // reason [`JudgeLaunch::session`] records: what a session handle may be is
+    // oneharness's rule, applied by it on both ends.
+    /// The handle this member's turns are addressed by when they open with
+    /// control — see [`crate::harness`] for which ones do. Each turn takes a
+    /// handle of its own under it, so a scheduled member's firings never
+    /// continue one another's conversation.
+    pub session: String,
+    // llmlint: ignore-end[invalid_states_unrepresentable]
 }
 
 /// Everything driving one two-party member in this process needs.
@@ -307,6 +316,7 @@ pub fn build(
                         .iter()
                         .map(crate::preturn::View::declared)
                         .collect(),
+                    session: context.session.to_string(),
                 })),
                 persona: persona_label,
                 env: Vec::new(),
@@ -629,16 +639,27 @@ fn anchor(
     Ok(())
 }
 
-/// Every two-party member's agent side asks for a controllable turn, so
-/// `oneagentgraph interrupt` has a lever whenever the harness under it has one.
+/// Both sides of every two-party member ask for a controllable turn, so
+/// `oneagentgraph interrupt` has a lever whenever the agent's harness has one and
+/// a note can redirect whichever party's turn is live.
 ///
 /// Unconditional rather than a graph field, because the ask costs nothing where
 /// it cannot be honored: onejudge retries the same call once without `--control`
 /// and records the refusal as a stated reason, so a harness with no control
 /// mechanism runs exactly as it did before and `interrupt` reports the reason
-/// instead of a lever that silently did nothing. Only the *agent* side asks — a
-/// judge turn is short and has nothing to redirect, and giving it a socket would
-/// put two runs on one address.
+/// instead of a lever that silently did nothing.
+///
+/// The judge side asks too, because a judge turn is where a ruling that changes
+/// the bar has to land: without a lever there, a note to the supervisor waits for
+/// the decision it was meant to change and costs a second judge invocation to
+/// re-take it. The two sides run on separate session handles (`<base>-skill`,
+/// `<base>-user`), so the two sockets never share an address. One `control` on
+/// the `kind: oneharness` block is the ask for both parties. A `split` block's
+/// judge entries do not ask: a split always seats a panel — one harness judge is
+/// the plain block above — and onejudge never redirects a panel's turn, because
+/// several judges deciding at once cannot be redirected one at a time. Asking
+/// there would open sockets nothing dials, and move a Codex judge onto its
+/// app-server to do it.
 const ASK_FOR_CONTROL: bool = true;
 
 /// The onejudge `provider` block for a two-party member.

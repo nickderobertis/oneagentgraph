@@ -11,7 +11,7 @@
     "lint": { "command": "just _crate-lint", "inputs": ["crateSource", "{workspaceRoot}/clippy.toml"] },
     "test": {
       "command": "just _crate-test",
-      "inputs": ["crateSource"],
+      "inputs": ["crateSource", "{workspaceRoot}/tests/golden/note-wire.v1.json"],
       "outputs": ["{workspaceRoot}/target/llvm-cov-target/oneagentgraph-unit-*.profraw"],
       "parallelism": false
     },

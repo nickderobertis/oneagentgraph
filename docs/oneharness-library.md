@@ -8,7 +8,7 @@
 > where it lives. `src/harness.rs` is the module; `src/judge.rs` is its twin for
 > the other member kind, and the two are deliberately the same shape.
 >
-> **What provides it** is `oneharness-core` **0.28.1**, the release this crate
+> **What provides it** is `oneharness-core` **0.28.4**, the release this crate
 > links today: a
 > [`ProcessSupervisor`](#grouping-the-seam-this-whole-document-was-written-to-get)
 > trait with a `spawning(&mut Command)` / `spawned(&Child)` pair, and
@@ -16,7 +16,7 @@
 > this document proposed, added upstream as proposed — a second entry point
 > rather than a field on `RunControls`, so the exhaustive literals embedders had
 > already written kept compiling. Both names arrived in **0.10.1** and are
-> unchanged here, re-measured against 0.28.1 rather than assumed; the floor is a
+> unchanged here, re-measured against 0.28.4 rather than assumed; the floor is a
 > **compile floor**, not a preference, because below 0.10.1 neither exists and
 > `src/harness.rs` does not build, which is what stops a future edit from quietly
 > falling back to unsupervised `run`. The version emphasised above is the linked
@@ -145,14 +145,22 @@ carries that decision rather than a constant, and it reaches `RunRequest::stream
 as `Some` in both directions — never `None`, which would hand the question back to
 the config layer that has already answered it.
 
-**Control binding — available, and deliberately not taken.** A single-sided
+**Control binding — taken, where oneharness interrupts in place.** A single-sided
 member's argv carried no `--control`, so it recorded no `control::Turn` and
-`oneagentgraph interrupt` had no lever on one. `RunRequest::control` and
-`RunReport::control` are the same pair `src/judge.rs` reads for a two-party
-member, so the library path *could* grow the lever. It does not, in this change:
-the bar here is that a converted member behaves identically, and giving one kind
-of member a new lever is a contract-visible feature rather than a conversion.
-Named here because the seam is now free — see the follow-ups.
+`oneagentgraph interrupt` had no lever on one. It now asks for one through
+`RunRequest::control`, with a per-turn `RunRequest::session` handle under the
+member's, and writes the address into its `control.json` before the turn starts —
+but only where oneharness's own registry says every candidate the member's chain
+could be served by interrupts the turn **in place**: a declared `ControlShape`
+that does not drive the turn (`ControlShape::drives_turn`). One `control` covers
+the whole chain, so asking for it on a chain holding any other candidate would
+move that candidate's turn onto another transport — a Codex candidate onto the
+pooled `codex app-server` — and such a member keeps running as it always did and
+records the reason it has no lever. A control ask oneharness refuses anyway is
+refused before anything spawns, and the same turn is asked again without it, the
+ladder onejudge runs for a two-party member's sides. `src/harness.rs` is where
+that decision is made, from `io::config::load` and `domain::select::select_specs`
+— the selection the run itself resolves, read rather than restated.
 
 **Accounting — replaced by the return value.** The exit status fed
 `member::Kind::settled` and the stderr tail fed `member-died`'s `detail`; both
@@ -378,10 +386,11 @@ its owner rather than an edit.
    chain that stepped past every candidate dies as `fallback_chain_exhausted`
    carrying each candidate's own `failure_kind` in oneharness's spelling —
    `model_mismatch` included — as the paragraph above describes.
-2. **A single-sided member could become interruptible.** `RunRequest::control`
-   and `RunReport::control` are right there, and `src/judge.rs` already reads that
-   pair. Adding it would give `oneagentgraph interrupt` a lever on a member kind
-   that has never had one — a feature, and a contract-visible one.
+2. **A single-sided member on a Codex chain could become interruptible.** Its
+   turn would move onto the pooled `codex app-server`, which this binary does not
+   host a sweeper for (`io::app_server::serve_sweeper_if_requested`), and which
+   the harness double cannot take a turn over; so it is left uncontrolled, and
+   that is a feature for a later change rather than a side effect of this one.
 
 ## Two things that are not this hop
 

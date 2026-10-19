@@ -530,6 +530,9 @@ fn publish(run_id: &run::RunId, member: &str, input_bytes: u64, reason: Option<S
         input_bytes,
         reason,
         truncated: false,
+        offer: None,
+        accepted: None,
+        party: None,
     };
     emitter.emit(
         EventKind::TurnInterrupted,

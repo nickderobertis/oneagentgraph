@@ -1,0 +1,108 @@
+{
+  "requests": [
+    {
+      "offer": {
+        "offer": "o-1792417588859-3839167-1",
+        "note": {
+          "addressee": "worker",
+          "text": "the migration has to be reversible"
+        }
+      }
+    },
+    {
+      "offer": {
+        "offer": "o-1792417588859-3839167-1",
+        "note": {
+          "addressee": "both",
+          "text": "keep the public API stable",
+          "criterion": "the public API is unchanged",
+          "delivery": "turn-end"
+        }
+      }
+    },
+    {
+      "wait": {
+        "offer": "o-1792417588859-3839167-1"
+      }
+    },
+    {
+      "wait_until": {
+        "offer": "o-1792417588859-3839167-1",
+        "deadline_unix_ms": 1792417590000
+      }
+    },
+    {
+      "withdraw": {
+        "offer": "o-1792417588859-3839167-1"
+      }
+    }
+  ],
+  "replies": [
+    "admitted",
+    {
+      "accepted": "queued"
+    },
+    {
+      "accepted": {
+        "interrupted": {
+          "party": "worker"
+        }
+      }
+    },
+    {
+      "accepted": {
+        "at_turn_end": {
+          "party": "supervisor"
+        }
+      }
+    },
+    {
+      "accepted": {
+        "judged_with": {
+          "completion_reason": "the work is complete"
+        }
+      }
+    },
+    {
+      "undelivered": {
+        "conversation_completed": {
+          "completion_reason": "the work is complete"
+        }
+      }
+    },
+    {
+      "undelivered": {
+        "member_settled": {
+          "outcome": "settled"
+        }
+      }
+    },
+    {
+      "undelivered": {
+        "no_conversation": {
+          "reason": "turn-end delivery needs a two-party member"
+        }
+      }
+    },
+    "expired",
+    "withdrawn",
+    "taken",
+    {
+      "refused": {
+        "reason": "this member holds no offer o-1"
+      }
+    }
+  ],
+  "settled": [
+    {
+      "schema_version": 1,
+      "reply": {
+        "accepted": {
+          "interrupted": {
+            "party": "worker"
+          }
+        }
+      }
+    }
+  ]
+}
