@@ -39,7 +39,8 @@
 //!
 //! The engine takes a note out of its inbox only when it is about to present it,
 //! so until then the note is the caller's to take back — which is what
-//! [`NoteOffer::withdraw`] and [`NoteOffer::wait_until`] rest on.
+//! [`NoteOffer::withdraw`], [`NoteWithdrawer::withdraw`] and
+//! [`NoteOffer::wait_until`] rest on.
 //!
 //! # The transport: an offer, carried in by the member's relay
 //!
@@ -57,6 +58,13 @@
 //! deadline and the withdrawal the caller asks for are the bus's own — taking a
 //! note and taking it back never both succeed — rather than anything this crate
 //! re-implements.
+//!
+//! The relay keeps that offer in its book for the offer's whole life, a wait in
+//! flight included: the wait looks for the answer through the bus's
+//! non-consuming `Offer::try_answer` rather than taking the offer out to block
+//! on it. So a withdrawal arriving while a wait is in flight — from a
+//! [`NoteWithdrawer`] on another thread of the caller's process — still reaches
+//! the offer, and the wait it overtook answers [`NoteDelivery::Withdrawn`].
 //!
 //! It is a relay rather than the spool bound straight onto the engine's inbox for
 //! the things only the member process can do with an offer: give it an id the
@@ -112,6 +120,11 @@ const SETTLED_SCHEMA_VERSION: u32 = 1;
 /// also how soon it notices it is asked to stop.
 const RELAY_POLL: Duration = Duration::from_millis(50);
 
+/// How often a wait in flight looks for its offer's answer. The engine's answer
+/// arrives with nothing to wake the wait, so it is looked for; a withdrawal or a
+/// turn's announcement that settles the offer wakes the wait at once.
+const ANSWER_POLL: Duration = Duration::from_millis(20);
+
 /// How long a member's end waits for its relay to stop taking requests.
 const STOP_BOUND: Duration = Duration::from_secs(2);
 
@@ -127,7 +140,7 @@ const SETTLE_BOUND: Duration = Duration::from_secs(5);
 /// The engine answers a note it takes *before* it announces the turn that
 /// carries it, and the turn being announced looks for that answer itself
 /// ([`Book::probe`]) — or, for a note a caller's wait holds, lets that wait's
-/// thread report it a moment later — so the wait is that moment, and this bound
+/// thread report it — so the wait is that moment, and this bound
 /// is only ever reached by a note that arrived after the engine last looked,
 /// which the announced turn does not carry.
 const DELIVERY_SETTLE: Duration = Duration::from_secs(1);
@@ -137,10 +150,12 @@ const MAX_OFFER_ID: usize = 128;
 
 /// What became of one note.
 ///
-/// The three are not interchangeable and none is an exit code: a caller reads
+/// None is interchangeable with another and none is an exit code: a caller reads
 /// the [`Accepted`] to know *when* the addressee sees it, the [`Undelivered`] to
-/// know it never will, and [`NoteDelivery::Expired`] to know its own deadline
-/// passed with the note untaken — and that no turn ever will take it.
+/// know it never will, [`NoteDelivery::Expired`] to know its own deadline passed
+/// with the note untaken, and [`NoteDelivery::Withdrawn`] to know a
+/// [`NoteWithdrawer`] took it back — and, for either of the last two, that no
+/// turn ever will take it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoteDelivery {
     /// The conversation took it.
@@ -151,6 +166,10 @@ pub enum NoteDelivery {
     /// still untaken, so it was withdrawn: it was never presented, and never
     /// will be.
     Expired,
+    /// A [`NoteWithdrawer`] took the note back before any turn took it — while
+    /// this wait was in flight, or before it began: it was never presented, and
+    /// never will be.
+    Withdrawn,
 }
 
 /// What offering one note answered: it is in the member's conversation inbox,
@@ -268,8 +287,64 @@ impl NoteOffer {
     /// took the note first — or when that cannot be established, which reads as
     /// taken.
     pub fn withdraw(self) -> Result<(), Self> {
-        let OfferState::Relayed { scratch } = &self.state else {
-            return Err(self);
+        match self.withdrawer().withdraw() {
+            Ok(()) => Ok(()),
+            Err(NotWithdrawn { .. }) => Err(self),
+        }
+    }
+
+    /// What takes this note back from another thread while this offer's
+    /// [`wait`](Self::wait) or [`wait_until`](Self::wait_until) blocks on it.
+    #[must_use]
+    pub fn withdrawer(&self) -> NoteWithdrawer {
+        NoteWithdrawer {
+            id: self.id.clone(),
+            scratch: match &self.state {
+                OfferState::Relayed { scratch } => Some(scratch.clone()),
+                OfferState::Answered(_) => None,
+            },
+        }
+    }
+}
+
+/// Takes one admitted note back, from any thread of the offering process — a
+/// wait on its [`NoteOffer`] in flight or not.
+///
+/// It holds nothing of the offer's but its id and its member's address, so a
+/// clone is the same withdrawer and every clone races the conversation for the
+/// same note: at most one withdrawal of it ever succeeds, and none does once a
+/// turn has taken it.
+#[derive(Debug, Clone)]
+pub struct NoteWithdrawer {
+    id: OfferId,
+    /// The member's scratch, or `None` for an offer answered as it was made,
+    /// which has nothing left to take back.
+    scratch: Option<PathBuf>,
+}
+
+impl NoteWithdrawer {
+    /// The id of the offer this takes back — its [`NoteOffer::id`].
+    #[must_use]
+    pub fn id(&self) -> &str {
+        &self.id.0
+    }
+
+    /// Take the note back: `Ok` exactly when no turn had taken it, and then none
+    /// ever presents it, a wait on its offer answers [`NoteDelivery::Withdrawn`],
+    /// and the run's stream carries one `note-withdrawn` with reason
+    /// `withdrawn`.
+    ///
+    /// # Errors
+    ///
+    /// [`NotWithdrawn`] when a turn took the note first; when the offer was
+    /// already answered, expired or withdrawn; or when the member can no longer
+    /// be asked — each of which leaves the note's fate to its offer's wait.
+    pub fn withdraw(&self) -> Result<(), NotWithdrawn> {
+        let Some(scratch) = &self.scratch else {
+            return Err(NotWithdrawn {
+                reason: "the offer was answered as it was made, so there is nothing to take back"
+                    .to_string(),
+            });
         };
         match ask(
             scratch,
@@ -278,10 +353,35 @@ impl NoteOffer {
             },
         ) {
             Ok(Reply::Withdrawn) => Ok(()),
-            _ => Err(self),
+            Ok(Reply::Taken) => Err(NotWithdrawn {
+                reason: "a turn took the note first, or the offer was already answered, expired \
+                         or withdrawn"
+                    .to_string(),
+            }),
+            Ok(other) => Err(NotWithdrawn {
+                reason: format!("the member answered the withdrawal with {other:?}"),
+            }),
+            Err(undelivered) => Err(NotWithdrawn {
+                reason: format!("the member can no longer be asked: {undelivered}"),
+            }),
         }
     }
 }
+
+/// Why a [`NoteWithdrawer::withdraw`] took nothing back. The note's fate is then
+/// whatever its offer's wait answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotWithdrawn {
+    reason: String,
+}
+
+impl std::fmt::Display for NotWithdrawn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the note was not withdrawn: {}", self.reason)
+    }
+}
+
+impl std::error::Error for NotWithdrawn {}
 
 /// `at`, in milliseconds since the Unix epoch: how a deadline crosses from the
 /// caller's process to the member's.
@@ -407,8 +507,8 @@ pub(crate) enum Reply {
     Expired,
     /// It was taken back before any turn took it.
     Withdrawn,
-    /// A turn took it first, or its answer is already being waited on: there is
-    /// nothing to take back.
+    /// A turn took it first, or it was already answered, expired or withdrawn:
+    /// there is nothing to take back.
     Taken,
     /// The member holds no such offer.
     Refused {
@@ -509,6 +609,11 @@ fn submit_within(scratch: &Path, note: &Note, wait: Duration) -> Result<Accepted
                 Ok(NoteDelivery::Expired) | Err(_) => Err(Undelivered::NoConversation {
                     reason: "the member answered a wait with no deadline as expired".to_string(),
                 }),
+                // Only a withdrawer can take a note back, and this offer never
+                // left this call to have one made for it.
+                Ok(NoteDelivery::Withdrawn) => Err(Undelivered::NoConversation {
+                    reason: "the note was withdrawn before any turn took it".to_string(),
+                }),
             },
             NoteOffered::Undelivered(undelivered) => Err(undelivered),
         };
@@ -563,9 +668,7 @@ fn delivery_of(reply: &Reply) -> Option<NoteDelivery> {
         Reply::Accepted(accepted) => Some(NoteDelivery::Accepted(accepted.clone())),
         Reply::Undelivered(undelivered) => Some(NoteDelivery::Undelivered(undelivered.clone())),
         Reply::Expired => Some(NoteDelivery::Expired),
-        Reply::Withdrawn => Some(NoteDelivery::Undelivered(Undelivered::NoConversation {
-            reason: "the note was withdrawn by its sender before any turn took it".to_string(),
-        })),
+        Reply::Withdrawn => Some(NoteDelivery::Withdrawn),
         Reply::Admitted | Reply::Taken | Reply::Refused { .. } => None,
     }
 }
@@ -805,10 +908,24 @@ impl Deliveries {
 /// One admitted note the relay holds for its caller.
 struct Held {
     note: Note,
-    /// The in-process offer, until a wait takes it away to block on — `None`
-    /// while one does, which is also what refuses a second wait or a withdrawal
-    /// then.
+    /// The in-process offer. Kept here while a caller's wait is in flight, so a
+    /// withdrawal still reaches it; `None` only while a member that is ending
+    /// settles it on a thread of its own.
     offer: Option<onemessagebus::Offer<Accepted>>,
+    /// Whether a caller's wait is on it: what refuses a second wait, and keeps a
+    /// member that is ending from settling it out from under that wait.
+    waited: bool,
+}
+
+/// What a member's [`Book`] guards: the offers it holds, and every answer it has
+/// given.
+#[derive(Default)]
+struct Ledger {
+    held: HashMap<OfferId, Held>,
+    /// Every answer given, kept beside the one written down in [`OFFERS_DIR`] so
+    /// a wait an answer overtook — a withdrawal, or a turn being announced that
+    /// settled it first — reads it even where the write failed.
+    answered: HashMap<OfferId, Reply>,
 }
 
 /// Every offer a member holds, and what it does as each is answered: write the
@@ -817,40 +934,37 @@ struct Book {
     scratch: PathBuf,
     emitter: Emitter,
     relayed: Arc<Relayed>,
-    held: Mutex<HashMap<OfferId, Held>>,
-    /// Notified whenever an offer is answered, for an [`Ending`] waiting on them.
+    ledger: Mutex<Ledger>,
+    /// Notified whenever an offer is answered, for an [`Ending`] waiting on them
+    /// and for a wait an answer from elsewhere overtook.
     emptied: Condvar,
 }
 
 impl Book {
-    fn lock(&self) -> MutexGuard<'_, HashMap<OfferId, Held>> {
-        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, Ledger> {
+        self.ledger.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Whether `offer` was ever made to this member.
     fn knows(&self, offer: &OfferId) -> bool {
-        self.lock().contains_key(offer) || settled_path(&self.scratch, offer).exists()
+        let ledger = self.lock();
+        ledger.held.contains_key(offer)
+            || ledger.answered.contains_key(offer)
+            || settled_path(&self.scratch, offer).exists()
     }
 
-    /// Take `offer`'s in-process handle out to act on, with its note.
-    fn take(&self, offer: &OfferId) -> Option<(onemessagebus::Offer<Accepted>, Note)> {
-        let mut held = self.lock();
-        let entry = held.get_mut(offer)?;
-        let handle = entry.offer.take()?;
-        Some((handle, entry.note.clone()))
+    /// The answer `offer` was given, if it has one.
+    fn answer(&self, offer: &OfferId) -> Option<Reply> {
+        let given = self.lock().answered.get(offer).cloned();
+        given.or_else(|| read_settled(&self.scratch, offer))
     }
 
-    /// Put a handle a withdrawal could not take back where it was.
-    fn restore(&self, offer: &OfferId, handle: onemessagebus::Offer<Accepted>) {
-        if let Some(entry) = self.lock().get_mut(offer) {
-            entry.offer = Some(handle);
-        }
-    }
-
-    /// Every offer no wait is blocked on, taken out to settle.
+    /// Every offer no wait is on, taken out to settle.
     fn idle(&self) -> Vec<(OfferId, onemessagebus::Offer<Accepted>, Note)> {
         self.lock()
+            .held
             .iter_mut()
+            .filter(|(_, entry)| !entry.waited)
             .filter_map(|(id, entry)| {
                 let handle = entry.offer.take()?;
                 Some((id.clone(), handle, entry.note.clone()))
@@ -858,11 +972,20 @@ impl Book {
             .collect()
     }
 
-    /// `offer` is answered `reply`: written down first, so a caller that reads it
-    /// after the member has gone reads this; then published, counted, and let go.
-    fn settle(&self, offer: &OfferId, note: &Note, reply: &Reply) {
+    /// `offer` is answered `reply`, under the book's lock: written down first,
+    /// so a caller that reads it after the member has gone reads this; then
+    /// remembered and let go. What it is answered is announced once the lock is
+    /// let go.
+    fn record(&self, ledger: &mut Ledger, offer: &OfferId, reply: &Reply) {
         write_settled(&self.scratch, offer, reply);
-        self.lock().remove(offer);
+        ledger.held.remove(offer);
+        ledger.answered.insert(offer.clone(), reply.clone());
+    }
+
+    /// [`record`](Self::record) and [`announce`](Self::announce) `offer`'s
+    /// answer.
+    fn settle(&self, offer: &OfferId, note: &Note, reply: &Reply) {
+        self.record(&mut self.lock(), offer, reply);
         self.announce(offer, note, reply);
     }
 
@@ -883,25 +1006,22 @@ impl Book {
     /// `try_answer`: an offer still untaken keeps every guarantee it had, so a
     /// withdrawal or a deadline racing this still settles it atomically. One
     /// that answered is written down and dropped from the book before the lock
-    /// is let go, so a wait or a withdrawal arriving next reads the written
-    /// answer rather than settling it a second time. One a wait has taken out is
-    /// that wait's to settle, and is left to it.
+    /// is let go, so a wait or a withdrawal arriving next reads the recorded
+    /// answer rather than settling it a second time. A wait in flight on one it
+    /// settles reads that answer too.
     fn probe(&self) {
         let answered: Vec<(OfferId, Note, Reply)> = {
-            let mut held = self.lock();
-            let answered: Vec<(OfferId, Note, Reply)> = held
+            let mut ledger = self.lock();
+            let answered: Vec<(OfferId, Note, Reply)> = ledger
+                .held
                 .iter_mut()
                 .filter_map(|(id, entry)| {
-                    let reply = match entry.offer.as_mut()?.try_answer()? {
-                        Ok(accepted) => Reply::Accepted(accepted),
-                        Err(undelivered) => Reply::Undelivered(Undelivered::from(undelivered)),
-                    };
+                    let reply = reply_of(entry.offer.as_mut()?.try_answer()?);
                     Some((id.clone(), entry.note.clone(), reply))
                 })
                 .collect();
             for (offer, _, reply) in &answered {
-                write_settled(&self.scratch, offer, reply);
-                held.remove(offer);
+                self.record(&mut ledger, offer, reply);
             }
             answered
         };
@@ -910,6 +1030,91 @@ impl Book {
         }
     }
 
+    /// Wait for `offer`'s answer — withdrawing it at `deadline`, if there is
+    /// one and it is still untaken then — and answer what became of it.
+    ///
+    /// The offer stays in the book throughout, looked at through the bus's
+    /// non-consuming `try_answer` every [`ANSWER_POLL`], so a withdrawal arriving
+    /// meanwhile still reaches it; and every look is made under the book's lock,
+    /// so the two never act on the offer at once. Whatever answers it elsewhere
+    /// — a withdrawal, a turn being announced — wakes this wait, which then
+    /// answers what was recorded.
+    fn awaited(&self, offer: &OfferId, deadline: Option<Instant>) -> Reply {
+        let mut ledger = self.lock();
+        loop {
+            let Some(entry) = ledger.held.get_mut(offer) else {
+                let given = ledger.answered.get(offer).cloned();
+                drop(ledger);
+                return given
+                    .or_else(|| read_settled(&self.scratch, offer))
+                    .unwrap_or_else(|| Reply::Refused {
+                        reason: format!("offer {offer} was let go of unanswered"),
+                    });
+            };
+            let note = entry.note.clone();
+            let mut reply = None;
+            if let Some(handle) = entry.offer.as_mut() {
+                if let Some(outcome) = handle.try_answer() {
+                    reply = Some(reply_of(outcome));
+                } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    // Past the deadline every look tries the withdrawal again,
+                    // rather than giving the deadline up on the first refusal: a
+                    // turn that took the note to read it and handed it back has
+                    // left it untaken, and the bus's own deadline would expire it
+                    // at that hand-back.
+                    if let Some(handle) = entry.offer.take() {
+                        match handle.withdraw() {
+                            Ok(()) => reply = Some(Reply::Expired),
+                            Err(handle) => entry.offer = Some(handle),
+                        }
+                    }
+                }
+            }
+            if let Some(reply) = reply {
+                self.record(&mut ledger, offer, &reply);
+                drop(ledger);
+                self.announce(offer, &note, &reply);
+                return reply;
+            }
+            let look = deadline.map_or(ANSWER_POLL, |deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .clamp(Duration::from_millis(1), ANSWER_POLL)
+            });
+            ledger = self
+                .emptied
+                .wait_timeout(ledger, look)
+                .unwrap_or_else(PoisonError::into_inner)
+                .0;
+        }
+    }
+
+    /// Take `offer` back, if no turn has taken it, and answer whether it was.
+    ///
+    /// Under the book's lock, so a wait in flight on the offer never looks at it
+    /// mid-withdrawal; that wait is woken, and answers what this recorded.
+    fn withdraw(&self, offer: &OfferId) -> Reply {
+        let mut ledger = self.lock();
+        let Some(entry) = ledger.held.get_mut(offer) else {
+            return Reply::Taken;
+        };
+        let Some(handle) = entry.offer.take() else {
+            return Reply::Taken;
+        };
+        match handle.withdraw() {
+            Ok(()) => {
+                let note = entry.note.clone();
+                self.record(&mut ledger, offer, &Reply::Withdrawn);
+                drop(ledger);
+                self.announce(offer, &note, &Reply::Withdrawn);
+                Reply::Withdrawn
+            }
+            Err(handle) => {
+                entry.offer = Some(handle);
+                Reply::Taken
+            }
+        }
+    }
     /// Publish what became of `offer` on the run's own stream.
     ///
     /// A caller learns the disposition from its own wait; this is the *run's*
@@ -964,10 +1169,10 @@ impl Book {
 
     /// Wait up to `bound` for every offer to be answered.
     fn drained(&self, bound: Duration) {
-        let held = self.lock();
+        let ledger = self.lock();
         let _ = self
             .emptied
-            .wait_timeout_while(held, bound, |held| !held.is_empty())
+            .wait_timeout_while(ledger, bound, |ledger| !ledger.held.is_empty())
             .unwrap_or_else(PoisonError::into_inner);
     }
 }
@@ -1058,7 +1263,7 @@ impl Relay {
             scratch,
             emitter: emitter.clone(),
             relayed,
-            held: Mutex::default(),
+            ledger: Mutex::default(),
             emptied: Condvar::new(),
         });
         let _ = book.relayed.book.set(Arc::downgrade(&book));
@@ -1125,11 +1330,12 @@ impl Relay {
                 // are two arrivals rather than one.
                 self.offered.fetch_add(1, Ordering::SeqCst);
                 self.book.relayed.handing();
-                self.book.lock().insert(
+                self.book.lock().held.insert(
                     offer.clone(),
                     Held {
                         note: note.clone(),
                         offer: Some(handle),
+                        waited: false,
                     },
                 );
                 // On the stream before the caller hears it is in, so nothing the
@@ -1163,54 +1369,48 @@ impl Relay {
         deadline: Option<Instant>,
         delivered: Delivered<Request, Reply>,
     ) {
-        let Some((handle, note)) = self.book.take(offer) else {
-            delivered.answer(read_settled(&self.book.scratch, offer).unwrap_or_else(|| {
-                Reply::Refused {
-                    reason: format!(
-                        "this member holds no offer {offer}, or its answer is already being \
-                         waited on"
-                    ),
+        {
+            let mut ledger = self.book.lock();
+            match ledger.held.get_mut(offer) {
+                Some(entry) if !entry.waited => entry.waited = true,
+                Some(_) => {
+                    drop(ledger);
+                    delivered.answer(Reply::Refused {
+                        reason: format!("the answer to offer {offer} is already being waited on"),
+                    });
+                    return;
                 }
-            }));
-            return;
-        };
+                None => {
+                    drop(ledger);
+                    delivered.answer(self.book.answer(offer).unwrap_or_else(|| Reply::Refused {
+                        reason: format!("this member holds no offer {offer}"),
+                    }));
+                    return;
+                }
+            }
+        }
         let book = Arc::clone(&self.book);
         let key = offer.clone();
         let waiting = std::thread::Builder::new().spawn(move || {
-            let reply = awaited(handle, deadline);
-            book.settle(&key, &note, &reply);
-            delivered.answer(reply);
+            delivered.answer(book.awaited(&key, deadline));
         });
         // llmlint: ignore-block[changed_behavior_has_e2e] a host that refused
         // this member one more thread, which no graph, task or config asks for and
-        // no seam this crate sanctions fakes. The wait's closure — the in-process
-        // offer and its caller's request — went with the refused spawn: the
-        // caller is answered by its request being let go, the note stays offered
-        // to nobody, and the book stops holding an offer nothing will settle.
+        // no seam this crate sanctions fakes. The caller's request went with the
+        // refused spawn, so the caller is answered by its request being let go;
+        // the offer stays in the book with no wait on it, still withdrawable, and
+        // settled as the member ends.
         if waiting.is_err() {
-            self.book.lock().remove(offer);
-            self.book.relayed.answered(false);
-            self.book.emptied.notify_all();
+            if let Some(entry) = self.book.lock().held.get_mut(offer) {
+                entry.waited = false;
+            }
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 
     /// Take `offer` back, if no turn has taken it.
     fn withdraw(&self, offer: &OfferId, delivered: Delivered<Request, Reply>) {
-        let Some((handle, note)) = self.book.take(offer) else {
-            delivered.answer(Reply::Taken);
-            return;
-        };
-        match handle.withdraw() {
-            Ok(()) => {
-                self.book.settle(offer, &note, &Reply::Withdrawn);
-                delivered.answer(Reply::Withdrawn);
-            }
-            Err(handle) => {
-                self.book.restore(offer, handle);
-                delivered.answer(Reply::Taken);
-            }
-        }
+        delivered.answer(self.book.withdraw(offer));
     }
 }
 
@@ -1230,6 +1430,14 @@ fn opens_a_later_turn(accepted: &Accepted) -> bool {
         Accepted::Queued | Accepted::AtTurnEnd { .. } => true,
         Accepted::Interrupted { party } => *party == Party::Supervisor,
         Accepted::JudgedWith { .. } => false,
+    }
+}
+
+/// What the bus answered about one offer, as a [`Reply`].
+fn reply_of(outcome: Result<Accepted, onemessagebus::Undelivered>) -> Reply {
+    match outcome {
+        Ok(accepted) => Reply::Accepted(accepted),
+        Err(undelivered) => Reply::Undelivered(Undelivered::from(undelivered)),
     }
 }
 
@@ -1301,7 +1509,7 @@ impl Ending {
             // went with the refused spawn and is answered by the close below; the
             // book stops holding it so the end is not held for it.
             if settling.is_err() {
-                self.book.lock().remove(&offer);
+                self.book.lock().held.remove(&offer);
                 self.book.relayed.answered(false);
             }
             // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -1317,10 +1525,13 @@ impl Ending {
                     self.book.publish(&offer, &note, &reply);
                     reply
                 }
-                Request::Wait { offer }
-                | Request::WaitUntil { offer, .. }
-                | Request::Withdraw { offer } => read_settled(&self.book.scratch, &offer)
+                Request::Wait { offer } | Request::WaitUntil { offer, .. } => self
+                    .book
+                    .answer(&offer)
                     .unwrap_or_else(|| Reply::Undelivered(refusal.clone())),
+                // Every offer is answered by now, so there is nothing left to
+                // take back — a note already withdrawn included.
+                Request::Withdraw { .. } => Reply::Taken,
             };
             delivered.answer(reply);
         }
@@ -1623,6 +1834,214 @@ mod tests {
             0,
             "a note that redirected the live worker turn was counted for a later one"
         );
+    }
+
+    /// Wait for `offer`'s answer on a thread of its own, returning once the
+    /// member's relay has that wait in hand — the book marks the offer waited on
+    /// only as the relay takes the request — so what the test does next races
+    /// the wait itself rather than the request's trip across the spool.
+    fn waiting_in_hand(
+        member: &Member,
+        offer: NoteOffer,
+        deadline: Option<Instant>,
+    ) -> std::thread::JoinHandle<NoteDelivery> {
+        let id = OfferId::try_from(offer.id().to_string()).expect("a minted id");
+        let waiting = std::thread::spawn(move || {
+            match deadline {
+                None => offer.wait(),
+                Some(deadline) => offer.wait_until(deadline),
+            }
+            .expect("a wait answers")
+        });
+        let bound = Instant::now() + Duration::from_secs(10);
+        while !member
+            .ending
+            .book
+            .lock()
+            .held
+            .get(&id)
+            .is_some_and(|held| held.waited)
+        {
+            assert!(Instant::now() < bound, "the wait never reached the relay");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        waiting
+    }
+
+    /// A withdrawer reaches a note while its offer's wait is in flight — with no
+    /// deadline, or one that has not passed — and that wait answers `Withdrawn`:
+    /// never `Expired`, never `Undelivered`. The withdrawal is published once, and
+    /// the conversation never finds the note.
+    #[test]
+    fn a_withdrawer_takes_a_note_back_while_its_wait_is_in_flight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        for deadline in [None, Some(Instant::now() + Duration::from_secs(600))] {
+            let offer = admitted(dir.path(), &note(Addressee::Worker));
+            let id = offer.id().to_string();
+            let withdrawer = offer.withdrawer();
+            assert_eq!(withdrawer.id(), id, "a withdrawer names another offer");
+            let waiting = waiting_in_hand(&member, offer, deadline);
+            withdrawer
+                .withdraw()
+                .expect("an untaken note was not taken back while its wait was in flight");
+            assert_eq!(
+                waiting.join().expect("the waiting thread"),
+                NoteDelivery::Withdrawn,
+                "a wait with deadline {deadline:?} did not read the withdrawal"
+            );
+            let withdrawn: Vec<_> = member
+                .recorder
+                .of_kind("note-withdrawn")
+                .into_iter()
+                .filter(|event| event["payload"]["offer"] == id.as_str())
+                .collect();
+            assert_eq!(withdrawn.len(), 1, "the withdrawal was not published once");
+            assert_eq!(withdrawn[0]["payload"]["reason"], "withdrawn");
+            assert_eq!(withdrawn[0]["payload"]["member"], "worker");
+        }
+        assert!(
+            member.conversation.take().is_none(),
+            "a withdrawn note was still in the conversation's inbox"
+        );
+        assert_eq!(member.relayed.taken(Duration::ZERO), 0);
+    }
+
+    /// Once a withdrawer has succeeded, a wait begun afterwards answers
+    /// `Withdrawn`, and no second withdrawal — through the same withdrawer or a
+    /// clone of it — succeeds or publishes again.
+    #[test]
+    fn a_note_is_withdrawn_once_and_a_later_wait_reads_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let withdrawer = offer.withdrawer();
+        let clone = withdrawer.clone();
+        withdrawer.withdraw().expect("an untaken note withdraws");
+        withdrawer
+            .withdraw()
+            .expect_err("one note was withdrawn twice through one withdrawer");
+        let refused = clone
+            .withdraw()
+            .expect_err("one note was withdrawn twice through a clone");
+        assert!(
+            refused.to_string().contains("already answered"),
+            "{refused}"
+        );
+        assert_eq!(
+            offer.wait().expect("a wait answers"),
+            NoteDelivery::Withdrawn
+        );
+        assert_eq!(member.recorder.of_kind("note-withdrawn").len(), 1);
+    }
+
+    /// A withdrawer takes nothing back from an offer already answered — accepted
+    /// by the conversation, or expired at its deadline — and publishes nothing.
+    #[test]
+    fn a_withdrawer_refuses_an_offer_already_answered_or_expired() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+
+        let accepted = admitted(dir.path(), &note(Addressee::Worker));
+        let withdrawer = accepted.withdrawer();
+        member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the note reaches the conversation")
+            .answer(Accepted::Queued);
+        assert_eq!(
+            accepted.wait().expect("a wait answers"),
+            NoteDelivery::Accepted(Accepted::Queued)
+        );
+        withdrawer
+            .withdraw()
+            .expect_err("an accepted note was taken back");
+
+        let expiring = admitted(dir.path(), &note(Addressee::Worker));
+        let withdrawer = expiring.withdrawer();
+        assert_eq!(
+            expiring
+                .wait_until(Instant::now() + Duration::from_millis(100))
+                .expect("a wait answers"),
+            NoteDelivery::Expired
+        );
+        withdrawer
+            .withdraw()
+            .expect_err("an expired note was taken back");
+        let withdrawn = member.recorder.of_kind("note-withdrawn");
+        assert_eq!(withdrawn.len(), 1, "only the expiry is a withdrawal");
+        assert_eq!(withdrawn[0]["payload"]["reason"], "expired");
+    }
+
+    /// A note a turn takes while its wait is in flight is that turn's: a
+    /// withdrawer is refused, the wait reads the conversation's answer, and
+    /// nothing says the note was withdrawn.
+    #[test]
+    fn a_withdrawer_is_refused_once_a_turn_took_the_note_its_wait_is_on() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let withdrawer = offer.withdrawer();
+        let waiting = waiting_in_hand(&member, offer, None);
+        let delivered = member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the note reaches the conversation");
+        withdrawer
+            .withdraw()
+            .expect_err("a note a turn holds was taken back");
+        delivered.answer(Accepted::Interrupted {
+            party: Party::Worker,
+        });
+        assert_eq!(
+            waiting.join().expect("the waiting thread"),
+            NoteDelivery::Accepted(Accepted::Interrupted {
+                party: Party::Worker
+            })
+        );
+        withdrawer
+            .withdraw()
+            .expect_err("an answered note was taken back");
+        assert!(member.recorder.of_kind("note-withdrawn").is_empty());
+    }
+
+    /// Once the member has settled there is nothing a withdrawer can take back,
+    /// and the offer's wait still reads the answer the member recorded as it
+    /// ended.
+    #[test]
+    fn a_withdrawer_after_the_member_settled_is_refused_and_the_wait_reads_its_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let withdrawer = offer.withdrawer();
+        member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the note reaches the conversation")
+            .answer(Accepted::Queued);
+        member.ending.end(&Undelivered::MemberSettled {
+            outcome: "the conversation ended".to_string(),
+        });
+        withdrawer
+            .withdraw()
+            .expect_err("a settled member gave a note back");
+        assert_eq!(
+            offer.wait().expect("a wait answers"),
+            NoteDelivery::Accepted(Accepted::Queued)
+        );
+        assert!(member.recorder.of_kind("note-withdrawn").is_empty());
+    }
+
+    /// An offer answered as it was made — by an endpoint that takes a bare note
+    /// — has nothing for a withdrawer to take back.
+    #[test]
+    fn a_withdrawer_of_an_offer_answered_as_it_was_made_is_refused() {
+        let offer = NoteOffer::answered(NoteDelivery::Accepted(Accepted::Queued));
+        let withdrawer = offer.withdrawer();
+        assert_eq!(withdrawer.id(), offer.id());
+        withdrawer
+            .withdraw()
+            .expect_err("an offer answered as it was made was taken back");
     }
 
     /// Every acceptance survives the spool and relay to the caller unchanged, and

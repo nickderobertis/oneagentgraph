@@ -331,8 +331,9 @@ pub fn interrupt(
 /// caller's reading of an outcome the member's own answer rather than a
 /// translation of it.
 pub use crate::note::{
-    Accepted, Addressee, Criterion, DeliveredNote, Delivery as NoteDeliveryMode, Note,
-    NoteDelivery, NoteOffer, NoteOffered, NoteRefused, NoteText, Party, Undelivered,
+    Accepted, Addressee, Criterion, DeliveredNote, Delivery as NoteDeliveryMode, NotWithdrawn,
+    Note, NoteDelivery, NoteOffer, NoteOffered, NoteRefused, NoteText, NoteWithdrawer, Party,
+    Undelivered,
 };
 
 /// Route one role-addressed note to whichever side of `member`'s conversation is
@@ -382,7 +383,9 @@ pub fn note(
 /// [`NoteOffer::wait_until`] to bound that wait — [`NoteDelivery::Expired`]
 /// exactly when the deadline passed with the note untaken, which then no turn
 /// ever takes — or [`NoteOffer::withdraw`] to take it back, which succeeds only
-/// while no turn has taken it.
+/// while no turn has taken it. [`NoteOffer::withdrawer`] takes it back from
+/// another thread while a wait is in flight, and that wait then answers
+/// [`NoteDelivery::Withdrawn`].
 ///
 /// A single-sided `kind: oneharness` member binds no note endpoint — it has no
 /// second party for a note to be addressed away from — so a note to one is
