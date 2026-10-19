@@ -515,8 +515,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # onejudge 0.20.0 above, which asks for `^0.28.4`. 0.28.4 answers a redirect as
 # served only once its replacement turn opens with it — the guarantee a
 # single-sided member's note rests on, because `control::offer_note` reports
-# such a note interrupted only when `oneharness interrupt` says it was delivered;
-# 0.28.2 and 0.28.3 fixed the shared Codex app-server's macOS start and tests.
+# such a note interrupted only when `oneharness interrupt` says it was delivered.
 # Its controlled Codex turns share one pooled app-server, yet no turn this crate
 # runs reaches it: a `kind: oneharness` member's `RunRequest` (`src/harness.rs`)
 # asks for `control` only when every candidate of its chain is interrupted in

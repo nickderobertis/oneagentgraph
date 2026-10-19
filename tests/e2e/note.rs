@@ -1971,3 +1971,47 @@ fn an_interrupting_note_to_a_turn_with_no_lever_expires_at_its_deadline_and_is_n
         "an expired note was presented once the turn it waited for ended"
     );
 }
+
+/// A caller that waits only after the member has settled still reads what became
+/// of its note: the member answered every offer it held as it ended and wrote
+/// each answer down, so the wait is answered from there rather than refused by a
+/// spool nothing serves any more.
+#[cfg(unix)]
+#[test]
+fn a_caller_that_waits_after_the_member_settled_reads_what_became_of_its_note() {
+    let _serial = serial();
+    let workspace = Workspace::new();
+    let began = workspace.at("worker-began");
+    let release = workspace.at("worker-release");
+    let running = start(
+        &workspace,
+        "",
+        &format!(
+            "fake:should-fail fake:entered={} fake:hold={}",
+            began.display(),
+            release.display()
+        ),
+    );
+    until("the worker's turn to be in flight", || began.exists());
+
+    let offer = admitted(
+        &workspace,
+        &running,
+        &Note::new(
+            Addressee::Worker,
+            "once this turn is done, rebase onto main",
+        )
+        .expect("a note with text in it")
+        .with_delivery(NoteDeliveryMode::TurnEnd),
+    );
+    std::fs::write(&release, "go").expect("release the worker's held turn");
+    running.run.wait().expect("the member settles");
+
+    assert_eq!(
+        offer.wait().expect("a wait answers"),
+        NoteDelivery::Accepted(Accepted::AtTurnEnd {
+            party: Party::Worker
+        }),
+        "a caller asking after the member settled was not told what became of its note"
+    );
+}

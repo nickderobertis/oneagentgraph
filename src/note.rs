@@ -236,16 +236,16 @@ impl NoteOffer {
         Ok(match self.state {
             OfferState::Answered(delivery) => delivery,
             OfferState::Relayed { scratch, offer } => {
-                // A remaining span rather than an instant, because an `Instant`
-                // means nothing to another process: the member reads it on its
-                // own clock the moment it receives it, which is as early as it
-                // could act on the deadline at all.
-                let within = deadline.saturating_duration_since(Instant::now());
+                // Named as an instant on the clock both processes read, never as
+                // a span: a span would restart when the member received it, and
+                // the time the request spent crossing the spool would extend the
+                // deadline the caller set.
+                let left = deadline.saturating_duration_since(Instant::now());
                 let asked = ask(
                     &scratch,
                     Request::WaitUntil {
                         offer: offer.clone(),
-                        within_ms: u64::try_from(within.as_millis()).unwrap_or(u64::MAX),
+                        deadline_unix_ms: unix_millis(SystemTime::now() + left),
                     },
                 );
                 resolve(&scratch, &offer, asked)
@@ -275,6 +275,20 @@ impl NoteOffer {
             _ => Err(self),
         }
     }
+}
+
+/// `at`, in milliseconds since the Unix epoch: how a deadline crosses from the
+/// caller's process to the member's.
+///
+/// The wall clock, because it is the one clock two processes on one host can
+/// name the same instant on without a handshake — an `Instant` means nothing
+/// outside the process that took it. A step of that clock between the two reads
+/// moves the deadline by the step; that is the price of naming an instant at all,
+/// and it is bounded by the clock rather than by how long the request took.
+fn unix_millis(at: SystemTime) -> u64 {
+    at.duration_since(UNIX_EPOCH).map_or(0, |since| {
+        u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+    })
 }
 
 /// One offer's id, as a caller mints it and a member names its events and its
@@ -353,13 +367,14 @@ pub(crate) enum Request {
         /// Which offer.
         offer: OfferId,
     },
-    /// As [`Request::Wait`], withdrawing the note if it is still untaken
-    /// `within_ms` from when the member reads this.
+    /// As [`Request::Wait`], withdrawing the note if it is still untaken at
+    /// `deadline_unix_ms`.
     WaitUntil {
         /// Which offer.
         offer: OfferId,
-        /// How long from now the deadline is.
-        within_ms: u64,
+        /// The deadline, in milliseconds since the Unix epoch — see
+        /// [`unix_millis`] for why that clock.
+        deadline_unix_ms: u64,
     },
     /// Take the note back, if no turn has taken it.
     Withdraw {
@@ -374,7 +389,7 @@ impl Message for Request {
 
 /// What a member answers one [`Request`] with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Reply {
     /// The note is in the conversation's inbox, untaken.
     Admitted,
@@ -418,6 +433,12 @@ pub(crate) fn offer(scratch: &Path, note: &Note) -> NoteOffered {
     if !address.is_dir() {
         return NoteOffered::Undelivered(no_endpoint());
     }
+    // llmlint: ignore-block[changed_behavior_has_e2e] an endpoint that takes a
+    // bare note is bound only by a build before the offer protocol, so the run
+    // this branch reaches is one an earlier *release* started — a journey would
+    // have to run that release inside the suite. What it does is
+    // `an_endpoint_that_takes_a_bare_note_is_still_delivered_to` below, driven
+    // across a real spool into a real conversation inbox.
     if Spool::declared(&address).ok().flatten() == Some(Note::SCHEMA) {
         return match submit(scratch, note) {
             Ok(accepted) => {
@@ -426,6 +447,7 @@ pub(crate) fn offer(scratch: &Path, note: &Note) -> NoteOffered {
             Err(undelivered) => NoteOffered::Undelivered(undelivered),
         };
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     let offer = OfferId::mint();
     match ask(
         scratch,
@@ -879,34 +901,48 @@ impl Book {
     }
 }
 
-/// Whether a member's relay has been asked to stop, and whether it has.
+/// Where a member's relay is in its life: serving, asked to stop, or stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Phase {
+    /// Taking requests.
+    #[default]
+    Serving,
+    /// Asked to stop; it takes no request after the one in hand.
+    Stopping,
+    /// It has stopped, and takes nothing more.
+    Stopped,
+}
+
+/// A member's relay's [`Phase`], and the wait for it to stop.
 #[derive(Default)]
 struct Stop {
-    state: Mutex<(bool, bool)>,
+    phase: Mutex<Phase>,
     changed: Condvar,
 }
 
 impl Stop {
-    fn lock(&self) -> MutexGuard<'_, (bool, bool)> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    fn lock(&self) -> MutexGuard<'_, Phase> {
+        self.phase.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn stopping(&self) -> bool {
-        self.lock().0
+        *self.lock() != Phase::Serving
     }
 
     fn stopped(&self) {
-        self.lock().1 = true;
+        *self.lock() = Phase::Stopped;
         self.changed.notify_all();
     }
 
     /// Ask the relay to stop, and wait up to `bound` for it to.
     fn halt(&self, bound: Duration) {
-        let mut state = self.lock();
-        state.0 = true;
+        let mut phase = self.lock();
+        if *phase == Phase::Serving {
+            *phase = Phase::Stopping;
+        }
         let _ = self
             .changed
-            .wait_timeout_while(state, bound, |state| !state.1)
+            .wait_timeout_while(phase, bound, |phase| *phase != Phase::Stopped)
             .unwrap_or_else(PoisonError::into_inner);
     }
 }
@@ -981,9 +1017,14 @@ impl Relay {
             match delivered.message().clone() {
                 Request::Offer { offer, note } => self.admit(offer, note, delivered),
                 Request::Wait { offer } => self.answer_once_answered(&offer, None, delivered),
-                Request::WaitUntil { offer, within_ms } => {
-                    let deadline = Instant::now() + Duration::from_millis(within_ms);
-                    self.answer_once_answered(&offer, Some(deadline), delivered);
+                Request::WaitUntil {
+                    offer,
+                    deadline_unix_ms,
+                } => {
+                    let left = Duration::from_millis(
+                        deadline_unix_ms.saturating_sub(unix_millis(SystemTime::now())),
+                    );
+                    self.answer_once_answered(&offer, Some(Instant::now() + left), delivered);
                 }
                 Request::Withdraw { offer } => self.withdraw(&offer, delivered),
             }
