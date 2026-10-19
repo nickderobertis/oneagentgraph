@@ -1626,4 +1626,105 @@ mod tests {
         };
         assert_eq!(buffered.request(&buffered.prompt).stream, Some(false));
     }
+
+    /// A launch whose one config is `chain`, written into `dir`.
+    fn launch_on(dir: &Path, chain: &str) -> HarnessLaunch {
+        let config = dir.join("oneharness.toml");
+        std::fs::write(&config, chain).expect("the member's config");
+        HarnessLaunch {
+            config,
+            worktree: dir.to_path_buf(),
+            prompt: "report in".to_string(),
+            reporting: Reporting::Streamed,
+            views: Vec::new(),
+            session: "node-scope-1-reporter".to_string(),
+        }
+    }
+
+    /// A single-sided turn opens with control exactly when oneharness's registry
+    /// says every candidate of its chain is interrupted in place — and otherwise
+    /// it runs as it always did, its control record naming the candidate that
+    /// kept it uncontrolled. A Codex candidate is never moved onto another
+    /// transport by a chain it merely shares with one that could be interrupted.
+    #[test]
+    fn a_turn_asks_for_control_only_where_every_candidate_is_interrupted_in_place() {
+        for (chain, controlled, named) in [
+            ("run_mode = \"fallback\"\nharnesses = [\"claude-code\"]\n", true, ""),
+            (
+                "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"claude-code:alternate\"]\n\
+                 [harness.claude-code.variant.alternate]\nbin = \"claude\"\n",
+                true,
+                "",
+            ),
+            ("run_mode = \"fallback\"\nharnesses = [\"codex\"]\n", false, "codex"),
+            (
+                "run_mode = \"fallback\"\nharnesses = [\"claude-code\", \"codex\"]\n",
+                false,
+                "codex",
+            ),
+            ("run_mode = \"fallback\"\nharnesses = [\"qwen\"]\n", false, "qwen"),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let launch = launch_on(dir.path(), chain);
+            let request = with_control(launch.request(&launch.prompt), &launch, dir.path());
+            let record = crate::control::read(dir.path()).expect("a control record");
+            if controlled {
+                assert!(request.control, "{chain} was not opened with control");
+                let session = request.session.clone().expect("a controlled turn's handle");
+                assert!(
+                    session.starts_with("node-scope-1-reporter-"),
+                    "the turn's handle is not its own under the member's: {session}"
+                );
+                assert!(
+                    matches!(&record, crate::control::Turn::Open { address }
+                        if address.session == session
+                            && address.session_dir.is_some()
+                            && address.cwd == dir.path()),
+                    "{record:?}"
+                );
+            } else {
+                assert!(!request.control, "{chain} was opened with control");
+                assert_eq!(request.session, None);
+                assert!(
+                    matches!(&record, crate::control::Turn::Unavailable { reason }
+                        if reason.contains("opened no controllable turn") && reason.contains(named)),
+                    "{chain}: {record:?}"
+                );
+            }
+        }
+    }
+
+    /// A config that cannot be read, or a chain that does not resolve, is a turn
+    /// with no lever rather than a member that fails over it: the run itself is
+    /// what reports the config's own problem.
+    #[test]
+    fn a_chain_that_cannot_be_resolved_opens_no_controllable_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let unreadable = HarnessLaunch {
+            config: dir.path().join("missing.toml"),
+            ..launch_on(dir.path(), "")
+        };
+        assert!(interruptible(&unreadable.request("x"))
+            .unwrap_err()
+            .contains("could not be read"));
+        let empty = launch_on(dir.path(), "harnesses = []\n");
+        assert!(interruptible(&empty.request("x"))
+            .unwrap_err()
+            .contains("could not be resolved"));
+    }
+
+    /// Every refusal oneharness answers a control ask with before it spawns is
+    /// one the turn is asked again without; a failure of the turn itself is not.
+    #[test]
+    fn only_a_refused_control_ask_is_asked_again_without_it() {
+        use oneharness_core::errors::OneharnessError as E;
+        assert!(refused_control(&E::ControlNeedsSession));
+        assert!(refused_control(&E::ControlSchema));
+        assert!(refused_control(&E::ControlUnsupported {
+            id: "qwen".into(),
+            supported: "claude-code".into(),
+        }));
+        assert!(refused_control(&E::SessionBatch));
+        assert!(!refused_control(&E::NoSelection));
+    }
 }

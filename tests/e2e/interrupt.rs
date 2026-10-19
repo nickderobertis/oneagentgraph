@@ -394,6 +394,84 @@ fn a_single_sided_member_it_cannot_interrupt_in_place_opens_no_controllable_turn
     );
 }
 
+/// A single-sided member on a **Codex** chain keeps its turn on `codex exec`, as
+/// it always ran: oneharness would interrupt Codex only by moving the turn onto
+/// its app-server, so the member opens no controllable turn, and `interrupt`
+/// answers exit 3 naming the candidate — never a lever it does not have.
+///
+/// The `codex` is found on `PATH` the way an operator's is and records every
+/// launch's argv before handing it to the harness double, which is how the
+/// transport the turn really took is read.
+// llmlint: ignore-block[tests_mirror_real_usage] the argv a `codex` on `PATH`
+// recorded is the one witness of which transport the turn took: an `exec` turn
+// and an app-server turn settle identically on the stream. The exit code and the
+// `interrupt` answer are still read through the CLI.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_on_a_codex_chain_stays_on_exec_and_opens_no_controllable_turn() {
+    const END: &str = "--end-of-launch--";
+    let workspace = Workspace::new();
+    workspace.write(
+        "oneharness.toml",
+        "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
+    );
+    let record = workspace.at("codex-argv.txt");
+    let codex = workspace.write(
+        "bin/codex",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" {END} >> '{}'\nexec '{}' \"$@\"\n",
+            record.display(),
+            crate::support::fake_harness()
+        ),
+    );
+    crate::support::make_executable(&codex);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        crate::support::NO_ENV,
+    ));
+    let path = format!(
+        "{}:{}",
+        workspace.at("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    workspace
+        .run_task_with("fake:complete-now: start codex", &[("PATH", &path)])
+        .expect_code(0);
+    let recorded = std::fs::read_to_string(&record).expect("the codex on PATH recorded its argv");
+    let turns: Vec<&str> = recorded
+        .split_terminator(&format!("{END}\n"))
+        .filter(|launch| launch.trim() != "--version")
+        .collect();
+    assert!(!turns.is_empty(), "codex never started a turn: {recorded}");
+    for launch in &turns {
+        assert!(
+            launch.lines().next() == Some("exec"),
+            "a single-sided Codex turn left `codex exec`: {launch}"
+        );
+    }
+
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let interrupted = workspace.run(&["interrupt", &run_id, "reporter", "--input", "instead"]);
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        reason.contains("opened no controllable turn") && reason.contains("codex"),
+        "{reason}"
+    );
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// A single-sided member on a harness oneharness interrupts in place opens its
 /// turn with control, and an `interrupt` redirects it exactly as it redirects a
 /// two-party member's agent side: the parked turn stops, and the redirection is

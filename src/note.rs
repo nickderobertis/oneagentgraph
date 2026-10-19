@@ -1199,3 +1199,432 @@ impl Ending {
         self.requests.close(Closed::from(refusal));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::Labels;
+
+    /// Where a relay's events land, for a test to read back.
+    #[derive(Clone, Default)]
+    struct Recorder(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Recorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Recorder {
+        /// Every envelope of `kind` written so far.
+        fn of_kind(&self, kind: &str) -> Vec<serde_json::Value> {
+            let written = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+            String::from_utf8_lossy(&written)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+                .filter(|event| event["kind"] == kind)
+                .collect()
+        }
+    }
+
+    /// An emitter labelled for one member, writing into `recorder`.
+    fn emitter(recorder: &Recorder) -> Emitter {
+        Emitter::new("stream", Box::new(recorder.clone())).with_labels(Labels {
+            member: Some("worker".to_string()),
+            ..Labels::default()
+        })
+    }
+
+    fn note(addressee: Addressee) -> Note {
+        Note::new(addressee, "the migration has to be reversible").expect("a note")
+    }
+
+    /// One member's seam, bound in `scratch` and relaying into a **real**
+    /// conversation inbox the test plays the engine's part on.
+    struct Member {
+        ending: Ending,
+        relayed: Arc<Relayed>,
+        conversation: onejudge::note::NoteInbox,
+        recorder: Recorder,
+        offered: Arc<AtomicU64>,
+    }
+
+    fn member(scratch: &Path) -> Member {
+        let endpoint = Endpoint::bind(scratch).expect("an endpoint");
+        let relayed = endpoint.relayed();
+        let (notes, conversation) = onejudge::note::Notes::channel();
+        let recorder = Recorder::default();
+        let offered = Arc::new(AtomicU64::new(0));
+        let (relay, ending) =
+            Relay::open(endpoint, notes, &emitter(&recorder), Arc::clone(&offered));
+        std::thread::spawn(move || relay.serve());
+        Member {
+            ending,
+            relayed,
+            conversation,
+            recorder,
+            offered,
+        }
+    }
+
+    fn admitted(scratch: &Path, note: &Note) -> NoteOffer {
+        match offer(scratch, note) {
+            NoteOffered::Admitted(offer) => offer,
+            NoteOffered::Undelivered(undelivered) => panic!("not admitted: {undelivered}"),
+        }
+    }
+
+    /// An offer is answered `Admitted` once the note is in the conversation's
+    /// inbox and published as such — and its wait reads the conversation's own
+    /// answer, published once, written down, and counted.
+    #[test]
+    fn an_offer_is_admitted_before_it_is_answered_and_its_wait_reads_the_conversations_answer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let id = offer.id().to_string();
+
+        let admissions = member.recorder.of_kind("note-admitted");
+        assert_eq!(admissions.len(), 1, "admission was not published once");
+        assert_eq!(admissions[0]["payload"]["offer"], id.as_str());
+        assert_eq!(admissions[0]["payload"]["addressee"], "worker");
+        assert_eq!(member.offered.load(Ordering::SeqCst), 1);
+        assert!(member.recorder.of_kind("turn-interrupted").is_empty());
+
+        let delivered = member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the note is in the conversation's inbox");
+        assert_eq!(delivered.message(), &note(Addressee::Worker));
+        delivered.answer(Accepted::Queued);
+
+        assert_eq!(
+            offer.wait().expect("a wait answers"),
+            NoteDelivery::Accepted(Accepted::Queued)
+        );
+        let answered = member.recorder.of_kind("turn-interrupted");
+        assert_eq!(answered.len(), 1);
+        assert_eq!(answered[0]["payload"]["offer"], id.as_str());
+        assert_eq!(answered[0]["payload"]["accepted"], "queued");
+        assert_eq!(answered[0]["payload"]["delivered"], true);
+        assert_eq!(member.relayed.taken(Duration::ZERO), 1);
+        let offer_id = OfferId::try_from(id).expect("a minted id is one");
+        assert_eq!(
+            read_settled(dir.path(), &offer_id),
+            Some(Reply::Accepted(Accepted::Queued)),
+            "the answer was not written down before it was given"
+        );
+    }
+
+    /// A note no turn takes before its deadline **expires**: withdrawn by the
+    /// bus in the same moment, so the conversation never finds it, and published
+    /// as `note-withdrawn` with reason `expired`.
+    #[test]
+    fn a_note_untaken_at_its_deadline_expires_and_the_conversation_never_finds_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let id = offer.id().to_string();
+        assert_eq!(
+            offer
+                .wait_until(Instant::now() + Duration::from_millis(200))
+                .expect("a wait answers"),
+            NoteDelivery::Expired
+        );
+        assert!(
+            member.conversation.take().is_none(),
+            "an expired note was still in the conversation's inbox"
+        );
+        let withdrawn = member.recorder.of_kind("note-withdrawn");
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(withdrawn[0]["payload"]["offer"], id.as_str());
+        assert_eq!(withdrawn[0]["payload"]["reason"], "expired");
+        assert_eq!(member.relayed.taken(Duration::ZERO), 0);
+    }
+
+    /// A note withdrawn before any turn takes it is gone — and one a turn has
+    /// taken cannot be withdrawn: the offer comes back to be waited on, and a
+    /// note that redirected the worker's own live turn is not counted as one a
+    /// later turn carries.
+    #[test]
+    fn a_withdrawal_succeeds_only_for_a_note_no_turn_has_taken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+
+        let untaken = admitted(dir.path(), &note(Addressee::Worker));
+        let id = untaken.id().to_string();
+        untaken.withdraw().expect("an untaken note withdraws");
+        assert!(member.conversation.take().is_none());
+        let withdrawn = member.recorder.of_kind("note-withdrawn");
+        assert_eq!(withdrawn.len(), 1);
+        assert_eq!(withdrawn[0]["payload"]["offer"], id.as_str());
+        assert_eq!(withdrawn[0]["payload"]["reason"], "withdrawn");
+
+        let taken = admitted(dir.path(), &note(Addressee::Worker));
+        let delivered = member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the second note is in the inbox");
+        let taken = taken
+            .withdraw()
+            .expect_err("a note a turn has taken was withdrawn");
+        delivered.answer(Accepted::Interrupted {
+            party: Party::Worker,
+        });
+        assert_eq!(
+            taken.wait().expect("a wait answers"),
+            NoteDelivery::Accepted(Accepted::Interrupted {
+                party: Party::Worker
+            })
+        );
+        assert_eq!(
+            member.relayed.taken(Duration::ZERO),
+            0,
+            "a note that redirected the live worker turn was counted for a later one"
+        );
+    }
+
+    /// Every acceptance survives the spool and relay to the caller unchanged, and
+    /// is counted for a later worker turn exactly when one carries it.
+    #[test]
+    fn every_disposition_survives_the_relay_and_is_counted_only_where_a_later_turn_carries_it() {
+        let dispositions = [
+            (Accepted::Queued, true),
+            (
+                Accepted::Interrupted {
+                    party: Party::Worker,
+                },
+                false,
+            ),
+            (
+                Accepted::Interrupted {
+                    party: Party::Supervisor,
+                },
+                true,
+            ),
+            (
+                Accepted::AtTurnEnd {
+                    party: Party::Worker,
+                },
+                true,
+            ),
+            (
+                Accepted::AtTurnEnd {
+                    party: Party::Supervisor,
+                },
+                true,
+            ),
+            (
+                Accepted::JudgedWith {
+                    completion_reason: "passed with the note in hand".to_string(),
+                },
+                false,
+            ),
+        ];
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let mut counted = 0;
+        for (disposition, carried) in &dispositions {
+            let offer = admitted(dir.path(), &note(Addressee::Both));
+            member
+                .conversation
+                .take_within(Duration::from_secs(10))
+                .expect("a note reaches the conversation")
+                .answer(disposition.clone());
+            assert_eq!(
+                offer.wait().expect("a wait answers"),
+                NoteDelivery::Accepted(disposition.clone()),
+                "{disposition:?} did not survive the relay"
+            );
+            counted += usize::from(*carried);
+            assert_eq!(
+                member.relayed.taken(Duration::ZERO),
+                counted,
+                "{disposition:?} was counted wrongly"
+            );
+        }
+    }
+
+    /// A member that ends answers every offer it holds before its spool closes,
+    /// and writes each answer down — so a caller asking after it has gone reads
+    /// what became of its note rather than a refusal. An offer made after the end
+    /// is refused with the end's own reason.
+    #[test]
+    fn a_member_that_ends_answers_every_offer_it_holds_and_a_late_caller_reads_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let member = member(dir.path());
+        let answered = admitted(dir.path(), &note(Addressee::Worker));
+        let untaken = admitted(dir.path(), &note(Addressee::Worker));
+        member
+            .conversation
+            .take_within(Duration::from_secs(10))
+            .expect("the first note reaches the conversation")
+            .answer(Accepted::Queued);
+        let refusal = Undelivered::ConversationCompleted {
+            completion_reason: "its supervisor judged the task complete".to_string(),
+        };
+        member.ending.end(&refusal);
+
+        assert_eq!(
+            answered.wait().expect("a wait answers"),
+            NoteDelivery::Accepted(Accepted::Queued),
+            "a note the conversation answered was reported otherwise once the member ended"
+        );
+        assert_eq!(
+            untaken.wait().expect("a wait answers"),
+            NoteDelivery::Undelivered(refusal.clone()),
+            "a note nothing took was not refused with the member's end"
+        );
+        match offer(dir.path(), &note(Addressee::Worker)) {
+            NoteOffered::Undelivered(late) => assert_eq!(late, refusal),
+            NoteOffered::Admitted(_) => panic!("a member that ended admitted a note"),
+        }
+        assert_eq!(member.ending.endpoint(), dir.path().join(NOTES_DIR));
+    }
+
+    /// A member with no endpoint is reported rather than waited on; and an
+    /// endpoint nothing has bound is waited on only as long as the bus's bound,
+    /// with the note taken back on the way out.
+    #[test]
+    fn a_member_that_never_takes_a_note_is_reported_rather_than_waited_on() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        match offer(dir.path(), &note(Addressee::Worker)) {
+            NoteOffered::Undelivered(Undelivered::NoConversation { reason }) => {
+                assert!(reason.contains("binds no note endpoint"), "{reason}");
+            }
+            other => panic!("a member with no endpoint was answered {other:?}"),
+        }
+
+        std::fs::create_dir(dir.path().join(NOTES_DIR)).expect("an unbound spool");
+        let silent = submit_within(
+            dir.path(),
+            &note(Addressee::Worker),
+            Duration::from_millis(50),
+        )
+        .expect_err("a spool nothing is serving cannot take a note");
+        assert!(
+            matches!(&silent, Undelivered::NoConversation { reason }
+                if reason.contains("was withdrawn")),
+            "{silent:?}"
+        );
+        let left: Vec<_> = std::fs::read_dir(dir.path().join(NOTES_DIR))
+            .expect("the spool")
+            .flatten()
+            .collect();
+        assert!(left.is_empty(), "a refused note was left in the spool");
+    }
+
+    /// An endpoint a build before the offer protocol bound takes a bare note and
+    /// answers it once: the note is still delivered, answered when it is, and
+    /// there is nothing to take back.
+    #[test]
+    fn an_endpoint_that_takes_a_bare_note_is_still_delivered_to() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let inbox = onejudge::note::NoteInbox::new();
+        let _spool = Spool::bind(dir.path().join(NOTES_DIR), &inbox).expect("a bare-note spool");
+        let conversation = std::thread::spawn(move || {
+            inbox
+                .take_within(Duration::from_secs(10))
+                .expect("the note reaches the conversation")
+                .answer(Accepted::AtTurnEnd {
+                    party: Party::Worker,
+                });
+            inbox
+        });
+        let offer = admitted(dir.path(), &note(Addressee::Worker));
+        let _inbox = conversation.join().expect("the conversation");
+        let offer = offer
+            .withdraw()
+            .expect_err("an answered note cannot be taken back");
+        assert_eq!(
+            offer.wait().expect("a wait answers"),
+            NoteDelivery::Accepted(Accepted::AtTurnEnd {
+                party: Party::Worker
+            })
+        );
+    }
+
+    /// An offer id is checked as it arrives — it names a file in the member's
+    /// scratch — and every id this crate mints passes.
+    #[test]
+    fn an_offer_id_is_refused_unless_it_is_a_safe_file_name() {
+        for minted in [OfferId::mint(), OfferId::mint()] {
+            assert!(OfferId::try_from(minted.0.clone()).is_ok(), "{minted}");
+        }
+        assert_ne!(OfferId::mint(), OfferId::mint(), "two offers shared an id");
+        for hostile in [
+            String::new(),
+            "../../escape".to_string(),
+            "-leading".to_string(),
+            "has space".to_string(),
+            "x".repeat(MAX_OFFER_ID + 1),
+        ] {
+            assert!(OfferId::try_from(hostile.clone()).is_err(), "{hostile:?}");
+            assert!(
+                serde_json::from_value::<Request>(serde_json::json!({
+                    "withdraw": {"offer": hostile}
+                }))
+                .is_err(),
+                "a request naming {hostile:?} was read"
+            );
+        }
+    }
+
+    /// A turn announced while a note is with the conversation waits for its
+    /// answer, so a note taken just before the announcement is attributed to the
+    /// turn that carries it — and one still unanswered past the bound is not.
+    #[test]
+    fn a_turn_waits_for_a_note_already_handed_over_and_attributes_it_once() {
+        let relayed = Arc::new(Relayed::default());
+        let mut deliveries = Deliveries::of(Some(Arc::clone(&relayed)));
+        assert!(
+            !deliveries.carried_by_this_turn(),
+            "nothing was handed over"
+        );
+
+        relayed.handing();
+        let answering = {
+            let relayed = Arc::clone(&relayed);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(50));
+                relayed.answered(true);
+            })
+        };
+        assert!(
+            deliveries.carried_by_this_turn(),
+            "the turn did not wait for the note the conversation had taken"
+        );
+        answering.join().expect("the answering thread");
+        assert!(
+            !deliveries.carried_by_this_turn(),
+            "one note was attributed to two turns"
+        );
+
+        // A member with no seam attributes nothing.
+        assert!(!Deliveries::of(None).carried_by_this_turn());
+    }
+
+    /// A member with no conversation is handed the addressed role too.
+    #[test]
+    fn a_note_to_a_member_with_no_conversation_still_names_its_addressee() {
+        for addressee in [Addressee::Worker, Addressee::Supervisor, Addressee::Both] {
+            let framed = framed(&note(addressee));
+            assert!(
+                framed.contains(&format!("addressed to: {}", addressee.as_str())),
+                "{addressee:?} did not name itself: {framed}"
+            );
+            assert!(
+                framed.contains("the migration has to be reversible"),
+                "{addressee:?} did not carry the text: {framed}"
+            );
+        }
+    }
+}
