@@ -228,6 +228,16 @@ fn with_control(mut request: RunRequest, launch: &HarnessLaunch, scratch: &Path)
         );
         return request;
     };
+    // The store as it will be bound: oneharness fits the socket's file name to
+    // the platform's `sun_path` budget against the directory it is handed, and
+    // then binds through the *resolved* one — so a store reached through a
+    // symlink (macOS's `/tmp` -> `/private/tmp`, or `/var` -> `/private/var`)
+    // would be budgeted short and refused at bind, killing a member that ran
+    // uncontrolled before. Handing it the resolved directory budgets what is
+    // bound, and the record names the same one `interrupt` connects to.
+    let store = std::fs::create_dir_all(&store)
+        .and_then(|()| std::fs::canonicalize(&store))
+        .unwrap_or(store);
     let session = format!(
         "{}-{}",
         launch.session,
@@ -240,13 +250,14 @@ fn with_control(mut request: RunRequest, launch: &HarnessLaunch, scratch: &Path)
         &crate::control::Turn::Open {
             address: crate::control::Address {
                 session: session.clone(),
-                session_dir: Some(store),
+                session_dir: Some(store.clone()),
                 cwd: launch.worktree.clone(),
             },
         },
     );
     request.control = true;
     request.session = Some(session);
+    request.session_dir = Some(store);
     request
 }
 

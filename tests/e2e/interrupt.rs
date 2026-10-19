@@ -54,11 +54,17 @@ impl Parked {
 /// addressed at a turn oneharness has already opened a socket for — waiting for
 /// the process instead would race the bind.
 fn parked(workspace: &Workspace, task: &str) -> Parked {
+    parked_in(workspace, task, workspace.session_store())
+}
+
+/// [`parked`], with oneharness's per-user state at `xdg` instead of the
+/// workspace's own store.
+fn parked_in(workspace: &Workspace, task: &str, xdg: &std::path::Path) -> Parked {
     let run = {
         let workspace_dir = workspace.path().to_path_buf();
         let state = workspace.state();
         let dir = workspace.dir();
-        let xdg = workspace.session_store().to_path_buf();
+        let xdg = xdg.to_path_buf();
         let task = task.to_string();
         std::thread::spawn(move || {
             std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
@@ -513,6 +519,58 @@ fn a_single_sided_member_it_can_interrupt_in_place_is_redirected() {
     let did = std::fs::read_to_string(&redirected_work)
         .expect("the redirected turn never did the new work");
     assert!(did.contains("write the summary instead"), "{did:?}");
+}
+
+/// A single-sided member whose session store is reached through a symlink is
+/// still controlled, and still redirected.
+///
+/// oneharness fits the socket's name to the `sun_path` budget against the
+/// directory it is handed and binds through the resolved one, so a store whose
+/// resolved path is longer — every default store on macOS, where `/tmp` and
+/// `/var` are links into `/private` — would be refused at bind and the member
+/// would die unstartable, where before it was ever controllable it simply ran.
+/// The link here is short and its target a score of bytes longer — enough to
+/// carry a socket address fitted to the link past the budget, not so much that
+/// none fits the target — which is that host's shape on any unix.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_whose_store_is_reached_through_a_link_is_still_redirected() {
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    ));
+    let target = workspace.path().join("store-behind-a-link");
+    std::fs::create_dir_all(&target).expect("the store the link resolves to");
+    let link = workspace.session_store().join("l");
+    std::os::unix::fs::symlink(&target, &link).expect("the link the run is handed");
+    let redirected_work = workspace.at("did-redirected-work");
+    let member = parked_in(&workspace, &parking_task(&workspace, None), &link);
+
+    let redirection = format!(
+        "fake:did-work={} write the summary instead",
+        redirected_work.display()
+    );
+    let interrupted = workspace.run_with(
+        &["interrupt", &member.id, "reporter", "--input", &redirection],
+        &[("XDG_STATE_HOME", &link.display().to_string())],
+    );
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["delivered"], true);
+
+    let output = member.settled();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the redirected member did not settle\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        redirected_work.exists(),
+        "the redirected turn never did the new work"
+    );
 }
 
 /// Everything a caller can type that cannot work, refused with the contract's
