@@ -925,7 +925,15 @@ struct Ledger {
     /// Every answer given, kept beside the one written down in [`OFFERS_DIR`] so
     /// a wait an answer overtook — a withdrawal, or a turn being announced that
     /// settled it first — reads it even where the write failed.
+    // llmlint: ignore-block[changed_behavior_has_e2e] what this adds over the
+    // written-down answer shows only where the host refuses a write inside the
+    // member's own scratch, which no graph, task or config reaches — the same
+    // reason `write_settled` carries. It is driven by
+    // `a_withdrawal_reaches_its_wait_where_the_answer_store_is_unwritable` below,
+    // which occupies the store's path so the write really fails, through a real
+    // spool and relay into a real conversation inbox.
     answered: HashMap<OfferId, Reply>,
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Every offer a member holds, and what it does as each is answered: write the
@@ -1061,12 +1069,21 @@ impl Book {
                     // turn that took the note to read it and handed it back has
                     // left it untaken, and the bus's own deadline would expire it
                     // at that hand-back.
+                    // llmlint: ignore-block[changed_behavior_has_e2e] a refusal
+                    // here happens only when the deadline falls inside onejudge's
+                    // instant of holding a note to read its delivery before
+                    // handing it back, which nothing outside the member's process
+                    // can hold open — a journey cannot aim a deadline into it.
+                    // `a_note_handed_back_after_its_deadline_expires_then` below
+                    // holds a real conversation inbox's take past the deadline
+                    // and hands the note back, and the wait expires it then.
                     if let Some(handle) = entry.offer.take() {
                         match handle.withdraw() {
                             Ok(()) => reply = Some(Reply::Expired),
                             Err(handle) => entry.offer = Some(handle),
                         }
                     }
+                    // llmlint: ignore-end[changed_behavior_has_e2e]
                 }
             }
             if let Some(reply) = reply {
