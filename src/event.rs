@@ -261,6 +261,12 @@ pub enum EventKind {
     /// An operator asked a member's in-flight turn to do something else; see
     /// [`TurnInterrupted`].
     TurnInterrupted,
+    /// A note offered to a member was admitted to its conversation's inbox; see
+    /// [`NoteAdmitted`].
+    NoteAdmitted,
+    /// A note admitted to a member was taken back before any turn took it; see
+    /// [`NoteWithdrawn`].
+    NoteWithdrawn,
     /// A member is alive but has produced nothing since the last heartbeat.
     MemberHeartbeat,
     /// An identity chain moved past a candidate; see [`FallbackAdvanced`].
@@ -283,7 +289,7 @@ pub enum EventKind {
 
 impl EventKind {
     /// Every kind, in the order the contract lists them.
-    pub const ALL: [EventKind; 17] = [
+    pub const ALL: [EventKind; 19] = [
         EventKind::GraphStarted,
         EventKind::MemberStarted,
         EventKind::PreTurnContext,
@@ -293,6 +299,8 @@ impl EventKind {
         EventKind::TurnCompleted,
         EventKind::JudgeDecided,
         EventKind::TurnInterrupted,
+        EventKind::NoteAdmitted,
+        EventKind::NoteWithdrawn,
         EventKind::MemberHeartbeat,
         EventKind::FallbackAdvanced,
         EventKind::OneharnessSession,
@@ -322,6 +330,8 @@ impl EventKind {
             EventKind::TurnCompleted => "turn-completed",
             EventKind::JudgeDecided => "judge-decided",
             EventKind::TurnInterrupted => "turn-interrupted",
+            EventKind::NoteAdmitted => "note-admitted",
+            EventKind::NoteWithdrawn => "note-withdrawn",
             EventKind::MemberHeartbeat => "member-heartbeat",
             EventKind::FallbackAdvanced => "fallback-advanced",
             EventKind::OneharnessSession => "oneharness-session",
@@ -938,6 +948,98 @@ pub struct TurnInterrupted {
     /// [`MAX_PAYLOAD_TEXT_BYTES`] — see [`JudgeDecided::truncated`].
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
+    /// The offer this event answers, when it answers a note offered through
+    /// [`crate::control::offer_note`] — the id that note's [`NoteAdmitted`]
+    /// carried. Absent for an `interrupt`, which offers nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offer: Option<String>,
+    /// How the conversation accepted the note — present exactly when a note was
+    /// accepted, and absent for an `interrupt` and for a note that was not.
+    ///
+    /// The one field that tells a turn the note *interrupted* from one it
+    /// reached only once that turn ended: [`delivered`](Self::delivered) is
+    /// `true` for both, and stays a boolean for every consumer that reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted: Option<NoteAccepted>,
+    /// The party whose turn the note reached — present beside
+    /// [`NoteAccepted::Interrupted`] and [`NoteAccepted::AtTurnEnd`], and only
+    /// there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub party: Option<crate::note::Party>,
+}
+
+/// How a conversation accepted one note: onejudge's [`crate::note::Accepted`],
+/// by the word a consumer branches on.
+///
+/// Its own closed set rather than onejudge's type on the wire, because the event
+/// carries the party beside it rather than inside it, and a consumer reading
+/// `accepted` needs one string to compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum NoteAccepted {
+    /// No turn was live; the next turn to open took it.
+    Queued,
+    /// It reached a live turn by interrupting it, and the replacement turn
+    /// opened with it.
+    Interrupted,
+    /// It reached a live turn only once that turn ended, in the turn that
+    /// followed.
+    AtTurnEnd,
+    /// The supervisor passed the work with it in hand.
+    JudgedWith,
+}
+
+impl NoteAccepted {
+    /// The word and party an [`crate::note::Accepted`] is published as.
+    #[must_use]
+    pub fn of(accepted: &crate::note::Accepted) -> (Self, Option<crate::note::Party>) {
+        use crate::note::Accepted;
+        match accepted {
+            Accepted::Queued => (Self::Queued, None),
+            Accepted::Interrupted { party } => (Self::Interrupted, Some(*party)),
+            Accepted::AtTurnEnd { party } => (Self::AtTurnEnd, Some(*party)),
+            Accepted::JudgedWith { .. } => (Self::JudgedWith, None),
+        }
+    }
+}
+
+/// The payload of an [`EventKind::NoteAdmitted`] event.
+///
+/// Published by the member the moment a note offered to it is admitted to its
+/// conversation's inbox, and before that note is answered — so a test or a view
+/// waits on a real signal that the note is in, rather than on a guess.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NoteAdmitted {
+    /// The member the note was offered to.
+    pub member: String,
+    /// Who the note is for.
+    pub addressee: crate::note::Addressee,
+    /// The offer's id — unique per offer within the run, and the id every later
+    /// event about this note names.
+    pub offer: String,
+}
+
+/// The payload of an [`EventKind::NoteWithdrawn`] event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NoteWithdrawn {
+    /// The member the note was offered to.
+    pub member: String,
+    /// The offer's id, as its [`NoteAdmitted`] named it.
+    pub offer: String,
+    /// Why no turn will ever take it.
+    pub reason: WithdrawnReason,
+}
+
+/// Why an admitted note was taken back before any turn took it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WithdrawnReason {
+    /// Its sender's deadline passed with the note still untaken.
+    Expired,
+    /// Its sender took it back.
+    Withdrawn,
 }
 
 /// The payload of an [`EventKind::FallbackAdvanced`] event.
@@ -1265,6 +1367,8 @@ payload_messages! {
     TurnCompleted => TurnCompleted, "turn-completed";
     JudgeDecided => JudgeDecided, "judge-decided";
     TurnInterrupted => TurnInterrupted, "turn-interrupted";
+    NoteAdmitted => NoteAdmitted, "note-admitted";
+    NoteWithdrawn => NoteWithdrawn, "note-withdrawn";
     FallbackAdvanced => FallbackAdvanced, "fallback-advanced";
     OneharnessSession => OneharnessSession, "oneharness-session";
     MemberDied => MemberDied, "member-died";
@@ -1884,7 +1988,7 @@ mod tests {
         let registry = registry();
         let ids: Vec<String> = registry.ids().iter().map(ToString::to_string).collect();
         let declared = payload_schemas();
-        assert_eq!(declared.len(), 11);
+        assert_eq!(declared.len(), 13);
         for (kind, schema) in &declared {
             let expected = format!("agent.agentgraph.{}@1", kind.as_str());
             assert_eq!(schema.to_string(), expected);

@@ -50,6 +50,7 @@
 //! | `fake:entered=<path>` | write `<path>` the moment any turn begins |
 //! | `fake:started=<path>` | *agent's controlled turn only:* write `<path>` the moment this turn begins |
 //! | `fake:did-work=<path>` | *agent's controlled turn only:* append this turn's prompt once it finishes its work — never written by a turn an interrupt stopped |
+//! | `fake:vanish-on-interrupt` | *controlled turn only:* acknowledge an interrupt and exit at once, with no terminal result — a turn that ended before its redirection could be written |
 //! | `fake:crash-before-recovery` | crash every launch of the initial turn, then let a command judge's recovery turn run |
 //! | `FAKE_HARNESS_FAIL_AFTER_MARKER` | let an `exec`-shaped provider run once, then crash later launches |
 //! | `FAKE_HARNESS_FAIL_ONCE_MARKER` | crash an `exec`-shaped provider once, then allow later launches |
@@ -58,7 +59,7 @@
 //! | `fake:murmur=<path>` | consume **no** CPU and publish only the agent's own finished `text` items, one every [`MURMUR_EVERY`], until `<path>` exists, then take the turn |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
-//! | `fake:supervisor-hold=<path>` | *judge side only:* write `<path>.entered` as the supervisor's turn begins, then block until `<path>` exists |
+//! | `fake:supervisor-hold=<path>` | *judge side only:* write `<path>.entered` as the supervisor's turn begins, then block until `<path>` exists or an interrupt arrives |
 //! | `fake:next-turn=<path>` | *judge side only:* while `<path>` exists, continue the conversation with that file's contents as the next user turn, and consume it |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
 //! | `fake:record-supervisor-prompt=<path>` | *judge side only:* append the exact prompt the supervisor was given |
@@ -709,6 +710,15 @@ fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::
     let refused = Arc::new(AtomicBool::new(false));
     let mut running: Option<std::thread::JoinHandle<()>> = None;
     let argv = Arc::new(argv.to_vec());
+    // The text that opened this stream's first turn. Every later user frame on
+    // the same stream is a *redirect* — oneharness writes the replacement turn's
+    // prompt there the moment the aborted one ends — and a redirected supervisor
+    // turn is still the supervisor's: it answers in the judge's shape, records
+    // where the judge's recorder points, and carries the sentinels the original
+    // prompt steered it with. So a replacement is read beside the prompt it
+    // replaced, and on a worker stream it is read alone, which is exactly what
+    // the worker was handed.
+    let mut opening: Option<String> = None;
     for line in std::io::stdin().lock().lines().map_while(Result::ok) {
         let Ok(frame) = serde_json::from_str::<Value>(&line) else {
             continue;
@@ -727,7 +737,13 @@ fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::
                     eprintln!("fake-harness: a user frame carried no message text: {line}");
                     continue;
                 };
-                let prompt = format!("{system}\n{text}");
+                let prompt = match &opening {
+                    Some(first) if prompt_frames_the_supervisor(first) => {
+                        format!("{system}\n{first}\n{text}")
+                    }
+                    _ => format!("{system}\n{text}"),
+                };
+                opening.get_or_insert_with(|| text.clone());
                 let flag = Arc::clone(&interrupted);
                 let failed = Arc::clone(&refused);
                 let argv = Arc::clone(&argv);
@@ -756,6 +772,16 @@ fn control_stream(system: &str, argv: &[String], shape: Shape) -> std::process::
                     "response": {"subtype": "success",
                                  "request_id": frame.get("request_id").cloned()},
                 }));
+                // The turn that ends before its redirection can be written: the
+                // process goes away the moment the abort lands, with no terminal
+                // result and nothing left to read the replacement turn — so the
+                // run cannot deliver it, and says so rather than claiming it did.
+                if opening
+                    .as_deref()
+                    .is_some_and(|first| steers(first, "vanish-on-interrupt"))
+                {
+                    return exit(0);
+                }
                 interrupted.store(true, Ordering::SeqCst);
             }
             Some("control_request") => {
@@ -842,8 +868,31 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
     // which is a cancel journey watching a tree that comes and goes rather than
     // one that stays. Before `entered`, as in `main`: a turn that never answers
     // never began, on either path.
+    //
+    // The ticker and the working barrier get the same treatment, for the same
+    // reason: a single-sided member's turn opens with control where its harness
+    // can be interrupted in place, so a liveness journey's member reaches here
+    // rather than `main`, and its sentinels have to steer it the same way. The
+    // agent's turn only — a judge side's prompt embeds the task, and a ticker or a
+    // barrier there would be a second process the journey never asked for.
+    let agents = agents_controlled_turn(prompt, interrupted);
+    if agents {
+        if let Some(path) = sentinel_path(prompt, "spawn-ticker") {
+            spawn_ticker(&path);
+        }
+    }
     if steers(prompt, "hang") {
         hang(sentinel_path(prompt, "tick").as_deref());
+    }
+    if agents {
+        if let Some(release) = sentinel_path(prompt, "work") {
+            if !work_until_released(&release) {
+                eprintln!(
+                    "fake-harness: a working turn was never released, so nothing observed it"
+                );
+                return Answered::No;
+            }
+        }
     }
     if steers(prompt, "crash-before-recovery")
         && !prompt.contains("retry the agent turn after the classified failure")
@@ -877,7 +926,10 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
             let mut entered = path.clone().into_os_string();
             entered.push(".entered");
             let _ = std::fs::write(std::path::PathBuf::from(entered), "entered");
-            while !path.exists() {
+            // Stoppable, as `hold` is: a supervisor turn opened with control is
+            // one a note can redirect, and a hold that sat out the interrupt
+            // would answer a decision the redirect had already replaced.
+            while !path.exists() && !stopped() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }

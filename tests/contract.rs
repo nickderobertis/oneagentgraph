@@ -783,6 +783,9 @@ fn a_turn_interrupted_payload_names_the_member_and_whether_it_landed() {
         input_bytes: 31,
         reason: None,
         truncated: false,
+        offer: None,
+        accepted: None,
+        party: None,
     };
     let serialized = serde_json::to_value(&delivered).expect("serializes");
     assert_eq!(
@@ -800,6 +803,9 @@ fn a_turn_interrupted_payload_names_the_member_and_whether_it_landed() {
         input_bytes: 0,
         reason: Some("the member is between turns".to_string()),
         truncated: false,
+        offer: None,
+        accepted: None,
+        party: None,
     };
     let serialized = serde_json::to_value(&refused).expect("serializes");
     assert_eq!(serialized["reason"], json!("the member is between turns"));

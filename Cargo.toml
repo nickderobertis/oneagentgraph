@@ -387,7 +387,21 @@ test-doubles = []
 # the state `tests/inventory.rs` refuses. Its `oneharness-core` requirement is
 # still `^0.18.0`.
 #
-# **0.19.5 is what is linked**, and moves in lockstep with oneharness-core
+# **0.20.0 is what is linked, and it is a compile floor.** It is the release in
+# which a note *interrupts* the live turn it is addressed to: `Note` gained
+# `delivery` (`Delivery::Interrupt` or `Delivery::TurnEnd`) and `Accepted` gained
+# `AtTurnEnd`, both of which `src/note.rs` re-exports and `src/event.rs` names on
+# the stream; `Interrupted` is now answered only for a turn oneharness confirmed
+# it redirected; and the engine takes a note out of its inbox only when it is
+# about to present it, which is what lets `control::offer_note`'s withdrawal and
+# deadline hold until then. Its `kind: oneharness` provider asks for a
+# controllable turn on **both** parties under one `control: true`, and a `split`
+# judge entry asks on its own — `src/invoke.rs` sets both. It moves in lockstep
+# with oneharness-core 0.28.4 and onemessagebus 0.9.2 below: its published
+# requirements are `^0.28.4` and `^0.9.2`, so the three are edited together or
+# the graph carries two copies — the state `tests/inventory.rs` refuses.
+#
+# 0.19.5 moved in lockstep with oneharness-core
 # 0.28.1 below: its published requirement is `^0.28.1`, a pre-1.0 minor past
 # the `^0.26.0` 0.19.1 and 0.19.2 asked for, so the two are edited together or
 # the graph carries two cores — the state `tests/inventory.rs` refuses. Every
@@ -453,7 +467,7 @@ test-doubles = []
 #      the engine and reads no CLI output.
 #   4. 0.19.2 reads and writes its YAML through serde-saphyr, so no libyaml
 #      translation reaches this graph through onejudge.
-onejudge = { version = "0.19.5", features = ["cli"] }
+onejudge = { version = "0.20.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -477,7 +491,13 @@ onejudge = { version = "0.19.5", features = ["cli"] }
 #
 # 0.9.1 reads a filter file's YAML through serde-saphyr rather than
 # `serde_yaml_ng`, so no libyaml translation reaches this graph through the bus.
-onemessagebus = "0.9.1"
+#
+# **0.9.2 is a compile floor**, moved in lockstep with onejudge 0.20.0 above. It
+# is the release whose `Sender::offer` answers an `Offer` once the receiver has
+# admitted the message — `wait`, `wait_until(deadline)` and `withdraw`, with
+# taking and withdrawing atomic in process and across the spool — which a
+# two-party member's relay holds for the caller of `control::offer_note`.
+onemessagebus = "0.9.2"
 # The payload structs are registered with the bus's schema registry as
 # `Message` types, which is a `schemars` derivation. The same major and feature
 # the bus itself takes, so the one `JsonSchema` trait is the bus's.
@@ -491,11 +511,18 @@ schemars = { version = "1", features = ["preserve_order"] }
 # 0.28.1; that was re-measured for this bump rather than assumed, and
 # `tests/inventory.rs` holds `docs/oneharness-library.md` against it.
 #
-# **0.28.1 is what is linked, and it is linked exactly once**, in lockstep with
-# onejudge 0.19.5 above, which asks for `^0.28.1`. Its controlled Codex turns
-# share one pooled app-server, yet no turn this crate runs reaches it: a
-# `kind: oneharness` member's `RunRequest` (`src/harness.rs`) leaves `control`
-# unset, so its turn is an uncontrolled `codex exec`, and a two-party member's
+# **0.28.4 is what is linked, and it is linked exactly once**, in lockstep with
+# onejudge 0.20.0 above, which asks for `^0.28.4`. 0.28.4 answers a redirect as
+# served only once its replacement turn opens with it — the guarantee a
+# single-sided member's note rests on, because `control::offer_note` reports
+# such a note interrupted only when `oneharness interrupt` says it was delivered;
+# 0.28.2 and 0.28.3 fixed the shared Codex app-server's macOS start and tests.
+# Its controlled Codex turns share one pooled app-server, yet no turn this crate
+# runs reaches it: a `kind: oneharness` member's `RunRequest` (`src/harness.rs`)
+# asks for `control` only when every candidate of its chain is interrupted in
+# place by oneharness's registry — a mechanism that does not drive the turn, so
+# never Codex's — and otherwise leaves it unset, so a Codex turn is an
+# uncontrolled `codex exec`; and a two-party member's
 # sides run in the `oneharness` CLI through `src/judge.rs`'s spawn hook, which
 # pools and sweeps its own servers. So the `oneagentgraph` binary hosts no
 # sweeper (`io::app_server::serve_sweeper_if_requested`): it never pools.
@@ -633,7 +660,7 @@ schemars = { version = "1", features = ["preserve_order"] }
 # requirement. The rule that went with the split is retired with it, because
 # there is no longer a second set of types to confuse this one with; what remains
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.28.1"
+oneharness-core = "0.28.4"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

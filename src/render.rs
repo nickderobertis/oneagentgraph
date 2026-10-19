@@ -89,8 +89,15 @@ pub fn line(envelope: &Envelope) -> String {
             // The reason only for a delivery that did not land, which is the one
             // that has one — a served interrupt says how much redirection it
             // carried instead.
+            // How a note was accepted, when this answers one: the one word that
+            // tells an interrupted turn from a turn-end delivery.
+            let accepted = match (field(envelope, "accepted"), field(envelope, "party")) {
+                (accepted, _) if accepted.is_empty() => String::new(),
+                (accepted, party) if party.is_empty() => format!(" {accepted}"),
+                (accepted, party) => format!(" {accepted} ({party})"),
+            };
             if delivered {
-                format!("delivered ({bytes} bytes)")
+                format!("delivered{accepted} ({bytes} bytes)")
             } else {
                 let reason = field(envelope, "reason");
                 if reason.is_empty() {
@@ -99,6 +106,14 @@ pub fn line(envelope: &Envelope) -> String {
                     format!("not delivered: {reason}")
                 }
             }
+        }
+        EventKind::NoteAdmitted => format!(
+            "{} for {}",
+            field(envelope, "offer"),
+            field(envelope, "addressee")
+        ),
+        EventKind::NoteWithdrawn => {
+            format!("{} {}", field(envelope, "offer"), field(envelope, "reason"))
         }
         EventKind::MemberHeartbeat => "alive".to_string(),
         EventKind::FallbackAdvanced => format!(
@@ -384,6 +399,24 @@ mod tests {
                 json!({"member": "worker", "delivered": false, "input_bytes": 0,
                        "reason": "the member is between turns"}),
                 "turn-interrupted not delivered: the member is between turns",
+            ),
+            // A note's answer says how it was accepted, so a turn it interrupted
+            // and a turn it reached at its end read apart.
+            (
+                EventKind::TurnInterrupted,
+                json!({"member": "worker", "delivered": true, "input_bytes": 12,
+                       "offer": "note-1", "accepted": "at-turn-end", "party": "worker"}),
+                "turn-interrupted delivered at-turn-end (worker) (12 bytes)",
+            ),
+            (
+                EventKind::NoteAdmitted,
+                json!({"member": "worker", "addressee": "supervisor", "offer": "note-1"}),
+                "note-admitted note-1 for supervisor",
+            ),
+            (
+                EventKind::NoteWithdrawn,
+                json!({"member": "worker", "offer": "note-1", "reason": "expired"}),
+                "note-withdrawn note-1 expired",
             ),
             (
                 EventKind::MemberHeartbeat,

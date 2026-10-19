@@ -17,8 +17,11 @@
 //!   It must keep reading for the same reason `record.v1.json` must: a run in
 //!   flight was written by the build before this one, and an `interrupt` against
 //!   it is the case the version range exists for.
-//! * `control.v2.json` — what this build writes, byte for byte: the same three
-//!   shapes, plus the note endpoint a two-party member's own thread binds.
+//! * `control.v2.json` — the shapes the build before the offer protocol wrote:
+//!   the same three, plus the note endpoint a two-party member's own thread
+//!   binds. It must keep reading for `control.v1.json`'s reason.
+//! * `control.v3.json` — what this build writes, byte for byte: the same shapes,
+//!   plus the supervisor turn a two-party member's judge side now asks for.
 //! * `member-died.json` — the three shapes of the one *event* payload that
 //!   changed when onejudge became a library, and again when an exhausted chain
 //!   became its own cause. It is not in `record.json`, but it is in the
@@ -873,7 +876,33 @@ fn golden_controls() -> Vec<ControlRecord> {
                     cwd: cwd.clone(),
                 },
             },
+            notes: Some(notes.clone()),
+            supervisor: Some(Turn::Open {
+                address: Address {
+                    session: "node-scope-1786171301679-1447994-worker-user".to_string(),
+                    session_dir: None,
+                    cwd: cwd.clone(),
+                },
+            }),
+        },
+        // A supervisor whose own ask was refused beside a worker whose was
+        // honored: the two sides are separately addressable and separately
+        // refusable.
+        ControlRecord {
+            schema_version: CONTROL_SCHEMA_VERSION,
+            turn: Turn::Open {
+                address: Address {
+                    session: session.clone(),
+                    session_dir: Some("/state/oneharness/sessions".into()),
+                    cwd: cwd.clone(),
+                },
+            },
             notes: Some(notes),
+            supervisor: Some(Turn::Unavailable {
+                reason: "harness `qwen` has no out-of-band turn control, so --control cannot be \
+                         honored"
+                    .into(),
+            }),
         },
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
@@ -885,6 +914,7 @@ fn golden_controls() -> Vec<ControlRecord> {
                 },
             },
             notes: None,
+            supervisor: None,
         },
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
@@ -896,6 +926,7 @@ fn golden_controls() -> Vec<ControlRecord> {
                 },
             },
             notes: None,
+            supervisor: None,
         },
         ControlRecord {
             schema_version: CONTROL_SCHEMA_VERSION,
@@ -905,6 +936,7 @@ fn golden_controls() -> Vec<ControlRecord> {
                     .into(),
             },
             notes: None,
+            supervisor: None,
         },
     ]
 }
@@ -919,7 +951,7 @@ fn golden_controls() -> Vec<ControlRecord> {
 /// the same store and a written `null` would claim otherwise.
 #[test]
 fn the_control_goldens_are_exactly_what_this_build_writes() {
-    let golden = include_str!("golden/control.v2.json");
+    let golden = include_str!("golden/control.v3.json");
     let written = format!(
         "{}\n",
         serde_json::to_string_pretty(&golden_controls()).expect("the records serialize")
@@ -927,7 +959,7 @@ fn the_control_goldens_are_exactly_what_this_build_writes() {
     assert_eq!(
         written, golden,
         "control.json's shape changed. If that was deliberate, bump \
-         CONTROL_SCHEMA_VERSION and commit a new golden *beside* control.v2.json — a run in \
+         CONTROL_SCHEMA_VERSION and commit a new golden *beside* control.v3.json — a run in \
          flight was written by the build before this one."
     );
 
@@ -961,6 +993,23 @@ fn the_shape_written_before_the_note_endpoint_still_reads_as_a_member_that_binds
         "the v1 refusal did not survive the trip: {:?}",
         read[2].turn
     );
+}
+
+/// The shape written before the judge side asked for a controllable turn still
+/// reads, as a member whose supervisor turn nobody recorded.
+#[test]
+fn the_shape_written_before_the_supervisor_turn_still_reads_as_a_member_with_none() {
+    let read: Vec<ControlRecord> =
+        serde_json::from_str(include_str!("golden/control.v2.json")).expect("the v2 golden reads");
+    assert_eq!(read.len(), 4, "the v2 golden lost a record");
+    for record in &read {
+        assert_eq!(record.schema_version, 2, "a v2 record changed version");
+        assert_eq!(
+            record.supervisor, None,
+            "a record written before the judge side asked claimed a supervisor turn"
+        );
+    }
+    assert!(read[0].notes.is_some(), "the v2 endpoint did not survive");
 }
 
 /// The three fields only a child process has are omitted when it had none, and

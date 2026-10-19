@@ -87,7 +87,7 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
         emitter,
         &launch.prompt,
     );
-    let request = launch.request(&prompt);
+    let request = with_control(launch.request(&prompt), launch, scratch);
     // Minted before the engine is handed the request: this member's one turn
     // begins here, and its opening and its close have to name the same instant.
     // Over the instruction the turn really receives, views and all, because that
@@ -99,12 +99,13 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
     let (tx, rx) = mpsc::channel();
 
     let engine = {
-        let (emitter, activity, cancel, group, turn) = (
+        let (emitter, activity, cancel, group, turn, recorded) = (
             emitter.clone(),
             Arc::clone(&activity),
             cancel.clone(),
             Arc::clone(&group),
             turn.clone(),
+            scratch.to_path_buf(),
         );
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
@@ -123,21 +124,45 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 cancel: cancel.clone(),
                 turn,
             };
-            let outcome = run_supervised(
-                &request,
-                RunControls {
-                    events: Some(&mut sink),
-                    cancel,
-                    // This process is a graph of many members and installs its
-                    // own disposition; a run that took the host's handlers would
-                    // be one member deciding what a signal means for all of them.
-                    signal_cancel: false,
-                    // The engine names itself: unlike the CLI, there is no
-                    // separately-versioned binary here for the report to name.
-                    version: None,
-                },
-                Some(&supervisor),
-            );
+            let mut turn_on = |request: &RunRequest| {
+                run_supervised(
+                    request,
+                    RunControls {
+                        events: Some(&mut sink),
+                        cancel: cancel.clone(),
+                        // This process is a graph of many members and installs
+                        // its own disposition; a run that took the host's
+                        // handlers would be one member deciding what a signal
+                        // means for all of them.
+                        signal_cancel: false,
+                        // The engine names itself: unlike the CLI, there is no
+                        // separately-versioned binary here for the report to
+                        // name.
+                        version: None,
+                    },
+                    Some(&supervisor),
+                )
+            };
+            let mut outcome = turn_on(&request);
+            // A control ask oneharness refuses is refused before anything
+            // spawns, so the same turn is asked again without it — the ladder
+            // onejudge runs for a two-party member's sides — and the refusal is
+            // what `interrupt` reports from here on.
+            if let Err(refused) = outcome.as_ref().map(|_| ()) {
+                if request.control && refused_control(refused) {
+                    crate::control::write(
+                        &recorded,
+                        &crate::control::Turn::Unavailable {
+                            reason: refused.to_string(),
+                        },
+                    );
+                    outcome = turn_on(&RunRequest {
+                        control: false,
+                        session: None,
+                        ..request.clone()
+                    });
+                }
+            }
             // A send that fails means the supervisor already condemned this
             // member and stopped listening; the engine still tore itself down on
             // the way here, which is what that teardown was waiting for.
@@ -167,6 +192,128 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
     let heartbeat = Heartbeat::start(scratch, started, &launch.prompt);
     supervise(
         &rx, &cancel, emitter, bounds, scratch, started, &activity, &turn, heartbeat,
+    )
+}
+
+/// Open this member's turn with control where oneharness says it can be
+/// interrupted in place, and write down where it is addressed — or why it is not.
+///
+/// Where is decided by oneharness's own registry, never by a list kept here: the
+/// turn asks for control only when **every** candidate its resolved chain could
+/// serve it with declares a control mechanism that does not drive the turn —
+/// one whose interrupt rides the harness's own run rather than moving the turn
+/// onto another transport
+/// ([`oneharness_core::domain::control::ControlShape::drives_turn`]). A chain holding any
+/// other candidate is left exactly as it ran before: one `--control` covers the
+/// whole chain, so asking for it would move that candidate's turn — a Codex
+/// candidate onto `codex app-server`, say — even when another candidate serves.
+/// Such a member opens no controllable turn, and `interrupt` says so.
+///
+/// Each turn takes a handle of its own under the member's — a scheduled member's
+/// firings never continue one another's conversation — in the store the run
+/// itself resolves when it is handed none.
+fn with_control(mut request: RunRequest, launch: &HarnessLaunch, scratch: &Path) -> RunRequest {
+    let refused = |reason: String| {
+        crate::control::write(scratch, &crate::control::Turn::Unavailable { reason });
+    };
+    if let Err(reason) = interruptible(&request) {
+        refused(reason);
+        return request;
+    }
+    let Some(store) = oneharness_core::io::session::resolve_dir(None) else {
+        refused(
+            "no session store directory could be resolved, so a controllable turn would have no \
+             address"
+                .to_string(),
+        );
+        return request;
+    };
+    let session = format!(
+        "{}-{}",
+        launch.session,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_nanos())
+    );
+    crate::control::write(
+        scratch,
+        &crate::control::Turn::Open {
+            address: crate::control::Address {
+                session: session.clone(),
+                session_dir: Some(store),
+                cwd: launch.worktree.clone(),
+            },
+        },
+    );
+    request.control = true;
+    request.session = Some(session);
+    request
+}
+
+/// Whether every candidate `request` could be served by is interrupted in place,
+/// read from the config and the registry the run itself resolves — or why not.
+fn interruptible(request: &RunRequest) -> Result<(), String> {
+    let start = request
+        .cwd
+        .clone()
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let loaded = oneharness_core::io::config::load(&request.config, request.no_config, &start)
+        .map_err(|err| format!("this member's oneharness config could not be read: {err}"))?;
+    let config = &loaded.config;
+    let (all, include) = if request.all || !request.harness.is_empty() {
+        (request.all, request.harness.clone())
+    } else {
+        (
+            config.all.unwrap_or(false),
+            config.harnesses.clone().unwrap_or_default(),
+        )
+    };
+    let exclude = if request.exclude.is_empty() {
+        config.exclude.clone().unwrap_or_default()
+    } else {
+        request.exclude.clone()
+    };
+    let specs = oneharness_core::domain::select::select_specs(all, &include, &exclude)
+        .map_err(|err| format!("this member's harness chain could not be resolved: {err}"))?;
+    let moved: Vec<&str> = specs
+        .iter()
+        .filter(|spec| !spec.control.is_some_and(|shape| !shape.drives_turn()))
+        .map(|spec| spec.id)
+        .collect();
+    if moved.is_empty() && !specs.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "this member opened no controllable turn: its chain holds {}, which oneharness either \
+         cannot interrupt or would move onto another transport to interrupt, so the turn ran as it \
+         always did",
+        moved.join(", ")
+    ))
+}
+
+/// Whether `err` is oneharness refusing the control ask — or the session handle
+/// that ask needs — rather than failing the turn: every such refusal is decided
+/// before a harness spawns.
+fn refused_control(err: &oneharness_core::errors::OneharnessError) -> bool {
+    use oneharness_core::errors::OneharnessError as E;
+    matches!(
+        err,
+        E::ControlNeedsSession
+            | E::ControlUnsupported { .. }
+            | E::ControlSingleHarness { .. }
+            | E::ControlBatch
+            | E::ControlPlatform
+            | E::ControlStreamUnsupported { .. }
+            | E::ControlSchema
+            | E::ControlModeUnsupported { .. }
+            | E::ControlOutputFormat { .. }
+            | E::ControlSocketAddress { .. }
+            | E::ControlNoSessionDir
+            | E::MultiModelConflict { .. }
+            | E::SessionMultipleHarnesses { .. }
+            | E::SessionBatch
+            | E::SessionUnsupported { .. }
+            | E::SessionControlNoResume { .. }
     )
 }
 
@@ -1454,6 +1601,7 @@ mod tests {
             prompt: "report in".to_string(),
             reporting: Reporting::Streamed,
             views: Vec::new(),
+            session: "node-scope-1-reporter".to_string(),
         };
         let request = launch.request(&launch.prompt);
         assert_eq!(

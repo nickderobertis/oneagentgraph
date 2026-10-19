@@ -272,6 +272,14 @@ fn an_interrupt_stops_the_in_flight_turn_and_the_member_does_the_new_work() {
         settled["turn"]["address"]["session_dir"].is_string(),
         "the report's own store directory did not replace the default: {settled}"
     );
+    // The same gate for the judge side, which asks for a controllable turn of its
+    // own: the handle written down while the member ran is the one the report
+    // says its supervisor turns were bound under.
+    assert_eq!(live["supervisor"]["state"], "open", "{live}");
+    assert_eq!(
+        settled["supervisor"]["address"]["session"], live["supervisor"]["address"]["session"],
+        "the supervisor session a live note addresses is not the one the report says was bound"
+    );
 
     // And the same lever on the same member, now that it is over: the run's own
     // record says it settled, so the answer is that fact rather than a socket
@@ -343,13 +351,26 @@ fn a_member_with_no_control_mechanism_is_reported_as_a_fact_rather_than_a_failur
     );
 }
 
-/// A single-sided member opens no controllable turn at all, and says so rather
-/// than reaching for a socket nothing ever bound.
+/// A single-sided member whose chain oneharness cannot interrupt in place opens
+/// no controllable turn, and says so — naming the candidate — rather than
+/// reaching for a socket nothing ever bound.
+///
+/// `qwen` declares no control mechanism at all, so the member's turn runs exactly
+/// as it did before single-sided members could be redirected, and the exit-3 fact
+/// is what `interrupt` reports for it: a member still settles its record with the
+/// reason, so this answer beats the run's own "already settled".
 #[test]
-fn a_single_sided_member_says_it_opens_no_controllable_turn() {
+fn a_single_sided_member_it_cannot_interrupt_in_place_opens_no_controllable_turn() {
     let workspace = Workspace::new();
-    workspace.graph(&crate::support::single_sided_graph(
-        &crate::support::fake_harness(),
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
     ));
     workspace
         .run_task("fake:complete-now: one agent")
@@ -365,10 +386,55 @@ fn a_single_sided_member_says_it_opens_no_controllable_turn() {
     assert!(
         events[0]["payload"]["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("opened no controllable turn")),
+            .is_some_and(
+                |reason| reason.contains("opened no controllable turn") && reason.contains("qwen")
+            ),
         "{}",
         interrupted.stdout
     );
+}
+
+/// A single-sided member on a harness oneharness interrupts in place opens its
+/// turn with control, and an `interrupt` redirects it exactly as it redirects a
+/// two-party member's agent side: the parked turn stops, and the redirection is
+/// the turn that does the work.
+#[cfg(unix)]
+#[test]
+fn a_single_sided_member_it_can_interrupt_in_place_is_redirected() {
+    let workspace = Workspace::new();
+    workspace.graph(&crate::support::single_sided_graph(
+        &crate::support::fake_harness(),
+    ));
+    let original_work = workspace.at("did-original-work");
+    let redirected_work = workspace.at("did-redirected-work");
+    let member = parked(&workspace, &parking_task(&workspace, Some(&original_work)));
+
+    let redirection = format!(
+        "fake:did-work={} write the summary instead",
+        redirected_work.display()
+    );
+    let interrupted =
+        workspace.run(&["interrupt", &member.id, "reporter", "--input", &redirection]);
+    interrupted.expect_code(0);
+    let events = interrupted.of_kind("turn-interrupted");
+    assert_eq!(events.len(), 1, "{}", interrupted.stdout);
+    assert_eq!(events[0]["payload"]["delivered"], true);
+
+    let output = member.settled();
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "the redirected member did not settle\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !original_work.exists(),
+        "the interrupted turn went on and did the work it was parked before"
+    );
+    let did = std::fs::read_to_string(&redirected_work)
+        .expect("the redirected turn never did the new work");
+    assert!(did.contains("write the summary instead"), "{did:?}");
 }
 
 /// Everything a caller can type that cannot work, refused with the contract's
