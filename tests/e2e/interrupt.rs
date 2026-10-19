@@ -570,9 +570,11 @@ fn a_single_sided_member_it_can_interrupt_in_place_is_redirected() {
 
 /// A graph name of the length a real workstream gives its nodes, so the run id
 /// every session handle and socket name is built from is too.
+#[cfg(unix)]
 const LONG_GRAPH_NAME: &str = "manager-notes-reach-live-turns-oag-note-offers-attempt-2";
 
 /// `graph` renamed to [`LONG_GRAPH_NAME`].
+#[cfg(unix)]
 fn long_named(graph: &str) -> String {
     graph.replacen("name: node-scope", &format!("name: {LONG_GRAPH_NAME}"), 1)
 }
@@ -591,6 +593,7 @@ fn long_named(graph: &str) -> String {
 /// the link past the budget, not so much that none fits the target — which is
 /// that host's shape on any unix, so the Linux legs drive what the macOS leg
 /// does.
+#[cfg(unix)]
 fn redirected_through_a_link(graph: &str, member: &str) -> (PathBuf, serde_json::Value) {
     let workspace = Workspace::new();
     workspace.graph(&long_named(graph));
