@@ -6,10 +6,12 @@
 //! a turn that keeps running, which is the difference between correcting a worker
 //! and restarting it.
 //!
-//! **This crate owns none of the mechanism.** onejudge asks its agent side for a
-//! controllable turn (`provider.control`), oneharness opens the socket and knows
-//! which harnesses have a lever at all, and a separate `oneharness interrupt`
-//! process delivers the redirection. What lives here is the composition: the
+//! **This crate owns none of the mechanism.** onejudge asks both sides of a
+//! two-party member for a controllable turn (`provider.control`), a single-sided
+//! member's turn asks through `RunRequest::control` where oneharness's registry
+//! says its whole chain is interrupted in place (`crate::harness`), oneharness
+//! opens the socket and knows which harnesses have a lever at all, and a separate
+//! `oneharness interrupt` process delivers the redirection. What lives here is the composition: the
 //! address a run recorded for one member, and the mapping from oneharness's own
 //! answer onto the verb's exit codes.
 //!
@@ -109,7 +111,8 @@ pub struct Address {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "lowercase", deny_unknown_fields)]
 pub enum Turn {
-    /// The member's agent side asked for a controllable turn, addressed here.
+    /// The member's turn — a two-party member's agent side, or a single-sided
+    /// member's one turn — asked for control, and is addressed here.
     Open {
         /// Where to reach it.
         address: Address,
@@ -136,7 +139,7 @@ pub struct Record {
     ///
     /// Absent for a member that binds none: a single-sided `kind: oneharness`
     /// member has no second party for a note to be addressed *away* from, so
-    /// [`note`] falls through to [`interrupt`] for it; and so does a record
+    /// [`offer_note`] falls through to [`interrupt`] for it; and so does a record
     /// written by a build that had no note seam at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<PathBuf>,
@@ -206,8 +209,7 @@ pub fn record(scratch: &Path) -> Result<Record, String> {
     let path = path(scratch);
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return Err(
-            "this member opened no controllable turn: only a two-party member's agent side does, \
-             and this run recorded none for it"
+            "this member opened no controllable turn: this run recorded no turn control for it"
                 .to_string(),
         );
     };

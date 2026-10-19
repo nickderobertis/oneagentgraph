@@ -46,7 +46,7 @@
 //! A note is offered by a *different process* from the one running the member —
 //! `oneagentgraph`'s own API, against a run's state directory. The two meet at the
 //! member's notes spool (`Endpoint`), the bus inbox's [`Spool`] backend, which
-//! carries a [`Request`] at a time: offer this note, wait for that offer's answer
+//! carries one `Request` at a time: offer this note, wait for that offer's answer
 //! (with or without a deadline), take that offer back.
 //!
 //! The member's `Relay` — one thread of the member's process — services them. It

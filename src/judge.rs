@@ -1303,8 +1303,9 @@ fn cancellation_requested(scratch: &Path) -> bool {
 ///
 /// A member names one session and onejudge's engine gives each party its own
 /// under it — `<base>-skill` for the side that does the work and `<base>-user`
-/// for the one that supervises it, "always", per `onejudge::cli::Settings`. Only
-/// the agent side opens a controllable turn, so only its handle addresses one.
+/// for the one that supervises it, "always", per `onejudge::cli::Settings`. Each
+/// side opens a controllable turn under its own, so each handle addresses one —
+/// this is the agent's, and [`supervisor_session`] is the judge's.
 ///
 /// This is the single place that derivation is written down here, and it is a
 /// *provisional* answer with a gate under it: the report replaces the whole
