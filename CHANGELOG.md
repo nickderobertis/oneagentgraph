@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.6.0...v0.7.0) - 2026-10-20
+
+### Added
+
+- [**breaking**] let a note offer be withdrawn while its answer is waited on ([#223](https://github.com/nickderobertis/oneagentgraph/pull/223))
+
 ## [0.6.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.5.14...v0.6.0) - 2026-10-19
 
 ### Added
