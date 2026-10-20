@@ -2314,9 +2314,10 @@ fn a_note_withdrawn_while_its_wait_is_in_flight_is_answered_withdrawn_and_never_
 /// worker's turn is held at its opening (`oneagentgraph-fixture:hold-turn-open`)
 /// — after the engine took that turn's queued notes, before the turn has a lever
 /// — and the turn is let open only once the wait's request is in the relay's
-/// hands, unanswered. The waiting thread reads the run's stream the instant the
-/// wait returns, so the interruption it finds there was recorded while the wait
-/// was still blocked.
+/// hands, unanswered. The relay then holds the wait's answer once it has
+/// published it (`oneagentgraph-fixture:hold-wait-answer`), so when the journey
+/// reads the interruption off the run's stream it checks, at that moment, that
+/// the waiting thread has not returned — and only then lets the answer go.
 #[cfg(unix)]
 #[test]
 fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_the_interruption() {
@@ -2327,13 +2328,15 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
     let opening_entered = workspace.at("turn-opening.entered");
     let began = workspace.at("worker-began");
     let release = workspace.at("worker-release");
+    let answering = workspace.at("wait-answer");
     let running = start(
         &workspace,
         &format!("fake:record-prompt={}", agent_prompts.display()),
         &format!(
             // llmlint: ignore[tests_mirror_real_usage] the fixture fakes nothing and replaces no layer: it pauses the real engine at a worker turn's opening so a race every real caller runs is run in one order, because a note that interrupts is taken the instant it is offered into a live turn and the pinned oneharness answers the redirect once the abort is written, so no sanctioned seam can keep the interruption from landing before the wait is asked; everything asserted on (the offer, its wait, its withdrawer, the run's stream) is the public surface a real caller drives, as with `hold-between-turns` above.
-            "oneagentgraph-fixture:hold-turn-open={} fake:entered={} fake:hold={}",
+            "oneagentgraph-fixture:hold-turn-open={} oneagentgraph-fixture:hold-wait-answer={} fake:entered={} fake:hold={}",
             opening.display(),
+            answering.display(),
             began.display(),
             release.display()
         ),
@@ -2352,15 +2355,9 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
     let id = offer.id().to_string();
     let withdrawer = offer.withdrawer();
     let (answered, answer) = std::sync::mpsc::channel();
-    let waiter = {
-        let (events, id) = (events.clone(), id.clone());
-        std::thread::spawn(move || {
-            let delivery = offer.wait().expect("a wait answers");
-            let recorded = naming(&events, "turn-interrupted", &id).len();
-            let _ = answered.send(delivery);
-            recorded
-        })
-    };
+    let waiter = std::thread::spawn(move || {
+        let _ = answered.send(offer.wait().expect("a wait answers"));
+    });
     until("the wait to reach the member's relay", || {
         a_request_in_hand(&workspace, &running) || waiter.is_finished()
     });
@@ -2380,6 +2377,15 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
         "the interruption to be recorded on the run's stream",
         || !naming(&events, "turn-interrupted", &id).is_empty(),
     );
+    assert!(
+        !waiter.is_finished(),
+        "the wait had returned by the time the interruption was on the run's stream"
+    );
+    assert_eq!(
+        answer.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty),
+        "the wait was answered by the time the interruption was on the run's stream"
+    );
     let taker = {
         let withdrawer = withdrawer.clone();
         std::thread::spawn(move || withdrawer.withdraw())
@@ -2388,6 +2394,12 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
         .join()
         .expect("the withdrawing thread")
         .expect_err("a note that interrupted a turn was taken back");
+    assert!(
+        !waiter.is_finished(),
+        "the refused withdrawal let the wait return"
+    );
+    // llmlint: ignore[tests_mirror_real_usage] releases the relay's answer pause the run was started with, for the reason given at the marker above.
+    std::fs::write(&answering, "go").expect("let the wait's answer go");
     assert_eq!(
         answer
             .recv_timeout(ANSWER_BOUND)
@@ -2396,11 +2408,7 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
             party: Party::Worker
         }),
     );
-    assert_eq!(
-        waiter.join().expect("the waiting thread"),
-        1,
-        "the wait returned before the interruption was recorded on the run's stream"
-    );
+    waiter.join().expect("the waiting thread");
     assert!(
         prompts(&agent_prompts)
             .iter()

@@ -536,6 +536,12 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         (Some(endpoint), Some(notes)) => {
             let (relay, ending) =
                 crate::note::Relay::open(endpoint, notes, emitter, Arc::clone(&offered));
+            // The answer hold a journey's task asked for, if it asked for one.
+            #[cfg(feature = "test-doubles")]
+            let relay = relay.holding_answers(FixtureGate::parse(
+                &launch.task,
+                crate::note::HOLD_WAIT_ANSWER,
+            ));
             match std::thread::Builder::new().spawn(move || relay.serve()) {
                 Ok(_) => Some(ending),
                 Err(_) => None,

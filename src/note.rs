@@ -1307,7 +1307,18 @@ pub(crate) struct Relay {
     book: Arc<Book>,
     offered: Arc<AtomicU64>,
     stop: Arc<Stop>,
+    /// The gate a journey's task asked a wait's answer to be held at — see
+    /// [`Relay::holding_answers`], which is compiled only for the suite.
+    #[cfg(feature = "test-doubles")]
+    answers_held: Option<crate::member::FixtureGate>,
 }
+
+/// The marker a journey puts in its **task** to have every wait's answer held,
+/// once known and published, at the gate it names — see
+/// [`Relay::holding_answers`]. In the task, with the prefix every fixture of
+/// this crate's carries, for `crate::judge`'s `HOLD_BETWEEN_TURNS` reason.
+#[cfg(feature = "test-doubles")]
+pub(crate) const HOLD_WAIT_ANSWER: &str = "oneagentgraph-fixture:hold-wait-answer=";
 
 impl Relay {
     /// Open the relay for a member's `endpoint`, and the [`Ending`] its
@@ -1343,6 +1354,8 @@ impl Relay {
             book: Arc::clone(&book),
             offered,
             stop: Arc::clone(&stop),
+            #[cfg(feature = "test-doubles")]
+            answers_held: None,
         };
         let ending = Ending {
             requests,
@@ -1351,6 +1364,22 @@ impl Relay {
             stop,
         };
         (relay, ending)
+    }
+
+    /// This relay, holding every wait's answer at `gate` — a test-only pause,
+    /// compiled only under `test-doubles` like every fixture of this crate's.
+    ///
+    /// Held after the answer is known, recorded and published, and before the
+    /// caller's wait is given it, so a journey can read what became of a note
+    /// off the run's stream and see, rather than infer, that the wait on it has
+    /// not returned yet. Nothing the suite may fake sits between those two
+    /// steps: both are this relay's own, one statement apart. Writes the gate's
+    /// `.entered` sibling on reaching it, and holds every answer while the gate
+    /// is absent.
+    #[cfg(feature = "test-doubles")]
+    pub(crate) fn holding_answers(mut self, gate: Option<crate::member::FixtureGate>) -> Self {
+        self.answers_held = gate;
+        self
     }
 
     /// Serve requests until this member's spool closes or its end asks the relay
@@ -1459,8 +1488,19 @@ impl Relay {
         }
         let book = Arc::clone(&self.book);
         let key = offer.clone();
+        #[cfg(feature = "test-doubles")]
+        let held = self.answers_held.clone();
         let waiting = std::thread::Builder::new().spawn(move || {
-            delivered.answer(book.awaited(&key, deadline));
+            let reply = book.awaited(&key, deadline);
+            #[cfg(feature = "test-doubles")]
+            if let Some(gate) = held {
+                let _ = std::fs::write(&gate.entered, "entered");
+                let bound = Instant::now() + crate::member::FIXTURE_HOLD;
+                while !gate.gate.exists() && Instant::now() < bound {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+            delivered.answer(reply);
         });
         // llmlint: ignore-block[changed_behavior_has_e2e] a host that refused
         // this member one more thread, which no graph, task or config asks for and
