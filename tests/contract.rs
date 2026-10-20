@@ -906,7 +906,9 @@ fn the_documented_note_payloads_are_the_ones_this_build_publishes() {
 /// contract gives it, so a drift in either is a compile failure here.
 #[test]
 fn the_documented_offer_surface_is_the_one_this_build_exports() {
-    use oneagentgraph::control::{self, Note, NoteDelivery, NoteOffer, NoteOffered};
+    use oneagentgraph::control::{
+        self, NotWithdrawn, Note, NoteDelivery, NoteOffer, NoteOffered, NoteWithdrawer,
+    };
     let _: fn(
         &std::path::Path,
         &RunId,
@@ -925,15 +927,32 @@ fn the_documented_offer_surface_is_the_one_this_build_exports() {
     let _: fn(NoteOffer) -> Result<NoteDelivery, Error> = NoteOffer::wait;
     let _: fn(NoteOffer, std::time::Instant) -> Result<NoteDelivery, Error> = NoteOffer::wait_until;
     let _: fn(NoteOffer) -> Result<(), NoteOffer> = NoteOffer::withdraw;
-    let expired = NoteDelivery::Expired;
-    assert!(matches!(expired, NoteDelivery::Expired));
+    let _: fn(&NoteOffer) -> NoteWithdrawer = NoteOffer::withdrawer;
+    let _: fn(&NoteWithdrawer) -> &str = NoteWithdrawer::id;
+    let _: fn(&NoteWithdrawer) -> Result<(), NotWithdrawn> = NoteWithdrawer::withdraw;
+    // A withdrawer is handed to another thread while the offer's wait blocks
+    // this one, so these bounds are the surface rather than a convenience.
+    fn shareable<T: Clone + Send + Sync + std::fmt::Debug + 'static>() {}
+    fn an_error<T: std::error::Error + Send + Sync + 'static>() {}
+    shareable::<NoteWithdrawer>();
+    an_error::<NotWithdrawn>();
+    for delivery in [NoteDelivery::Expired, NoteDelivery::Withdrawn] {
+        assert!(matches!(
+            delivery,
+            NoteDelivery::Expired | NoteDelivery::Withdrawn
+        ));
+    }
     for item in [
         "pub fn offer_note(state_dir: &Path, run_id: &RunId, member: &MemberName, note: &Note, \
          oneharness_bin: &str) -> Result<NoteOffered, Error>;",
         "pub enum NoteOffered { Admitted(NoteOffer), Undelivered(Undelivered) }",
         "pub fn wait_until(self, deadline: std::time::Instant) -> Result<NoteDelivery, Error>;",
         "pub fn withdraw(self) -> Result<(), NoteOffer>;",
-        "pub enum NoteDelivery { Accepted(Accepted), Undelivered(Undelivered), Expired }",
+        "pub fn withdrawer(&self) -> NoteWithdrawer;",
+        "pub struct NoteWithdrawer { /* opaque: Clone + Send + Sync + Debug */ }",
+        "pub fn withdraw(&self) -> Result<(), NotWithdrawn>;",
+        "pub struct NotWithdrawn { /* opaque */ }",
+        "pub enum NoteDelivery { Accepted(Accepted), Undelivered(Undelivered), Expired, Withdrawn }",
     ] {
         assert!(
             fenced_block("rust").contains(item),
