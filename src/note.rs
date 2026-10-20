@@ -908,13 +908,73 @@ impl Deliveries {
 /// One admitted note the relay holds for its caller.
 struct Held {
     note: Note,
-    /// The in-process offer. Kept here while a caller's wait is in flight, so a
-    /// withdrawal still reaches it; `None` only while a member that is ending
-    /// settles it on a thread of its own.
-    offer: Option<onemessagebus::Offer<Accepted>>,
-    /// Whether a caller's wait is on it: what refuses a second wait, and keeps a
-    /// member that is ending from settling it out from under that wait.
-    waited: bool,
+    custody: Custody,
+}
+
+/// Where the relay's in-process handle on one held offer is, and whether a
+/// caller's wait is on it — one value, so no wait is ever on an offer whose
+/// handle has gone.
+enum Custody {
+    /// In the book, with no caller's wait on it.
+    Idle(onemessagebus::Offer<Accepted>),
+    /// In the book with a caller's wait on it. Kept here rather than taken out
+    /// to block on, so a withdrawal still reaches it; a second wait is refused,
+    /// and a member that is ending leaves it to the wait already on it.
+    Waited(onemessagebus::Offer<Accepted>),
+    /// Taken out by a member that is ending, which settles it on a thread of
+    /// its own.
+    Settling,
+}
+
+impl Custody {
+    /// The handle, while the book still holds it.
+    fn handle(&mut self) -> Option<&mut onemessagebus::Offer<Accepted>> {
+        match self {
+            Custody::Idle(handle) | Custody::Waited(handle) => Some(handle),
+            Custody::Settling => None,
+        }
+    }
+
+    /// Put a caller's wait on it: `false` when one is already there. One on an
+    /// offer being settled is let through, and reads what that settles.
+    fn wait(&mut self) -> bool {
+        match std::mem::replace(self, Custody::Settling) {
+            Custody::Idle(handle) => *self = Custody::Waited(handle),
+            Custody::Waited(handle) => {
+                *self = Custody::Waited(handle);
+                return false;
+            }
+            Custody::Settling => {}
+        }
+        true
+    }
+
+    /// Take a caller's wait back off it, once nothing is left to answer it.
+    fn unwait(&mut self) {
+        if let Custody::Waited(handle) = std::mem::replace(self, Custody::Settling) {
+            *self = Custody::Idle(handle);
+        }
+    }
+
+    /// Take the offer back if no turn has taken it: `true` when it was, and the
+    /// entry is then the caller's to record; `false`, leaving the custody as it
+    /// was, when a turn had or the handle is not here to ask.
+    fn withdraw(&mut self) -> bool {
+        type Offer = onemessagebus::Offer<Accepted>;
+        let (handle, kept): (Offer, fn(Offer) -> Custody) =
+            match std::mem::replace(self, Custody::Settling) {
+                Custody::Idle(handle) => (handle, Custody::Idle),
+                Custody::Waited(handle) => (handle, Custody::Waited),
+                Custody::Settling => return false,
+            };
+        match handle.withdraw() {
+            Ok(()) => true,
+            Err(handle) => {
+                *self = kept(handle);
+                false
+            }
+        }
+    }
 }
 
 /// What a member's [`Book`] guards: the offers it holds, and every answer it has
@@ -973,10 +1033,14 @@ impl Book {
         self.lock()
             .held
             .iter_mut()
-            .filter(|(_, entry)| !entry.waited)
             .filter_map(|(id, entry)| {
-                let handle = entry.offer.take()?;
-                Some((id.clone(), handle, entry.note.clone()))
+                match std::mem::replace(&mut entry.custody, Custody::Settling) {
+                    Custody::Idle(handle) => Some((id.clone(), handle, entry.note.clone())),
+                    kept => {
+                        entry.custody = kept;
+                        None
+                    }
+                }
             })
             .collect()
     }
@@ -1023,7 +1087,7 @@ impl Book {
                 .held
                 .iter_mut()
                 .filter_map(|(id, entry)| {
-                    let reply = reply_of(entry.offer.as_mut()?.try_answer()?);
+                    let reply = reply_of(entry.custody.handle()?.try_answer()?);
                     Some((id.clone(), entry.note.clone(), reply))
                 })
                 .collect();
@@ -1060,7 +1124,7 @@ impl Book {
             };
             let note = entry.note.clone();
             let mut reply = None;
-            if let Some(handle) = entry.offer.as_mut() {
+            if let Some(handle) = entry.custody.handle() {
                 if let Some(outcome) = handle.try_answer() {
                     reply = Some(reply_of(outcome));
                 } else if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
@@ -1077,11 +1141,8 @@ impl Book {
                     // `a_note_handed_back_after_its_deadline_expires_then` below
                     // holds a real conversation inbox's take past the deadline
                     // and hands the note back, and the wait expires it then.
-                    if let Some(handle) = entry.offer.take() {
-                        match handle.withdraw() {
-                            Ok(()) => reply = Some(Reply::Expired),
-                            Err(handle) => entry.offer = Some(handle),
-                        }
+                    if entry.custody.withdraw() {
+                        reply = Some(Reply::Expired);
                     }
                     // llmlint: ignore-end[changed_behavior_has_e2e]
                 }
@@ -1114,22 +1175,14 @@ impl Book {
         let Some(entry) = ledger.held.get_mut(offer) else {
             return Reply::Taken;
         };
-        let Some(handle) = entry.offer.take() else {
+        if !entry.custody.withdraw() {
             return Reply::Taken;
-        };
-        match handle.withdraw() {
-            Ok(()) => {
-                let note = entry.note.clone();
-                self.record(&mut ledger, offer, &Reply::Withdrawn);
-                drop(ledger);
-                self.announce(offer, &note, &Reply::Withdrawn);
-                Reply::Withdrawn
-            }
-            Err(handle) => {
-                entry.offer = Some(handle);
-                Reply::Taken
-            }
         }
+        let note = entry.note.clone();
+        self.record(&mut ledger, offer, &Reply::Withdrawn);
+        drop(ledger);
+        self.announce(offer, &note, &Reply::Withdrawn);
+        Reply::Withdrawn
     }
     /// Publish what became of `offer` on the run's own stream.
     ///
@@ -1350,8 +1403,7 @@ impl Relay {
                     offer.clone(),
                     Held {
                         note: note.clone(),
-                        offer: Some(handle),
-                        waited: false,
+                        custody: Custody::Idle(handle),
                     },
                 );
                 // On the stream before the caller hears it is in, so nothing the
@@ -1387,9 +1439,9 @@ impl Relay {
     ) {
         {
             let mut ledger = self.book.lock();
-            match ledger.held.get_mut(offer) {
-                Some(entry) if !entry.waited => entry.waited = true,
-                Some(_) => {
+            match ledger.held.get_mut(offer).map(|entry| entry.custody.wait()) {
+                Some(true) => {}
+                Some(false) => {
                     drop(ledger);
                     delivered.answer(Reply::Refused {
                         reason: format!("the answer to offer {offer} is already being waited on"),
@@ -1418,7 +1470,7 @@ impl Relay {
         // settled as the member ends.
         if waiting.is_err() {
             if let Some(entry) = self.book.lock().held.get_mut(offer) {
-                entry.waited = false;
+                entry.custody.unwait();
             }
         }
         // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -1875,7 +1927,7 @@ mod tests {
             .lock()
             .held
             .get(&id)
-            .is_some_and(|held| held.waited)
+            .is_some_and(|held| matches!(held.custody, Custody::Waited(_)))
         {
             assert!(Instant::now() < bound, "the wait never reached the relay");
             std::thread::sleep(Duration::from_millis(5));
