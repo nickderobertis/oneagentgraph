@@ -463,6 +463,9 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         // [`hold_between_turns`], which is compiled only for the suite.
         #[cfg(feature = "test-doubles")]
         let mut gate: Option<FixtureGate> = None;
+        // And the gate at a worker turn's opening — see [`hold_turn_open`].
+        #[cfg(feature = "test-doubles")]
+        let mut opening: Option<FixtureGate> = None;
         // `Builder`, not `thread::spawn`: a host that cannot give this run one
         // more thread is a recoverable refusal, and the plain spawn answers it by
         // panicking — which would take the whole graph down over one member. A
@@ -475,6 +478,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
                 ingest(observation, &emitter, &mut deliveries);
                 #[cfg(feature = "test-doubles")]
                 hold_between_turns(observation, &mut gate);
+                #[cfg(feature = "test-doubles")]
+                hold_turn_open(observation, &mut opening);
                 // After the observation is published and before the engine is
                 // answered: a `TurnClosed` that opens a hold is on the stream
                 // before the wait it opens, and the wait decides the answer.
@@ -606,6 +611,52 @@ fn hold_between_turns(observation: &Observation<'_>, gate: &mut Option<FixtureGa
             }
         }
         _ => {}
+    }
+}
+
+/// The marker a journey puts in its **task** to ask for [`hold_turn_open`]'s
+/// pause, naming the gate file it will release. In the task for
+/// [`HOLD_BETWEEN_TURNS`]'s reason, and with the same prefix.
+#[cfg(feature = "test-doubles")]
+const HOLD_TURN_OPEN: &str = "oneagentgraph-fixture:hold-turn-open=";
+
+/// A test-only pause at a worker turn's opening: after the engine has taken the
+/// notes queued for that turn, and before the turn has a lever a note could
+/// interrupt it through.
+///
+/// Compiled only under `test-doubles`, for [`hold_between_turns`]'s reason. It
+/// exists because a note that interrupts a live worker turn is taken the moment
+/// it is offered: the engine's watch over the turn is already waiting on the
+/// inbox, and the pinned oneharness answers the redirect as soon as it has
+/// written the abort, before the harness reads a byte of it. So no seam this
+/// suite may fake can hold that note between its admission and its answer, and a
+/// journey that has to have its answer *waited on* before the interruption lands
+/// has nowhere to stand. The engine publishes a worker turn's `TurnOpened`
+/// through this sink after its `take_notes` and before it builds that watch, so
+/// a note offered while this holds is taken by neither: it stays untaken until
+/// the turn opens, and then interrupts it.
+///
+/// Holds every worker turn that opens while the gate is absent, writing the
+/// gate's `.entered` sibling first; the first turn's instruction is the task, so
+/// the gate is read off it there, before the first hold.
+#[cfg(feature = "test-doubles")]
+fn hold_turn_open(observation: &Observation<'_>, gate: &mut Option<FixtureGate>) {
+    let Observation::TurnOpened(opened) = observation else {
+        return;
+    };
+    if !matches!(opened.role, onejudge::Role::Assistant) {
+        return;
+    }
+    if gate.is_none() {
+        *gate = FixtureGate::parse(opened.instruction, HOLD_TURN_OPEN);
+    }
+    let Some(gate) = gate.as_ref() else {
+        return;
+    };
+    let _ = std::fs::write(&gate.entered, "entered");
+    let deadline = Instant::now() + FIXTURE_HOLD;
+    while !gate.gate.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 

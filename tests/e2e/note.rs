@@ -2304,28 +2304,42 @@ fn a_note_withdrawn_while_its_wait_is_in_flight_is_answered_withdrawn_and_never_
     }
 }
 
-/// A default note interrupts the held worker turn while its wait is in flight,
-/// and from then on it is that turn's: a withdrawer called after the
+/// A default note interrupts the held worker turn **while its wait is in
+/// flight**, and from then on it is that turn's: a withdrawer called after the
 /// interruption is refused, the wait answers [`Accepted::Interrupted`] naming
 /// the worker, and nothing on the run's stream says the note was withdrawn.
+///
+/// The order is held rather than hoped for. A note that interrupts is taken the
+/// moment it is offered into a live turn, so the note is offered while the
+/// worker's turn is held at its opening (`oneagentgraph-fixture:hold-turn-open`)
+/// — after the engine took that turn's queued notes, before the turn has a lever
+/// — and the turn is let open only once the wait's request is in the relay's
+/// hands, unanswered. The waiting thread reads the run's stream the instant the
+/// wait returns, so the interruption it finds there was recorded while the wait
+/// was still blocked.
 #[cfg(unix)]
 #[test]
 fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_the_interruption() {
     let _serial = serial();
     let workspace = Workspace::new();
     let agent_prompts = workspace.at("agent-prompts");
+    let opening = workspace.at("turn-opening");
+    let opening_entered = workspace.at("turn-opening.entered");
     let began = workspace.at("worker-began");
     let release = workspace.at("worker-release");
     let running = start(
         &workspace,
         &format!("fake:record-prompt={}", agent_prompts.display()),
         &format!(
-            "fake:entered={} fake:hold={}",
+            "oneagentgraph-fixture:hold-turn-open={} fake:entered={} fake:hold={}",
+            opening.display(),
             began.display(),
             release.display()
         ),
     );
-    until("the worker's turn to be in flight", || began.exists());
+    until("the worker's turn to be held at its opening", || {
+        opening_entered.exists()
+    });
     let events = running.run.started().events_path.clone();
 
     let text = "fake:complete-now stop and ship what you have";
@@ -2336,12 +2350,34 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
     );
     let id = offer.id().to_string();
     let withdrawer = offer.withdrawer();
-    let answer = waiting_in_hand(&workspace, &running, offer, None);
-    until("the replacement turn to open carrying the note", || {
-        prompts(&agent_prompts)
-            .iter()
-            .any(|prompt| prompt.contains(text))
+    let (answered, answer) = std::sync::mpsc::channel();
+    let waiter = {
+        let (events, id) = (events.clone(), id.clone());
+        std::thread::spawn(move || {
+            let delivery = offer.wait().expect("a wait answers");
+            let recorded = naming(&events, "turn-interrupted", &id).len();
+            let _ = answered.send(delivery);
+            recorded
+        })
+    };
+    until("the wait to reach the member's relay", || {
+        a_request_in_hand(&workspace, &running) || waiter.is_finished()
     });
+    assert_eq!(
+        answer.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty),
+        "the wait was answered before its note could reach any turn"
+    );
+    assert!(
+        !began.exists() && naming(&events, "turn-interrupted", &id).is_empty(),
+        "the note reached a turn before the wait was in the relay's hands"
+    );
+
+    std::fs::write(&opening, "go").expect("let the worker's turn open");
+    until(
+        "the interruption to be recorded on the run's stream",
+        || !naming(&events, "turn-interrupted", &id).is_empty(),
+    );
     let taker = {
         let withdrawer = withdrawer.clone();
         std::thread::spawn(move || withdrawer.withdraw())
@@ -2357,6 +2393,17 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
         NoteDelivery::Accepted(Accepted::Interrupted {
             party: Party::Worker
         }),
+    );
+    assert_eq!(
+        waiter.join().expect("the waiting thread"),
+        1,
+        "the wait returned before the interruption was recorded on the run's stream"
+    );
+    assert!(
+        prompts(&agent_prompts)
+            .iter()
+            .any(|prompt| prompt.contains(text)),
+        "the replacement turn did not open carrying the note"
     );
     withdrawer
         .withdraw()
