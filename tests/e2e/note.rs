@@ -2331,6 +2331,15 @@ fn a_withdrawer_after_a_note_interrupted_the_turn_is_refused_and_the_wait_reads_
         &workspace,
         &format!("fake:record-prompt={}", agent_prompts.display()),
         &format!(
+            // llmlint: ignore[tests_mirror_real_usage] the fixture fakes nothing
+            // and replaces no layer: it pauses the real engine at a turn's opening
+            // so a race every real caller runs is run in one order. A note that
+            // interrupts is taken the instant it is offered into a live turn, and
+            // the pinned oneharness answers the redirect once the abort is written,
+            // so no sanctioned seam can keep the interruption from landing before
+            // the wait is asked. Everything this journey asserts on — the offer,
+            // its wait, its withdrawer, the run's stream — is the public surface a
+            // real caller drives, as `hold-between-turns` above is.
             "oneagentgraph-fixture:hold-turn-open={} fake:entered={} fake:hold={}",
             opening.display(),
             began.display(),
