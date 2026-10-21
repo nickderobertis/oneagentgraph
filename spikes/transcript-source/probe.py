@@ -553,6 +553,56 @@ def pointers_for(entry: dict, stream: str, member: str, pointers: list[dict]) ->
     return out
 
 
+def two_party_instructions(runs: list[str]) -> None:
+    """Every recorded two-party worker turn's instruction against the closing
+    run line of that turn's own session file. onejudge runs each agent turn as
+    one `oneharness run` under the session name `<graph run>-<member>-skill`, so
+    turn N is the Nth such session the pointer file names."""
+    tally: dict[tuple, int] = {}
+    for journal in runs:
+        run_dir = os.path.dirname(journal)
+        pointers = read_jsonl(os.path.join(run_dir, "oneharness-sessions.jsonl"))
+        opened: dict[str, list[dict]] = {}
+        for e in read_jsonl(journal):
+            if (
+                e.get("kind") == "turn-started"
+                and (e.get("labels") or {}).get("member") == "worker"
+                and e["payload"].get("role") == "assistant"
+            ):
+                opened.setdefault(e["stream"], []).append(e)
+        for stream, turns in opened.items():
+            sessions: list[dict] = []
+            for p in pointers:
+                if p.get("name") == f"{stream}-worker-skill" and all(
+                    s["history_session"] != p["history_session"] for s in sessions
+                ):
+                    sessions.append(p)
+            for e in turns:
+                n = e["payload"]["turn"]
+                if n > len(sessions):
+                    outcome = "no pointer line for this turn"
+                elif not os.path.exists(sessions[n - 1]["history_file"]):
+                    outcome = "history file gone"
+                else:
+                    closing = [l for l in read_jsonl(sessions[n - 1]["history_file"]) if l.get("type") == "run"]
+                    prompt = (closing[-1].get("prompt") or "") if closing else None
+                    instruction = e["payload"].get("instruction") or ""
+                    if prompt is None:
+                        outcome = "no closing run line (turn never closed: killed or still live)"
+                    elif prompt == instruction:
+                        outcome = "equal"
+                    elif prompt.startswith(instruction):
+                        outcome = "journal copy is a strict prefix"
+                    else:
+                        outcome = "DIFFERS"
+                key = ("turn 1" if n == 1 else "turn >= 2",
+                       "cut" if e["payload"].get("instruction_truncated") else "whole", outcome)
+                tally[key] = tally.get(key, 0) + 1
+    print("\nQ4 two-party worker instructions vs the closing run line's prompt of that turn's session file")
+    for (turn, cut, outcome), count in sorted(tally.items()):
+        print(f"    {turn:<9} {cut:<5} {outcome:<64} {count:>5}")
+
+
 def recorded(args: argparse.Namespace) -> int:
     runs = sorted(glob.glob(os.path.join(args.runs, "*", "events.jsonl")))
     print(f"\n=== recorded runs: {len(runs)} journals under {args.runs} (read-only) ===")
@@ -616,6 +666,8 @@ def recorded(args: argparse.Namespace) -> int:
         )
     print("    ptr-lines: members with a line in the run's oneharness-sessions.jsonl (ONEHARNESS_HISTORY_POINTER_FILE)")
     print("    journal-ohs: members whose journal carries an `oneharness-session` record")
+
+    two_party_instructions(runs)
 
     print(f"\nQ6 change-request drafter turn-started with instruction_truncated: true: {len(drafter_cases)}")
     resolved = whole = prefix = 0
