@@ -979,6 +979,15 @@ impl TurnJournal {
                     history_session: begun.history_session.to_string(),
                     history_id: begun.history_id.to_string(),
                 };
+                if !reference.available() {
+                    self.opening(emitter, None);
+                    if matches!(party(begun.role), Party::Assistant) {
+                        self.worker = None;
+                    } else {
+                        self.judge = None;
+                    }
+                    return;
+                }
                 reference.announce(
                     emitter,
                     if matches!(party(begun.role), Party::Assistant) {

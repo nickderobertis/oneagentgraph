@@ -18,6 +18,7 @@
 
 mod anchor;
 mod clock;
+mod transcript;
 
 pub mod cli;
 pub mod config;

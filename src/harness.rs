@@ -497,6 +497,10 @@ struct Events {
 impl EventSink for Events {
     fn run_began(&mut self, begun: &oneharness_core::io::run::RunBegun) -> SinkStep {
         let transcript = crate::event::Transcript::from_begun(begun);
+        if !transcript.available() {
+            self.transcript = None;
+            return SinkStep::Continue;
+        }
         transcript.announce(
             &self.emitter,
             crate::event::Role::Agent,

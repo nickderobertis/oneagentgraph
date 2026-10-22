@@ -763,6 +763,14 @@ pub struct ActivityTranscript {
 }
 
 impl Transcript {
+    pub(crate) fn available(&self) -> bool {
+        // Opening writes are best-effort upstream. Use the reader's own check
+        // before promising content that the store may have refused to persist.
+        serde_json::to_value(self).ok().is_some_and(|reference| {
+            crate::transcript::resolve(&reference, crate::transcript::Content::Instruction).is_ok()
+        })
+    }
+
     pub(crate) fn from_begun(begun: &oneharness_core::io::run::RunBegun) -> Self {
         Self {
             history_dir: begun.history_dir.to_string(),

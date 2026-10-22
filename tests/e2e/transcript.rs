@@ -705,3 +705,49 @@ fn harness_judge_message_references_its_own_candidate_session() {
         .unwrap();
     assert_ne!(path(reference), path(&worker["payload"]["transcript"]));
 }
+
+#[cfg(unix)]
+#[test]
+fn a_store_whose_session_file_cannot_be_opened_never_publishes_an_unusable_reference() {
+    use std::os::unix::fs::PermissionsExt;
+    for graph in [
+        single_sided_graph(&fake_harness()),
+        two_party_graph(&fake_harness(), NO_ENV),
+    ] {
+        let workspace = Workspace::new();
+        workspace.graph(&graph);
+        let store = workspace.at("read-only-project-store");
+        let project = store.join(oneharness_core::domain::history::project_slug(
+            workspace.dir().canonicalize().unwrap().to_str().unwrap(),
+        ));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let task = format!("fake:complete-now {}", "instruction ".repeat(500));
+        let run = workspace.run_task_with(
+            &task,
+            &[
+                ("ONEHARNESS_HISTORY", "1"),
+                ("ONEHARNESS_HISTORY_DIR", store.to_str().unwrap()),
+            ],
+        );
+        std::fs::set_permissions(&project, std::fs::Permissions::from_mode(0o700)).unwrap();
+        run.expect_code(0);
+        assert!(
+            run.of_kind("oneharness-session").is_empty(),
+            "{}",
+            run.stdout
+        );
+        let opened = run.of_kind("turn-started");
+        assert!(!opened.is_empty());
+        for event in run.events().iter().filter(|event| {
+            matches!(
+                event["kind"].as_str(),
+                Some("turn-started" | "turn-message" | "turn-activity")
+            )
+        }) {
+            assert!(event["payload"].get("transcript").is_none(), "{event}");
+        }
+        assert_eq!(opened[0]["payload"]["instruction"], &task[..4096]);
+        assert_eq!(opened[0]["payload"]["instruction_truncated"], true);
+    }
+}
