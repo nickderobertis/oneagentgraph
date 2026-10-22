@@ -1159,6 +1159,105 @@ fn a_sweep_leaves_scratch_a_live_process_still_names_alone() {
     let _ = child.wait();
 }
 
+/// Stop while a command provider is still consuming its input. `cat` reads until
+/// EOF; a request larger than both pipes makes its echo fill stdout while
+/// onejudge is still writing stdin, so the provider cannot finish on its own.
+/// This exercises cancellation outside the conversation's between-turn hold.
+#[cfg(unix)]
+#[test]
+fn stopping_a_graph_ends_a_command_provider_still_reading_its_input() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 2\nname: node-scope\nenv: {}\n",
+            "members:\n  worker:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      command: [sh, -c, 'echo $$ > provider.pid; exec cat']\n",
+            "    mode: bypass\n",
+        ),
+        &[(FAKE_HARNESS_KEY, fake_harness())],
+    ));
+    let task = workspace.write(
+        "task.txt",
+        &format!("fake:complete-now: {}", "x".repeat(8 * 1024 * 1024)),
+    );
+    let mut owner = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task-file",
+            task.to_str().expect("task path"),
+            "--dir",
+            workspace.dir().to_str().expect("work path"),
+        ],
+        &[],
+    );
+    let stdout = owner.stdout.take().expect("graph stdout");
+    let reading = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut bytes)
+            .expect("drain graph events");
+        bytes
+    });
+    until("the command provider to start", || {
+        workspace.at("provider.pid").is_file()
+    });
+    let pid: i32 = std::fs::read_to_string(workspace.at("provider.pid"))
+        .expect("provider recorded its own PID")
+        .trim()
+        .parse()
+        .expect("a PID");
+    let scratch = member_scratch(&workspace.state()).expect("member scratch");
+    let alive = || {
+        oneagentgraph::scratch::stamped_for(&scratch.display().to_string())
+            .iter()
+            .any(|process| process.pid == pid)
+    };
+    assert!(alive(), "the provider exited before cancellation");
+    let cancelled = workspace.run(&["cancel", &run_id(&workspace.state())]);
+    cancelled.expect_code(0);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while alive() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let survived = alive();
+    // Always clean up this run before reporting a regression failure.
+    if survived {
+        workspace
+            .run(&["cancel", &run_id(&workspace.state()), "--kill"])
+            .expect_code(0);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while owner.try_wait().expect("owner status").is_none() && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let owner_survived = owner.try_wait().expect("owner status").is_none();
+    if owner_survived {
+        owner.kill().expect("clean up captured graph owner");
+    }
+    let output = owner.wait_with_output().expect("graph output");
+    let events = String::from_utf8(reading.join().expect("event reader")).expect("UTF-8 events");
+    assert!(
+        !survived,
+        "command provider {pid} survived 10 seconds after stop returned"
+    );
+    assert!(!owner_survived, "graph owner survived cancellation");
+    let run = Run {
+        code: output.status.code().unwrap_or(-1),
+        stdout: events,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    run.expect_code(1);
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    assert_eq!(died[0]["payload"]["rule"], "signalled");
+    assert_eq!(died[0]["payload"]["cause"], "cancelled");
+    assert_eq!(run.of_kind("graph-settled").len(), 1);
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
+}
+
 /// A two-party member puts **every process its engine spawns** into the group its
 /// own scratch names — both sides of the conversation, in the same group.
 ///
