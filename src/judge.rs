@@ -736,6 +736,18 @@ fn supervise(
             // llmlint: ignore-end[changed_behavior_has_e2e]
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        // A command provider may block without publishing another observation.
+        // The sink and paced hold cannot notice its stop in that state. Observe
+        // the same stop files here and keep reaping during bounded teardown,
+        // including processes the engine starts while an earlier turn unwinds.
+        if cancellation_requested(scratch) {
+            if let Some(ending) = ending.as_ref() {
+                ending.end(&crate::note::Undelivered::MemberSettled {
+                    outcome: "the member was cancelled".to_string(),
+                });
+            }
+            return condemn(rx, abort, emitter, Rule::Signalled, scratch);
+        }
         // The suite's lever for a loop delayed past the bound; a no-op outside it.
         heartbeat.hold_turn_loop();
         let now = Instant::now();
