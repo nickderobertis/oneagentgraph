@@ -978,8 +978,6 @@ impl TurnJournal {
                     history_project: begun.history_project.to_string(),
                     history_session: begun.history_session.to_string(),
                     history_id: begun.history_id.to_string(),
-                    index: None,
-                    tool_call_id: None,
                 };
                 reference.announce(
                     emitter,

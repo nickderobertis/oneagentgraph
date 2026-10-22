@@ -746,10 +746,18 @@ pub struct Transcript {
     pub history_session: String,
     /// UUIDv7 identifying the harness candidate.
     pub history_id: String,
-    /// Candidate event index, present only for activity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index: Option<u64>,
-    /// Harness tool call identity, when exposed on activity.
+}
+
+/// A transcript event within one candidate, extending its durable location.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ActivityTranscript {
+    /// The candidate's four history location fields, flattened on the wire.
+    #[serde(flatten)]
+    pub location: Transcript,
+    /// Required event index within this candidate.
+    pub index: u64,
+    /// Harness tool call identity, when exposed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
@@ -761,8 +769,6 @@ impl Transcript {
             history_project: begun.history_project.to_string(),
             history_session: begun.history_session.to_string(),
             history_id: begun.history_id.to_string(),
-            index: None,
-            tool_call_id: None,
         }
     }
 
@@ -797,10 +803,11 @@ impl Transcript {
 impl TurnActivity {
     pub(crate) fn reference(mut self, transcript: Option<&Transcript>) -> Self {
         if let Some(transcript) = transcript {
-            let mut transcript = transcript.clone();
-            transcript.index = Some(self.index);
-            transcript.tool_call_id = self.tool_call_id.clone();
-            self.transcript = Some(transcript);
+            self.transcript = Some(ActivityTranscript {
+                location: transcript.clone(),
+                index: self.index,
+                tool_call_id: self.tool_call_id.clone(),
+            });
             self.detail = None;
             self.output = None;
             self.truncated = false;
@@ -923,7 +930,7 @@ pub struct JudgeDecided {
 pub struct TurnActivity {
     /// Durable content location; content copies are absent when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub transcript: Option<Transcript>,
+    pub transcript: Option<ActivityTranscript>,
     /// `tool_call` (the model invoked a tool) or `tool_result` (the observation
     /// returned to it).
     pub kind: String,

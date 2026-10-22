@@ -327,8 +327,22 @@ enum Content {
 /// Resolve the published candidate and event, preserving the complete content.
 fn resolve(reference: &Value, field: Content) -> Result<String, (String, String)> {
     use std::io::BufRead;
-    let reference: crate::event::Transcript = serde_json::from_value(reference.clone())
-        .map_err(|error| ("<invalid reference>".to_string(), error.to_string()))?;
+    let invalid = |error: serde_json::Error| ("<invalid reference>".to_string(), error.to_string());
+    let (reference, activity_index) = if matches!(field, Content::Input | Content::Output) {
+        if reference.get("index").is_none() {
+            return Err((
+                "<invalid reference>".to_string(),
+                "activity reference has no index".to_string(),
+            ));
+        }
+        let activity: crate::event::ActivityTranscript =
+            serde_json::from_value(reference.clone()).map_err(invalid)?;
+        (activity.location, Some(activity.index))
+    } else {
+        let location: crate::event::Transcript =
+            serde_json::from_value(reference.clone()).map_err(invalid)?;
+        (location, None)
+    };
     let path = std::path::Path::new(&reference.history_dir)
         .join(&reference.history_project)
         .join(format!("{}.jsonl", reference.history_session));
@@ -342,15 +356,6 @@ fn resolve(reference: &Value, field: Content) -> Result<String, (String, String)
     {
         return Err(unavailable("invalid history address".to_string()));
     }
-    let activity_index = if matches!(field, Content::Input | Content::Output) {
-        Some(
-            reference
-                .index
-                .ok_or_else(|| unavailable("activity reference has no index".to_string()))?,
-        )
-    } else {
-        None
-    };
     let file = std::fs::File::open(&path).map_err(|error| unavailable(error.to_string()))?;
     for line in std::io::BufReader::new(file).lines() {
         let line = line.map_err(|error| unavailable(error.to_string()))?;
@@ -402,9 +407,7 @@ fn resolve(reference: &Value, field: Content) -> Result<String, (String, String)
     Err(unavailable(format!(
         "entry missing for {}{}",
         reference.history_id,
-        reference
-            .index
-            .map_or(String::new(), |index| format!(" event {index}"))
+        activity_index.map_or(String::new(), |index| format!(" event {index}"))
     )))
 }
 

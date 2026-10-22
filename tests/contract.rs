@@ -3199,6 +3199,21 @@ fn the_documented_path_keys_are_the_ones_a_members_config_has_anchored() {
 fn transcript_record_goldens_round_trip_without_content_copies() {
     let values: Vec<Value> =
         serde_json::from_str(&fenced_block("json transcript-turns")).expect("documented records");
+    let mut invalid_opening = values[0].clone();
+    invalid_opening["transcript"]["index"] = json!(0);
+    assert!(
+        serde_json::from_value::<TurnStarted>(invalid_opening).is_err(),
+        "opening references cannot carry activity indices"
+    );
+    let mut invalid_activity = values[2].clone();
+    invalid_activity["transcript"]
+        .as_object_mut()
+        .unwrap()
+        .remove("index");
+    assert!(
+        serde_json::from_value::<TurnActivity>(invalid_activity).is_err(),
+        "activity references require an index"
+    );
     let started: TurnStarted = serde_json::from_value(values[0].clone()).expect("opening");
     let message: TurnMessage = serde_json::from_value(values[1].clone()).expect("message");
     let activity: TurnActivity = serde_json::from_value(values[2].clone()).expect("activity");
