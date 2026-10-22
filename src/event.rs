@@ -748,11 +748,90 @@ impl PreTurnOutcome {
 // a newer producer is not a malformed envelope, and refusing a role or a kind
 // this build has not heard of would drop the first event a widened contract
 // carries instead of showing it to the operator it was widened for.
+/// A candidate's durable oneharness transcript address.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Transcript {
+    /// Absolute history store directory.
+    pub history_dir: String,
+    /// Project slug within the store.
+    pub history_project: String,
+    /// Session file stem, without `.jsonl`.
+    pub history_session: String,
+    /// UUIDv7 identifying the harness candidate.
+    pub history_id: String,
+    /// Candidate event index, present only for activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u64>,
+    /// Harness tool call identity, when exposed on activity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl Transcript {
+    pub(crate) fn from_begun(begun: &oneharness_core::io::run::RunBegun) -> Self {
+        Self {
+            history_dir: begun.history_dir.to_string(),
+            history_project: begun.history_project.to_string(),
+            history_session: begun.history_session.to_string(),
+            history_id: begun.history_id.to_string(),
+            index: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub(crate) fn announce(&self, emitter: &Emitter, role: Role, turn: u64, identity: String) {
+        emitter.emit_with(
+            EventKind::OneharnessSession,
+            crate::member::as_payload(&OneharnessSession {
+                role,
+                turn,
+                identity,
+                session_id: None,
+                history_dir: self.history_dir.clone(),
+                history_project: self.history_project.clone(),
+                history_session: self.history_session.clone(),
+                history_id: self.history_id.clone(),
+                truncated: false,
+            }),
+            vec![Artifact {
+                id: self.history_id.clone(),
+                kind: ONEHARNESS_SESSION_ARTIFACT.to_string(),
+                bytes: std::fs::metadata(
+                    std::path::Path::new(&self.history_dir)
+                        .join(&self.history_project)
+                        .join(format!("{}.jsonl", self.history_session)),
+                )
+                .map_or(0, |metadata| metadata.len()),
+            }],
+        );
+    }
+}
+
+impl TurnActivity {
+    pub(crate) fn reference(mut self, transcript: Option<&Transcript>) -> Self {
+        if let Some(transcript) = transcript {
+            let mut transcript = transcript.clone();
+            transcript.index = Some(self.index);
+            transcript.tool_call_id = self.tool_call_id.clone();
+            self.transcript = Some(transcript);
+            self.detail = None;
+            self.output = None;
+            self.truncated = false;
+            self.output_truncated = false;
+        }
+        self
+    }
+}
+
 /// The payload of an [`EventKind::TurnStarted`] event: a turn beginning, and the
 /// message it was given to answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TurnStarted {
+    /// Durable content location; content copies are absent when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<Transcript>,
     /// The turn's 1-based index within this member's conversation.
     pub turn: u64,
     /// Which party is about to speak: `assistant`, `user`, or `system`.
@@ -760,7 +839,8 @@ pub struct TurnStarted {
     /// The message this turn answers, head-bounded to
     /// [`MAX_PAYLOAD_TEXT_BYTES`] — the task on the first turn, the supervisor's
     /// last instruction afterwards.
-    pub instruction: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instruction: Option<String>,
     /// Whether [`instruction`](Self::instruction) was cut to that bound. The
     /// rest is not lost: the settled report artifact carries the same text
     /// whole, and this says where to look for it.
@@ -780,12 +860,16 @@ pub struct TurnStarted {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TurnMessage {
+    /// Durable content location; content copies are absent when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<Transcript>,
     /// The turn this reply belongs to, as [`TurnStarted::turn`].
     pub turn: u64,
     /// Who is speaking: `assistant`, `user`, or `system`.
     pub role: String,
     /// That party's own words, head-bounded to [`MAX_PAYLOAD_TEXT_BYTES`].
-    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     /// Whether [`text`](Self::text) was cut to that bound. As on
     /// [`TurnStarted::instruction_truncated`], the settled report artifact still
     /// carries the whole of it.
@@ -837,6 +921,9 @@ pub struct JudgeDecided {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TurnActivity {
+    /// Durable content location; content copies are absent when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<Transcript>,
     /// `tool_call` (the model invoked a tool) or `tool_result` (the observation
     /// returned to it).
     pub kind: String,
@@ -846,7 +933,8 @@ pub struct TurnActivity {
     pub name: Option<String>,
     /// A summary of the call's structured input, bounded by
     /// [`MAX_ACTIVITY_DETAIL_CHARS`].
-    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// Whether [`detail`](Self::detail) was cut to that bound.
     #[serde(default, skip_serializing_if = "is_false")]
     pub truncated: bool,
@@ -1314,13 +1402,13 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Declares each payload struct as the bus [`Message`] its kind carries, under
-/// `agent.agentgraph.<kind>@1`, and the list [`registry`] registers.
+/// its versioned `agent.agentgraph.<kind>` id, and the list [`registry`] registers.
 macro_rules! payload_messages {
-    ($($payload:ident => $kind:ident, $wire:literal;)*) => {
+    ($($payload:ident => $kind:ident,  $wire:literal, $version:literal;)*) => {
         $(
             impl Message for $payload {
                 const SCHEMA: SchemaId =
-                    SchemaId::literal("agent", concat!("agentgraph.", $wire), 1);
+                    SchemaId::literal("agent", concat!("agentgraph.", $wire), $version);
             }
         )*
 
@@ -1359,19 +1447,19 @@ macro_rules! payload_messages {
 }
 
 payload_messages! {
-    MemberStarted => MemberStarted, "member-started";
-    PreTurnContext => PreTurnContext, "pre-turn-context";
-    TurnStarted => TurnStarted, "turn-started";
-    TurnActivity => TurnActivity, "turn-activity";
-    TurnMessage => TurnMessage, "turn-message";
-    TurnCompleted => TurnCompleted, "turn-completed";
-    JudgeDecided => JudgeDecided, "judge-decided";
-    TurnInterrupted => TurnInterrupted, "turn-interrupted";
-    NoteAdmitted => NoteAdmitted, "note-admitted";
-    NoteWithdrawn => NoteWithdrawn, "note-withdrawn";
-    FallbackAdvanced => FallbackAdvanced, "fallback-advanced";
-    OneharnessSession => OneharnessSession, "oneharness-session";
-    MemberDied => MemberDied, "member-died";
+    MemberStarted => MemberStarted, "member-started", 1;
+    PreTurnContext => PreTurnContext, "pre-turn-context", 1;
+    TurnStarted => TurnStarted, "turn-started", 2;
+    TurnActivity => TurnActivity, "turn-activity", 2;
+    TurnMessage => TurnMessage, "turn-message", 2;
+    TurnCompleted => TurnCompleted, "turn-completed", 1;
+    JudgeDecided => JudgeDecided, "judge-decided", 1;
+    TurnInterrupted => TurnInterrupted, "turn-interrupted", 1;
+    NoteAdmitted => NoteAdmitted, "note-admitted", 1;
+    NoteWithdrawn => NoteWithdrawn, "note-withdrawn", 1;
+    FallbackAdvanced => FallbackAdvanced, "fallback-advanced", 1;
+    OneharnessSession => OneharnessSession, "oneharness-session", 1;
+    MemberDied => MemberDied, "member-died", 1;
 }
 
 /// Stamps this process's events and writes them where the run said, through the
@@ -1975,7 +2063,7 @@ mod tests {
     }
 
     /// Every payload this crate declares is registered under
-    /// `agent.agentgraph.<kind>@1` — and the registry holds those and nothing
+    /// its versioned `agent.agentgraph.<kind>` id — and the registry holds those and nothing
     /// else.
     ///
     /// The second half is the point of the list below. The envelope, the filter,
@@ -1990,7 +2078,15 @@ mod tests {
         let declared = payload_schemas();
         assert_eq!(declared.len(), 13);
         for (kind, schema) in &declared {
-            let expected = format!("agent.agentgraph.{}@1", kind.as_str());
+            let version = if matches!(
+                kind,
+                EventKind::TurnStarted | EventKind::TurnMessage | EventKind::TurnActivity
+            ) {
+                2
+            } else {
+                1
+            };
+            let expected = format!("agent.agentgraph.{}@{version}", kind.as_str());
             assert_eq!(schema.to_string(), expected);
             assert!(ids.contains(&expected), "{expected} is not registered");
             assert!(registry.schema(schema).is_some());

@@ -118,6 +118,7 @@ pub fn run(launch: &HarnessLaunch, emitter: &Emitter, bounds: Bounds, scratch: &
                 ungrouped: Mutex::new(None),
             };
             let mut sink = Events {
+                transcript: None,
                 emitter,
                 activity,
                 started,
@@ -482,6 +483,7 @@ impl ProcessSupervisor for HarnessSpawn {
 /// events the `--stream` lines carried, arriving typed instead of as a document
 /// this crate parsed back apart.
 struct Events {
+    transcript: Option<crate::event::Transcript>,
     emitter: Emitter,
     activity: Arc<AtomicU64>,
     started: Instant,
@@ -493,11 +495,24 @@ struct Events {
 }
 
 impl EventSink for Events {
+    fn run_began(&mut self, begun: &oneharness_core::io::run::RunBegun) -> SinkStep {
+        let transcript = crate::event::Transcript::from_begun(begun);
+        transcript.announce(
+            &self.emitter,
+            crate::event::Role::Agent,
+            THE_ONLY_TURN,
+            begun.harness_id.to_string(),
+        );
+        self.turn.open_referenced(&self.emitter, Some(&transcript));
+        self.transcript = Some(transcript);
+        SinkStep::Continue
+    }
+
     fn event(&mut self, _harness_id: &str, event: &ActionEvent) -> SinkStep {
         self.activity
             .store(elapsed_millis(self.started), Ordering::SeqCst);
         self.turn.open(&self.emitter);
-        ingest(event, &self.emitter);
+        ingest_referenced(event, &self.emitter, self.transcript.as_ref());
         if self.cancel.is_cancelled() {
             SinkStep::Stop
         } else {
@@ -551,16 +566,21 @@ impl TheTurn {
 
     /// Announce the turn, once however often this is called.
     fn open(&self, emitter: &Emitter) {
+        self.open_referenced(emitter, None);
+    }
+
+    fn open_referenced(&self, emitter: &Emitter, transcript: Option<&crate::event::Transcript>) {
         if self.opened.swap(true, Ordering::SeqCst) {
             return;
         }
         emitter.emit(
             EventKind::TurnStarted,
             as_payload(&TurnStarted {
+                transcript: transcript.cloned(),
                 turn: THE_ONLY_TURN,
                 role: THE_ONLY_ROLE.as_str().to_string(),
-                instruction: self.instruction.clone(),
-                instruction_truncated: self.instruction_truncated,
+                instruction: transcript.is_none().then(|| self.instruction.clone()),
+                instruction_truncated: transcript.is_none() && self.instruction_truncated,
                 started_at: self.started_at.clone(),
                 // A single-sided member's one turn is opened on the composed
                 // task and on nothing else: it has no supervising side to
@@ -651,17 +671,29 @@ fn usage(result: &RunResult) -> crate::event::Usage {
 /// `reasoning` items as themselves — their text in `output`, with no `name` and
 /// no `tool_call_id` — never dressed as a tool call. A consumer counting tool
 /// calls filters on `kind`, not on `index`, which counts every kind.
+#[cfg(test)]
 fn ingest(event: &ActionEvent, emitter: &Emitter) {
+    ingest_referenced(event, emitter, None);
+}
+
+fn ingest_referenced(
+    event: &ActionEvent,
+    emitter: &Emitter,
+    transcript: Option<&crate::event::Transcript>,
+) {
     emitter.emit(
         EventKind::TurnActivity,
-        as_payload(&activity(
-            &event.kind,
-            event.name.as_deref(),
-            event.input.as_ref(),
-            event.output.as_deref(),
-            event.tool_call_id.as_deref(),
-            event.index,
-        )),
+        as_payload(
+            &activity(
+                &event.kind,
+                event.name.as_deref(),
+                event.input.as_ref(),
+                event.output.as_deref(),
+                event.tool_call_id.as_deref(),
+                event.index,
+            )
+            .reference(transcript),
+        ),
     );
 }
 
@@ -675,6 +707,7 @@ fn finish(answer: Answer, emitter: &Emitter, scratch: &Path, turn: &TheTurn) -> 
         // anything is spawned — so no process ever existed, exactly as a failed
         // `Command::spawn` meant here before.
         Err(reason) => {
+            turn.open(emitter);
             emitter.emit(EventKind::MemberDied, as_payload(&unstartable(&reason)));
             return Outcome::Unstartable(reason);
         }
@@ -1017,6 +1050,7 @@ mod tests {
     fn the_first_live_event_opens_the_only_turn_and_the_rest_publish_under_it() {
         let (emitter, recorder) = recorded();
         let mut sink = Events {
+            transcript: None,
             emitter,
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),
@@ -1242,6 +1276,7 @@ mod tests {
         let (emitter, _recorder) = recorded();
         let cancel = CancelToken::new();
         let mut sink = Events {
+            transcript: None,
             emitter,
             activity: Arc::new(AtomicU64::new(0)),
             started: Instant::now(),

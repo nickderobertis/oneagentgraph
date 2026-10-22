@@ -225,14 +225,10 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
             "the record a failed run pointed at carries no conversation"
         );
     }
-    // The judge side reached no identity, so it wrote nothing to point at — the
-    // same rule as the journey below, on the other side of one member.
-    assert!(
-        published
-            .iter()
-            .all(|event| event["payload"]["role"] == "agent"),
-        "a side that ran nothing published a conversation: {published:?}"
-    );
+    // Candidate openings are published even when the harness subsequently refuses.
+    assert!(published
+        .iter()
+        .any(|event| event["payload"]["role"] == "judge"));
     assert_session_labels(&run);
 }
 
@@ -724,7 +720,7 @@ fn a_single_sided_members_turn_appends_one_pointer_line_to_the_file_the_environm
 /// produced no report at all, which is where `fallback-advanced` still speaks and
 /// this must not.
 #[test]
-fn a_member_whose_chain_ran_nothing_publishes_no_conversation_to_point_at() {
+fn a_refusing_candidate_still_publishes_its_opening_history() {
     let workspace = Workspace::new();
     workspace.graph(&two_party_graph(
         &fake_harness(),
@@ -739,8 +735,8 @@ fn a_member_whose_chain_ran_nothing_publishes_no_conversation_to_point_at() {
         run.kinds()
     );
     assert!(
-        sessions(&run).is_empty(),
-        "a chain that ran no turn published a conversation: {:?}",
+        !sessions(&run).is_empty(),
+        "a candidate began without publishing its opening: {:?}",
         sessions(&run)
     );
     assert_eq!(run.of_kind("member-died").len(), 1, "{:?}", run.kinds());

@@ -126,9 +126,10 @@ fn an_emitted_envelope_carries_the_recorded_streams_key_order() {
         ..Labels::default()
     });
     let payload = match serde_json::to_value(TurnStarted {
+        transcript: None,
         turn: 1,
         role: "assistant".into(),
-        instruction: "stream something".into(),
+        instruction: Some("stream something".into()),
         started_at: "2026-09-13T05:32:52.875Z".into(),
         origin: None,
         instruction_truncated: false,

@@ -458,7 +458,9 @@ test-doubles = []
 #      the engine and reads no CLI output.
 #   4. 0.19.2 reads and writes its YAML through serde-saphyr, so no libyaml
 #      translation reaches this graph through onejudge.
-onejudge = { version = "0.20.0", features = ["cli"] }
+# 0.21.0 exposes HistoryBegun before candidate activity, so journal references
+# are resolvable at emission rather than reconstructed after settlement.
+onejudge = { version = "0.21.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -655,7 +657,9 @@ schemars = { version = "1", features = ["preserve_order"] }
 # requirement. The rule that went with the split is retired with it, because
 # there is no longer a second set of types to confuse this one with; what remains
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
-oneharness-core = "0.28.4"
+# 0.29.0 adds EventSink::run_began after flushing the opening prompt. Keep
+# this floor aligned with onejudge: both member kinds reference live history.
+oneharness-core = "0.29.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

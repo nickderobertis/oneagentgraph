@@ -1065,6 +1065,22 @@ fn published_of_kind(published: &str, kind: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Read the actual opening prompt through its durable reference, with the
+/// bounded-copy fallback for a turn that wrote no history.
+fn recorded_instruction(event: &serde_json::Value) -> String {
+    if event["payload"].get("transcript").is_some() {
+        crate::transcript::entry(event)["prompt"]
+            .as_str()
+            .expect("opening prompt")
+            .to_string()
+    } else {
+        event["payload"]["instruction"]
+            .as_str()
+            .expect("bounded instruction")
+            .to_string()
+    }
+}
+
 /// The `origin` a turn payload was stamped with, if it was stamped.
 ///
 /// Read as a string, so a payload that wrote `null` for it reads as no origin
@@ -1145,9 +1161,7 @@ fn every_turn_of_a_conversation_names_who_authored_what_it_carries() {
         "the opening turn was not stamped as the composed task: {first}"
     );
     assert!(
-        first["payload"]["instruction"]
-            .as_str()
-            .is_some_and(|it| it.contains("fake:should-fail")),
+        recorded_instruction(first).contains("fake:should-fail"),
         "the opening turn answered something other than the task: {first}"
     );
 
@@ -1157,9 +1171,8 @@ fn every_turn_of_a_conversation_names_who_authored_what_it_carries() {
     let delivered: Vec<&serde_json::Value> = opened
         .iter()
         .filter(|event| {
-            event["payload"]["instruction"]
-                .as_str()
-                .is_some_and(|it| it.contains(text))
+            origin(event).as_deref() == Some("delivered")
+                && recorded_instruction(event).contains(text)
         })
         .collect();
     assert_eq!(
@@ -1203,9 +1216,7 @@ fn every_turn_of_a_conversation_names_who_authored_what_it_carries() {
     assert!(
         opened.iter().any(|event| {
             origin(event).as_deref() == Some("supervisor")
-                && event["payload"]["instruction"]
-                    .as_str()
-                    .is_some_and(|it| it.contains("verify it before you call it done"))
+                && recorded_instruction(event).contains("verify it before you call it done")
         }),
         "no worker turn opened on the supervisor's instruction was stamped as its own: {opened:#?}"
     );
@@ -1323,12 +1334,7 @@ fn a_delivery_is_attributed_by_the_conversations_record_and_never_by_its_text() 
         worker_turns.len() >= 3,
         "the run took too few worker turns to tell the three apart: {opened:#?}"
     );
-    let instruction = |event: &serde_json::Value| -> String {
-        event["payload"]["instruction"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string()
-    };
+    let instruction = |event: &serde_json::Value| -> String { recorded_instruction(event) };
     // Every worker turn's instruction carries the note's words — the task, the
     // delivery, and the supervisor's own instruction alike — so the text alone
     // cannot tell them apart, which is the point.
@@ -1471,12 +1477,7 @@ fn a_note_is_attributed_to_the_turn_that_carried_it_however_late_its_caller_wait
     running.run.wait().expect("the member settles");
 
     let turns = worker_turns();
-    let instruction = |event: &serde_json::Value| -> String {
-        event["payload"]["instruction"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string()
-    };
+    let instruction = |event: &serde_json::Value| -> String { recorded_instruction(event) };
     assert!(
         instruction(&turns[1]).contains(waited_text)
             && instruction(&turns[1]).contains(unwaited_text),
@@ -1555,13 +1556,12 @@ fn ever_presented(events: &str, recorded: &[&std::path::Path], text: &str) -> bo
         &std::fs::read_to_string(events).unwrap_or_default(),
         "turn-started",
     );
-    announced.iter().any(|event| {
-        event["payload"]["instruction"]
-            .as_str()
-            .is_some_and(|it| it.contains(text))
-    }) || recorded
+    announced
         .iter()
-        .any(|path| prompts(path).iter().any(|prompt| prompt.contains(text)))
+        .any(|event| recorded_instruction(event).contains(text))
+        || recorded
+            .iter()
+            .any(|path| prompts(path).iter().any(|prompt| prompt.contains(text)))
 }
 
 /// An offered note is **admitted** first — in the member's conversation inbox,

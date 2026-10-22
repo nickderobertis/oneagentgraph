@@ -30,6 +30,16 @@ use crate::support::{
 #[test]
 fn a_member_completes_through_the_real_supervisor_loop() {
     let workspace = Workspace::new();
+    // This journey exercises the bounded-copy path; transcript-backed content
+    // is exercised by transcript.rs through the same real CLI.
+    workspace.write(
+        "oneharness.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
     let run = workspace.run_task("fake:complete-now: write the thing");
     run.expect_code(0);
 
@@ -290,6 +300,16 @@ fn a_member_completes_through_the_real_supervisor_loop() {
 #[test]
 fn a_turn_that_reported_no_text_relays_nothing_rather_than_the_harnesss_output() {
     let workspace = Workspace::new();
+    // This journey exercises the bounded-copy path; transcript-backed content
+    // is exercised by transcript.rs through the same real CLI.
+    workspace.write(
+        "oneharness.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
     let run = workspace.run_task("fake:silent-reply: say nothing at all");
     run.expect_code(0);
 
@@ -1766,6 +1786,16 @@ fn every_event_carries_the_labels_a_consumer_joins_on() {
 #[test]
 fn a_credential_the_process_holds_is_redacted_before_it_reaches_the_stream() {
     let workspace = Workspace::new();
+    // This journey exercises the bounded-copy path; transcript-backed content
+    // is exercised by transcript.rs through the same real CLI.
+    workspace.write(
+        "oneharness.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
     let secret = "e2e-credential-7f3a91c2";
     let run = workspace.run_with(
         &[
@@ -3612,6 +3642,16 @@ fn an_agents_reasoning_and_words_are_relayed_as_themselves_and_never_as_tools() 
         ("two-party", two_party_graph(&fake_harness(), NO_ENV)),
     ] {
         let workspace = Workspace::new();
+        // This journey exercises the bounded-copy path; transcript-backed content
+        // is exercised by transcript.rs through the same real CLI.
+        workspace.write(
+            "oneharness.toml",
+            &format!("{}history = false\n", crate::support::CHAIN),
+        );
+        workspace.write(
+            "oneharness.judge.toml",
+            &format!("{}history = false\n", crate::support::CHAIN),
+        );
         workspace.graph(&graph);
         let run = workspace.run_task("fake:complete-now: fake:narrate check the tree");
         run.expect_code(0);
@@ -3701,6 +3741,16 @@ fn an_agents_reasoning_and_words_are_relayed_as_themselves_and_never_as_tools() 
 #[test]
 fn a_tool_whose_trace_exposed_neither_an_id_nor_an_observation_still_reaches_the_journal() {
     let workspace = Workspace::new();
+    // This journey exercises the bounded-copy path; transcript-backed content
+    // is exercised by transcript.rs through the same real CLI.
+    workspace.write(
+        "oneharness.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
     workspace.graph(&two_party_graph(&fake_harness(), NO_ENV));
     let run = workspace.run_task("fake:complete-now: fake:bare-tool report what you can");
     run.expect_code(0);
@@ -3766,6 +3816,16 @@ fn a_tool_whose_trace_exposed_neither_an_id_nor_an_observation_still_reaches_the
 fn a_live_turns_long_text_is_bounded_from_the_end_that_field_is_read_from() {
     const BOUND: usize = 4096;
     let workspace = Workspace::new();
+    // This journey exercises the bounded-copy path; transcript-backed content
+    // is exercised by transcript.rs through the same real CLI.
+    workspace.write(
+        "oneharness.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
     workspace.graph(&two_party_graph(&fake_harness(), NO_ENV));
 
     // Past the bound and recognisable at both ends, so an assertion can tell

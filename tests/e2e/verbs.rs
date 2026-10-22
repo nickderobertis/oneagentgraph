@@ -414,6 +414,16 @@ fn an_unreachable_https_ref_and_a_cleartext_one_are_both_refused_by_url() {
 #[test]
 fn text_output_renders_the_same_events_as_json() {
     let workspace = Workspace::new();
+    // The copy-only view retains one line per event; transcript.rs separately
+    // drives the complete, potentially multiline transcript-backed view.
+    workspace.write(
+        "oneharness.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
+    workspace.write(
+        "oneharness.judge.toml",
+        &format!("{}history = false\n", crate::support::CHAIN),
+    );
     let json = workspace.run_task("fake:complete-now: render me");
     json.expect_code(0);
 

@@ -138,6 +138,52 @@ A turn's own events describe **that turn**, and a member of several turns publis
 
 The text these events carry is bounded, and the bound is a property of the **live journal event alone**: `instruction`, `text`, and `output` are cut to 4096 bytes on a character boundary, with `instruction_truncated`, `truncated`, and `output_truncated` saying so. `instruction` and `text` keep their **head** — a turn's opening is where the model says what it is about to do — and `output` keeps its **tail**, because what names a failure is the last of a tool's output. A reader meeting one of those flags is being told where the rest is, not that anything was lost: the report-backed route serves the same text whole.
 
+The `turn-started`, `turn-message` and `turn-activity` payload schemas are now
+`agent.agentgraph.turn-started@2`, `agent.agentgraph.turn-message@2` and
+`agent.agentgraph.turn-activity@2`: their content fields are no longer always
+present. The envelope version remains 1.
+
+When history is available, each carries `transcript`, with these fields:
+`history_dir` (string, absolute store directory), `history_project` (string,
+project slug), `history_session` (string, file stem), and `history_id` (string,
+the candidate run's UUIDv7). Only activity references also carry `index`
+(integer, the candidate's `event.index`) and optional `tool_call_id` (string).
+The file is `<history_dir>/<history_project>/<history_session>.jsonl`.
+A reference replaces every content copy: none of `instruction`,
+`instruction_truncated`, `text`, `truncated`, `detail`, `output`, or
+`output_truncated` appears beside it. Activity retains `kind`, `name`,
+`tool_call_id` and `index`; all other fields stay as before.
+
+Resolve an activity by its `type: event` line with `run_id == history_id` and
+`event.index == index`: input is `.event.input`, output is `.event.output`.
+Resolve the instruction by the `type: run-started` line with that `history_id`,
+its `.prompt`. Resolve an assistant message by the closing `type: run` line
+with that `history_id`, its `.text`. A harness judge's message references that
+judge's own session. Candidate event indices restart on fallback; the history id
+is required. Missing files or entries render as
+`transcript unavailable: <path>: <why>`.
+
+A two-party member emits its opening on `HistoryBegun` for the worker's first
+candidate; a single-sided member emits it on `run_began`. Each candidate, of
+every member kind, publishes `oneharness-session` as it begins, before its first
+activity, including candidates of a stopped long-lived member. When no history
+is written — history off, an unopenable store, refusal before startup, or a
+command or llmlint judge's message — there is no `transcript`, and the bounded
+copies and flags described above remain. An opening whose harness never begins
+also retains its bounded instruction.
+
+Referenced files follow oneharness's retention rule: they are removed only by
+`oneharness history clear --yes`. Nothing in this library removes them,
+`oneagentgraph sweep` included.
+
+```json transcript-turns
+[
+  {"turn":1,"role":"assistant","started_at":"2026-10-22T00:00:00.000Z","transcript":{"history_dir":"/state/oneharness/history","history_project":"project","history_session":"session","history_id":"01a12345-6789-7000-8000-0123456789ab"}},
+  {"turn":1,"role":"assistant","transcript":{"history_dir":"/state/oneharness/history","history_project":"project","history_session":"session","history_id":"01a12345-6789-7000-8000-0123456789ab"}},
+  {"kind":"tool_call","name":"Bash","index":0,"tool_call_id":"call-1","transcript":{"history_dir":"/state/oneharness/history","history_project":"project","history_session":"session","history_id":"01a12345-6789-7000-8000-0123456789ab","index":0,"tool_call_id":"call-1"}}
+]
+```
+
 `member-died` describes an in-process failure honestly, and a member that *died* stays distinct from one that *failed its task* — the latter is a `member-settled` with `completed: false`, never this event. Its payload:
 
 - `rule` — the liveness rule that fired: `unstartable`, `signalled`, `provider-failure`, `heartbeat`, `activity`.
@@ -160,7 +206,7 @@ The text these events carry is bounded, and the bound is a property of the **liv
 
 `fallback-advanced` gains two fields a two-party member can now answer for, and only it: `role: agent|judge` and the `turn`. onejudge's report carries no fallback chain of its own, so while that hop was a subprocess a two-party member published no `fallback-advanced` at all; in-process, its per-invocation telemetry names every candidate each side stepped past — including for a run that failed and produced no report, which is exactly when an operator needs to know which subscription refused. A single-sided member stamps neither field.
 
-`oneharness-session` names the conversation one oneharness invocation actually had, which is the surface an operator reads to see what an agent did. One is published per invocation that names **both** a history id and a history file — the same per-invocation telemetry `fallback-advanced` is read from, and the only place either is reachable for a run that failed and produced no report. An invocation naming neither publishes nothing, because history was off or no candidate ran. Its payload:
+`oneharness-session` names a harness candidate's durable history. Every member kind publishes one per candidate as it begins, before its first activity; history-disabled candidates publish none. Its payload:
 
 ```json oneharness-session
 {

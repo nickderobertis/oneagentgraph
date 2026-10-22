@@ -343,9 +343,8 @@ fn a_judge_that_sends_the_worker_back_is_named_and_its_findings_open_the_next_tu
         .into_iter()
         .find(|event| event["payload"]["turn"] == 2 && event["payload"]["role"] == "assistant")
         .expect("the worker took a second turn");
-    let instruction = second_turn["payload"]["instruction"]
-        .as_str()
-        .expect("an instruction");
+    let opening = crate::transcript::entry(&second_turn);
+    let instruction = opening["prompt"].as_str().expect("an instruction");
     assert!(
         instruction.contains("## Judge `llmlint` (llmlint)"),
         "{instruction}"

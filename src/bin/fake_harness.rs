@@ -45,6 +45,7 @@
 //! | `fake:project-skill=<name>` | answer with the body of `.claude/skills/<name>/SKILL.md` under the directory this process was started in — the project skill Claude Code discovers from its working directory, so a journey reads off the transcript *which* directory's skills reached the conversation |
 //! | `fake:silent-reply` | take the turn, do the work, and report **no text** — a completed turn that said nothing, whose stdout is still full of wire framing |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
+//! | `fake:activity-hold=<path>` | pause after tool activity until the path exists |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:park` | *agent's controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:entered=<path>` | write `<path>` the moment any turn begins |
@@ -1042,6 +1043,12 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
                 "message": {"id": "m2", "type": "message", "role": "assistant", "content": [
                     {"type": "text", "text": NARRATED_CONCLUSION}]},
             }));
+        }
+    }
+    // Hold after publishing tool activity so a consumer can resolve live history.
+    if let Some(path) = sentinel_path(prompt, "activity-hold") {
+        while !path.exists() && !stopped() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
     // Resolved before the terminal line rather than inside it: a turn this

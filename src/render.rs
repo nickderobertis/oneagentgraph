@@ -1,10 +1,8 @@
 //! `--output text`: a deterministic rendering of the same events.
 //!
 //! `docs/contract.md` is explicit that text mode is "a deterministic rendering
-//! of the same events, never separate content." So this module is a pure
-//! function of one [`Envelope`], and the text writer is the JSON writer with
-//! this applied — there is no second path that could report something the JSON
-//! does not.
+//! of the same events, never separate content." The text writer renders one
+//! [`Envelope`] at a time and resolves content through its transcript reference.
 
 use serde_json::Value;
 
@@ -40,7 +38,13 @@ pub fn line(envelope: &Envelope) -> String {
                 format!("{head}: {}", detail.lines().next_back().unwrap_or_default())
             }
         }
-        EventKind::TurnStarted => turn_head(envelope),
+        EventKind::TurnStarted => {
+            if envelope.payload.contains_key("transcript") {
+                joined(&[turn_head(envelope), field(envelope, "instruction")])
+            } else {
+                turn_head(envelope)
+            }
+        }
         EventKind::TurnActivity => {
             // A result names no tool — it answers one — so its `kind` is what
             // identifies it, and what it returned is where the detail is. Only
@@ -50,13 +54,23 @@ pub fn line(envelope: &Envelope) -> String {
                 name if name.is_empty() => field(envelope, "kind"),
                 name => name,
             };
-            let body = match field(envelope, "detail") {
-                detail if detail.is_empty() => field(envelope, "output")
-                    .lines()
-                    .next_back()
-                    .unwrap_or_default()
-                    .to_string(),
-                detail => detail,
+            let body = if envelope.payload.contains_key("transcript") {
+                let input = field(envelope, "detail");
+                let output = field(envelope, "output");
+                if input == output {
+                    input
+                } else {
+                    joined(&[input, output])
+                }
+            } else {
+                match field(envelope, "detail") {
+                    detail if detail.is_empty() => field(envelope, "output")
+                        .lines()
+                        .next_back()
+                        .unwrap_or_default()
+                        .to_string(),
+                    detail => detail,
+                }
             };
             joined(&[head, body])
         }
@@ -65,7 +79,11 @@ pub fn line(envelope: &Envelope) -> String {
             // a live dispatch reads the event for; the whole of it is on the
             // wire for a consumer that wants it.
             let text = field(envelope, "text");
-            let opening = text.lines().next().unwrap_or_default().to_string();
+            let opening = if envelope.payload.contains_key("transcript") {
+                text
+            } else {
+                text.lines().next().unwrap_or_default().to_string()
+            };
             joined(&[turn_head(envelope), opening])
         }
         EventKind::TurnCompleted => joined(&[turn_head(envelope), usage(envelope)]),
@@ -193,6 +211,19 @@ fn turn_head(envelope: &Envelope) -> String {
 
 /// One payload field, rendered for a person.
 fn field(envelope: &Envelope, name: &str) -> String {
+    let content = match name {
+        "instruction" => Some(Content::Instruction),
+        "text" => Some(Content::Text),
+        "detail" => Some(Content::Input),
+        "output" => Some(Content::Output),
+        _ => None,
+    };
+    if let Some(content) = content {
+        if let Some(reference) = envelope.payload.get("transcript") {
+            return resolve(reference, content)
+                .unwrap_or_else(|(path, why)| format!("transcript unavailable: {path}: {why}"));
+        }
+    }
     match envelope.payload.get(name) {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Null) | None => String::new(),
@@ -283,6 +314,98 @@ impl<W: std::io::Write> std::io::Write for Text<W> {
         }
         self.sink.flush()
     }
+}
+
+#[derive(Clone, Copy)]
+enum Content {
+    Instruction,
+    Text,
+    Input,
+    Output,
+}
+
+/// Resolve the published candidate and event, preserving the complete content.
+fn resolve(reference: &Value, field: Content) -> Result<String, (String, String)> {
+    use std::io::BufRead;
+    let reference: crate::event::Transcript = serde_json::from_value(reference.clone())
+        .map_err(|error| ("<invalid reference>".to_string(), error.to_string()))?;
+    let path = std::path::Path::new(&reference.history_dir)
+        .join(&reference.history_project)
+        .join(format!("{}.jsonl", reference.history_session));
+    let unavailable = |why: String| (path.display().to_string(), why);
+    // The history producer validates these components too; journals are external
+    // input, so a reader must check before joining their address on its host.
+    use oneharness_core::domain::history::{AbsoluteHistoryDir, HistoryPathComponent};
+    if AbsoluteHistoryDir::try_from(std::path::PathBuf::from(&reference.history_dir)).is_err()
+        || HistoryPathComponent::try_from(reference.history_project.clone()).is_err()
+        || HistoryPathComponent::try_from(reference.history_session.clone()).is_err()
+    {
+        return Err(unavailable("invalid history address".to_string()));
+    }
+    let activity_index = if matches!(field, Content::Input | Content::Output) {
+        Some(
+            reference
+                .index
+                .ok_or_else(|| unavailable("activity reference has no index".to_string()))?,
+        )
+    } else {
+        None
+    };
+    let file = std::fs::File::open(&path).map_err(|error| unavailable(error.to_string()))?;
+    for line in std::io::BufReader::new(file).lines() {
+        let line = line.map_err(|error| unavailable(error.to_string()))?;
+        let line: Value =
+            serde_json::from_str(&line).map_err(|error| unavailable(error.to_string()))?;
+        let candidate = if matches!(field, Content::Input | Content::Output) {
+            &line["run_id"]
+        } else {
+            &line["history_id"]
+        };
+        if candidate.as_str() != Some(&reference.history_id) {
+            continue;
+        }
+        match field {
+            Content::Instruction if line["type"] == "run-started" => {
+                return line["prompt"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| unavailable("run-started prompt is not a string".to_string()));
+            }
+            Content::Text if line["type"] == "run" => {
+                return line["text"]
+                    .as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| unavailable("run text is not a string".to_string()));
+            }
+            Content::Input | Content::Output if line["type"] == "event" => {
+                let index = line["event"]["index"]
+                    .as_u64()
+                    .ok_or_else(|| unavailable("event index is not an integer".to_string()))?;
+                if Some(index) != activity_index {
+                    continue;
+                }
+                let value = &line["event"][if matches!(field, Content::Input) {
+                    "input"
+                } else {
+                    "output"
+                }];
+                return match value {
+                    Value::String(value) => Ok(value.clone()),
+                    Value::Null => Ok(String::new()),
+                    other if matches!(field, Content::Input) => Ok(other.to_string()),
+                    _ => Err(unavailable("event output is not a string".to_string())),
+                };
+            }
+            _ => (),
+        }
+    }
+    Err(unavailable(format!(
+        "entry missing for {}{}",
+        reference.history_id,
+        reference
+            .index
+            .map_or(String::new(), |index| format!(" event {index}"))
+    )))
 }
 
 #[cfg(test)]
