@@ -745,7 +745,7 @@ pub struct Transcript {
     /// Session file stem, without `.jsonl`.
     pub history_session: String,
     /// UUIDv7 identifying the harness candidate.
-    pub history_id: String,
+    pub history_id: oneharness_core::domain::history::HistoryId,
 }
 
 /// A transcript event within one candidate, extending its durable location.
@@ -776,7 +776,7 @@ impl Transcript {
             history_dir: begun.history_dir.to_string(),
             history_project: begun.history_project.to_string(),
             history_session: begun.history_session.to_string(),
-            history_id: begun.history_id.to_string(),
+            history_id: begun.history_id,
         }
     }
 
@@ -791,11 +791,11 @@ impl Transcript {
                 history_dir: self.history_dir.clone(),
                 history_project: self.history_project.clone(),
                 history_session: self.history_session.clone(),
-                history_id: self.history_id.clone(),
+                history_id: self.history_id.to_string(),
                 truncated: false,
             }),
             vec![Artifact {
-                id: self.history_id.clone(),
+                id: self.history_id.to_string(),
                 kind: ONEHARNESS_SESSION_ARTIFACT.to_string(),
                 bytes: std::fs::metadata(
                     std::path::Path::new(&self.history_dir)

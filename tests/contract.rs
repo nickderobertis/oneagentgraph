@@ -3199,6 +3199,12 @@ fn the_documented_path_keys_are_the_ones_a_members_config_has_anchored() {
 fn transcript_record_goldens_round_trip_without_content_copies() {
     let values: Vec<Value> =
         serde_json::from_str(&fenced_block("json transcript-turns")).expect("documented records");
+    let mut invalid_identity = values[0].clone();
+    invalid_identity["transcript"]["history_id"] = json!("not-a-uuid");
+    assert!(
+        serde_json::from_value::<TurnStarted>(invalid_identity).is_err(),
+        "transcript identities are UUIDs"
+    );
     let mut invalid_opening = values[0].clone();
     invalid_opening["transcript"]["index"] = json!(0);
     assert!(

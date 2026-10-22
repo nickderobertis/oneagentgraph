@@ -977,7 +977,7 @@ impl TurnJournal {
                     history_dir: begun.history_dir.to_string(),
                     history_project: begun.history_project.to_string(),
                     history_session: begun.history_session.to_string(),
-                    history_id: begun.history_id.to_string(),
+                    history_id: *begun.history_id,
                 };
                 if !reference.available() {
                     self.opening(emitter, None);

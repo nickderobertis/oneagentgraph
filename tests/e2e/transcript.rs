@@ -455,6 +455,11 @@ fn rendered_views_refuse_malformed_references_and_history_content() {
         serde_json::json!({}),
         {
             let mut reference = started["payload"]["transcript"].clone();
+            reference["history_id"] = serde_json::json!("not-a-uuid");
+            reference
+        },
+        {
+            let mut reference = started["payload"]["transcript"].clone();
             reference["history_project"] = serde_json::json!("../outside");
             reference
         },

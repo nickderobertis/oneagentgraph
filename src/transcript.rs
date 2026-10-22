@@ -42,6 +42,7 @@ pub(crate) fn resolve(reference: &Value, field: Content) -> Result<String, (Stri
     {
         return Err(unavailable("invalid history address".to_string()));
     }
+    let history_id = reference.history_id.to_string();
     let file = std::fs::File::open(&path).map_err(|error| unavailable(error.to_string()))?;
     for line in std::io::BufReader::new(file).lines() {
         let line = line.map_err(|error| unavailable(error.to_string()))?;
@@ -52,7 +53,7 @@ pub(crate) fn resolve(reference: &Value, field: Content) -> Result<String, (Stri
         } else {
             &line["history_id"]
         };
-        if candidate.as_str() != Some(&reference.history_id) {
+        if candidate.as_str() != Some(history_id.as_str()) {
             continue;
         }
         match field {
