@@ -61,7 +61,10 @@ fn live_references_resolve_whole_content_and_survive_cleanup_for_both_members() 
         single_sided_graph(&fake_harness()),
     ] {
         let workspace = Workspace::new();
-        workspace.graph(&graph);
+        workspace.graph(&crate::support::graph_with(
+            &graph,
+            &[("env.FAKE_HARNESS_SESSION", "transcript-native-id")],
+        ));
         let history = workspace.at("durable-history");
         let release = workspace.at("release");
         let answer = workspace.at("answer");
@@ -112,6 +115,15 @@ fn live_references_resolve_whole_content_and_survive_cleanup_for_both_members() 
                 }
             }
             assert!(child.try_wait().unwrap().is_none(), "harness was not held");
+            let begun = events
+                .iter()
+                .find(|event| event["kind"] == "oneharness-session")
+                .expect("candidate announcement");
+            assert!(
+                begun["payload"].get("session_id").is_none(),
+                "native continuation identity is not known at candidate begin: {begun}"
+            );
+
             for event in events.iter().filter(|event| {
                 matches!(
                     event["kind"].as_str(),
@@ -175,6 +187,24 @@ fn live_references_resolve_whole_content_and_survive_cleanup_for_both_members() 
                 assert_eq!(sessions.len(), 1);
                 assert!(sessions[0]["seq"].as_u64() < event["seq"].as_u64());
             }
+        }
+        for session in events
+            .iter()
+            .filter(|event| event["kind"] == "oneharness-session")
+        {
+            assert!(session["payload"].get("session_id").is_none());
+            let closing = std::fs::read_to_string(path(&session["payload"]))
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .find(|line| {
+                    line["type"] == "run" && line["history_id"] == session["payload"]["history_id"]
+                })
+                .expect("closing candidate record");
+            assert_eq!(
+                closing["session_id"], "transcript-native-id",
+                "the harness's later continuation identity remains in its transcript"
+            );
         }
         std::fs::remove_dir_all(workspace.dir()).unwrap();
         let scratch = workspace

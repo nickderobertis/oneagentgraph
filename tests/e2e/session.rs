@@ -262,11 +262,10 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
 /// it is meant to account for has happened *and* gone quiet, because its clock
 /// is quiet time since the member's own last event over a tree two probes agree
 /// is idle. The heartbeat rule's window is fixed at the member's birth instead,
-/// so it would race the very turn asserted on below; and shortening that race by
-/// going single-sided, the way `tests/e2e/liveness.rs` does, is not open here,
-/// because only a two-party member publishes a pointer at all. Lost, the member
-/// is condemned having had no conversation and the assertion below is vacuously
-/// red.
+/// so it would race the very turn asserted on below. A single-sided member,
+/// as in `tests/e2e/liveness.rs`, would lose this journey's precondition: a
+/// completed worker turn before the supervisor stalls. Without that turn the
+/// assertion about the worker's conversation would be vacuously red.
 ///
 /// **The retry is how the precondition is reached**, the way
 /// `tests/e2e/liveness.rs`'s `a_condemned_member_leaves_no_descendant_running`
