@@ -336,6 +336,21 @@ fn a_judge_that_sends_the_worker_back_is_named_and_its_findings_open_the_next_tu
         "{first:?}"
     );
     assert_eq!(first[1].3, "1 violation, 2 rules hold");
+    let messages: Vec<_> = run
+        .of_kind("turn-message")
+        .into_iter()
+        .filter(|event| event["payload"]["role"] == "user")
+        .collect();
+    assert_eq!(messages.len(), 1);
+    let message = &messages[0]["payload"];
+    assert!(
+        message.get("transcript").is_none(),
+        "a panel continuation reused its completed harness judge's transcript: {message}"
+    );
+    assert!(message["text"]
+        .as_str()
+        .expect("panel continuation text")
+        .contains("fake finding: the double was told to fail this run"));
 
     // The worker's second turn opens on llmlint's own report, attributed.
     let second_turn = run

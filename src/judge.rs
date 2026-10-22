@@ -998,6 +998,14 @@ impl TurnJournal {
                     self.judge = Some(reference);
                 }
             }
+            Observation::JudgeDecided(_) => {
+                // A panel composes its continuation from its judges' decisions.
+                // That composed text has no harness run of its own, even when
+                // one of the panel's judges wrote a transcript.
+                self.opening(emitter, None);
+                self.judge = None;
+                ingest_referenced(observation, emitter, deliveries, None);
+            }
             _ => {
                 self.opening(emitter, None);
                 let reference = match observation {

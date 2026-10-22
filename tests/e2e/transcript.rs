@@ -670,3 +670,38 @@ fn stopped_single_sided_candidate_keeps_its_session_and_live_opening() {
     assert!(sessions[0]["seq"].as_u64() < activity["seq"].as_u64());
     entry(activity);
 }
+
+#[test]
+fn harness_judge_message_references_its_own_candidate_session() {
+    let workspace = Workspace::new();
+    let continuation = workspace.at("next-turn");
+    std::fs::write(&continuation, "complete the next check").unwrap();
+    let run = workspace.run_task(&format!(
+        "fake:complete-now fake:next-turn={}",
+        continuation.display()
+    ));
+    run.expect_code(0);
+    let message = run
+        .of_kind("turn-message")
+        .into_iter()
+        .find(|event| event["payload"]["role"] == "user")
+        .expect("judge continuation");
+    no_copy(&message);
+    let reference = &message["payload"]["transcript"];
+    let sessions: Vec<_> = run
+        .of_kind("oneharness-session")
+        .into_iter()
+        .filter(|event| event["payload"]["history_id"] == reference["history_id"])
+        .collect();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0]["payload"]["role"], "judge");
+    let record = entry(&message);
+    let reply: Value = serde_json::from_str(record["text"].as_str().unwrap()).unwrap();
+    assert_eq!(reply["message"], "complete the next check");
+    let worker = run
+        .of_kind("turn-message")
+        .into_iter()
+        .find(|event| event["payload"]["role"] == "assistant")
+        .unwrap();
+    assert_ne!(path(reference), path(&worker["payload"]["transcript"]));
+}
