@@ -552,6 +552,19 @@ fn fallback_candidates_keep_distinct_references_when_indices_restart() {
             path(&firsts[0]["payload"]["transcript"]),
             path(&firsts[1]["payload"]["transcript"])
         );
+        assert_eq!(
+            entry(&firsts[0])["event"]["output"],
+            "Considering the request before quota refused it."
+        );
+        assert_eq!(
+            entry(&firsts[1])["event"]["input"],
+            serde_json::json!({"command":"just check"})
+        );
+        let opening = run.of_kind("turn-started").remove(0);
+        assert_eq!(
+            opening["payload"]["transcript"]["history_id"],
+            firsts[0]["payload"]["transcript"]["history_id"]
+        );
         for event in run.of_kind("turn-activity") {
             no_copy(&event);
             let resolved = entry(&event);

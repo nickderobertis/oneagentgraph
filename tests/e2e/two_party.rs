@@ -101,7 +101,14 @@ fn agent_messages(run: &Run) -> Vec<String> {
     run.of_kind("turn-message")
         .into_iter()
         .filter(|event| event["payload"]["role"] == "assistant")
-        .filter_map(|event| event["payload"]["text"].as_str().map(str::to_string))
+        .map(|event| {
+            let content = if event["payload"].get("transcript").is_some() {
+                crate::transcript::entry(&event)["text"].clone()
+            } else {
+                event["payload"]["text"].clone()
+            };
+            content.as_str().expect("assistant text").to_string()
+        })
         .collect()
 }
 
