@@ -1243,14 +1243,19 @@ fn stopping_a_graph_ends_a_command_provider_still_reading_its_input() {
         !survived,
         "command provider {pid} survived 10 seconds after stop returned"
     );
-    assert_eq!(output.status.code(), Some(1), "cancelled graph status");
     assert!(!owner_survived, "graph owner survived cancellation");
-    assert!(events.contains("graph-settled"), "graph never settled");
-    assert!(
-        output.stderr.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    let run = Run {
+        code: output.status.code().unwrap_or(-1),
+        stdout: events,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    run.expect_code(1);
+    let died = run.of_kind("member-died");
+    assert_eq!(died.len(), 1, "{:?}", run.kinds());
+    assert_eq!(died[0]["payload"]["rule"], "signalled");
+    assert_eq!(died[0]["payload"]["cause"], "cancelled");
+    assert_eq!(run.of_kind("graph-settled").len(), 1);
+    assert!(run.stderr.is_empty(), "{}", run.stderr);
 }
 
 /// A two-party member puts **every process its engine spawns** into the group its
