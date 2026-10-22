@@ -430,7 +430,6 @@ fn rendered_views_report_missing_transcript_files_and_entries() {
         );
         // A readable session whose candidate entry was lost is a different
         // failure from a file that cannot be opened.
-        // An empty transcript contains no entries, without a malformed line.
         std::fs::write(&file, b"").unwrap();
         let missing = rendered(&event);
         assert!(
@@ -497,6 +496,12 @@ fn rendered_views_refuse_malformed_references_and_history_content() {
             line[field] = serde_json::json!({"wrong":"type"});
             std::fs::write(&file, format!("{line}\n")).unwrap();
             assert!(rendered(&event).contains(diagnostic));
+        }
+        if event["kind"] == "turn-activity" {
+            let mut invalid_output = entry_from_bytes(&original, &event);
+            invalid_output["event"]["output"] = serde_json::json!({"wrong":"type"});
+            std::fs::write(&file, format!("{invalid_output}\n")).unwrap();
+            assert!(rendered(&event).contains("event output is not a string"));
         }
         std::fs::write(&file, original).unwrap();
         assert!(!rendered(&event).contains("transcript unavailable:"));
@@ -579,4 +584,89 @@ fn fallback_candidates_keep_distinct_references_when_indices_restart() {
             assert!(sessions[0]["seq"].as_u64() < event["seq"].as_u64());
         }
     }
+}
+
+#[test]
+fn stopped_single_sided_candidate_keeps_its_session_and_live_opening() {
+    let workspace = Workspace::new();
+    workspace.graph(&single_sided_graph(&fake_harness()));
+    workspace.write(
+        "oneharness.toml",
+        &format!("{}history = true\n", crate::support::CHAIN),
+    );
+    let release = workspace.at("release");
+    let task = format!("fake:complete-now fake:activity-hold={}", release.display());
+    let mut child = workspace.spawn_with(
+        &[
+            "run",
+            "graph.yaml",
+            "--task",
+            &task,
+            "--dir",
+            workspace.dir().to_str().unwrap(),
+        ],
+        &[],
+    );
+    let stdout = child.stdout.take().unwrap();
+    let (sender, receiver) = mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            sender
+                .send(serde_json::from_str::<Value>(&line.unwrap()).unwrap())
+                .unwrap();
+        }
+    });
+    let mut events = Vec::new();
+    let live = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        loop {
+            let event = receiver
+                .recv_timeout(Duration::from_secs(30))
+                .expect("held candidate activity");
+            let activity = event["kind"] == "turn-activity";
+            events.push(event);
+            if activity {
+                break;
+            }
+        }
+        let opening = events
+            .iter()
+            .find(|event| event["kind"] == "turn-started")
+            .unwrap();
+        assert_eq!(entry(opening)["prompt"], task);
+        assert!(child.try_wait().unwrap().is_none());
+    }));
+    if let Err(panic) = live {
+        std::fs::write(&release, "release after failed assertion").unwrap();
+        let _ = child.wait();
+        let _ = reader.join();
+        std::panic::resume_unwind(panic);
+    }
+    let id = events[0]["labels"]["run_id"].as_str().unwrap();
+    let cancelled = workspace.run(&["cancel", id, "reporter", "--kill"]);
+    std::fs::write(&release, "release if cancellation failed").unwrap();
+    let status = child.wait().unwrap();
+    reader.join().unwrap();
+    events.extend(receiver);
+    cancelled.expect_code(0);
+    assert!(!status.success(), "cancelled member settled successfully");
+    let sessions: Vec<_> = events
+        .iter()
+        .filter(|event| event["kind"] == "oneharness-session")
+        .collect();
+    assert_eq!(sessions.len(), 1);
+    let opening = events
+        .iter()
+        .find(|event| event["kind"] == "turn-started")
+        .unwrap();
+    assert_eq!(
+        sessions[0]["payload"]["history_id"],
+        opening["payload"]["transcript"]["history_id"]
+    );
+    assert_eq!(entry(opening)["prompt"], task);
+    let activity = events
+        .iter()
+        .find(|event| event["kind"] == "turn-activity")
+        .unwrap();
+    assert!(sessions[0]["seq"].as_u64() < activity["seq"].as_u64());
+    entry(activity);
 }

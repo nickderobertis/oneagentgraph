@@ -734,20 +734,6 @@ impl PreTurnOutcome {
 }
 // llmlint: ignore-end[boundary_inputs_validated]
 
-// llmlint: ignore-block[boundary_inputs_validated] the four payloads below are
-// what this crate *writes*, and every value in them is made correct where it is
-// minted rather than re-checked where it is read: `role` comes only from
-// [`Party`], `origin` only from [`Origin`], the instants only from
-// [`crate::clock::now_rfc3339`], and the bounds only from [`bound_text`] and the
-// head-trim its own doc directs a caller to make. `Deserialize` is here so the
-// contract test can round-trip them and a consumer can read them back — the
-// trust boundary an envelope really crosses is `deny_unknown_fields`, which every
-// one of them carries, exactly as `MemberDied` and `TurnInterrupted` have since
-// they were written. Validating the *values* on the way in would be worse than no
-// check: a bound is a promise about what a producer wrote, so a longer text from
-// a newer producer is not a malformed envelope, and refusing a role or a kind
-// this build has not heard of would drop the first event a widened contract
-// carries instead of showing it to the operator it was widened for.
 /// A candidate's durable oneharness transcript address.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -824,6 +810,20 @@ impl TurnActivity {
     }
 }
 
+// llmlint: ignore-block[boundary_inputs_validated] the four payloads below are
+// what this crate *writes*, and every value in them is made correct where it is
+// minted rather than re-checked where it is read: `role` comes only from
+// [`Party`], `origin` only from [`Origin`], the instants only from
+// [`crate::clock::now_rfc3339`], and the bounds only from [`bound_text`] and the
+// head-trim its own doc directs a caller to make. `Deserialize` is here so the
+// contract test can round-trip them and a consumer can read them back — the
+// trust boundary an envelope really crosses is `deny_unknown_fields`, which every
+// one of them carries, exactly as `MemberDied` and `TurnInterrupted` have since
+// they were written. Validating the *values* on the way in would be worse than no
+// check: a bound is a promise about what a producer wrote, so a longer text from
+// a newer producer is not a malformed envelope, and refusing a role or a kind
+// this build has not heard of would drop the first event a widened contract
+// carries instead of showing it to the operator it was widened for.
 /// The payload of an [`EventKind::TurnStarted`] event: a turn beginning, and the
 /// message it was given to answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
