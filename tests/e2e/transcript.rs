@@ -522,3 +522,48 @@ fn entry_from_bytes(bytes: &[u8], event: &Value) -> Value {
         })
         .unwrap()
 }
+
+#[test]
+fn fallback_candidates_keep_distinct_references_when_indices_restart() {
+    for graph in [
+        two_party_graph(&fake_harness(), NO_ENV),
+        single_sided_graph(&fake_harness()),
+    ] {
+        let workspace = Workspace::new();
+        workspace.graph(&graph);
+        workspace.write("oneharness.toml", &format!("run_mode = \"fallback\"\nhistory = true\nharnesses = [\"claude-code\", \"claude-code:alternate\"]\n[harness.claude-code.variant.alternate]\nbin = {:?}\n", fake_harness()));
+        let marker = workspace.at("refused");
+        let run = workspace.run_task(&format!(
+            "fake:complete-now fake:activity-fallback={}",
+            marker.display()
+        ));
+        run.expect_code(0);
+        let firsts: Vec<_> = run
+            .of_kind("turn-activity")
+            .into_iter()
+            .filter(|event| event["payload"]["index"] == 0)
+            .collect();
+        assert_eq!(firsts.len(), 2, "{}\n{}", run.stdout, run.stderr);
+        assert_ne!(
+            firsts[0]["payload"]["transcript"]["history_id"],
+            firsts[1]["payload"]["transcript"]["history_id"]
+        );
+        assert_eq!(
+            path(&firsts[0]["payload"]["transcript"]),
+            path(&firsts[1]["payload"]["transcript"])
+        );
+        for event in run.of_kind("turn-activity") {
+            no_copy(&event);
+            let resolved = entry(&event);
+            assert_eq!(resolved["event"]["index"], event["payload"]["index"]);
+            let candidate = &event["payload"]["transcript"]["history_id"];
+            let sessions: Vec<_> = run
+                .of_kind("oneharness-session")
+                .into_iter()
+                .filter(|item| item["payload"]["history_id"] == *candidate)
+                .collect();
+            assert_eq!(sessions.len(), 1);
+            assert!(sessions[0]["seq"].as_u64() < event["seq"].as_u64());
+        }
+    }
+}
