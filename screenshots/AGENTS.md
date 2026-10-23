@@ -203,9 +203,10 @@ fresh capture rather than restoring a previously captured tree’s shots.
 The stills are static; the README **hero** is the event stream filling line by
 line, because that is what using this tool looks like and a still of the same text
 says strictly less. `scripts/demo-gif.py` drives one real run of the fixture
-graph's two-party member and replays its `--output text` lines in the order they
-arrived, at the pace its own timestamps give them (clamped at both ends, so a burst
-does not flash past and a genuine wait does not stall the loop). A two-party member
+graph's two-party member and replays its `--output text` events in the order they
+arrived — each with the transcript content it resolves, in a window that scrolls
+as a terminal does — at the pace its own timestamps give them (clamped at both
+ends, so a burst does not flash past and a genuine wait does not stall the loop). A two-party member
 is the hero rather than a single-sided one because the agent's own `turn-message` —
 the reply the whole conversation is for — is published only for that member kind,
 and a stream showing the machinery running without the thing the machinery is for

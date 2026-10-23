@@ -1,6 +1,6 @@
 # oneagentgraph
 
-![One run's event stream filling a terminal line by line: a graph starting, a two-party member starting, its first turn opening, a member-heartbeat while that turn is still in flight, the turn's Bash tool call and the observation it answered with, the agent's own reply, the turn completing with its token usage and cost, the supervisor's turn, each side's oneharness session id, the member settling as completed with the supervisor's verdict, and the graph settling at exit 0](docs/screenshots/demo.gif)
+![One run's event stream filling a terminal event by event: a graph starting, a two-party member starting, the agent side's oneharness session as its harness run begins, its first turn opening with the instruction read back from that transcript, a member-heartbeat while that turn is still in flight, the turn's Bash tool call and the whole output it answered with, the agent's own reply, the turn completing with its token usage and cost, the supervisor side's oneharness session, the supervisor's turn with its whole instruction scrolling past, the member settling as completed with the supervisor's verdict, and the graph settling at exit 0](docs/screenshots/demo.gif)
 
 Compose agents into a graph over [oneharness] and [onejudge], and merge their
 outputs into **one NDJSON event stream**.

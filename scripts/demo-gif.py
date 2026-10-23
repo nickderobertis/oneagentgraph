@@ -15,11 +15,14 @@ So this renderer, and nothing else in the capture, needs the `oneharness` CLI on
 `PATH` at the release the justfile pins. The hash-gated stills need none.
 
 `run --output text` is append-only — nothing redraws, nothing is cleared — so
-rendering it faithfully is simply replaying the lines in the order they arrived,
+rendering it faithfully is simply replaying the events in the order they arrived,
 at the pace they arrived. There is no view to reconstruct, which is what makes
-this simpler than `llmlint`'s equivalent (its live view redraws in place). Each
-frame's duration comes from the gap between the two event timestamps it sits
-between, clamped, so the animation carries the real rhythm of a run — a tool call
+this simpler than `llmlint`'s equivalent (its live view redraws in place). An
+event is its stamped line plus any lines under it — a record that references its
+transcript renders that content whole, so a supervisor's instruction or a tool's
+output can run to many lines — and it lands in one frame, in a window of
+[`ROWS`] rows that scrolls as a terminal does. Each frame's duration comes from
+the gap between the two event timestamps it sits between, clamped, so the animation carries the real rhythm of a run — a tool call
 landing, then a wait, then the reply — rather than a uniform tick.
 
 The agent's first turn is deliberately held in flight for [`HOLD_SECONDS`], with
@@ -62,6 +65,7 @@ DOTS = [(255, 95, 86), (255, 189, 46), (39, 201, 63)]  # traffic-light window do
 
 COLS = 118           # clears the widest line a settling run writes (a
                      # `turn-completed` carrying its usage, or a session id)
+ROWS = 24            # the window's height in lines; a longer stream scrolls
 FONT_SIZE = 18
 PAD = 24
 BAR_H = 40
@@ -166,21 +170,43 @@ def stream(root: Path, binary: str, fake: str) -> list[str]:
     return lines
 
 
-def gaps(lines: list[str]) -> list[int]:
-    """How long each line stays alone on screen, from the stream's own timestamps.
+def stamp(line: str) -> datetime | None:
+    """The RFC 3339 stamp an event's first rendered line opens with, if it has one."""
+    head = line.split(" ", 1)[0].replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(head)
+    except ValueError:
+        return None
 
-    Every rendered line opens with its RFC 3339 stamp, so the pace is read off the
-    run rather than invented. Clamped at both ends: a burst of events in the same
-    millisecond would flash past, and a genuine thirty-second wait would stall the
-    loop.
+
+def events(lines: list[str]) -> list[tuple[datetime, list[str]]]:
+    """Group the rendered lines into events: a stamped line and the lines under it.
+
+    Every event opens with its stamp; a line without one is the rest of the event
+    above it — resolved transcript content, rendered whole.
     """
-    stamps = []
+    out: list[tuple[datetime, list[str]]] = []
     for line in lines:
-        head = line.split(" ", 1)[0].replace("Z", "+00:00")
-        stamps.append(datetime.fromisoformat(head))
+        at = stamp(line)
+        if at is not None:
+            out.append((at, [line]))
+        elif out:
+            out[-1][1].append(line)
+        else:
+            raise SystemExit(f"demo-gif: the stream opens without a stamp: {line!r}")
+    return out
+
+
+def gaps(stamps: list[datetime]) -> list[int]:
+    """How long each event stays alone on screen, from the stream's own timestamps.
+
+    The pace is read off the run rather than invented. Clamped at both ends: a
+    burst of events in the same millisecond would flash past, and a genuine
+    thirty-second wait would stall the loop.
+    """
     out = []
-    for i in range(len(lines)):
-        if i + 1 == len(lines):
+    for i in range(len(stamps)):
+        if i + 1 == len(stamps):
             out.append(HOLD_MS)
             continue
         delta = (stamps[i + 1] - stamps[i]).total_seconds() * 1000
@@ -200,7 +226,7 @@ def wrap(line: str) -> list[str]:
     return folded
 
 
-def render(lines: list[str], durations: list[int], font_path: str, out: str) -> int:
+def render(bodies: list[list[str]], durations: list[int], font_path: str, out: str) -> int:
     font = ImageFont.truetype(font_path, FONT_SIZE)
     char = font.getlength("M")
     ascent, descent = font.getmetrics()
@@ -208,11 +234,11 @@ def render(lines: list[str], durations: list[int], font_path: str, out: str) -> 
 
     frames = [([], LEAD_MS)]
     drawn: list[str] = []
-    for line, ms in zip(lines, durations):
-        drawn = drawn + wrap(line)
-        frames.append((list(drawn), ms))
+    for body, ms in zip(bodies, durations):
+        drawn = drawn + [row for line in body for row in wrap(line)]
+        frames.append((drawn[-ROWS:], ms))
 
-    rows = max(len(body) for body, _ in frames)
+    rows = ROWS
     width = int(PAD * 2 + COLS * char)
     height = int(BAR_H + PAD + rows * line_h + PAD)
 
@@ -250,10 +276,11 @@ def main() -> int:
             print(f"demo-gif: missing {path}", file=sys.stderr)
             return 1
 
-    lines = stream(root, str(binary), str(fake))
-    frames = render(lines, gaps(lines), str(font), out)
+    grouped = events(stream(root, str(binary), str(fake)))
+    frames = render([body for _, body in grouped],
+                    gaps([at for at, _ in grouped]), str(font), out)
     Path(out).parent.mkdir(parents=True, exist_ok=True)
-    print(f"demo-gif: wrote {out} ({frames} frames from {len(lines)} events)",
+    print(f"demo-gif: wrote {out} ({frames} frames from {len(grouped)} events)",
           file=sys.stderr)
     return 0
 
