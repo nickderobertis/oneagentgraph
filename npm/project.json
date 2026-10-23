@@ -25,6 +25,7 @@
         "{workspaceRoot}/.github/workflows/visual-docs.yml",
         "{workspaceRoot}/screenshots/tools.env",
         "{workspaceRoot}/scripts/report-workflow-failure.sh",
+        "{workspaceRoot}/scripts/demo-gif.py",
         "{workspaceRoot}/src/**/*",
         "{workspaceRoot}/Cargo.toml",
         "{workspaceRoot}/Cargo.lock",

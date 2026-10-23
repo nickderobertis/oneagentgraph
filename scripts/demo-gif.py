@@ -55,8 +55,6 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
-
 # The window, matching the stills' `freeze` chrome (background #0d1117).
 BG = (13, 17, 23)
 BAR = (22, 27, 34)
@@ -193,7 +191,13 @@ def events(lines: list[str]) -> list[tuple[datetime, list[str]]]:
         elif out:
             out[-1][1].append(line)
         else:
-            raise SystemExit(f"demo-gif: the stream opens without a stamp: {line!r}")
+            raise SystemExit(
+                f"demo-gif: the stream opens without a stamp: {line!r}. Every event "
+                "`--output text` writes opens with its RFC 3339 stamp, so this is "
+                "either not that output or `src/render.rs` changed its line head; "
+                "run the fixture graph by hand with `--output text` and compare the "
+                "first line against the head `stamp()` parses."
+            )
     return out
 
 
@@ -226,21 +230,33 @@ def wrap(line: str) -> list[str]:
     return folded
 
 
-def render(bodies: list[list[str]], durations: list[int], font_path: str, out: str) -> int:
+def frames(bodies: list[list[str]], durations: list[int]) -> list[tuple[list[str], int]]:
+    """What the window shows in each frame, and for how long.
+
+    The empty window first, then one frame per event: everything drawn so far,
+    wrapped, of which the window shows its last [`ROWS`] rows — a terminal
+    scrolling as the stream grows.
+    """
+    out: list[tuple[list[str], int]] = [([], LEAD_MS)]
+    drawn: list[str] = []
+    for body, ms in zip(bodies, durations):
+        drawn = drawn + [row for line in body for row in wrap(line)]
+        out.append((drawn[-ROWS:], ms))
+    return out
+
+
+def render(shown: list[tuple[list[str], int]], font_path: str, out: str) -> int:
+    # Imported here rather than at the top so the layout above stays importable,
+    # and testable, on a host without Pillow; drawing is the only part needing it.
+    from PIL import Image, ImageDraw, ImageFont
+
     font = ImageFont.truetype(font_path, FONT_SIZE)
     char = font.getlength("M")
     ascent, descent = font.getmetrics()
     line_h = ascent + descent + 4
 
-    frames = [([], LEAD_MS)]
-    drawn: list[str] = []
-    for body, ms in zip(bodies, durations):
-        drawn = drawn + [row for line in body for row in wrap(line)]
-        frames.append((drawn[-ROWS:], ms))
-
-    rows = ROWS
     width = int(PAD * 2 + COLS * char)
-    height = int(BAR_H + PAD + rows * line_h + PAD)
+    height = int(BAR_H + PAD + ROWS * line_h + PAD)
 
     def draw(body: list[str]) -> Image.Image:
         image = Image.new("RGB", (width, height), BG)
@@ -256,10 +272,10 @@ def render(bodies: list[list[str]], durations: list[int], font_path: str, out: s
             y += line_h
         return image
 
-    images = [draw(body) for body, _ in frames]
+    images = [draw(body) for body, _ in shown]
     images[0].save(
         out, save_all=True, append_images=images[1:],
-        duration=[ms for _, ms in frames], loop=0, optimize=True, disposal=2,
+        duration=[ms for _, ms in shown], loop=0, optimize=True, disposal=2,
     )
     return len(images)
 
@@ -277,10 +293,10 @@ def main() -> int:
             return 1
 
     grouped = events(stream(root, str(binary), str(fake)))
-    frames = render([body for _, body in grouped],
-                    gaps([at for at, _ in grouped]), str(font), out)
+    shown = frames([body for _, body in grouped], gaps([at for at, _ in grouped]))
     Path(out).parent.mkdir(parents=True, exist_ok=True)
-    print(f"demo-gif: wrote {out} ({frames} frames from {len(grouped)} events)",
+    count = render(shown, str(font), out)
+    print(f"demo-gif: wrote {out} ({count} frames from {len(grouped)} events)",
           file=sys.stderr)
     return 0
 
