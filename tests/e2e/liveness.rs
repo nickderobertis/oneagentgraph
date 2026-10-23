@@ -270,11 +270,18 @@ fn a_member_whose_agent_is_talking_is_not_condemned_though_its_tree_is_idle() {
         );
         // What kept it alive was its words, relayed live as themselves: several
         // stall bounds' worth of `message` activity, and not one of them a tool.
+        // A member whose turn writes history references those words rather than
+        // copying them, so they are read where the reference points.
         let said: Vec<_> = run
             .of_kind("turn-activity")
             .into_iter()
             .filter(|event| {
-                event["payload"]["output"]
+                let output = if event["payload"].get("transcript").is_some() {
+                    crate::transcript::entry(event)["event"]["output"].clone()
+                } else {
+                    event["payload"]["output"].clone()
+                };
+                output
                     .as_str()
                     .is_some_and(|text| text.starts_with("still thinking it through"))
             })
