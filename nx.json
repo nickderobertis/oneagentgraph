@@ -63,11 +63,7 @@
       "{workspaceRoot}/npm/oneagentgraph-cli/package.json"
     ],
     "e2eSource": ["{workspaceRoot}/tests/e2e/**/*.rs", "sharedGlobals"],
-    "e2eReads": [
-      "{workspaceRoot}/README.md",
-      "{workspaceRoot}/scripts/smoke-published.sh",
-      "{workspaceRoot}/scripts/demo-gif.py"
-    ],
+    "e2eReads": ["{workspaceRoot}/README.md", "{workspaceRoot}/scripts/smoke-published.sh"],
     "repoToolingSource": [
       "{workspaceRoot}/tests/repo-tooling/**/*.rs",
       "{workspaceRoot}/Cargo.toml",
