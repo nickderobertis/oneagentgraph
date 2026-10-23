@@ -47,6 +47,7 @@ changes.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -168,13 +169,18 @@ def stream(root: Path, binary: str, fake: str) -> list[str]:
     return lines
 
 
+# The head of an event's line: the stamp `src/clock.rs` writes — always UTC, always
+# milliseconds — then the space `src/render.rs` puts after it. Nothing looser, so a
+# line of transcript content that merely opens with a date stays content.
+STAMP = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})Z ")
+
+
 def stamp(line: str) -> datetime | None:
-    """The RFC 3339 stamp an event's first rendered line opens with, if it has one."""
-    head = line.split(" ", 1)[0].replace("Z", "+00:00")
-    try:
-        return datetime.fromisoformat(head)
-    except ValueError:
+    """The stamp an event's first rendered line opens with, if it has one."""
+    head = STAMP.match(line)
+    if head is None:
         return None
+    return datetime.fromisoformat(head.group(1) + "+00:00")
 
 
 def events(lines: list[str]) -> list[tuple[datetime, list[str]]]:

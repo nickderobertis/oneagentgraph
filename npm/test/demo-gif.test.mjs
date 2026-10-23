@@ -60,6 +60,8 @@ const STREAM = [
   "2026-10-23T02:42:30.720Z worker member-heartbeat alive",
   "2026-10-23T02:42:33.721Z worker turn-activity tool_result running the gate",
   "2 passed; 0 failed",
+  "2026-10-23 nightly run",
+  "2026-10-23T02:42:33 local",
   "2026-10-23T02:42:33.737Z worker turn-started turn 1 (user) You are the supervisor.",
   ...INSTRUCTION,
   "2026-10-23T02:42:33.741Z worker turn-completed turn 1 (user) in=10 out=5",
@@ -75,7 +77,8 @@ describe("demo-gif layout", () => {
 
     // Seven events, not one per line: continuation lines stay with their event.
     assert.equal(bodies.length, 7);
-    assert.deepEqual(bodies[3], [STREAM[3], "2 passed; 0 failed"]);
+    // Content that opens with a date, even a whole ISO time, is not a stamp.
+    assert.deepEqual(bodies[3], STREAM.slice(3, 7));
     assert.equal(bodies[4].length, 1 + INSTRUCTION.length);
 
     // Pace comes from the stamps between events, clamped at both ends.
@@ -90,14 +93,14 @@ describe("demo-gif layout", () => {
     }
 
     // The tool's whole output lands in the frame of its event.
-    assert.deepEqual(frames[4][0].slice(-2), [STREAM[3], "2 passed; 0 failed"]);
+    assert.deepEqual(frames[4][0].slice(-4), STREAM.slice(3, 7));
 
     // The instruction is longer than the window, so its frame has scrolled past
     // its own head and ends on its last line; the over-wide line is folded at
     // the window's width with a hanging indent.
     const [instructionFrame] = frames[5];
     assert.equal(instructionFrame.length, ROWS);
-    assert.ok(!instructionFrame.includes(STREAM[5]));
+    assert.ok(!instructionFrame.includes(STREAM[7]));
     const wide = INSTRUCTION[38];
     assert.deepEqual(instructionFrame.slice(-4), [
       INSTRUCTION[37],
