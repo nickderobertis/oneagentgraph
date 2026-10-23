@@ -148,6 +148,10 @@ merged stream was written:
 
 ![The record oneagentgraph history show prints, as pretty JSON: schema_version 3, the run id, the graph path and name, started and finished milliseconds, exit_code 0, a members map with implementer and reviewer both settled, the declared members, a refs list giving the origin, sha256 and byte length of each config the run resolved, and the events_path under ~/.local/state/oneagentgraph/runs](docs/screenshots/history-record.svg)
 
+`oneagentgraph render EVENTS_PATH` reads that stream back as `--output text`
+would have shown it, resolving each turn's content from the transcript it
+references; it reads stdin without a path and writes nothing but stdout.
+
 ## Identities and quota
 
 `oneagentgraph health` forwards oneharness's own per-identity sweep: which

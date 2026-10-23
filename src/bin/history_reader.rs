@@ -9,8 +9,7 @@
 //! can trace the file-system calls that read makes, which a read inside the
 //! test's own process cannot be traced for.
 //!
-//! With `--render-events`, reads journal NDJSON on stdin and renders it through
-//! the real library text writer. Otherwise one argument, the pointer file. On success prints one JSON object per
+//! One argument, the pointer file. On success prints one JSON object per
 //! pointer line, in file order — `history_id`, `session_file` and `prompt` of
 //! the record that line names — and exits 0; a file with no pointer, an
 //! unreadable line, or a pointer whose record is not there is a message on
@@ -72,35 +71,7 @@ fn read_back(pointer: &HistoryPointer) -> serde_json::Value {
     })
 }
 
-/// Replay journal bytes through the same public text writer the production CLI
-/// uses. A consumer process permits deterministic checks after history is lost;
-/// the production `run --output text` has already rendered those live events.
-fn render_events() {
-    use std::io::{BufRead, Write};
-    let mut rendered = oneagentgraph::render::Text::new(std::io::stdout());
-    for line in std::io::stdin().lock().lines() {
-        let line = line.unwrap_or_else(|error| refuse(&error.to_string()));
-        let envelope: oneagentgraph::event::Envelope =
-            serde_json::from_str(&line).unwrap_or_else(|error| refuse(&error.to_string()));
-        let bytes =
-            serde_json::to_vec(&envelope).unwrap_or_else(|error| refuse(&error.to_string()));
-        rendered
-            .write_all(&bytes)
-            .unwrap_or_else(|error| refuse(&error.to_string()));
-        rendered
-            .write_all(b"\n")
-            .unwrap_or_else(|error| refuse(&error.to_string()));
-    }
-    rendered
-        .flush()
-        .unwrap_or_else(|error| refuse(&error.to_string()));
-}
-
 fn main() {
-    if std::env::args().skip(1).eq(["--render-events"]) {
-        render_events();
-        return;
-    }
     let mut args = std::env::args().skip(1);
     let (Some(pointer_file), None) = (args.next(), args.next()) else {
         refuse("usage: oneagentgraph-history-reader POINTER_FILE")

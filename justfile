@@ -46,9 +46,10 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # `oneharness-core` `Cargo.toml` takes: the linked engine answers what a
 # `kind: oneharness` member does, and this CLI answers what `smoke`, `interrupt`,
 # and onejudge's per-side turns do (`docs/oneharness-library.md`). 0.26.0 is the
-# CLI released beside the core 0.29.0 `Cargo.toml` links, so both halves run the
-# same core and a two-party member's sides record history as a single-sided
-# member's turn does. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
+# CLI released beside core 0.29.0, so a two-party member's sides record history
+# as a single-sided member's turn does. `Cargo.toml` links core 0.29.1, which
+# differs from 0.29.0 only in announcing a buffered run's candidates to the
+# embedding caller's event sink. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
 # only a CLI at it.
 oneharness-version := "0.26.0"
 

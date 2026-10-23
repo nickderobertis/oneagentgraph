@@ -1275,9 +1275,9 @@ dependencies = [
 
 [[package]]
 name = "oneharness-core"
-version = "0.29.0"
+version = "0.29.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "53c8414fb530a6337b795b0346660f463927e264af8b75fc71e4946aa7e195d2"
+checksum = "dab297bd0e5ee942c14b0aa99050d1e95d3ae7e93f187db1c47c81698eb69823"
 dependencies = [
  "fs2",
  "jsonschema 0.33.0",

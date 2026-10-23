@@ -659,7 +659,10 @@ schemars = { version = "1", features = ["preserve_order"] }
 # true is the ordinary one — a value onejudge hands back is onejudge's own type.
 # 0.29.0 adds EventSink::run_began after flushing the opening prompt. Keep
 # this floor aligned with onejudge: both member kinds reference live history.
-oneharness-core = "0.29.0"
+# 0.29.1 is the floor because 0.29.0 dropped the sink of a run that does not
+# stream, so a `stream = false` single-sided member never learned its history
+# and journalled cut copies; 0.29.1 calls `run_began` per candidate there too.
+oneharness-core = "0.29.1"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

@@ -225,6 +225,63 @@ fn live_references_resolve_whole_content_and_survive_cleanup_for_both_members() 
     }
 }
 
+/// A member whose config asks not to stream is not forced to, and still
+/// journals its candidate's session and references rather than cut copies.
+#[test]
+fn buffered_members_reference_their_transcripts_without_streaming() {
+    for single in [false, true] {
+        let workspace = Workspace::new();
+        workspace.graph(&if single {
+            single_sided_graph(&fake_harness())
+        } else {
+            two_party_graph(&fake_harness(), NO_ENV)
+        });
+        let config = format!("{}history = true\nstream = false\n", crate::support::CHAIN);
+        workspace.write("oneharness.toml", &config);
+        workspace.write("oneharness.judge.toml", &config);
+        let task = format!("fake:complete-now {}", "buffered instruction ".repeat(300));
+        assert!(task.len() > 4096);
+        let run = workspace.run_task(&task);
+        run.expect_code(0);
+        if single {
+            assert!(
+                run.of_kind("turn-activity").is_empty(),
+                "`stream = false` was overridden: {:?}",
+                run.kinds()
+            );
+        }
+        let sessions = run.of_kind("oneharness-session");
+        assert!(!sessions.is_empty(), "single={single}: {:?}", run.kinds());
+        let events = run.events();
+        let mut assistant_started = 0;
+        for event in events.iter().filter(|event| {
+            matches!(
+                event["kind"].as_str(),
+                Some("turn-started" | "turn-message" | "turn-activity")
+            )
+        }) {
+            if event["kind"] == "turn-message" && event["payload"].get("transcript").is_none() {
+                // A command or panel-composed supervisor message has no run.
+                assert_ne!(event["payload"]["role"], "assistant", "{event}");
+                continue;
+            }
+            no_copy(event);
+            let record = entry(event);
+            let candidate = &event["payload"]["transcript"]["history_id"];
+            let announced = sessions
+                .iter()
+                .find(|session| session["payload"]["history_id"] == *candidate)
+                .unwrap_or_else(|| panic!("no oneharness-session for {event}"));
+            assert!(announced["seq"].as_u64() < event["seq"].as_u64(), "{event}");
+            if event["kind"] == "turn-started" && event["payload"]["role"] == "assistant" {
+                assistant_started += 1;
+                assert_eq!(record["prompt"], task);
+            }
+        }
+        assert_eq!(assistant_started, 1, "single={single}: {:?}", run.kinds());
+    }
+}
+
 #[test]
 fn history_disabled_and_unopenable_stores_keep_bounded_copies() {
     for single in [false, true] {
@@ -412,13 +469,13 @@ fn command_and_llmlint_judge_messages_keep_their_bounded_copy() {
     }
 }
 
-/// A real consumer process drives the public event view over journal bytes a
-/// real run emitted; the production CLI's live text mode is exercised above.
+/// The production CLI's own `render` verb over journal bytes a real run
+/// emitted, so a view read after history is lost is the binary's own rendering.
 fn rendered(event: &Value) -> String {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut child = Command::new(env!("CARGO_BIN_EXE_oneagentgraph-history-reader"))
-        .arg("--render-events")
+    let mut child = Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+        .arg("render")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -432,6 +489,46 @@ fn rendered(event: &Value) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+/// `render FILE` reads a stored journal the way stdin is read, and a journal
+/// that is not there is refused rather than rendered as nothing.
+#[test]
+fn render_reads_a_stored_journal_and_refuses_one_that_is_missing() {
+    let workspace = Workspace::new();
+    let task = format!("fake:complete-now: {}", "x".repeat(5000));
+    let run = workspace.run_task(&task);
+    run.expect_code(0);
+    let journal = workspace.dir().join("stored.ndjson");
+    let lines: Vec<String> = run.events().iter().map(Value::to_string).collect();
+    std::fs::write(&journal, lines.join("\n") + "\n").unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+        .arg("render")
+        .arg(&journal)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains(&task),
+        "the whole instruction was not rendered: {text}"
+    );
+    assert!(text.contains("member-settled"), "{text}");
+    assert!(!text.contains("transcript unavailable:"), "{text}");
+
+    let missing = workspace.dir().join("no-such.ndjson");
+    let refused = std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
+        .arg("render")
+        .arg(&missing)
+        .output()
+        .unwrap();
+    assert_eq!(refused.status.code(), Some(2), "{refused:?}");
+    assert!(refused.stdout.is_empty(), "{refused:?}");
+    let why = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        why.contains(&format!("cannot read {}", missing.display())),
+        "{why}"
+    );
 }
 
 #[test]

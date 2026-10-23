@@ -55,6 +55,8 @@ pub enum Command {
     Sweep(SweepArgs),
     /// Scaffold or check a persona.
     Persona(PersonaArgs),
+    /// Render a stored journal's NDJSON envelopes as `run --output text` does.
+    Render(RenderArgs),
 }
 
 /// `oneagentgraph run`.
@@ -170,6 +172,16 @@ pub enum HistoryCommand {
         /// The record's id.
         id: String,
     },
+}
+
+/// `oneagentgraph render`.
+///
+/// Read-only: it reads the journal and writes the rendering to stdout, nothing
+/// else, so a journal whose run is long over is read the way it was watched.
+#[derive(Debug, Clone, PartialEq, Eq, Args)]
+pub struct RenderArgs {
+    /// The journal to render, one envelope per line; omit to read stdin.
+    pub file: Option<PathBuf>,
 }
 
 /// `oneagentgraph smoke`.
