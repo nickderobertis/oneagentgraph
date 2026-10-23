@@ -368,9 +368,10 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     );
 
     let call = TurnActivity {
+        transcript: None,
         kind: "tool_call".to_string(),
         name: Some("Bash".to_string()),
-        detail: "cargo test --locked".to_string(),
+        detail: Some("cargo test --locked".to_string()),
         truncated: false,
         output: None,
         output_truncated: false,
@@ -388,9 +389,10 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     // `name` is serialized as `null` rather than omitted, so a consumer meets one
     // shape whichever kind of activity it reads.
     let result = TurnActivity {
+        transcript: None,
         kind: "tool_result".to_string(),
         name: None,
-        detail: String::new(),
+        detail: Some(String::new()),
         output: Some(String::new()),
         ..call.clone()
     };
@@ -406,6 +408,7 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     // not be named is a fact about the event, an identity nobody published is
     // nothing to say.
     let anonymous = TurnActivity {
+        transcript: None,
         tool_call_id: None,
         ..call.clone()
     };
@@ -431,9 +434,10 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     // no call identity — never a tool call — and an `index` that counts them, so
     // the call after them is not at the next index a count of calls would give.
     let words = TurnActivity {
+        transcript: None,
         kind: "message".to_string(),
         name: None,
-        detail: String::new(),
+        detail: Some(String::new()),
         output: Some("Running the gate first.".to_string()),
         tool_call_id: None,
         index: 1,
@@ -452,7 +456,8 @@ fn a_turn_activity_payload_carries_the_documented_call_or_observation() {
     );
 
     let cut = TurnActivity {
-        detail: "x".repeat(MAX_ACTIVITY_DETAIL_CHARS),
+        transcript: None,
+        detail: Some("x".repeat(MAX_ACTIVITY_DETAIL_CHARS)),
         truncated: true,
         output: Some("y".repeat(MAX_PAYLOAD_TEXT_BYTES)),
         output_truncated: true,
@@ -500,9 +505,10 @@ fn a_turn_started_payload_names_the_turn_and_what_it_answers() {
     );
 
     let started = TurnStarted {
+        transcript: None,
         turn: 3,
         role: "assistant".to_string(),
-        instruction: "verify it before you call it done".to_string(),
+        instruction: Some("verify it before you call it done".to_string()),
         instruction_truncated: false,
         started_at: "2026-08-21T09:15:02.847Z".to_string(),
         origin: None,
@@ -515,6 +521,7 @@ fn a_turn_started_payload_names_the_turn_and_what_it_answers() {
         "an unbounded instruction must not carry a truncation flag"
     );
     let cut = TurnStarted {
+        transcript: None,
         instruction_truncated: true,
         ..started.clone()
     };
@@ -528,6 +535,7 @@ fn a_turn_started_payload_names_the_turn_and_what_it_answers() {
     // The whole of what a stamped instruction adds, and the whole of what an
     // unstamped one keeps.
     let stamped = TurnStarted {
+        transcript: None,
         origin: Some(Origin::Delivered),
         ..started.clone()
     };
@@ -608,9 +616,10 @@ fn a_turn_message_payload_carries_one_partys_own_words() {
     );
 
     let message = TurnMessage {
+        transcript: None,
         turn: 1,
         role: "assistant".to_string(),
-        text: "done".to_string(),
+        text: Some("done".to_string()),
         truncated: false,
         origin: None,
     };
@@ -619,7 +628,8 @@ fn a_turn_message_payload_carries_one_partys_own_words() {
         json!({"turn": 1, "role": "assistant", "text": "done"})
     );
     let cut = TurnMessage {
-        text: "x".repeat(MAX_PAYLOAD_TEXT_BYTES),
+        transcript: None,
+        text: Some("x".repeat(MAX_PAYLOAD_TEXT_BYTES)),
         truncated: true,
         ..message.clone()
     };
@@ -631,6 +641,7 @@ fn a_turn_message_payload_carries_one_partys_own_words() {
     );
 
     let stamped = TurnMessage {
+        transcript: None,
         origin: Some(Origin::Supervisor),
         ..message.clone()
     };
@@ -3182,4 +3193,55 @@ fn the_documented_path_keys_are_the_ones_a_members_config_has_anchored() {
         "the contract and this build disagree about which paths in a member's \
          oneharness config are anchored to that config's own directory"
     );
+}
+
+#[test]
+fn transcript_record_goldens_round_trip_without_content_copies() {
+    let values: Vec<Value> =
+        serde_json::from_str(&fenced_block("json transcript-turns")).expect("documented records");
+    let mut invalid_identity = values[0].clone();
+    invalid_identity["transcript"]["history_id"] = json!("not-a-uuid");
+    assert!(
+        serde_json::from_value::<TurnStarted>(invalid_identity).is_err(),
+        "transcript identities are UUIDs"
+    );
+    let mut invalid_opening = values[0].clone();
+    invalid_opening["transcript"]["index"] = json!(0);
+    assert!(
+        serde_json::from_value::<TurnStarted>(invalid_opening).is_err(),
+        "opening references cannot carry activity indices"
+    );
+    let mut invalid_activity = values[2].clone();
+    invalid_activity["transcript"]
+        .as_object_mut()
+        .unwrap()
+        .remove("index");
+    assert!(
+        serde_json::from_value::<TurnActivity>(invalid_activity).is_err(),
+        "activity references require an index"
+    );
+    let started: TurnStarted = serde_json::from_value(values[0].clone()).expect("opening");
+    let message: TurnMessage = serde_json::from_value(values[1].clone()).expect("message");
+    let activity: TurnActivity = serde_json::from_value(values[2].clone()).expect("activity");
+    for (actual, expected) in [
+        serde_json::to_value(started).unwrap(),
+        serde_json::to_value(message).unwrap(),
+        serde_json::to_value(activity).unwrap(),
+    ]
+    .into_iter()
+    .zip(values)
+    {
+        assert_eq!(actual, expected);
+        for name in [
+            "instruction",
+            "instruction_truncated",
+            "text",
+            "truncated",
+            "detail",
+            "output",
+            "output_truncated",
+        ] {
+            assert!(actual.get(name).is_none(), "{name}: {actual}");
+        }
+    }
 }

@@ -1,6 +1,6 @@
 # oneagentgraph
 
-![One run's event stream filling a terminal line by line: a graph starting, a two-party member starting, its first turn opening, a member-heartbeat while that turn is still in flight, the turn's Bash tool call and the observation it answered with, the agent's own reply, the turn completing with its token usage and cost, the supervisor's turn, each side's oneharness session id, the member settling as completed with the supervisor's verdict, and the graph settling at exit 0](docs/screenshots/demo.gif)
+![One run's event stream filling a terminal event by event: a graph starting, a two-party member starting, the agent side's oneharness session as its harness run begins, its first turn opening with the instruction read back from that transcript, a member-heartbeat while that turn is still in flight, the turn's Bash tool call and the whole output it answered with, the agent's own reply, the turn completing with its token usage and cost, the supervisor side's oneharness session, the supervisor's turn with its whole instruction scrolling past, the member settling as completed with the supervisor's verdict, and the graph settling at exit 0](docs/screenshots/demo.gif)
 
 Compose agents into a graph over [oneharness] and [onejudge], and merge their
 outputs into **one NDJSON event stream**.
@@ -147,6 +147,10 @@ what became of each, the digest of every config the run resolved, and where the
 merged stream was written:
 
 ![The record oneagentgraph history show prints, as pretty JSON: schema_version 3, the run id, the graph path and name, started and finished milliseconds, exit_code 0, a members map with implementer and reviewer both settled, the declared members, a refs list giving the origin, sha256 and byte length of each config the run resolved, and the events_path under ~/.local/state/oneagentgraph/runs](docs/screenshots/history-record.svg)
+
+`oneagentgraph render EVENTS_PATH` reads that stream back as `--output text`
+would have shown it, resolving each turn's content from the transcript it
+references; it reads stdin without a path and writes nothing but stdout.
 
 ## Identities and quota
 

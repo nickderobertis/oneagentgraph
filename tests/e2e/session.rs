@@ -90,6 +90,23 @@ fn read_record(path: &Path, id: &Value) -> Value {
         .unwrap_or_else(|| panic!("{} holds no record {id}", path.display()))
 }
 
+/// The instruction a candidate was given, by the rule `docs/contract.md` states
+/// for it: the `run-started` line carrying that `history_id`, its `.prompt`.
+///
+/// Read off that line rather than off a display record because oneharness writes
+/// it as the candidate begins, before anything can stop it: a candidate killed
+/// mid-turn never writes its closing `run` line, and a display reader that
+/// materializes records from those lines shows no record for it at all.
+fn begun_prompt(path: &Path, id: &Value) -> String {
+    std::fs::read_to_string(path)
+        .expect("the session file reads back")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["type"] == "run-started" && &line["history_id"] == id)
+        .and_then(|line| line["prompt"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("{} holds no run-started line {id}", path.display()))
+}
+
 /// A settled member publishes one pointer per oneharness invocation, and the
 /// three path fields on it resolve the session file that invocation wrote.
 ///
@@ -225,14 +242,10 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
             "the record a failed run pointed at carries no conversation"
         );
     }
-    // The judge side reached no identity, so it wrote nothing to point at — the
-    // same rule as the journey below, on the other side of one member.
-    assert!(
-        published
-            .iter()
-            .all(|event| event["payload"]["role"] == "agent"),
-        "a side that ran nothing published a conversation: {published:?}"
-    );
+    // Candidate openings are published even when the harness subsequently refuses.
+    assert!(published
+        .iter()
+        .any(|event| event["payload"]["role"] == "judge"));
     assert_session_labels(&run);
 }
 
@@ -266,11 +279,10 @@ fn a_failed_run_still_names_the_conversation_the_side_that_ran_had() {
 /// it is meant to account for has happened *and* gone quiet, because its clock
 /// is quiet time since the member's own last event over a tree two probes agree
 /// is idle. The heartbeat rule's window is fixed at the member's birth instead,
-/// so it would race the very turn asserted on below; and shortening that race by
-/// going single-sided, the way `tests/e2e/liveness.rs` does, is not open here,
-/// because only a two-party member publishes a pointer at all. Lost, the member
-/// is condemned having had no conversation and the assertion below is vacuously
-/// red.
+/// so it would race the very turn asserted on below. A single-sided member,
+/// as in `tests/e2e/liveness.rs`, would lose this journey's precondition: a
+/// completed worker turn before the supervisor stalls. Without that turn the
+/// assertion about the worker's conversation would be vacuously red.
 ///
 /// **The retry is how the precondition is reached**, the way
 /// `tests/e2e/liveness.rs`'s `a_condemned_member_leaves_no_descendant_running`
@@ -338,11 +350,12 @@ fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
             "a condemned member accounted for nothing it had done: {:?}",
             run.kinds()
         );
-        // The side that ran, named by role: a condemned member's in-flight
-        // invocation is killed where it stands, and only POSIX's ask-then-compel
-        // teardown leaves it a moment to report at all — so what an operator is
-        // owed on every platform is the turn that *finished*, and this is that
-        // claim rather than "some pointer arrived".
+        // The side that ran, named by role. Pointers are journalled as each
+        // candidate begins, so the in-flight invocation a condemned member is
+        // killed in has one too — and on Windows that kill is immediate, so its
+        // closing `run` line is never written. What every pointer is owed on
+        // every platform is the instruction its candidate began with, which
+        // oneharness wrote before anything could stop it.
         assert!(
             published
                 .iter()
@@ -352,9 +365,7 @@ fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
         for event in &published {
             let path = resolve(&event["payload"]);
             assert!(
-                read_record(&path, &event["artifacts"][0]["id"])["prompt"]
-                    .as_str()
-                    .is_some_and(|it| !it.is_empty()),
+                !begun_prompt(&path, &event["artifacts"][0]["id"]).is_empty(),
                 "the record a condemned member pointed at carries no conversation"
             );
         }
@@ -724,7 +735,7 @@ fn a_single_sided_members_turn_appends_one_pointer_line_to_the_file_the_environm
 /// produced no report at all, which is where `fallback-advanced` still speaks and
 /// this must not.
 #[test]
-fn a_member_whose_chain_ran_nothing_publishes_no_conversation_to_point_at() {
+fn a_refusing_candidate_still_publishes_its_opening_history() {
     let workspace = Workspace::new();
     workspace.graph(&two_party_graph(
         &fake_harness(),
@@ -739,8 +750,8 @@ fn a_member_whose_chain_ran_nothing_publishes_no_conversation_to_point_at() {
         run.kinds()
     );
     assert!(
-        sessions(&run).is_empty(),
-        "a chain that ran no turn published a conversation: {:?}",
+        !sessions(&run).is_empty(),
+        "a candidate began without publishing its opening: {:?}",
         sessions(&run)
     );
     assert_eq!(run.of_kind("member-died").len(), 1, "{:?}", run.kinds());

@@ -71,6 +71,12 @@ mod scheduler;
 mod selection;
 mod session;
 mod support;
+// llmlint: ignore-block[e2e_not_mocked] Only the paid harness is doubled at
+// ONEHARNESS_BIN_<ID>, the seam AGENTS.md explicitly sanctions. The graph CLI,
+// released oneharness CLI, linked onejudge engine, transcript store and public
+// text renderer all run for real in these journeys.
+mod transcript;
+// llmlint: ignore-end[e2e_not_mocked]
 // llmlint: ignore-block[e2e_not_mocked] the same declaration `mod note;` above
 // carries, for the same reason: the journeys are in tests/e2e/two_party.rs,
 // which declares it itself on the terms every journey file shares — the paid

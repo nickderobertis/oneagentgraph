@@ -535,6 +535,7 @@ fn a_two_party_member_advances_past_a_server_overloaded_codex_candidate() {
         concat!(
             "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
             "server_overloaded_max_retries = 0\n",
+            "[harness.codex]\napp_server = \"per-dispatch\"\n",
         ),
     );
     let overloaded = workspace.write(
@@ -588,8 +589,10 @@ fn a_two_party_member_reports_which_side_stepped_past_which_identity() {
     // shape the doubled harness speaks. A conversation is parsed on both sides,
     // so a journey that landed either of them on a harness whose output the
     // double does not produce would be testing the double, not the chain.
-    const REFUSING_FIRST: &str =
-        "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n";
+    const REFUSING_FIRST: &str = concat!(
+        "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
+        "[harness.codex]\napp_server = \"per-dispatch\"\n",
+    );
     workspace.write("oneharness.toml", REFUSING_FIRST);
     workspace.write("oneharness.judge.toml", REFUSING_FIRST);
     let refusing = workspace.write(
@@ -684,6 +687,11 @@ fn a_two_party_member_reports_which_side_stepped_past_which_identity() {
 /// the new reason, and that is precisely the claim: the payload is proven to
 /// carry it rather than assumed to.
 ///
+/// Every controlled codex chain in this file says `app_server = "per-dispatch"`:
+/// oneharness-core 0.29 pools a controlled turn onto one shared
+/// `codex app-server --listen unix://…` by default, and the double speaks only
+/// the dispatch's own stdio app-server, the shape these journeys are about.
+///
 /// A controlled codex turn is driven over `codex app-server`, which is why the
 /// chain has to be a two-party member's — a single-sided member asks for no
 /// control and would reach codex over `exec`, where no model is ever observed.
@@ -704,7 +712,7 @@ fn a_candidate_that_would_run_under_the_wrong_model_is_stepped_past_as_model_mis
         "oneharness.toml",
         concat!(
             "run_mode = \"fallback\"\nharnesses = [\"codex\", \"claude-code\"]\n",
-            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\n",
+            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\napp_server = \"per-dispatch\"\n",
         ),
     );
     let serving_another = workspace.write(
@@ -762,7 +770,7 @@ fn a_chain_of_one_candidate_serving_the_wrong_model_dies_naming_the_refusal() {
         "oneharness.toml",
         concat!(
             "run_mode = \"fallback\"\nharnesses = [\"codex\"]\n",
-            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\n",
+            "[harness.codex]\nmodel = \"gpt-5.6-sol\"\napp_server = \"per-dispatch\"\n",
         ),
     );
     let serving_another = workspace.write(

@@ -543,14 +543,15 @@ impl Bounds {
 /// holds each against `Cargo.toml`. It is named in prose rather than linked
 /// because it is a `#[cfg(test)]` item, which rustdoc cannot resolve:
 ///
-/// * `oneharness_core` 0.28.4 delivers a streaming run's events to an
+/// * `oneharness_core` 0.29.1 delivers a streaming run's events to an
 ///   `EventSink` as `ActionEvent`s whose `kind` is `tool_call`, `tool_result`,
-///   `message` (the agent's own text, in `output`) or `reasoning`. A `message`
+///   `message` (the agent's own text, in `output`) or `reasoning`; a buffered
+///   run delivers no event, only each candidate's `run_began`. A `message`
 ///   or `reasoning` event is one finished item, never a token delta, so a
 ///   single-sided member that talks as it works stamps this clock at each item
 ///   it finishes — while one spending ten minutes generating a single reply,
 ///   with no tool call and no finished item in between, still hands it nothing.
-/// * `onejudge` 0.20.0 delivers the worker's same normalized events **live**,
+/// * `onejudge` 0.21.0 delivers the worker's same normalized events **live**,
 ///   from inside `respond_observing`, as `Observation::Action` — a tool event as
 ///   `Observation::Tool` first and then as `Action`, the agent's words as
 ///   `Action` alone — so a two-party member's worker turn stamps this clock at
@@ -941,9 +942,10 @@ pub(crate) fn activity(
     // the last of a tool's output, not its startup chatter.
     let bounded = output.map(bound_text);
     TurnActivity {
+        transcript: None,
         kind: kind.to_string(),
         name: name.map(str::to_string),
-        detail,
+        detail: Some(detail),
         truncated,
         output: bounded.as_ref().map(|(text, _)| text.clone()),
         output_truncated: bounded.is_some_and(|(_, cut)| cut),

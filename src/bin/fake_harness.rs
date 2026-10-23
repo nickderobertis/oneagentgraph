@@ -45,6 +45,8 @@
 //! | `fake:project-skill=<name>` | answer with the body of `.claude/skills/<name>/SKILL.md` under the directory this process was started in — the project skill Claude Code discovers from its working directory, so a journey reads off the transcript *which* directory's skills reached the conversation |
 //! | `fake:silent-reply` | take the turn, do the work, and report **no text** — a completed turn that said nothing, whose stdout is still full of wire framing |
 //! | `fake:should-fail` | the agent never finishes, so the run hits its turn cap |
+//! | `fake:activity-fallback=<path>` | refuse once after reasoning, remembered at the path |
+//! | `fake:activity-hold=<path>` | pause after tool activity until the path exists |
 //! | `fake:hold=<path>` | block until `<path>` exists — an observably in-flight turn |
 //! | `fake:park` | *agent's controlled turn only:* do nothing until an interrupt arrives |
 //! | `fake:entered=<path>` | write `<path>` the moment any turn begins |
@@ -976,6 +978,34 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
         }));
         return Answered::Yes;
     }
+    // Reasoning can precede a zero-work refusal. Tool activity cannot: core's
+    // RunWork correctly stops a fallback chain once the candidate used a tool.
+    if let Some(marker) = sentinel_path(prompt, "activity-fallback") {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(marker)
+        {
+            Ok(_) => {
+                emit(&json!({"type":"assistant", "session_id":session,
+                "message":{"role":"assistant","content":[
+                    {"type":"thinking","thinking":"Considering the request before quota refused it."}
+                ]}}));
+                emit(&json!({
+                    "type": "result", "subtype": "success", "terminal_reason": "api_error",
+                    "api_error_status": 429, "result": "",
+                    "usage": {"input_tokens": 0, "output_tokens": 0}, "total_cost_usd": 0.0,
+                    "modelUsage": {},
+                }));
+                std::process::exit(1);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+            Err(error) => {
+                eprintln!("fake-harness: cannot record activity fallback: {error}");
+                return Answered::No;
+            }
+        }
+    }
     // Past the wait and past the abort, so this line is the proof that *this*
     // turn did its work — a turn an interrupt stopped never reaches it.
     if agents_controlled_turn(prompt, interrupted) {
@@ -1042,6 +1072,12 @@ fn turn(prompt: &str, interrupted: Option<&AtomicBool>, shape: Shape) -> Answere
                 "message": {"id": "m2", "type": "message", "role": "assistant", "content": [
                     {"type": "text", "text": NARRATED_CONCLUSION}]},
             }));
+        }
+    }
+    // Hold after publishing tool activity so a consumer can resolve live history.
+    if let Some(path) = sentinel_path(prompt, "activity-hold") {
+        while !path.exists() && !stopped() {
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
     // Resolved before the terminal line rather than inside it: a turn this

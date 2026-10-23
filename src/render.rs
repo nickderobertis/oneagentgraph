@@ -1,14 +1,13 @@
 //! `--output text`: a deterministic rendering of the same events.
 //!
 //! `docs/contract.md` is explicit that text mode is "a deterministic rendering
-//! of the same events, never separate content." So this module is a pure
-//! function of one [`Envelope`], and the text writer is the JSON writer with
-//! this applied — there is no second path that could report something the JSON
-//! does not.
+//! of the same events, never separate content." The text writer renders one
+//! [`Envelope`] at a time and resolves content through its transcript reference.
 
 use serde_json::Value;
 
 use crate::event::{Envelope, EventKind};
+use crate::transcript::{resolve, Content};
 
 /// One envelope, as a line of text.
 #[must_use]
@@ -40,7 +39,13 @@ pub fn line(envelope: &Envelope) -> String {
                 format!("{head}: {}", detail.lines().next_back().unwrap_or_default())
             }
         }
-        EventKind::TurnStarted => turn_head(envelope),
+        EventKind::TurnStarted => {
+            if envelope.payload.contains_key("transcript") {
+                joined(&[turn_head(envelope), field(envelope, "instruction")])
+            } else {
+                turn_head(envelope)
+            }
+        }
         EventKind::TurnActivity => {
             // A result names no tool — it answers one — so its `kind` is what
             // identifies it, and what it returned is where the detail is. Only
@@ -50,13 +55,23 @@ pub fn line(envelope: &Envelope) -> String {
                 name if name.is_empty() => field(envelope, "kind"),
                 name => name,
             };
-            let body = match field(envelope, "detail") {
-                detail if detail.is_empty() => field(envelope, "output")
-                    .lines()
-                    .next_back()
-                    .unwrap_or_default()
-                    .to_string(),
-                detail => detail,
+            let body = if envelope.payload.contains_key("transcript") {
+                let input = field(envelope, "detail");
+                let output = field(envelope, "output");
+                if input == output {
+                    input
+                } else {
+                    joined(&[input, output])
+                }
+            } else {
+                match field(envelope, "detail") {
+                    detail if detail.is_empty() => field(envelope, "output")
+                        .lines()
+                        .next_back()
+                        .unwrap_or_default()
+                        .to_string(),
+                    detail => detail,
+                }
             };
             joined(&[head, body])
         }
@@ -65,7 +80,11 @@ pub fn line(envelope: &Envelope) -> String {
             // a live dispatch reads the event for; the whole of it is on the
             // wire for a consumer that wants it.
             let text = field(envelope, "text");
-            let opening = text.lines().next().unwrap_or_default().to_string();
+            let opening = if envelope.payload.contains_key("transcript") {
+                text
+            } else {
+                text.lines().next().unwrap_or_default().to_string()
+            };
             joined(&[turn_head(envelope), opening])
         }
         EventKind::TurnCompleted => joined(&[turn_head(envelope), usage(envelope)]),
@@ -193,6 +212,19 @@ fn turn_head(envelope: &Envelope) -> String {
 
 /// One payload field, rendered for a person.
 fn field(envelope: &Envelope, name: &str) -> String {
+    let content = match name {
+        "instruction" => Some(Content::Instruction),
+        "text" => Some(Content::Text),
+        "detail" => Some(Content::Input),
+        "output" => Some(Content::Output),
+        _ => None,
+    };
+    if let Some(content) = content {
+        if let Some(reference) = envelope.payload.get("transcript") {
+            return resolve(reference, content)
+                .unwrap_or_else(|(path, why)| format!("transcript unavailable: {path}: {why}"));
+        }
+    }
     match envelope.payload.get(name) {
         Some(Value::String(text)) => text.clone(),
         Some(Value::Null) | None => String::new(),

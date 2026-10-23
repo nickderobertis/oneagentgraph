@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use clap::Parser;
 use oneagentgraph::cli::{
     CancelArgs, Cli, Command, HistoryArgs, HistoryCommand, InterruptArgs, MemberArgs, OutputFormat,
-    PersonaArgs, PersonaCommand, RunArgs, SmokeArgs, SweepArgs, ValidateArgs,
+    PersonaArgs, PersonaCommand, RenderArgs, RunArgs, SmokeArgs, SweepArgs, ValidateArgs,
 };
 use oneagentgraph::config::GraphConfig;
 use oneagentgraph::control::Delivery;
@@ -91,7 +91,27 @@ fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Err
         Command::Smoke(args) => run_smoke(&args, env),
         Command::Sweep(args) => sweep_scratch(&args, env),
         Command::Persona(args) => persona(&args),
+        Command::Render(args) => render(&args),
     }
+}
+
+/// `oneagentgraph render`: a stored journal through the same [`Text`] writer
+/// `run --output text` streams through, so the two views cannot say different
+/// things about one envelope.
+fn render(args: &RenderArgs) -> Result<i32, Error> {
+    use std::io::Write as _;
+    let mut text = Text::new(std::io::stdout().lock());
+    let copied = match &args.file {
+        Some(path) => std::fs::File::open(path)
+            .and_then(|mut journal| std::io::copy(&mut journal, &mut text))
+            .map_err(|err| format!("cannot read {}: {err}", path.display())),
+        None => std::io::copy(&mut std::io::stdin().lock(), &mut text)
+            .map_err(|err| format!("cannot read stdin: {err}")),
+    };
+    copied
+        .and_then(|_| text.flush().map_err(|err| format!("cannot write: {err}")))
+        .map_err(Error::InvalidConfig)?;
+    Ok(EXIT_SUCCESS)
 }
 
 /// The task this invocation names, from whichever flag carries it.
