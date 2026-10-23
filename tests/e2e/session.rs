@@ -90,6 +90,23 @@ fn read_record(path: &Path, id: &Value) -> Value {
         .unwrap_or_else(|| panic!("{} holds no record {id}", path.display()))
 }
 
+/// The instruction a candidate was given, by the rule `docs/contract.md` states
+/// for it: the `run-started` line carrying that `history_id`, its `.prompt`.
+///
+/// Read off that line rather than off a display record because oneharness writes
+/// it as the candidate begins, before anything can stop it: a candidate killed
+/// mid-turn never writes its closing `run` line, and a display reader that
+/// materializes records from those lines shows no record for it at all.
+fn begun_prompt(path: &Path, id: &Value) -> String {
+    std::fs::read_to_string(path)
+        .expect("the session file reads back")
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["type"] == "run-started" && &line["history_id"] == id)
+        .and_then(|line| line["prompt"].as_str().map(str::to_owned))
+        .unwrap_or_else(|| panic!("{} holds no run-started line {id}", path.display()))
+}
+
 /// A settled member publishes one pointer per oneharness invocation, and the
 /// three path fields on it resolve the session file that invocation wrote.
 ///
@@ -333,11 +350,12 @@ fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
             "a condemned member accounted for nothing it had done: {:?}",
             run.kinds()
         );
-        // The side that ran, named by role: a condemned member's in-flight
-        // invocation is killed where it stands, and only POSIX's ask-then-compel
-        // teardown leaves it a moment to report at all — so what an operator is
-        // owed on every platform is the turn that *finished*, and this is that
-        // claim rather than "some pointer arrived".
+        // The side that ran, named by role. Pointers are journalled as each
+        // candidate begins, so the in-flight invocation a condemned member is
+        // killed in has one too — and on Windows that kill is immediate, so its
+        // closing `run` line is never written. What every pointer is owed on
+        // every platform is the instruction its candidate began with, which
+        // oneharness wrote before anything could stop it.
         assert!(
             published
                 .iter()
@@ -347,9 +365,7 @@ fn a_condemned_member_still_names_the_conversations_it_had_before_it_stalled() {
         for event in &published {
             let path = resolve(&event["payload"]);
             assert!(
-                read_record(&path, &event["artifacts"][0]["id"])["prompt"]
-                    .as_str()
-                    .is_some_and(|it| !it.is_empty()),
+                !begun_prompt(&path, &event["artifacts"][0]["id"]).is_empty(),
                 "the record a condemned member pointed at carries no conversation"
             );
         }
