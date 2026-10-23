@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.7.1...v0.8.0) - 2026-10-23
+
+### Added
+
+- [**breaking**] point turn records at the durable transcript instead of copying its content ([#230](https://github.com/nickderobertis/oneagentgraph/pull/230))
+
 ## [0.7.1](https://github.com/nickderobertis/oneagentgraph/compare/v0.7.0...v0.7.1) - 2026-10-22
 
 ### Fixed
