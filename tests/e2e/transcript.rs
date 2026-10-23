@@ -433,10 +433,17 @@ fn command_and_llmlint_judge_messages_keep_their_bounded_copy() {
                 serde_json::to_string(&crate::support::fake_provider()).unwrap()
             )
         } else {
+            // llmlint: ignore-block[e2e_not_mocked] the `llmlint` this graph names is an
+            // *input* — a `bin` the graph supplies — on the terms tests/e2e/support.rs
+            // states for `fake_llmlint` and tests/e2e/panel.rs records for the same
+            // judge: real oneagentgraph composes the judge, and the real onejudge engine
+            // probes, spawns, bounds and reads it exactly as it would `llmlint`. What
+            // this journey proves is this crate's record of that judge's message.
             format!(
                 "kind: llmlint\n      config: ./llmlint.yml\n      bin: {}",
                 serde_json::to_string(&crate::support::fake_llmlint()).unwrap()
             )
+            // llmlint: ignore-end[e2e_not_mocked]
         };
         let graph = two_party_graph(&fake_harness(), NO_ENV)
             .replace("oneharness_config: ./oneharness.judge.toml", &judge);
