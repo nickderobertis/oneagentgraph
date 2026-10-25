@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.8.0...v0.9.0) - 2026-10-25
+
+### Fixed
+
+- *(test)* make the panel worker config journey parse its environment report on Windows ([#240](https://github.com/nickderobertis/oneagentgraph/pull/240))
+- [**breaking**] run a member's worker side under its own config through onejudge's worker_config ([#237](https://github.com/nickderobertis/oneagentgraph/pull/237))
+
 ## [0.8.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.7.1...v0.8.0) - 2026-10-23
 
 ### Added
