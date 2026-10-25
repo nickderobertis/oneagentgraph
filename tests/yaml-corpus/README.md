@@ -40,3 +40,8 @@ through the production parse and `to_value`/`from_value` hop, personas through
   `__SCRATCH__` and `__HOST__`, and the test substitutes its own paths back in
   before reading them. The host's `_template.yaml` was refused as an override,
   so no file was written for it.
+- One line in each `effective/` file was added after that recording, not
+  recorded: the `worker_config` naming the member's stamped `oneharness.toml`,
+  on the block that runs the worker side. It is how a member's worker side is
+  pinned since onejudge 0.22, and it replaced the worker-side `--config` the
+  member's spawn used to append, which no `onejudge.yaml` carried.

@@ -12,18 +12,10 @@
 //!
 //! # How each side is pinned, in a process shared with every other member
 //!
-//! onejudge routes both conversation sides through one `provider.bin`. The judge
-//! side is given `oneharness run --config <judge_config>`; the agent side is
-//! given none on the argv onejudge builds, and would otherwise rely on oneharness
-//! discovering `oneharness.toml` upward from **the directory the harness will run
-//! in** — `oneharness run --cwd`, which onejudge takes from the conversation's own
-//! worktree.
-//!
-//! Both sides are therefore pinned by *file*, never by directory: each side's
-//! resolved config is written into the member's scratch, and the path to the
-//! agent side's rides [`JudgeLaunch::agent_config`] to `crate::judge`, which puts
-//! it on that side's own `--config`. That is what frees
-//! [`JudgeLaunch::worktree`] to be the directory the graph was told to work in.
+//! Both conversation sides are pinned by file: onejudge's `judge_config` and
+//! `worker_config` name the resolved configs in the member's scratch. The worker
+//! layers history defaults and that stamped file alone, without discovering a
+//! project config from the conversation's worktree.
 //!
 //! Naming a worktree, rather than changing directory into it: a process has one working
 //! directory and this one runs every member of the graph at once, so a member
@@ -192,16 +184,8 @@ pub struct JudgeLaunch {
     /// The agent side's resolved oneharness config, pinned by name rather than by
     /// where the harness happens to run.
     ///
-    /// onejudge gives the agent side no config key — only a worktree, from which
-    /// oneharness *discovers* a project `oneharness.toml` — so `crate::judge`
-    /// puts this on that side's own `--config` through onejudge's `SpawnHook`.
-    /// By name and not merely by preference, because this is the *stamped* copy:
-    /// discovery from an operator's own directory finds their `oneharness.toml`,
-    /// whose `harnesses` chain would spend a different subscription than the
-    /// graph named — [`PROCESS_WIDE_HARNESS_ENV`]'s hazard from the other side.
-    ///
-    /// *Proposal to onejudge, which would retire the hook:* an `agent_config` on
-    /// its `kind: oneharness` provider, beside the `judge_config` it takes.
+    /// Composed as onejudge's `worker_config` on the provider running the worker
+    /// side, so project config discovery cannot add routing from the worktree.
     pub agent_config: PathBuf,
     // llmlint: ignore-block[invalid_states_unrepresentable] the handle is a
     // `String` for the reason [`crate::control::Address::session`] records: what
@@ -696,6 +680,7 @@ fn provider_block(
             "kind": "oneharness",
             "bin": context.oneharness_bin,
             "judge_config": path.display().to_string(),
+            "worker_config": context.scratch.join(AGENT_CONFIG_FILE),
             "stream": agent.stream,
             "control": ASK_FOR_CONTROL,
         });
@@ -778,6 +763,7 @@ fn provider_block(
         "kind": "split",
         "skill": {
             "kind": "oneharness",
+            "worker_config": context.scratch.join(AGENT_CONFIG_FILE),
             "bin": context.oneharness_bin,
             "stream": agent.stream,
             "control": ASK_FOR_CONTROL,
@@ -1990,20 +1976,17 @@ mod tests {
 
     /// A single harness judge — spelled as the mapping every graph wrote before
     /// a member could carry a list, or as a list of that one side — composes
-    /// the `kind: oneharness` block it composed at the release before the list
-    /// existed, field for field, with the judge's config at the file it was
-    /// always at.
+    /// one `kind: oneharness` block with both stamped side configs.
     #[test]
-    fn a_single_harness_judge_composes_the_block_it_composed_before_the_list_existed() {
+    fn a_single_harness_judge_composes_both_explicit_side_configs() {
         let dir = workspace();
         let scratch = dir.path().join("scratch");
-        // The block as the release before this one composed it, written out
-        // rather than derived, so a drift in either spelling is a drift from
-        // *that* rather than from the other spelling.
+        // Both graph spellings must compose the same explicit side configs.
         let before = serde_json::json!({
             "kind": "oneharness",
             "bin": "oneharness",
             "judge_config": scratch.join(JUDGE_CONFIG_FILE).display().to_string(),
+            "worker_config": scratch.join(AGENT_CONFIG_FILE),
             "stream": true,
             "control": true,
         });
@@ -2040,6 +2023,10 @@ mod tests {
         )
         .expect("a provider");
         assert_eq!(block["kind"], serde_json::json!("split"));
+        assert_eq!(
+            block["skill"]["worker_config"],
+            serde_json::json!(scratch.join(AGENT_CONFIG_FILE))
+        );
         assert_eq!(block["skill"]["stream"], serde_json::json!(true));
         assert_eq!(block["skill"]["control"], serde_json::json!(true));
         assert_eq!(

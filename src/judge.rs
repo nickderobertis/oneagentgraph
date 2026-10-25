@@ -382,7 +382,6 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         Ok(plan) => {
             let plan = plan.with_spawn_hook(Arc::new(MemberSpawn {
                 group: Arc::clone(&group),
-                agent_config: launch.agent_config.clone(),
             }));
             // Which side of this conversation is live is a fact only the engine
             // driving it has, so the routing is onejudge's rather than this
@@ -845,38 +844,19 @@ fn terminal_refusal(answer: &Answer) -> crate::note::Undelivered {
     }
 }
 
-/// Everything this crate has to do to a process onejudge is about to start:
-/// place it in this member's [`crate::scratch::Group`], and — for the agent side
-/// only — name the config that side runs under.
-///
-/// **The group** is what `cancel --kill` and the reap reach a member's tree
-/// through, and in-process the `oneharness run` for each side is spawned by this
-/// process rather than into a group of its own. One hook for both sides on
-/// purpose: onejudge installs it on both backends of a `split`, so one
-/// termination ends the pair.
-///
-/// **The config** is why the graph's `--dir` can reach this member's harness —
-/// see [`crate::invoke::JudgeLaunch::agent_config`], including the upstream key
-/// that would retire the arm. Appending is safe in both directions: oneharness
-/// takes the last `--config` it is given, so a future onejudge that passes one is
-/// overridden rather than collided with, and only `respond` is touched — a judge
-/// side and a `judge: {command: [...]}` provider stay byte-identical.
+/// Place every process onejudge starts in this member's group, including both
+/// backends of a split, so cancellation and reaping reach the whole member.
 struct MemberSpawn {
     /// The group every process onejudge starts for this member joins.
     group: Arc<crate::scratch::Group>,
-    /// The stamped config the **agent** side runs under.
-    agent_config: PathBuf,
 }
 
 impl onejudge::SpawnHook for MemberSpawn {
     fn spawning(
         &self,
         command: &mut std::process::Command,
-        context: &onejudge::SpawnContext<'_>,
+        _context: &onejudge::SpawnContext<'_>,
     ) -> std::io::Result<()> {
-        if context.role == onejudge::TelemetryRole::Agent {
-            command.arg("--config").arg(&self.agent_config);
-        }
         self.group.prepare(command)
     }
 
@@ -902,7 +882,7 @@ impl onejudge::SpawnHook for MemberSpawn {
 /// working directory.
 ///
 /// What it no longer has to carry is the agent side's config: that rides
-/// [`MemberSpawn`] to the same side's `--config`, which is what let this become
+/// the provider's `worker_config`, which lets this remain
 /// the operator's directory rather than the member's scratch.
 fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
     let text = std::fs::read_to_string(&launch.config)
@@ -1859,7 +1839,7 @@ mod tests {
     /// This is what replaces changing directory: the directory onejudge takes
     /// from the conversation is the one it puts on the agent side's
     /// `oneharness run --cwd`, so it is where the member's harness really works.
-    /// What no longer rides it is the agent side's config — see [`MemberSpawn`].
+    /// What no longer rides it is the agent side's config — see the provider's `worker_config`.
     #[test]
     fn a_member_s_conversation_is_anchored_to_its_own_worktree() {
         let (dir, launch) = workspace(EFFECTIVE);

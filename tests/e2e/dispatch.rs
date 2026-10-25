@@ -575,7 +575,7 @@ fn a_single_sided_member_runs_its_own_job_beside_one_that_runs_the_graphs() {
 /// member to whatever config sits above the operator's directory. The pin is
 /// asserted against a decoy — a second, valid `oneharness.toml` in the directory
 /// the member now works in, naming a different approval mode, which oneharness
-/// spells on the harness's own argv. Take `MemberSpawn`'s `--config` arm out and
+/// spells on the harness's own argv. Remove the provider's `worker_config` and
 /// this half reddens while the directory half stays green.
 #[test]
 fn a_two_party_members_harness_runs_in_the_directory_the_graph_was_given() {

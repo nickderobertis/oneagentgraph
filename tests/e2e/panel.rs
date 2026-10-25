@@ -813,6 +813,32 @@ fn a_composed_key_in_either_settings_is_refused_by_both_verbs_naming_it() {
     let workspace = Workspace::new();
     for (graph, expected) in [
         (
+            settings_graph(
+                "    judge_settings: {worker_config: ./elsewhere.toml}\n",
+                "",
+            ),
+            "`judge_settings` names `worker_config`",
+        ),
+        (
+            settings_graph("", "        settings: {worker_config: ./elsewhere.toml}\n"),
+            "judge entry 1: `settings` names `worker_config`",
+        ),
+        (
+            graph_with(
+                concat!(
+                    "version: 10\nname: node-scope\nenv: {}\n",
+                    "members:\n  worker:\n    kind: onejudge\n",
+                    "    base_config: ./base.yaml\n",
+                    "    agent: {oneharness_config: ./oneharness.toml}\n",
+                    "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+                    "      settings: {worker_config: ./elsewhere.toml}\n",
+                    "    mode: bypass\n",
+                ),
+                &[(FAKE_HARNESS_KEY, fake_harness())],
+            ),
+            "judge entry 1: `settings` names `worker_config`",
+        ),
+        (
             settings_graph("    judge_settings: {judges: []}\n", ""),
             "`judge_settings` names `judges`",
         ),
