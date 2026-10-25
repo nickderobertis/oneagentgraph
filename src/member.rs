@@ -551,7 +551,7 @@ impl Bounds {
 ///   single-sided member that talks as it works stamps this clock at each item
 ///   it finishes — while one spending ten minutes generating a single reply,
 ///   with no tool call and no finished item in between, still hands it nothing.
-/// * `onejudge` 0.21.0 delivers the worker's same normalized events **live**,
+/// * `onejudge` 0.22.0 delivers the worker's same normalized events **live**,
 ///   from inside `respond_observing`, as `Observation::Action` — a tool event as
 ///   `Observation::Tool` first and then as `Action`, the agent's words as
 ///   `Action` alone — so a two-party member's worker turn stamps this clock at

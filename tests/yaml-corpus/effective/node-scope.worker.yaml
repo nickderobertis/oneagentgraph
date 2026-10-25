@@ -2,6 +2,7 @@ provider:
   kind: oneharness
   bin: oneharness
   judge_config: __SCRATCH__/node-scope.worker/oneharness.judge.toml
+  worker_config: __SCRATCH__/node-scope.worker/oneharness.toml
   stream: true
   control: true
 system_prompt: |-

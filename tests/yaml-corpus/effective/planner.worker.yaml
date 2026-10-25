@@ -3,6 +3,7 @@ provider:
   skill:
     kind: oneharness
     bin: oneharness
+    worker_config: __SCRATCH__/planner.worker/oneharness.toml
     stream: true
     control: true
   judges:
