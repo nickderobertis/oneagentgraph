@@ -1546,6 +1546,11 @@ fn record_launch() -> Option<usize> {
 }
 
 /// Append one line to the path a sentinel named, when it named a usable one.
+///
+/// The line goes out in a single append, newline included. Concurrent launches
+/// share these files — a panel's judges run at once — and `writeln!` with an
+/// argument issues one write for the text and another for the newline, so a
+/// second launch's record could land between them and splice two lines into one.
 fn record(prompt: &str, key: &str, line: &str) {
     let Some(path) = sentinel_path(prompt, key) else {
         return;
@@ -1555,7 +1560,9 @@ fn record(prompt: &str, key: &str, line: &str) {
         .append(true)
         .open(&path)
     {
-        let _ = writeln!(file, "{}", line.replace('\n', "\\n"));
+        let mut entry = line.replace('\n', "\\n");
+        entry.push('\n');
+        let _ = file.write_all(entry.as_bytes());
     }
 }
 
