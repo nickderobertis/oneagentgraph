@@ -553,6 +553,23 @@ pub fn fake_harness() -> String {
     env!("CARGO_BIN_EXE_oneagentgraph-fake-harness").to_string()
 }
 
+/// Every line a `fake:record-*` sentinel appended, each parsed as the one JSON
+/// document a single launch of the double wrote.
+///
+/// Several launches append to the same file at once — a panel's judges run
+/// concurrently — so a line that is not one whole document is two launches'
+/// records spliced together, and the panic names it.
+pub fn recorded_documents(records: &str) -> Vec<Value> {
+    records
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line).unwrap_or_else(|error| {
+                panic!("recorded line {line:?} is not one document: {error}")
+            })
+        })
+        .collect()
+}
+
 /// The compiled onejudge `CommandProvider` double.
 pub fn fake_provider() -> String {
     env!("CARGO_BIN_EXE_oneagentgraph-fake-provider").to_string()

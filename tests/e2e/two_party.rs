@@ -30,8 +30,8 @@
 use std::path::{Path, PathBuf};
 
 use crate::support::{
-    fake_harness, graph_with, Run, Workspace, FAKE_HARNESS_KEY, UNREACHABLE_CHAIN,
-    UNREACHABLE_HARNESS_KEY,
+    fake_harness, graph_with, recorded_documents, Run, Workspace, FAKE_HARNESS_KEY,
+    UNREACHABLE_CHAIN, UNREACHABLE_HARNESS_KEY,
 };
 
 /// Where Claude Code discovers a project skill from its working directory —
@@ -1346,10 +1346,7 @@ fn worker_config_is_exclusive(panel: bool, paced: bool, repository_root: bool) {
         "the worker completed no turn"
     );
     let records = std::fs::read_to_string(recorded).expect("harness environment");
-    let environments: Vec<serde_json::Value> = records
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("environment JSON"))
-        .collect();
+    let environments = recorded_documents(&records);
     assert!(
         environments
             .iter()
@@ -1375,4 +1372,50 @@ fn panel_worker_ignores_worktree_config() {
 #[test]
 fn node_worker_ignores_repository_root_config() {
     worker_config_is_exclusive(false, false, true);
+}
+
+/// Launches that record at the same moment each leave one whole line.
+///
+/// A panel's judges run concurrently and append to the file
+/// `panel_worker_ignores_worktree_config` reads, so a record written in more
+/// than one append can have another launch's record land inside it — the
+/// spliced line Windows CI failed that journey on. Many launches at once make
+/// that overlap a certainty here rather than a scheduling accident.
+#[test]
+fn concurrent_records_each_stay_one_line() {
+    const LAUNCHES: usize = 64;
+    let workspace = Workspace::new();
+    let recorded = workspace.at("routing.jsonl");
+    let prompt = format!(
+        "fake:complete-now fake:record-env={} complete the task",
+        recorded.display()
+    );
+    let launches: Vec<std::process::Child> = (0..LAUNCHES)
+        .map(|launch| {
+            std::process::Command::new(fake_harness())
+                .args(["-p", &prompt])
+                .env("ONEAGENTGRAPH_TEST_LAUNCH", launch.to_string())
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("the double starts")
+        })
+        .collect();
+    for mut launch in launches {
+        assert!(launch.wait().expect("the double exits").success());
+    }
+    let records = std::fs::read_to_string(recorded).expect("harness environment");
+    let launched: std::collections::BTreeSet<String> = recorded_documents(&records)
+        .iter()
+        .map(|env| {
+            env["ONEAGENTGRAPH_TEST_LAUNCH"]
+                .as_str()
+                .expect("launch")
+                .to_string()
+        })
+        .collect();
+    let expected: std::collections::BTreeSet<String> =
+        (0..LAUNCHES).map(|launch| launch.to_string()).collect();
+    assert_eq!(launched, expected, "{records}");
 }
