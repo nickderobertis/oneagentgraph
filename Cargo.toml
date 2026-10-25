@@ -460,7 +460,9 @@ test-doubles = []
 #      translation reaches this graph through onejudge.
 # 0.21.0 exposes HistoryBegun before candidate activity, so journal references
 # are resolvable at emission rather than reconstructed after settlement.
-onejudge = { version = "0.21.0", features = ["cli"] }
+# 0.22.0 brings worker_config: the worker layers its stamped config without
+# discovering project routing from the member worktree.
+onejudge = { version = "0.22.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the

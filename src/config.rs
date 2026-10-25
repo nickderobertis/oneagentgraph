@@ -728,6 +728,7 @@ pub const JUDGE_SETTINGS_COMPOSED: &[&str] = &[
     "judges",
     "bin",
     "judge_config",
+    "worker_config",
     "stream",
     "control",
 ];
@@ -740,6 +741,7 @@ pub const JUDGE_ENTRY_COMPOSED: &[&str] = &[
     "kind",
     "bin",
     "judge_config",
+    "worker_config",
     "config",
     "command",
     "label",

@@ -1282,3 +1282,97 @@ fn a_two_party_schedule_is_gated_and_ruled_by_both_verbs_before_any_member_is_bu
         &["pre_turn"],
     );
 }
+
+/// A worktree's unrelated routing must neither supply environment values nor
+/// demand secrets from a member whose routing is explicitly configured.
+fn worker_config_is_exclusive(panel: bool, paced: bool, repository_root: bool) {
+    let workspace = Workspace::new();
+    assert!(std::env::var_os("ONEAGENTGRAPH_TEST_ABSENT_SECRET").is_none());
+    let worktree = workspace.dir().join("repository");
+    std::fs::create_dir_all(&worktree).expect("worktree");
+    if repository_root {
+        let initialized = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&worktree)
+            .output()
+            .expect("initialize the worker repository");
+        assert!(initialized.status.success(), "{initialized:?}");
+    }
+    std::fs::write(
+        worktree.join("oneharness.toml"),
+        concat!(
+            "harnesses = [\"claude-code:unrelated\"]\n",
+            "[env]\nONEAGENTGRAPH_TEST_ROUTING = \"worktree\"\n",
+            "[harness.claude-code.variant.unrelated.env]\n",
+            "ONEAGENTGRAPH_TEST_UNRELATED = \"worktree-only\"\n",
+            "[harness.claude-code.variant.unrelated.env_from]\n",
+            "UNRELATED_SECRET = \"ONEAGENTGRAPH_TEST_ABSENT_SECRET\"\n",
+        ),
+    )
+    .expect("unrelated project config");
+    workspace.write(
+        "member.toml",
+        concat!(
+            "harnesses = [\"claude-code\"]\n",
+            "[env]\nONEAGENTGRAPH_TEST_ROUTING = \"member\"\n",
+        ),
+    );
+    let mut document =
+        graph(&workspace, Some("repository")).replace("./oneharness.toml", "./member.toml");
+    if panel {
+        // A two-harness panel exercises the split's worker provider.
+        let mut value: serde_json::Value = oneagentgraph::yaml::from_str(&document).expect("graph");
+        value["members"]["worker"]["judge"] = serde_json::json!([
+            {"oneharness_config": "./oneharness.judge.toml", "label": "first"},
+            {"oneharness_config": "./oneharness.judge.toml", "label": "second"}
+        ]);
+        document = oneagentgraph::yaml::to_string(&value).expect("panel graph");
+    }
+    if paced {
+        let mut value: serde_json::Value = oneagentgraph::yaml::from_str(&document).expect("graph");
+        value["members"]["worker"]["schedule"] = serde_json::json!({"every": 60, "start_after": 0});
+        value["members"]["worker"]["background"] = serde_json::json!(false);
+        document = oneagentgraph::yaml::to_string(&value).expect("paced graph");
+    }
+    workspace.graph(&document);
+    let recorded = workspace.at("routing.jsonl");
+    let run = workspace.run_task(&format!(
+        "fake:complete-now fake:record-env={} complete the task",
+        recorded.display()
+    ));
+    run.expect_code(0);
+    assert!(
+        !agent_messages(&run).is_empty(),
+        "the worker completed no turn"
+    );
+    let records = std::fs::read_to_string(recorded).expect("harness environment");
+    let environments: Vec<serde_json::Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("environment JSON"))
+        .collect();
+    assert!(
+        environments
+            .iter()
+            .any(|env| env["ONEAGENTGRAPH_TEST_ROUTING"] == "member"),
+        "{records}"
+    );
+    assert!(
+        !records.contains("worktree"),
+        "project routing leaked: {records}"
+    );
+}
+
+#[test]
+fn paced_foreground_worker_ignores_worktree_config() {
+    worker_config_is_exclusive(false, true, false);
+}
+
+#[test]
+fn panel_worker_ignores_worktree_config() {
+    worker_config_is_exclusive(true, true, false);
+}
+
+#[test]
+fn node_worker_ignores_repository_root_config() {
+    worker_config_is_exclusive(false, false, true);
+}
