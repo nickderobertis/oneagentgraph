@@ -729,27 +729,102 @@ mod platform {
         None
     }
 
-    /// Every process whose environment carries `stamp`, read from `/proc`.
-    #[cfg(target_os = "linux")]
+    /// Read independently twice: enumeration, exec-time argument reads and
+    /// identity reads can each miss a live process for one look. No membership
+    /// survives this call, and only a successfully read start token is returned.
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     fn enumerate(prefix: &str, stamp: &str) -> Vec<ProcessIdentity> {
         let mut found = Vec::new();
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return found;
-        };
-        for entry in entries.flatten() {
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<i32>() else {
-                continue;
-            };
-            let Ok(environ) = std::fs::read(entry.path().join("environ")) else {
-                continue;
-            };
-            if carries(&environ, prefix, stamp) {
-                if let Some(start_token) = start_token(pid) {
-                    found.push(ProcessIdentity { pid, start_token });
+        for _ in 0..2 {
+            for pid in read_pids() {
+                let Some(block) = read_args(pid) else {
+                    continue;
+                };
+                if carries(&block, prefix, stamp) {
+                    if let Some(start_token) = read_start_token(pid) {
+                        found.push(ProcessIdentity { pid, start_token });
+                    }
                 }
             }
         }
+        found.sort();
+        found.dedup();
         found
+    }
+
+    #[cfg(target_os = "linux")]
+    fn all_pids() -> Vec<i32> {
+        std::fs::read_dir("/proc")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_string_lossy().parse().ok())
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn process_args(pid: i32) -> Option<Vec<u8>> {
+        std::fs::read(format!("/proc/{pid}/environ")).ok()
+    }
+
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn read_pids() -> Vec<i32> {
+        let pids = all_pids();
+        #[cfg(test)]
+        let pids = pids
+            .into_iter()
+            .filter(|pid| !miss(*pid, Miss::Enumeration))
+            .collect();
+        pids
+    }
+
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn read_args(pid: i32) -> Option<Vec<u8>> {
+        #[cfg(test)]
+        if miss(pid, Miss::Arguments) {
+            return None;
+        }
+        process_args(pid)
+    }
+
+    #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+    fn read_start_token(pid: i32) -> Option<u64> {
+        #[cfg(test)]
+        if miss(pid, Miss::StartToken) {
+            return None;
+        }
+        start_token(pid)
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+    #[derive(Clone, Copy, PartialEq)]
+    enum Miss {
+        Arguments,
+        StartToken,
+        Enumeration,
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+    std::thread_local! {
+        static MISS: std::cell::Cell<Option<(i32, Miss)>> = const { std::cell::Cell::new(None) };
+        static ON_MISS: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+
+    #[cfg(all(test, any(target_os = "linux", target_vendor = "apple")))]
+    fn miss(pid: i32, kind: Miss) -> bool {
+        MISS.with(|slot| {
+            if slot.get() == Some((pid, kind)) {
+                slot.set(None);
+                ON_MISS.with(|callback| {
+                    if let Some(exit) = callback.borrow_mut().take() {
+                        exit();
+                    }
+                });
+                true
+            } else {
+                false
+            }
+        })
     }
 
     /// The kernel's start token for `pid`, from `libproc`: the wall-clock time
@@ -785,30 +860,6 @@ mod platform {
                 .saturating_mul(1_000_000)
                 .saturating_add(info.pbi_start_tvusec),
         )
-    }
-
-    /// Every process whose arguments-and-environment block carries `stamp`.
-    ///
-    /// Darwin exposes that block as one `KERN_PROCARGS2` buffer of
-    /// null-separated strings rather than as a file per process. The whole
-    /// buffer is scanned rather than parsed into argv and environ: the only
-    /// thing being looked for is a [`super::SCRATCH_ENV`] assignment, which this
-    /// crate only ever puts in an environment, and splitting the two halves
-    /// correctly means replaying a layout that has no stable contract.
-    #[cfg(target_vendor = "apple")]
-    fn enumerate(prefix: &str, stamp: &str) -> Vec<ProcessIdentity> {
-        let mut found = Vec::new();
-        for pid in all_pids() {
-            let Some(block) = process_args(pid) else {
-                continue;
-            };
-            if carries(&block, prefix, stamp) {
-                if let Some(start_token) = start_token(pid) {
-                    found.push(ProcessIdentity { pid, start_token });
-                }
-            }
-        }
-        found
     }
 
     /// Every pid on the host, as `libproc` reports them.
@@ -1027,6 +1078,124 @@ mod platform {
 
         use super::{at_or_below, terminate};
         use crate::scratch::{Ask, GRACE};
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        struct Worker(std::process::Child);
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        impl Worker {
+            fn spawn(scratch: &std::path::Path) -> Self {
+                Self(
+                    std::process::Command::new("sh")
+                        .args(["-c", "while :; do :; done"])
+                        .env(crate::scratch::SCRATCH_ENV, scratch)
+                        .spawn()
+                        .expect("spawn stamped worker"),
+                )
+            }
+
+            fn exit(&mut self) {
+                self.0.kill().expect("kill worker");
+                self.0.wait().expect("reap worker");
+            }
+        }
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        impl Drop for Worker {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        fn transient_miss(kind: super::Miss) {
+            let scratch = tempfile::tempdir().unwrap();
+            let worker = std::rc::Rc::new(std::cell::RefCell::new(Worker::spawn(scratch.path())));
+            let pid = i32::try_from(worker.borrow().0.id()).unwrap();
+            // Wait for exec to install the stamp before injecting the read miss.
+            let deadline = Instant::now() + std::time::Duration::from_secs(5);
+            while !super::stamped_for(scratch.path().to_str().unwrap())
+                .iter()
+                .any(|identity| identity.pid == pid)
+            {
+                assert!(Instant::now() < deadline, "worker never became visible");
+                std::thread::yield_now();
+            }
+            super::MISS.with(|slot| slot.set(Some((pid, kind))));
+            let found = super::stamped_for(scratch.path().to_str().unwrap());
+            assert!(
+                found.iter().any(|identity| identity.pid == pid),
+                "a single read miss dropped the live worker: {found:?}"
+            );
+            super::MISS.with(|slot| assert!(slot.get().is_none(), "miss was not exercised"));
+            let exiting = std::rc::Rc::clone(&worker);
+            super::ON_MISS.with(|callback| {
+                *callback.borrow_mut() = Some(Box::new(move || exiting.borrow_mut().exit()));
+            });
+            super::MISS.with(|slot| slot.set(Some((pid, kind))));
+            assert!(
+                super::stamped_for(scratch.path().to_str().unwrap()).is_empty(),
+                "an exited worker remained visible"
+            );
+            super::MISS.with(|slot| assert!(slot.get().is_none(), "exit miss was not exercised"));
+            super::ON_MISS.with(|callback| assert!(callback.borrow().is_none()));
+        }
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        #[test]
+        fn transient_arguments_miss_keeps_live_worker_but_not_exited_worker() {
+            transient_miss(super::Miss::Arguments);
+        }
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        #[test]
+        fn transient_start_token_miss_keeps_live_worker_but_not_exited_worker() {
+            transient_miss(super::Miss::StartToken);
+        }
+
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        #[test]
+        fn transient_enumeration_miss_keeps_live_worker_but_not_exited_worker() {
+            transient_miss(super::Miss::Enumeration);
+        }
+
+        /// Exercise the actual watchdog and kernel CPU accounting together. Only
+        /// individual reads are withheld; neither membership nor work is faked.
+        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
+        #[test]
+        fn activity_rule_reads_through_transient_misses_until_worker_exits() {
+            use std::time::Duration;
+            let scratch = tempfile::tempdir().unwrap();
+            let mut worker = Worker::spawn(scratch.path());
+            let pid = i32::try_from(worker.0.id()).unwrap();
+            let started = Instant::now();
+            let mut rule = crate::member::Stall::new(Duration::from_secs(2), started);
+            for kind in [
+                super::Miss::Arguments,
+                super::Miss::StartToken,
+                super::Miss::Enumeration,
+            ] {
+                std::thread::sleep(Duration::from_millis(1100));
+                super::MISS.with(|slot| slot.set(Some((pid, kind))));
+                assert!(!rule.condemns(0, scratch.path()), "busy worker condemned");
+                super::MISS.with(|slot| assert!(slot.get().is_none(), "rule did not read"));
+                super::MISS.with(|slot| slot.set(Some((pid, kind))));
+                assert!(
+                    crate::scratch::work(scratch.path()).is_some(),
+                    "live tree lost"
+                );
+                super::MISS.with(|slot| assert!(slot.get().is_none()));
+            }
+            worker.exit();
+            assert!(
+                crate::scratch::work(scratch.path()).is_none(),
+                "exited tree retained"
+            );
+            // No tree is an unfound reading, never an idle verdict.
+            std::thread::sleep(Duration::from_millis(750));
+            assert!(!rule.condemns(0, scratch.path()));
+        }
 
         /// One grace period, whatever the caller asked first: the `SIGTERM` this
         /// makes is already the ask, so a cancelled teardown waits exactly as
