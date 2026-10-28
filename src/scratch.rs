@@ -770,8 +770,15 @@ mod platform {
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     fn read_pids() -> Vec<i32> {
         let pids = all_pids();
+        #[cfg(feature = "test-doubles")]
+        let pids: Vec<i32> = pids
+            .into_iter()
+            .filter(|pid| {
+                !super::activity_fixture::miss(*pid, super::activity_fixture::Kind::Enumeration)
+            })
+            .collect();
         #[cfg(test)]
-        let pids = pids
+        let pids: Vec<i32> = pids
             .into_iter()
             .filter(|pid| !miss(*pid, Miss::Enumeration))
             .collect();
@@ -780,6 +787,13 @@ mod platform {
 
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     fn read_args(pid: i32) -> Option<Vec<u8>> {
+        #[cfg(all(
+            feature = "test-doubles",
+            any(target_os = "linux", target_vendor = "apple")
+        ))]
+        if super::activity_fixture::miss(pid, super::activity_fixture::Kind::Arguments) {
+            return None;
+        }
         #[cfg(test)]
         if miss(pid, Miss::Arguments) {
             return None;
@@ -789,6 +803,13 @@ mod platform {
 
     #[cfg(any(target_os = "linux", target_vendor = "apple"))]
     fn read_start_token(pid: i32) -> Option<u64> {
+        #[cfg(all(
+            feature = "test-doubles",
+            any(target_os = "linux", target_vendor = "apple")
+        ))]
+        if super::activity_fixture::miss(pid, super::activity_fixture::Kind::StartToken) {
+            return None;
+        }
         #[cfg(test)]
         if miss(pid, Miss::StartToken) {
             return None;
@@ -1158,43 +1179,6 @@ mod platform {
         #[test]
         fn transient_enumeration_miss_keeps_live_worker_but_not_exited_worker() {
             transient_miss(super::Miss::Enumeration);
-        }
-
-        /// Exercise the actual watchdog and kernel CPU accounting together. Only
-        /// individual reads are withheld; neither membership nor work is faked.
-        #[cfg(any(target_os = "linux", target_vendor = "apple"))]
-        #[test]
-        fn activity_rule_reads_through_transient_misses_until_worker_exits() {
-            use std::time::Duration;
-            let scratch = tempfile::tempdir().unwrap();
-            let mut worker = Worker::spawn(scratch.path());
-            let pid = i32::try_from(worker.0.id()).unwrap();
-            let started = Instant::now();
-            let mut rule = crate::member::Stall::new(Duration::from_secs(2), started);
-            for kind in [
-                super::Miss::Arguments,
-                super::Miss::StartToken,
-                super::Miss::Enumeration,
-            ] {
-                std::thread::sleep(Duration::from_millis(1100));
-                super::MISS.with(|slot| slot.set(Some((pid, kind))));
-                assert!(!rule.condemns(0, scratch.path()), "busy worker condemned");
-                super::MISS.with(|slot| assert!(slot.get().is_none(), "rule did not read"));
-                super::MISS.with(|slot| slot.set(Some((pid, kind))));
-                assert!(
-                    crate::scratch::work(scratch.path()).is_some(),
-                    "live tree lost"
-                );
-                super::MISS.with(|slot| assert!(slot.get().is_none()));
-            }
-            worker.exit();
-            assert!(
-                crate::scratch::work(scratch.path()).is_none(),
-                "exited tree retained"
-            );
-            // No tree is an unfound reading, never an idle verdict.
-            std::thread::sleep(Duration::from_millis(750));
-            assert!(!rule.condemns(0, scratch.path()));
         }
 
         /// One grace period, whatever the caller asked first: the `SIGTERM` this
@@ -2440,6 +2424,103 @@ impl Work {
     }
 }
 
+/// A read-boundary fixture for the subprocess liveness journey. It withholds
+/// one kernel read and records the very observation returned to Stall, rather
+/// than taking a second observation that might hide a lost tree. Like the turn
+/// boundary fixtures, it exists only in the suite's non-default build.
+#[cfg(all(
+    feature = "test-doubles",
+    any(target_os = "linux", target_vendor = "apple")
+))]
+pub(crate) mod activity_fixture {
+    use super::ProcessIdentity;
+
+    #[derive(Clone, Copy, PartialEq, serde::Deserialize, serde::Serialize)]
+    #[serde(rename_all = "kebab-case")]
+    pub(crate) enum Kind {
+        Arguments,
+        StartToken,
+        Enumeration,
+    }
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct Request {
+        pid: i32,
+        miss: Kind,
+    }
+
+    struct Reading {
+        request: Request,
+        path: std::path::PathBuf,
+        injected: bool,
+        visible: bool,
+    }
+
+    std::thread_local! {
+        static READING: std::cell::RefCell<Option<Reading>> = const { std::cell::RefCell::new(None) };
+    }
+
+    pub(crate) fn begin() {
+        let request = std::env::var_os("ONEAGENTGRAPH_FIXTURE_ACTIVITY_READ")
+            .map(std::path::PathBuf::from)
+            .and_then(|path| {
+                let request: Request = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+                if request.pid <= 0 {
+                    return None;
+                }
+                std::fs::remove_file(&path).ok()?;
+                Some(Reading {
+                    request,
+                    path,
+                    injected: false,
+                    visible: false,
+                })
+            });
+        READING.with(|slot| *slot.borrow_mut() = request);
+    }
+
+    pub(crate) fn miss(pid: i32, kind: Kind) -> bool {
+        READING.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            let Some(reading) = slot.as_mut() else {
+                return false;
+            };
+            if !reading.injected && reading.request.pid == pid && reading.request.miss == kind {
+                reading.injected = true;
+                true
+            } else {
+                false
+            }
+        })
+    }
+
+    pub(crate) fn membership(stamped: &[ProcessIdentity]) {
+        READING.with(|slot| {
+            if let Some(reading) = slot.borrow_mut().as_mut() {
+                reading.visible = stamped
+                    .iter()
+                    .any(|identity| identity.pid == reading.request.pid);
+            }
+        });
+    }
+
+    pub(crate) fn end(found: bool) -> std::io::Result<()> {
+        READING.with(|slot| {
+            if let Some(reading) = slot.borrow_mut().take() {
+                let report = serde_json::json!({
+                    "pid": reading.request.pid, "miss": reading.request.miss,
+                    "injected": reading.injected, "visible": reading.visible, "found": found,
+                });
+                let pending = reading.path.with_extension("pending");
+                std::fs::write(&pending, report.to_string())?;
+                std::fs::rename(pending, reading.path.with_extension("observed"))?;
+            }
+            Ok(())
+        })
+    }
+}
+
 /// Observe the work under `scratch` as it stands right now — or `None`, when
 /// there is no tree there to ask.
 ///
@@ -2471,6 +2552,11 @@ impl Work {
 #[must_use]
 pub fn work(scratch: &Path) -> Option<Work> {
     let stamped = stamped_for(&scratch.display().to_string());
+    #[cfg(all(
+        feature = "test-doubles",
+        any(target_os = "linux", target_vendor = "apple")
+    ))]
+    activity_fixture::membership(&stamped);
     if stamped.is_empty() {
         return None;
     }

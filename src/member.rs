@@ -695,7 +695,22 @@ impl Stall {
     ///
     /// `scratch` is the member's own, which is the stamp its tree carries.
     pub fn condemns(&mut self, published: u64, scratch: &Path) -> bool {
-        self.judge(published, Instant::now(), || crate::scratch::work(scratch))
+        self.judge(published, Instant::now(), || {
+            #[cfg(all(
+                feature = "test-doubles",
+                any(target_os = "linux", target_vendor = "apple")
+            ))]
+            crate::scratch::activity_fixture::begin();
+            let reading = crate::scratch::work(scratch);
+            #[cfg(all(
+                feature = "test-doubles",
+                any(target_os = "linux", target_vendor = "apple")
+            ))]
+            if let Err(error) = crate::scratch::activity_fixture::end(reading.is_some()) {
+                eprintln!("activity observation fixture: {error}");
+            }
+            reading
+        })
     }
 
     /// The rule itself: a decision over readings, taking the clock and the

@@ -40,6 +40,126 @@ use crate::support::{
 #[cfg(unix)]
 use crate::support::two_party_graph;
 
+/// The compiled supervisor's own activity observation must retain a real
+/// worker when a single kernel read misses it. The between-turn gate holds the
+/// real conversation with no harness running, so after the worker exits the
+/// same rule must observe an empty tree, rather than another stamped process.
+#[cfg(any(target_os = "linux", target_vendor = "apple"))]
+#[test]
+fn activity_observations_retain_transiently_missed_workers_and_lose_exited_workers() {
+    struct ChildGuard(Option<std::process::Child>);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            if let Some(child) = self.0.as_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+    fn wait_for(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "missing {}",
+                path.display()
+            );
+            std::thread::sleep(POLL);
+        }
+    }
+    fn observe(request: &Path, pid: u32, miss: &str) -> serde_json::Value {
+        let response = request.with_extension("observed");
+        let _ = std::fs::remove_file(&response);
+        let pending = request.with_extension("request");
+        std::fs::write(
+            &pending,
+            serde_json::json!({"pid": pid, "miss": miss}).to_string(),
+        )
+        .unwrap();
+        std::fs::rename(pending, request).unwrap();
+        wait_for(&response);
+        serde_json::from_slice(&std::fs::read(response).unwrap()).unwrap()
+    }
+
+    let workspace = Workspace::new();
+    let gate = workspace.at("between");
+    let request = workspace.at("activity-read");
+    let mut env = bounds("60", "4");
+    env.push((
+        "ONEAGENTGRAPH_FIXTURE_ACTIVITY_READ",
+        request.display().to_string(),
+    ));
+    let task = format!(
+        "fake:should-fail oneagentgraph-fixture:hold-between-turns={}",
+        gate.display()
+    );
+    let mut running = ChildGuard(Some(workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            &task,
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &as_env(&env),
+    )));
+    wait_for(&workspace.at("between.entered"));
+    let scratch = member_scratch(&workspace.state()).expect("member scratch");
+    let mut worker = ChildGuard(Some(
+        std::process::Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .env(oneagentgraph::scratch::SCRATCH_ENV, &scratch)
+            .spawn()
+            .expect("real busy worker"),
+    ));
+    let pid = worker.0.as_ref().unwrap().id();
+    for miss in ["arguments", "start-token", "enumeration"] {
+        let reading = observe(&request, pid, miss);
+        assert_eq!(
+            reading["injected"], true,
+            "fault was not exercised: {reading}"
+        );
+        assert_eq!(
+            reading["visible"], true,
+            "rule lost the live worker: {reading}"
+        );
+        assert_eq!(
+            reading["found"], true,
+            "rule received an Unfound reading: {reading}"
+        );
+        assert!(
+            running.0.as_mut().unwrap().try_wait().unwrap().is_none(),
+            "supervisor exited"
+        );
+    }
+    let child = worker.0.as_mut().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let reading = observe(&request, pid, "enumeration");
+    assert_eq!(
+        reading["visible"], false,
+        "rule retained an exited worker: {reading}"
+    );
+    assert_eq!(
+        reading["found"], false,
+        "rule did not observe the empty tree: {reading}"
+    );
+    std::fs::write(gate, "go").unwrap();
+    let output = running.0.take().unwrap().wait_with_output().unwrap();
+    let run = Run {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
+    run.expect_code(1); // should-fail reaches the real conversation's turn cap.
+    assert!(
+        run.of_kind("member-died").is_empty(),
+        "{:?}",
+        run.of_kind("member-died")
+    );
+}
+
 /// A member that publishes nothing is condemned by the activity watchdog, and
 /// the death says which rule fired and what the process left behind.
 ///
