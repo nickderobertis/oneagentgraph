@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.1](https://github.com/nickderobertis/oneagentgraph/compare/v0.9.0...v0.9.1) - 2026-10-28
+
+### Fixed
+
+- *(scratch)* keep a live process whose arguments could not be read on one look ([#244](https://github.com/nickderobertis/oneagentgraph/pull/244))
+
 ## [0.9.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.8.0...v0.9.0) - 2026-10-25
 
 ### Fixed
