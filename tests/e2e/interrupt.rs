@@ -504,6 +504,7 @@ fn interrupt_reads_a_control_record_again_while_a_replacement_holds_it() {
         .expect("the run recorded its id")
         .to_string();
     let reason = |held: &str| {
+        // llmlint: ignore[tests_mirror_real_usage] this host is Linux, where a rename never refuses a reader, and the window under test is the one a Windows rename opens for an instant: no real filesystem operation here can produce Windows' refusal, and racing a real writer on the Windows leg catches it only some of the time — the flake this journey exists to replace. The lever injects only the refusal, carrying a Windows error code that the production classifier and retry loop decide on unchanged; the verb, the binary, the record and the answer asserted on are all real.
         let interrupted = workspace.run_with(
             &["interrupt", &run_id, "reporter"],
             &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", held)],
@@ -515,14 +516,14 @@ fn interrupt_reads_a_control_record_again_while_a_replacement_holds_it() {
             .to_string()
     };
 
-    let landed = reason("control.json=3");
+    let landed = reason("control.json=3@303");
     assert!(
         landed.contains("opened no controllable turn") && landed.contains("qwen"),
         "{landed}"
     );
     assert!(!landed.contains("recorded no turn control"), "{landed}");
 
-    let held = reason("control.json=1000");
+    let held = reason("control.json=1000@5");
     let file = workspace
         .state()
         .join(&run_id)
@@ -534,6 +535,21 @@ fn interrupt_reads_a_control_record_again_while_a_replacement_holds_it() {
         "{held}"
     );
     assert!(!held.contains("recorded no turn control"), "{held}");
+
+    // A refusal no replacement explains, made by the filesystem itself: a
+    // directory where the record belongs reads as nothing, at once, and is
+    // reported by its file rather than as a turn control never recorded.
+    std::fs::remove_file(&file).expect("the record removes");
+    std::fs::create_dir(&file).expect("a directory in its place");
+    let unreadable = reason("control.json=0@5");
+    assert!(
+        unreadable.contains("does not read") && unreadable.contains(&file.display().to_string()),
+        "{unreadable}"
+    );
+    assert!(
+        !unreadable.contains("recorded no turn control"),
+        "{unreadable}"
+    );
 }
 
 /// A single-sided member on a **Codex** chain keeps its turn on `codex exec`, as

@@ -2334,9 +2334,10 @@ fn reset_timer_reads_a_record_again_while_a_replacement_holds_it() {
         .expect_code(0);
     let id = run_id(&workspace.state()).expect("a run");
 
+    // llmlint: ignore[tests_mirror_real_usage] the window under test is one only a Windows rename opens, which no filesystem operation on this host can produce; the lever injects that refusal alone, with its Windows code, for the production classifier and retry loop to decide on — see the same marker in `tests/e2e/interrupt.rs`.
     let reset = workspace.run_with(
         &["reset-timer", &id, "worker"],
-        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=3")],
+        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=3@32")],
     );
     reset.expect_code(0);
 }
@@ -2351,9 +2352,10 @@ fn reset_timer_refuses_a_record_held_mid_replace_by_its_file() {
     let state = workspace.state();
     let id = run_id(&state).expect("a run");
 
+    // llmlint: ignore[tests_mirror_real_usage] the window under test is one only a Windows rename opens, which no filesystem operation on this host can produce; the lever injects that refusal alone, with its Windows code, for the production classifier and retry loop to decide on — see the same marker in `tests/e2e/interrupt.rs`.
     let reset = workspace.run_with(
         &["reset-timer", &id, "worker"],
-        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=1000")],
+        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=1000@5")],
     );
     reset.expect_code(2);
     let file = state.join(&id).join(RECORD_FILE).display().to_string();

@@ -2097,10 +2097,8 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
 //   name, so a replacement in flight never makes it absent, and a reader that
 //   meets an absent name has met a run or a turn that recorded nothing.
 // - *Mid-replace* — the answers Windows gives an open, or a metadata query, of
-//   a name a rename is replacing at that instant: `ERROR_ACCESS_DENIED` while
-//   the old file is delete-pending under the name, `ERROR_SHARING_VIOLATION`
-//   while the rename holds it, `ERROR_DELETE_PENDING` — see
-//   [`windows_mid_replace`]. Unix answers none of these to a rename, which
+//   a name a rename is replacing at that instant — see [`windows_mid_replace`]
+//   for which. Unix answers none of these to a rename, which
 //   replaces a name in one step even under an open reader. Such a refusal is
 //   **read again**, up to [`REPLACE_READS`] times [`REPLACE_PAUSE`] apart: the
 //   rename it waits out is a single step, so the window closes in far less. One
@@ -2153,73 +2151,113 @@ fn read_once(path: &Path) -> std::io::Result<String> {
 
 /// Whether `err` is the platform telling a reader a replacement is in flight.
 fn mid_replace(err: &std::io::Error) -> bool {
-    #[cfg(feature = "test-doubles")]
-    if mid_replace_fixture::injected(err) {
-        return true;
-    }
-    cfg!(windows) && windows_mid_replace(err.raw_os_error())
+    windows_code(err).is_some_and(windows_mid_replace)
 }
 
+/// The Windows error code `err` carries: the system's own on Windows, and none
+/// anywhere else — except, in the suite's build, the one the
+/// [`mid_replace_fixture`] made a refusal with, on any host.
+fn windows_code(err: &std::io::Error) -> Option<u32> {
+    #[cfg(feature = "test-doubles")]
+    if let Some(code) = mid_replace_fixture::code(err) {
+        return Some(code);
+    }
+    cfg!(windows)
+        .then(|| err.raw_os_error())
+        .flatten()
+        .and_then(|code| u32::try_from(code).ok())
+}
+
+/// `ERROR_ACCESS_DENIED`: an open of a name whose old file is delete-pending.
+const ERROR_ACCESS_DENIED: u32 = 5;
+/// `ERROR_SHARING_VIOLATION`: an open of a name the rename holds.
+const ERROR_SHARING_VIOLATION: u32 = 32;
+/// `ERROR_DELETE_PENDING`: a query of a name whose old file is delete-pending.
+const ERROR_DELETE_PENDING: u32 = 303;
+
 /// Whether a Windows error code is one an open or a metadata query meets on a
-/// name a rename is replacing: `ERROR_ACCESS_DENIED` (5),
-/// `ERROR_SHARING_VIOLATION` (32) and `ERROR_DELETE_PENDING` (303).
+/// name a rename is replacing.
 ///
-/// A pure function of the code, compiled everywhere, so the codes are held by
-/// the suite on every host; only [`mid_replace`] restricts it to Windows, where
-/// those numbers mean these errors.
-const fn windows_mid_replace(code: Option<i32>) -> bool {
-    matches!(code, Some(5 | 32 | 303))
+/// The codes are this module's rather than `windows-sys`'s so this compiles on
+/// every host, where the suite drives it through [`mid_replace_fixture`]; the
+/// Windows leg holds each one to `windows-sys`'s definition.
+const fn windows_mid_replace(code: u32) -> bool {
+    matches!(
+        code,
+        ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_DELETE_PENDING
+    )
 }
 
 /// The suite's lever on the replace-and-read contract: the mid-replace window
 /// that only a Windows rename opens, forced without a clock on any host.
 ///
-/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE=<file name>=<n>` makes this process's
-/// first `n` reads through [`read_whole`] of a record by that file name —
-/// `record.json`, `control.json` — meet the refusal Windows gives a name a
-/// rename is replacing. So a journey drives the very loop a Windows reader
-/// runs, on the one record it names, and a count of [`REPLACE_READS`] or more
-/// drives the refusal that outlasts it. Compiled only under `test-doubles`; no
-/// shipped build reads the variable.
+/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE=<file name>=<n>@<code>` makes this
+/// process's first `n` reads through [`read_whole`] of a record by that file
+/// name — `record.json`, `control.json` — meet a refusal carrying the Windows
+/// error `code`. [`mid_replace`] classifies that code exactly as it classifies
+/// the system's own on Windows, so a journey drives the very loop and the very
+/// classification a Windows reader runs, on the one record it names; a count
+/// of [`REPLACE_READS`] or more drives the refusal that outlasts the loop.
+/// Compiled only under `test-doubles`; no shipped build reads the variable.
 #[cfg(feature = "test-doubles")]
 mod mid_replace_fixture {
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::OnceLock;
 
-    /// The marker an injected refusal carries, so it is classified mid-replace
-    /// on a host whose own codes never are.
+    /// The Windows error code an injected refusal carries.
     #[derive(Debug)]
-    struct Injected;
+    struct Injected(u32);
 
     impl std::fmt::Display for Injected {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("the name is being replaced (oneagentgraph-fixture:mid-replace)")
+            write!(
+                f,
+                "Windows error {} (oneagentgraph-fixture:mid-replace)",
+                self.0
+            )
         }
     }
 
     impl std::error::Error for Injected {}
 
+    /// What a journey asked for: which record, how many reads, which code.
+    struct Request {
+        name: String,
+        count: u64,
+        code: u32,
+    }
+
     /// The refusal this read of `path` is to meet, while the requested count
     /// lasts.
     pub(super) fn refusal(path: &Path) -> Option<std::io::Error> {
-        static REQUESTED: OnceLock<Option<(String, u64)>> = OnceLock::new();
+        static REQUESTED: OnceLock<Option<Request>> = OnceLock::new();
         static MET: AtomicU64 = AtomicU64::new(0);
-        let (name, count) = REQUESTED
+        let request = REQUESTED
             .get_or_init(|| {
                 let request = std::env::var("ONEAGENTGRAPH_FIXTURE_MID_REPLACE").ok()?;
-                let (name, count) = request.rsplit_once('=')?;
-                Some((name.to_string(), count.parse().ok()?))
+                let (name, held) = request.rsplit_once('=')?;
+                let (count, code) = held.split_once('@')?;
+                Some(Request {
+                    name: name.to_string(),
+                    count: count.parse().ok()?,
+                    code: code.parse().ok()?,
+                })
             })
             .as_ref()?;
-        let named = path.file_name().is_some_and(|file| file == name.as_str());
-        (named && MET.fetch_add(1, Ordering::SeqCst) < *count)
-            .then(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, Injected))
+        let named = path
+            .file_name()
+            .is_some_and(|file| file == request.name.as_str());
+        (named && MET.fetch_add(1, Ordering::SeqCst) < request.count).then(|| {
+            std::io::Error::new(std::io::ErrorKind::PermissionDenied, Injected(request.code))
+        })
     }
 
-    /// Whether `err` is one [`refusal`] made.
-    pub(super) fn injected(err: &std::io::Error) -> bool {
-        err.get_ref().is_some_and(|inner| inner.is::<Injected>())
+    /// The code a refusal [`refusal`] made carries.
+    pub(super) fn code(err: &std::io::Error) -> Option<u32> {
+        err.get_ref()?
+            .downcast_ref::<Injected>()
+            .map(|injected| injected.0)
     }
 }
 
@@ -2326,13 +2364,28 @@ mod tests {
     /// mid-replace answers — never an absent name, which is answered at once.
     #[test]
     fn windows_reads_again_only_a_name_mid_replace() {
-        for code in [5, 32, 303] {
-            assert!(windows_mid_replace(Some(code)), "{code}");
+        for code in [
+            ERROR_ACCESS_DENIED,
+            ERROR_SHARING_VIOLATION,
+            ERROR_DELETE_PENDING,
+        ] {
+            assert!(windows_mid_replace(code), "{code}");
         }
-        // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, and an error with no code.
-        for code in [Some(2), Some(3), None] {
-            assert!(!windows_mid_replace(code), "{code:?}");
+        // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND.
+        for code in [2, 3] {
+            assert!(!windows_mid_replace(code), "{code}");
         }
+    }
+
+    /// The codes [`windows_mid_replace`] names are Windows' own, held to
+    /// `windows-sys` on the leg where that crate is linked.
+    #[cfg(windows)]
+    #[test]
+    fn the_mid_replace_codes_are_windows_own() {
+        use windows_sys::Win32::Foundation as win;
+        assert_eq!(ERROR_ACCESS_DENIED, win::ERROR_ACCESS_DENIED);
+        assert_eq!(ERROR_SHARING_VIOLATION, win::ERROR_SHARING_VIOLATION);
+        assert_eq!(ERROR_DELETE_PENDING, win::ERROR_DELETE_PENDING);
     }
 
     /// Off Windows a rename never refuses a reader, so no platform refusal is

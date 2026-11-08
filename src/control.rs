@@ -212,10 +212,8 @@ pub fn read(scratch: &Path) -> Result<Turn, String> {
 /// As [`read`].
 pub fn record(scratch: &Path) -> Result<Record, String> {
     let path = path(scratch);
-    // Absent is the one answer that means no turn control: the writer never
-    // removes a record it is replacing — see the replace-and-read contract over
-    // `crate::run::read_whole` — so anything else that does not read is the
-    // file's, which is named.
+    // Only an absent record is no turn control — `crate::run::read_whole` says
+    // why; anything else that does not read is the file's, which is named.
     let raw = match crate::run::read_whole(&path) {
         Ok(raw) => raw,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {

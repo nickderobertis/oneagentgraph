@@ -45,10 +45,8 @@ pub fn list(state_dir: &Path) -> Vec<Record> {
 /// is no such run, or when its record cannot be read.
 pub fn show(state_dir: &Path, run_id: &str) -> Result<Record, Error> {
     let run_id = RunId::parse(run_id)?;
-    // Absent is the one answer that means no such run: the writer never removes
-    // a record it is replacing, so a replacement in flight is never absent — see
-    // the replace-and-read contract over `crate::run::read_whole`. Anything else
-    // that does not read is the file's, which is named.
+    // Only an absent record is a missing run — `crate::run::read_whole` says
+    // why; anything else that does not read is the file's, which is named.
     read(&state_dir.join(&run_id)).map_err(|unread| match unread {
         Unread::Absent => Error::InvalidConfig(format!(
             "no run {:?} under {}",
