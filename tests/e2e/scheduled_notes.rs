@@ -1979,3 +1979,132 @@ fn matches_between_two_reads_restart_a_clock_once_and_blank_lines_are_not_counte
     assert_eq!(resets[0]["payload"]["cause"]["seq"], 1, "{events:#?}");
     assert!(stderr.contains("skipped 1 line(s)"), "{stderr}");
 }
+
+/// A note's clock starts when its member's wave is reached, not when the graph
+/// does: a span far shorter than the wave ahead of it has not elapsed for a
+/// clock whose member has not been reached, and it is counted whole from there.
+#[test]
+fn a_note_clock_starts_when_its_members_later_wave_is_reached() {
+    const START: i64 = 2;
+    let workspace = Workspace::new();
+    workspace.write("base.yaml", &base_without_done_when(""));
+    let (entered, hold) = (workspace.at("first-entered"), workspace.at("first-hold"));
+    let earlier_wave = format!(
+        concat!(
+            "    deps: [first]\n",
+            "  first:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "    task: 'fake:entered={} fake:hold={} finish the setup'\n",
+        ),
+        entered.display(),
+        hold.display()
+    );
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 0}"),
+        2,
+        &note_entry(NOTE, 3600, START as u64, None),
+        &earlier_wave,
+    ));
+    let child = launch(&workspace, KEEP_GOING, None);
+    until("the earlier wave to be live", || entered.exists());
+
+    // The one wait here is for something not to happen: longer than the span,
+    // so a clock already counting would have fired by now.
+    std::thread::sleep(Duration::from_millis(START as u64 * 1000 + 1000));
+    let during = stream(&workspace);
+    assert!(
+        note_fired(&during, NOTE).is_empty(),
+        "the clock counted through a wave ahead of its member: {during:#?}"
+    );
+
+    release(&hold);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+    let events = stream(&workspace);
+    let fired = note_fired(&events, NOTE);
+    assert_eq!(fired.len(), 1, "{events:#?}");
+    assert_eq!(Ledger::of(&events, NOTE).accepted.len(), 1, "{events:#?}");
+    let reached = of(&events, "member-started", "worker");
+    let waited = gap(reached[0], fired[0]);
+    assert!(
+        (START * 1000 - 100..START * 1000 + 3000).contains(&waited),
+        "the first firing came {waited}ms after the wave was reached, not {START}s"
+    );
+}
+
+/// A `reset_on` match landing while a single-sided firing is live restarts the
+/// interval that firing is followed by, naming the envelope that caused it: the
+/// clock is inside the turn when the match arrives, and reads it on the way out.
+#[test]
+fn a_reset_on_match_during_a_single_sided_firing_restarts_the_next_interval() {
+    const EVERY: i64 = 3;
+    let workspace = Workspace::new();
+    let (entered, hold) = (workspace.at("firing-entered"), workspace.at("firing-hold"));
+    let keep_open = workspace.at("keeper-hold");
+    let schedule = format!("{{every: {EVERY}, start_after: 1, reset_on: {SURFACED}}}");
+    let skeleton = format!(
+        concat!(
+            "version: 11\nname: firing\nenv: {{}}\nmembers:\n",
+            "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  ticker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {schedule}\n",
+        ),
+        schedule = schedule,
+    );
+    workspace.graph(&graph_with(
+        &skeleton,
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.keeper.task".to_string(),
+                format!("fake:hold={} keep the run open", keep_open.display()),
+            ),
+            (
+                "members.ticker.task".to_string(),
+                format!(
+                    "fake:entered={} fake:hold={} write one status update",
+                    entered.display(),
+                    hold.display()
+                ),
+            ),
+        ],
+    ));
+    let followed = workspace.at("pipeline.jsonl");
+    let child = launch(&workspace, "fake:complete-now unused", Some(&followed));
+    until("the firing to be live", || entered.exists());
+    append(&followed, &envelope(9, "pipeline", "planner-surfaced"));
+    // Longer than the follower's tick, so the match has arrived while the turn
+    // is live; nothing on the stream can say so, because the clock is in it.
+    std::thread::sleep(Duration::from_millis(500));
+    let during = stream(&workspace);
+    assert!(
+        of(&during, "cron-reset", "ticker").is_empty(),
+        "the clock read the match mid-turn: {during:#?}"
+    );
+
+    release(&hold);
+    until("the firing after the restarted interval", || {
+        schedule_fired(&stream(&workspace), "ticker").len() >= 2
+    });
+    release(&keep_open);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let events = stream(&workspace);
+    let resets = of(&events, "cron-reset", "ticker");
+    assert_eq!(resets.len(), 1, "{events:#?}");
+    let cause = &resets[0]["payload"]["cause"];
+    assert_eq!(cause["seq"], 9);
+    assert_eq!(cause["source"], "pipeline");
+    assert_eq!(cause["kind"], "planner-surfaced");
+    let settled = of(&events, "member-settled", "ticker");
+    assert!(
+        precedes(&events, settled[0], resets[0]),
+        "the reset was not read after the firing it arrived during: {events:#?}"
+    );
+    let waited = gap(resets[0], schedule_fired(&events, "ticker")[1]);
+    assert!(
+        (EVERY * 1000 - 100..EVERY * 1000 + 3000).contains(&waited),
+        "the next firing came {waited}ms after the reset, not a whole {EVERY}s"
+    );
+}
