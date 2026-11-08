@@ -127,12 +127,20 @@ pub(crate) const NOTE_CLOCK_FROM: &str = "oneagentgraph-fixture:note-clock-from=
 /// span before the first firing, `every` after — and withdraws the untaken
 /// copy. It stops when the run settles, on the run's `stop` or the member's
 /// own `cancel`, and after the first firing that found the conversation over.
+// llmlint: ignore-block[changed_behavior_has_e2e] the `None` this answers is the
+// host refusing this process one more thread, which no graph, task or config
+// asks for and no seam this crate sanctions fakes — the refusal every thread arm
+// in `crate::judge` and `crate::note` records on the same terms. A clock started
+// in a later wave cannot refuse a graph already running, so the note is not
+// offered rather than the run being taken down over it. The reachable half — a
+// clock that runs — is every journey in `tests/e2e/scheduled_notes.rs`.
 pub(crate) fn spawn_note_clock(clock: NoteClock) -> Option<std::thread::JoinHandle<()>> {
     std::thread::Builder::new()
         .name(format!("note-{}", clock.note.id))
         .spawn(move || run_note_clock(&clock))
         .ok()
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 fn run_note_clock(clock: &NoteClock) {
     let id = crate::note::ScheduledNoteId::of(&clock.note);

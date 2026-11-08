@@ -143,7 +143,13 @@ impl Follower {
 /// A path that does not exist yet is waited for rather than refused, and once it
 /// appears everything in it was appended after this moment, so it is read from
 /// its start. A file that shrinks was replaced, and is read again from its start.
-pub(crate) fn follow(path: PathBuf, resets: Arc<Resets>) -> Follower {
+///
+/// # Errors
+///
+/// The host's refusal of the reading thread: a run asked to follow a stream
+/// that it could not follow is refused, rather than run with every followed
+/// reset silently missing.
+pub(crate) fn follow(path: PathBuf, resets: Arc<Resets>) -> std::io::Result<Follower> {
     let stop = Arc::new(AtomicBool::new(false));
     let skipped = Arc::new(AtomicU64::new(0));
     // The end *now*, read on this thread rather than the follower's own, so an
@@ -179,14 +185,13 @@ pub(crate) fn follow(path: PathBuf, resets: Arc<Resets>) -> Follower {
                         }
                     }
                 }
-            })
-            .ok()
+            })?
     };
-    Follower {
+    Ok(Follower {
         stop,
         skipped,
-        thread,
-    }
+        thread: Some(thread),
+    })
 }
 
 /// The complete lines appended to `path` past `offset`, advancing it; a line
@@ -278,7 +283,7 @@ mod tests {
         let clock = resets.subscribe(
             serde_json::from_str(r#"{"include":[{"kind":"planner-surfaced"}]}"#).expect("a filter"),
         );
-        let follower = follow(path.clone(), Arc::clone(&resets));
+        let follower = follow(path.clone(), Arc::clone(&resets)).expect("a follower");
         std::thread::sleep(FOLLOW_TICK * 3);
         assert!(
             clock.take().is_none(),
@@ -315,7 +320,7 @@ mod tests {
         let clock = resets.subscribe(
             serde_json::from_str(r#"{"include":[{"source":"pipeline"}]}"#).expect("a filter"),
         );
-        let follower = follow(path.clone(), Arc::clone(&resets));
+        let follower = follow(path.clone(), Arc::clone(&resets)).expect("a follower");
         std::thread::sleep(FOLLOW_TICK * 2);
         std::fs::write(&path, format!("{SURFACED}\n")).expect("created after the start");
         let deadline = std::time::Instant::now() + Duration::from_secs(10);

@@ -145,10 +145,21 @@ fn launch_with(workspace: &Workspace, task: &str, follow: Option<&Path>, extra: 
     workspace.spawn_with(&borrowed, &[])
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] the task names a
+// `test-doubles` fixture that starts a member's note clocks when the journey
+// releases a file, because the timings this file proves — a firing during a hold,
+// during a live turn, twice within one turn — are wall-clock races against turns
+// that take as long as the host makes them. The task asks for exactly this:
+// each case held "with a file the test releases rather than by sleeping". The
+// clock, the seam it offers through, onejudge and the binary are all the real
+// ones; the fixture only chooses *when* counting begins, on the lever every
+// fixture of this crate uses (`src/AGENTS.md`). The production wave-start is
+// what every journey without `clocked` drives, the fixed-cadence one among them.
 /// `task`, with this workspace's note clocks started by `gate`.
 fn clocked(task: &str, gate: &Path) -> String {
     format!("{task} {CLOCK_FROM}{}", gate.display())
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 fn release(gate: &Path) {
     std::fs::write(gate, "go").expect("a gate is writable");
@@ -421,11 +432,16 @@ fn a_note_firing_at_the_instant_a_hold_expires_is_delivered_once() {
         "",
     ));
     let (gate, expiry) = (workspace.at("note-clock"), workspace.at("hold-expiry"));
+    // llmlint: ignore-block[tests_mirror_real_usage] the instant a hold expires
+    // is the boundary the task asks to be made deterministic "by a fixture that
+    // pauses at that boundary"; the fixture is `test-doubles` only, pauses the
+    // real hold after it decided to wake, and changes nothing a run does.
     let task = format!(
         "{} {AT_EXPIRY}{}",
         clocked(KEEP_GOING, &gate),
         expiry.display()
     );
+    // llmlint: ignore-end[tests_mirror_real_usage]
     let child = launch(&workspace, &task, None);
     let paused = workspace.at("hold-expiry.entered");
     until("the hold to reach its expiry", || paused.exists());
@@ -1590,4 +1606,85 @@ fn two_notes_of_one_conversation_keep_independent_clocks() {
     let restarted: Vec<&Value> = of(&events, "cron-reset", "worker");
     assert_eq!(restarted.len(), 1, "{events:#?}");
     assert_eq!(restarted[0]["payload"]["scheduled_note"], "resets");
+}
+
+/// A `reset_on` match before a clock's first firing restarts the span it still
+/// owes — `start_after`, never `every` — for a scheduled note's clock and for a
+/// two-party member's deferred first turn alike.
+#[test]
+fn a_reset_before_the_first_firing_restores_the_whole_first_span() {
+    const START: i64 = 6;
+    let near = |what: &str, waited: i64| {
+        assert!(
+            (START * 1000 - 50..START * 1000 + 3000).contains(&waited),
+            "{what} came {waited}ms after the reset, not the whole {START}s it still owed"
+        );
+    };
+
+    // A scheduled note's clock, `every` one second, owing six.
+    let workspace = Workspace::new();
+    let (entered, hold) = (workspace.at("turn-entered"), workspace.at("turn-hold"));
+    workspace.write(
+        "base.yaml",
+        &base_without_done_when(&format!(
+            "fake:entered={} fake:hold={}",
+            entered.display(),
+            hold.display()
+        )),
+    );
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 0}"),
+        2,
+        &note_entry(NOTE, 1, START as u64, Some(SURFACED)),
+        "",
+    ));
+    let followed = workspace.at("pipeline.jsonl");
+    let child = launch(&workspace, KEEP_GOING, Some(&followed));
+    until("the first worker turn to be live", || entered.exists());
+    append(&followed, &envelope(1, "pipeline", "planner-surfaced"));
+    until("the first firing after the reset", || {
+        !note_fired(&stream(&workspace), NOTE).is_empty()
+    });
+    release(&hold);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+    let events = stream(&workspace);
+    let reset = of(&events, "cron-reset", "worker");
+    assert_eq!(reset.len(), 1, "{events:#?}");
+    near(
+        "the note's first firing",
+        gap(reset[0], note_fired(&events, NOTE)[0]),
+    );
+
+    // A deferred conversation's first turn, on its schedule's own `reset_on`.
+    let deferred = Workspace::new();
+    deferred.graph(&graph(
+        Some(&format!(
+            "{{every: 1, start_after: {START}, reset_on: {SURFACED}}}"
+        )),
+        1,
+        &note_entry(NOTE, 3600, 3600, None),
+        "",
+    ));
+    let followed = deferred.at("pipeline.jsonl");
+    let child = launch(
+        &deferred,
+        "fake:complete-now finish at once",
+        Some(&followed),
+    );
+    until("the member to come up deferred", || {
+        !of(&stream(&deferred), "member-started", "worker").is_empty()
+    });
+    append(&followed, &envelope(2, "pipeline", "planner-surfaced"));
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(0), "{stderr}");
+    let events = stream(&deferred);
+    let reset = of(&events, "cron-reset", "worker");
+    assert_eq!(reset.len(), 1, "{events:#?}");
+    assert_eq!(reset[0]["payload"]["cause"]["seq"], 2);
+    let opened = of(&events, "cron-fired", "worker")
+        .into_iter()
+        .find(|event| event["payload"].get("scheduled_note").is_none())
+        .expect("the first turn's delay ended");
+    near("the deferred first turn", gap(reset[0], opened));
 }

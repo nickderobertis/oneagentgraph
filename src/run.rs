@@ -1369,12 +1369,26 @@ fn run_announcing(
 
     // From its end *now*: an envelope written to the followed stream before the
     // graph started is one this run never saw happen.
-    let follower = request.follow_events.clone().map(|path| {
-        (
-            crate::resets::follow(path.clone(), Arc::clone(&resets)),
+    // llmlint: ignore-block[changed_behavior_has_e2e] the `Err` arm is the host
+    // refusing this process one more thread, which no graph, task or config
+    // asks for and no seam this crate sanctions fakes — the same refusal the
+    // engine thread's arm in `crate::judge` records. What it decides is the
+    // safe direction: the run is refused before the graph starts rather than
+    // run with every followed reset silently missing. The reachable half is
+    // `tests/e2e/scheduled_notes.rs`'s followed-stream journeys.
+    let follower = match request.follow_events.clone() {
+        Some(path) => Some((
+            crate::resets::follow(path.clone(), Arc::clone(&resets)).map_err(|err| {
+                Error::InvalidConfig(format!(
+                    "cannot follow --follow-events {}: {err}",
+                    path.display()
+                ))
+            })?,
             path,
-        )
-    });
+        )),
+        None => None,
+    };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 
     announce(run_id.clone());
     emitter.emit(

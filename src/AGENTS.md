@@ -171,6 +171,10 @@ hold — a harness runs inside a turn, so it cannot hold the gap between two. A
 journey asks for it with a marker in the *conversation's own task text*, which is
 the lever every other steer of a conversation already uses, and it is compiled
 only under `test-doubles`. Reach for it nowhere else.
+`hold-at-expiry` (the instant a hold's `every` elapses) and `note-clock-from` (when
+a member's scheduled-note clocks start counting) are its siblings on the same
+terms, for the same reason: they place a timing a journey cannot otherwise make
+deterministic, and `tests/e2e/scheduled_notes.rs` is their one user.
 
 **The spool mirrors `Accepted`/`Undelivered`, which are not `Serialize`.** Map
 every variant in both directions so one added upstream fails this build instead
