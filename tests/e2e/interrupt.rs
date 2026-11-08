@@ -475,6 +475,167 @@ fn interrupt_reads_a_whole_control_record_while_it_is_being_rewritten() {
     );
 }
 
+/// `interrupt` reads a member's turn-control record that the run replaces
+/// while the read is in progress, and answers from the whole record it opened
+/// — never from the replacement half-read, and never as a member that recorded
+/// no turn control.
+///
+/// The replacement lands at the one instant between the reader's open and its
+/// read, by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ` lever: deterministic where the
+/// concurrent journey above catches that instant only some of the time, and on
+/// Windows the very POSIX-semantics rename over a reader's shared handle that
+/// the replace-and-read contract in `src/run.rs` rests on. The replacement is
+/// the record's own first half — the partial no reader may ever see — so the
+/// answer can only have come from the record as it stood before.
+#[test]
+fn interrupt_answers_from_the_record_it_opened_when_a_replacement_lands_under_the_read() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let file = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter")
+        .join(CONTROL_FILE);
+    let whole = std::fs::read_to_string(&file).expect("the run wrote a control record");
+    let half = workspace.write("half-control.json", &whole[..whole.len() / 2]);
+    let interrupt = |env: &[(&str, &str)]| {
+        let interrupted = workspace.run_with(&["interrupt", &run_id, "reporter"], env);
+        interrupted.expect_code(3);
+        interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+            .as_str()
+            .expect("a reason")
+            .to_string()
+    };
+
+    let lever = format!("{CONTROL_FILE}={}", half.display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a replacement landing between a reader's open and its read — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires that instant forced deterministically with no clock. The lever adds nothing of its own: the replacement is written by the store's production writer (`replace_whole`, the POSIX-semantics rename on Windows) over the production reader's held shared handle, and the verb, the binary, the record and the answer asserted on are all real; the concurrent journey above still drives the same race through the public interface alone.
+    let read = interrupt(&[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)]);
+    assert!(
+        read.contains("opened no controllable turn") && read.contains("qwen"),
+        "{read}"
+    );
+    assert!(!read.contains("recorded no turn control"), "{read}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the record reads"),
+        whole[..whole.len() / 2],
+        "the replacement did not land under the read"
+    );
+
+    // The replacement is what the name holds now, and the next read meets it:
+    // a record that does not read, reported by its file — not an absent one.
+    let after = interrupt(&[]);
+    assert!(
+        after.contains("not one this build can read")
+            && after.contains(&file.display().to_string()),
+        "{after}"
+    );
+    assert!(!after.contains("recorded no turn control"), "{after}");
+
+    // A refusal made by the filesystem itself: a directory where the record
+    // belongs reads as nothing, and is reported by its file rather than as a
+    // turn control never recorded.
+    std::fs::remove_file(&file).expect("the record removes");
+    std::fs::create_dir(&file).expect("a directory in its place");
+    let unreadable = interrupt(&[]);
+    assert!(
+        unreadable.contains("does not read") && unreadable.contains(&file.display().to_string()),
+        "{unreadable}"
+    );
+    assert!(
+        !unreadable.contains("recorded no turn control"),
+        "{unreadable}"
+    );
+}
+
+/// `interrupt` arriving while the run is replacing a member's turn-control
+/// record — at the instant a Windows rename left the name missing to an open —
+/// waits for the replacement and answers from the whole record it leaves,
+/// never as a member that recorded no turn control.
+///
+/// The replacement is made by the run's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE` lever, which holds that writer
+/// inside the record's lock with the name removed until the reader has reached
+/// the lock — see the same journey in `tests/e2e/verbs.rs`. The replacement
+/// carries a reason the run never wrote, so the answer can only have come from
+/// the replacement, read whole.
+#[test]
+fn interrupt_arriving_mid_replace_waits_for_the_record_the_replacement_leaves() {
+    const REASON: &str = "the replacement's member opened no controllable turn";
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let scratch = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter");
+    assert!(
+        scratch.join(CONTROL_FILE).is_file(),
+        "the run wrote no control record at {}",
+        scratch.display()
+    );
+    let staged = workspace.path().join("replacement");
+    std::fs::create_dir_all(&staged).expect("a staging directory");
+    oneagentgraph::control::write(
+        &staged,
+        &Turn::Unavailable {
+            reason: REASON.to_string(),
+        },
+    );
+
+    let lever = format!("{CONTROL_FILE}={}", staged.join(CONTROL_FILE).display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a read arriving while a replacement has the name missing — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires it forced deterministically with no clock; the replacement is the run's production writer, under its production lock, and the verb, the binary, the record and the answer asserted on are all real.
+    let interrupted = workspace.run_with(
+        &["interrupt", &run_id, "reporter"],
+        &[("ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE", &lever)],
+    );
+    interrupted.expect_code(3);
+    let reason = interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+        .as_str()
+        .expect("a reason")
+        .to_string();
+    assert_eq!(reason, REASON);
+    assert_eq!(
+        std::fs::read(scratch.join(CONTROL_FILE)).expect("the record reads"),
+        std::fs::read(staged.join(CONTROL_FILE)).expect("the replacement reads"),
+        "the replacement did not land"
+    );
+    assert!(partials(&scratch).is_empty(), "{:?}", partials(&scratch));
+}
+
 /// A single-sided member on a **Codex** chain keeps its turn on `codex exec`, as
 /// it always ran: oneharness would interrupt Codex only by moving the turn onto
 /// its app-server, so the member opens no controllable turn, and `interrupt`

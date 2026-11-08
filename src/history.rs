@@ -45,22 +45,18 @@ pub fn list(state_dir: &Path) -> Vec<Record> {
 /// is no such run, or when its record cannot be read.
 pub fn show(state_dir: &Path, run_id: &str) -> Result<Record, Error> {
     let run_id = RunId::parse(run_id)?;
-    let dir = state_dir.join(&run_id);
-    if !dir.join(RECORD_FILE).exists() {
-        return Err(Error::InvalidConfig(format!(
+    // Only an absent record is a missing run — `crate::run::read_whole` says
+    // why; anything else that does not read is the file's, which is named.
+    read(&state_dir.join(&run_id)).map_err(|unread| match unread {
+        Unread::Absent => Error::InvalidConfig(format!(
             "no run {:?} under {}",
             run_id.as_str(),
             state_dir.display()
-        )));
-    }
-    // A record that is there and does not read is not a missing run: the writer
-    // replaces it whole, so no write in progress leaves it empty or partial, and
-    // what is wrong with it is the file's, which is named.
-    read(&dir).map_err(|err| {
-        Error::InvalidConfig(format!(
+        )),
+        Unread::Refused(err) => Error::InvalidConfig(format!(
             "run {:?} has a record that does not read: {err}",
             run_id.as_str()
-        ))
+        )),
     })
 }
 
@@ -80,15 +76,27 @@ pub fn events(state_dir: &Path, run_id: &str) -> Result<String, Error> {
         .map_err(|err| Error::InvalidConfig(format!("cannot read {}: {err}", path.display())))
 }
 
+/// Why a run directory's record did not read.
+enum Unread {
+    /// Nothing is recorded there.
+    Absent,
+    /// A record is there and does not read, for the reason given, which names
+    /// its file.
+    Refused(String),
+}
+
 /// Read one run directory's record.
 ///
 /// The version is read before the record, so a record from a *newer* build is
 /// refused for being one — `Record` denies unknown fields, so parsing first would
 /// blame whichever key that build added instead of the version that explains it.
-fn read(dir: &Path) -> Result<Record, String> {
+fn read(dir: &Path) -> Result<Record, Unread> {
     let path = dir.join(RECORD_FILE);
-    let named = |err: &dyn std::fmt::Display| format!("{}: {err}", path.display());
-    let raw = std::fs::read_to_string(&path).map_err(|err| named(&err))?;
+    let named = |err: &dyn std::fmt::Display| Unread::Refused(format!("{}: {err}", path.display()));
+    let raw = crate::run::read_whole(&path).map_err(|err| match err.kind() {
+        std::io::ErrorKind::NotFound => Unread::Absent,
+        _ => named(&err),
+    })?;
     let loose: serde_json::Value = serde_json::from_str(&raw).map_err(|err| named(&err))?;
     let version = loose
         .get("schema_version")

@@ -1124,12 +1124,19 @@ fn a_record_write_that_cannot_land_leaves_no_partial() {
     let err = oneagentgraph::run::write_record(&run, &golden_record())
         .expect_err("a record cannot replace a directory");
     assert!(err.to_string().contains(RECORD_FILE), "{err}");
-    let left: Vec<_> = std::fs::read_dir(&run)
+    // The record's lock stays: the writer creates it before its first rename and
+    // never removes it, so every later reader of the record finds one.
+    let mut left: Vec<_> = std::fs::read_dir(&run)
         .expect("the run's directory")
         .flatten()
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(left, vec![RECORD_FILE.to_string()], "{left:?}");
+    left.sort();
+    assert_eq!(
+        left,
+        vec![format!(".{RECORD_FILE}.lock"), RECORD_FILE.to_string()],
+        "{left:?}"
+    );
 }
 
 /// One state directory, and the compiled binary pointed at it.

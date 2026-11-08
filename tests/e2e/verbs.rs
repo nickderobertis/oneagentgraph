@@ -2317,6 +2317,231 @@ fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
     );
 }
 
+/// `reset-timer` reads a run's record that the run replaces while the read is
+/// in progress, and acts on the whole record it opened — never on the
+/// replacement half-read, and never reporting the run missing.
+///
+/// The replacement lands at the one instant between the reader's open and its
+/// read, by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ` lever — see the same journey in
+/// `tests/e2e/interrupt.rs`. The replacement is the record's own first half, so
+/// a verb that read anything but the record it opened would refuse it.
+#[test]
+fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_read() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: replaced")
+        .expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+    let file = state.join(&id).join(RECORD_FILE);
+    let whole = std::fs::read_to_string(&file).expect("the run wrote a record");
+    let half = workspace.write("half-record.json", &whole[..whole.len() / 2]);
+
+    let lever = format!("{RECORD_FILE}={}", half.display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test is one a real concurrent writer reaches only some of the time, and the task requires it forced deterministically; the replacement is the store's production writer landing over the production reader's held handle — see the same marker in `tests/e2e/interrupt.rs`.
+    let reset = workspace.run_with(
+        &["reset-timer", &id, "worker"],
+        &[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)],
+    );
+    reset.expect_code(0);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the record reads"),
+        whole[..whole.len() / 2],
+        "the replacement did not land under the read"
+    );
+
+    // The next read meets the replacement: a record that does not read,
+    // refused by its file — never a run that does not exist.
+    let after = workspace.run(&["reset-timer", &id, "worker"]);
+    after.expect_code(2);
+    assert!(
+        after.stderr.contains("does not read")
+            && after.stderr.contains(&file.display().to_string()),
+        "{}",
+        after.stderr
+    );
+    assert!(!after.stderr.contains("no run"), "{}", after.stderr);
+}
+
+/// `reset-timer` arriving while the run is replacing its record — at the
+/// instant a Windows rename left the name missing to an open — waits for the
+/// replacement and acts on the whole record it leaves, never reporting the run
+/// missing.
+///
+/// The replacement is made by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE` lever, which holds that writer
+/// inside the record's lock with the name removed until the reader has reached
+/// the lock: deterministic, with no clock, where the concurrent journey above
+/// meets that instant only when the scheduler happens to line it up. The
+/// replacement declares a member the run as recorded does not have, so the
+/// verb can only accept it by having read the replacement, whole.
+#[test]
+fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: mid-replace")
+        .expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+    let mut replacement = oneagentgraph::history::show(&state, &id).expect("the run's record");
+    replacement.declared_members = vec!["worker".to_string(), "late".to_string()];
+    let staged = workspace.path().join("replacement");
+    std::fs::create_dir_all(&staged).expect("a staging directory");
+    oneagentgraph::run::write_record(&staged, &replacement).expect("the replacement stages");
+
+    let lever = format!("{RECORD_FILE}={}", staged.join(RECORD_FILE).display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a read arriving while a replacement has the name missing — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires it forced deterministically with no clock; the replacement is the store's production writer, under its production lock, and the verb, the binary and the record it acts on are all real.
+    let reset = workspace.run_with(
+        &["reset-timer", &id, "late"],
+        &[("ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE", &lever)],
+    );
+    reset.expect_code(0);
+    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+    assert_eq!(
+        oneagentgraph::history::show(&state, &id).expect("the record reads"),
+        replacement,
+        "the replacement did not land"
+    );
+    assert!(
+        state
+            .join(&id)
+            .join(SIGNAL_DIR)
+            .join("late.reset")
+            .is_file(),
+        "the reset was not signalled to the replacement's member"
+    );
+    assert!(
+        partials(&state.join(&id)).is_empty(),
+        "{:?}",
+        partials(&state.join(&id))
+    );
+}
+
+/// A record an earlier build wrote has no lock file beside it, and a reader
+/// that finds none may meet a writer of this build that creates the lock and
+/// begins replacing the record in the instant after it looked. `reset-timer`
+/// arriving there still acts on a whole record — the replacement — and never
+/// reports the run missing; and reading such a record writes nothing, so a
+/// store the reader cannot write reads as it always did.
+///
+/// The store is made legacy by removing the lock file the run left. The
+/// replacement is made by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_AFTER_NO_LOCK` lever: it begins the moment
+/// the reader finds no lock, and holds the name missing inside the lock it
+/// created until the reader has reached the name or the lock — deterministic,
+/// with no clock. The replacement declares a member the run as recorded does
+/// not have, so the verb can only accept it by having read the replacement.
+#[test]
+fn reset_timer_reads_a_whole_legacy_record_a_writer_begins_replacing_after_the_reader_finds_no_lock(
+) {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: legacy")
+        .expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+    let root = state.join(&id);
+    let lock = root.join(format!(".{RECORD_FILE}.lock"));
+    std::fs::remove_file(&lock).expect("the run left its record's lock");
+
+    workspace.run(&["history", "show", &id]).expect_code(0);
+    assert!(!lock.exists(), "reading a legacy record wrote its lock");
+
+    let mut replacement = oneagentgraph::history::show(&state, &id).expect("the run's record");
+    replacement.declared_members = vec!["worker".to_string(), "late".to_string()];
+    let staged = workspace.path().join("replacement");
+    std::fs::create_dir_all(&staged).expect("a staging directory");
+    oneagentgraph::run::write_record(&staged, &replacement).expect("the replacement stages");
+
+    let lever = format!("{RECORD_FILE}={}", staged.join(RECORD_FILE).display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a writer beginning to replace a lock-less legacy record just after a reader found no lock — is one a real concurrent writer reaches only some of the time, and it is forced here deterministically with no clock; the replacement is the store's production writer creating its production lock, and the verb, the binary and the record it acts on are all real.
+    let reset = workspace.run_with(
+        &["reset-timer", &id, "late"],
+        &[("ONEAGENTGRAPH_FIXTURE_REPLACE_AFTER_NO_LOCK", &lever)],
+    );
+    reset.expect_code(0);
+    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+    assert_eq!(
+        oneagentgraph::history::show(&state, &id).expect("the record reads"),
+        replacement,
+        "the replacement did not land"
+    );
+    assert!(
+        lock.is_file(),
+        "the writer did not create the record's lock"
+    );
+    assert!(
+        root.join(SIGNAL_DIR).join("late.reset").is_file(),
+        "the reset was not signalled to the replacement's member"
+    );
+    assert!(partials(&root).is_empty(), "{:?}", partials(&root));
+}
+
+/// A volume that cannot rename with POSIX semantics refuses the run's rewrite
+/// of its record, saying so and naming the record, and leaves the whole record
+/// that was there — it never falls back to the classic Windows replace, whose
+/// instant with the name missing is the one a reader must never meet.
+///
+/// The refusal is Windows' own `ERROR_NOT_SUPPORTED`, put on every rename onto
+/// the record after the first by the suite's
+/// `ONEAGENTGRAPH_FIXTURE_RENAME_REFUSAL` lever and decided by the writer's
+/// production classification. A holder's refusal, by contrast, is waited out a
+/// bounded number of times and then returned as itself.
+#[test]
+fn a_record_whose_volume_cannot_rename_with_posix_semantics_is_left_whole() {
+    let refused = |code: &str| {
+        let workspace = Workspace::new();
+        let lever = format!("{RECORD_FILE}=1@{code}");
+        // llmlint: ignore[tests_mirror_real_usage] no volume on this Linux host refuses a POSIX-semantics rename, and the refusal under test is one only a Windows volume (FAT, some network shares) gives; the lever injects that refusal alone, with its Windows code, for the production writer's classification to decide on, and the run, the binary, the record and the verb that reads it back are all real.
+        let run = workspace.run_task_with(
+            "fake:complete-now: refused",
+            &[("ONEAGENTGRAPH_FIXTURE_RENAME_REFUSAL", &lever)],
+        );
+        let state = workspace.state();
+        let id = run_id(&state).expect("the first write landed");
+        let root = state.join(&id);
+        let record: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(RECORD_FILE)).expect("the record reads"),
+        )
+        .expect("the record is whole");
+        assert_eq!(record["run_id"], id.as_str(), "{record}");
+        assert!(record["finished_ms"].is_null(), "{record}");
+        assert!(partials(&root).is_empty(), "{:?}", partials(&root));
+        workspace.run(&["history", "show", &id]).expect_code(0);
+        (run, root.join(RECORD_FILE).display().to_string())
+    };
+
+    // ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER.
+    for code in ["1", "50", "87"] {
+        let (unsupported, file) = refused(code);
+        unsupported.expect_code(2);
+        assert!(
+            unsupported.stderr.contains(&format!(
+                "cannot replace {file} with POSIX rename semantics"
+            )) && unsupported.stderr.contains("left as it was")
+                && unsupported
+                    .stderr
+                    .contains(&format!("Windows error {code} ")),
+            "{code}: {}",
+            unsupported.stderr
+        );
+    }
+
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION: a holder, waited out and
+    // then returned as itself.
+    for code in ["5", "32"] {
+        let (held, _) = refused(code);
+        held.expect_code(2);
+        assert!(
+            held.stderr.contains(&format!("Windows error {code} "))
+                && !held.stderr.contains("POSIX rename"),
+            "{code}: {}",
+            held.stderr
+        );
+    }
+}
+
 /// A record that is there and does not read — empty, not JSON, not a record,
 /// from a newer build, or not a file at all — with nothing writing it, is
 /// refused naming the file: not reported as a run that does not exist, and not
