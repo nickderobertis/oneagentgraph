@@ -99,7 +99,25 @@ pub(crate) struct NoteClock {
     pub(crate) member: String,
     /// Set once the graph is settling: every clock stops.
     pub(crate) over: Arc<AtomicBool>,
+    /// The suite's lever for *when* this clock starts counting — see
+    /// [`NOTE_CLOCK_FROM`].
+    #[cfg(feature = "test-doubles")]
+    pub(crate) from: Option<crate::member::FixtureGate>,
 }
+
+/// The marker a journey puts in its member's **task** to have each of that
+/// member's scheduled-note clocks start counting only once the gate it names
+/// exists, rather than when the member's wave is reached.
+///
+/// A note's clock is wall-clock time, and the conversation it offers into
+/// moves at whatever pace its turns take: a journey that has to see a firing
+/// land *during a hold*, or *during a live turn*, cannot get there by choosing
+/// spans and hoping the host keeps up. The gate makes the firing the journey's
+/// to place. Compiled only under `test-doubles`, with the prefix every fixture
+/// of this crate's carries; in the task for `crate::judge`'s
+/// `HOLD_BETWEEN_TURNS` reason.
+#[cfg(feature = "test-doubles")]
+pub(crate) const NOTE_CLOCK_FROM: &str = "oneagentgraph-fixture:note-clock-from=";
 
 /// Start one scheduled note's clock, from now.
 ///
@@ -126,6 +144,16 @@ fn run_note_clock(clock: &NoteClock) {
     // Measured against `elapsed` rather than as a deadline, for the reason
     // `crate::run::cron` gives.
     let mut span = Duration::from_secs(clock.note.first_after());
+    #[cfg(feature = "test-doubles")]
+    if let Some(gate) = &clock.from {
+        let _ = std::fs::write(&gate.entered, "entered");
+        while !gate.gate.exists() {
+            std::thread::sleep(TICK);
+            if clock.over.load(Ordering::SeqCst) || stop.exists() || own_stop.exists() {
+                return;
+            }
+        }
+    }
     let mut counting_since = Instant::now();
     loop {
         std::thread::sleep(TICK);

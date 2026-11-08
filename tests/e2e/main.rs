@@ -68,6 +68,20 @@ mod panel;
 mod preturn;
 mod remote;
 mod scheduler;
+// llmlint: ignore-block[e2e_not_mocked] the same declaration `mod note;` above
+// carries, for the same reason: the journeys are in
+// tests/e2e/scheduled_notes.rs, which declares it itself on the terms every
+// journey file shares — the paid harness process is the one double this suite
+// sanctions, replaced at oneharness's own `ONEHARNESS_BIN_<ID>` seam, and
+// everything else in those journeys is real. This line only names the module.
+//
+// llmlint: ignore-block[expensive_tests_stay_behind_their_own_edge] and the same
+// again for the same reason: this crate has exactly one e2e target, so there is
+// no narrower edge for these to sit behind. Each journey is one short run of the
+// doubled harness, held only until the journey releases its gate.
+mod scheduled_notes;
+// llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
+// llmlint: ignore-end[e2e_not_mocked]
 mod selection;
 mod session;
 mod support;

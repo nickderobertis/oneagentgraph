@@ -301,7 +301,7 @@ use crate::support::{as_env, bounds, fake_provider, oneharness_bin, until, BASE}
 ///
 /// Real onejudge drives every turn; the double only answers the supervisor's
 /// question the way a `should-fail` task asks it to.
-const FAKE_JUDGE: &str = "judge.command.0";
+pub(crate) const FAKE_JUDGE: &str = "judge.command.0";
 
 /// A graph whose `worker` is a paced conversation on the command judge, plus
 /// whatever `extra` members the journey needs.
@@ -368,7 +368,7 @@ fn beside(name: &str, settings: &str, task: &str) -> String {
 /// the command double scores a `should-fail` task unmet on. The system prompt is
 /// the one text every **agent** turn carries: a task steers only the turn it
 /// opens, so a sentinel that has to fire on a later turn goes here.
-fn base_without_done_when(system: &str) -> String {
+pub(crate) fn base_without_done_when(system: &str) -> String {
     let mut document: serde_json::Value =
         oneagentgraph::yaml::from_str(BASE).expect("the base is a YAML document");
     let mapping = document.as_object_mut().expect("a mapping");
@@ -392,7 +392,7 @@ fn base_without_done_when(system: &str) -> String {
 
 /// The task every held conversation below runs on: one the command judge
 /// continues turn after turn.
-const KEEP_GOING: &str = "fake:should-fail keep going";
+pub(crate) const KEEP_GOING: &str = "fake:should-fail keep going";
 
 /// Start the run of this workspace's graph on `task`, holding `env` beyond the
 /// default.
@@ -414,7 +414,7 @@ fn spawn(workspace: &Workspace, task: &str, env: &[(&str, &str)]) -> Child {
 }
 
 /// This run's merged event stream, as it stands, parsed.
-fn stream(workspace: &Workspace) -> Vec<Value> {
+pub(crate) fn stream(workspace: &Workspace) -> Vec<Value> {
     std::fs::read_dir(workspace.state())
         .into_iter()
         .flatten()
@@ -429,7 +429,7 @@ fn stream(workspace: &Workspace) -> Vec<Value> {
 }
 
 /// Every envelope of `kind` that `member` published, in stream order.
-fn of<'a>(events: &'a [Value], kind: &str, member: &str) -> Vec<&'a Value> {
+pub(crate) fn of<'a>(events: &'a [Value], kind: &str, member: &str) -> Vec<&'a Value> {
     events
         .iter()
         .filter(|event| event["kind"] == kind && event["labels"]["member"] == member)
@@ -437,7 +437,12 @@ fn of<'a>(events: &'a [Value], kind: &str, member: &str) -> Vec<&'a Value> {
 }
 
 /// The turns one side of `member`'s conversation opened, in stream order.
-fn turns_of<'a>(events: &'a [Value], member: &str, role: &str, kind: &str) -> Vec<&'a Value> {
+pub(crate) fn turns_of<'a>(
+    events: &'a [Value],
+    member: &str,
+    role: &str,
+    kind: &str,
+) -> Vec<&'a Value> {
     of(events, kind, member)
         .into_iter()
         .filter(|event| event["payload"]["role"] == role)
@@ -449,7 +454,7 @@ fn turns_of<'a>(events: &'a [Value], member: &str, role: &str, kind: &str) -> Ve
 /// The stamp is RFC 3339 at millisecond precision in UTC — `tests/e2e/dispatch.rs`
 /// pins that shape — so it is read here rather than by a date library the suite
 /// does not otherwise carry. Days from the civil date by the usual arithmetic.
-fn millis(event: &Value) -> i64 {
+pub(crate) fn millis(event: &Value) -> i64 {
     let ts = event["ts"].as_str().expect("every envelope carries ts");
     let (date, rest) = ts.split_at(10);
     let mut ymd = date
@@ -475,12 +480,12 @@ fn millis(event: &Value) -> i64 {
 }
 
 /// The gap, in milliseconds, from `earlier` to `later`.
-fn gap(earlier: &Value, later: &Value) -> i64 {
+pub(crate) fn gap(earlier: &Value, later: &Value) -> i64 {
     millis(later) - millis(earlier)
 }
 
 /// Whether `earlier` precedes `later` on the stream.
-fn precedes(events: &[Value], earlier: &Value, later: &Value) -> bool {
+pub(crate) fn precedes(events: &[Value], earlier: &Value, later: &Value) -> bool {
     let at = |wanted: &Value| events.iter().position(|event| event == wanted);
     match (at(earlier), at(later)) {
         (Some(before), Some(after)) => before < after,
@@ -494,7 +499,7 @@ fn precedes(events: &[Value], earlier: &Value, later: &Value) -> bool {
 /// The hold begins the instant the supervisor's `turn-completed` is on the
 /// stream — the sink publishes it and then waits — so its presence, with no
 /// later worker `turn-started`, is the conversation held.
-fn until_held(workspace: &Workspace, turn: usize) {
+pub(crate) fn until_held(workspace: &Workspace, turn: usize) {
     until(
         &format!("the worker to be held after its supervisor's turn {turn}"),
         || {
@@ -507,7 +512,7 @@ fn until_held(workspace: &Workspace, turn: usize) {
 
 /// The run's exit code once it ends, and its stderr; a run that outlives the
 /// suite's patience is ended here rather than left holding its members open.
-fn exit_of(mut child: Child) -> (Option<i32>, String) {
+pub(crate) fn exit_of(mut child: Child) -> (Option<i32>, String) {
     let deadline = Instant::now() + Duration::from_secs(120);
     while child.try_wait().expect("waitable").is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
@@ -525,7 +530,7 @@ fn exit_of(mut child: Child) -> (Option<i32>, String) {
 }
 
 /// The id of the one run this workspace has recorded.
-fn run_id(workspace: &Workspace) -> String {
+pub(crate) fn run_id(workspace: &Workspace) -> String {
     workspace.record()["run_id"]
         .as_str()
         .expect("run id")

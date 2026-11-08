@@ -1468,6 +1468,14 @@ fn run_announcing(
                         signals: root.join(SIGNAL_DIR),
                         member: name.clone(),
                         over: Arc::clone(&over),
+                        #[cfg(feature = "test-doubles")]
+                        from: match &invocation.launch {
+                            invoke::Launch::Judge(launch) => crate::member::FixtureGate::parse(
+                                &launch.task,
+                                crate::scheduled::NOTE_CLOCK_FROM,
+                            ),
+                            _ => None,
+                        },
                     },
                 ));
             }

@@ -125,6 +125,7 @@ fn start(workspace: &Workspace, system: &str, task: &str) -> Running {
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
     let run = run::start(&request, &env).expect("the graph starts");
     let id = run.started().run_id.clone();
@@ -585,6 +586,7 @@ fn a_note_after_the_conversation_completed_names_that_rather_than_the_member_set
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
     let run = run::start(&request, &env).expect("the graph starts");
     let id = run.started().run_id.clone();
@@ -663,6 +665,7 @@ fn start_single_sided(workspace: &Workspace, chain: Option<&str>, task: &str) ->
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
     let run = run::start(&request, &env).expect("the graph starts");
     let id = run.started().run_id.clone();
@@ -2094,6 +2097,7 @@ fn start_without_lever(workspace: &Workspace, system: &str, task: &str) -> Runni
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
     let run = run::start(&request, &env).expect("the graph starts");
     Running {
