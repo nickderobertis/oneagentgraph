@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.9.3...v0.10.0) - 2026-11-08
+
+### Added
+
+- *(schedule)* [**breaking**] scheduled notes, and reset_on clocks that follow an outside event stream ([#259](https://github.com/nickderobertis/oneagentgraph/pull/259))
+
 ## [0.9.3](https://github.com/nickderobertis/oneagentgraph/compare/v0.9.2...v0.9.3) - 2026-11-08
 
 ### Fixed
