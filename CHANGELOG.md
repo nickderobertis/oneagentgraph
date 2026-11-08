@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.3](https://github.com/nickderobertis/oneagentgraph/compare/v0.9.2...v0.9.3) - 2026-11-08
+
+### Fixed
+
+- never read a graph run's state half-replaced on Windows ([#257](https://github.com/nickderobertis/oneagentgraph/pull/257))
+
 ## [0.9.2](https://github.com/nickderobertis/oneagentgraph/compare/v0.9.1...v0.9.2) - 2026-11-08
 
 ### Fixed
