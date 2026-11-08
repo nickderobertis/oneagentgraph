@@ -63,6 +63,7 @@ fn a_library_caller_watches_cancels_and_waits_for_a_live_graph() {
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     // The graph itself selects the sanctioned provider double. Keeping that at
@@ -172,6 +173,7 @@ fn starting_an_invalid_graph_returns_the_scheduler_error() {
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     let error = run::start(&request, &BTreeMap::new())
@@ -207,6 +209,7 @@ fn a_library_callers_own_filter_narrows_the_stream_it_receives() {
         filter,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
     let matching = |kind: &str| Matcher {
         kind: Some(kind.to_string()),
@@ -308,6 +311,7 @@ fn a_run_whose_filter_omits_graph_started_still_starts_and_settles() {
         }),
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     let running = run::start(&request, &BTreeMap::new())
@@ -396,6 +400,7 @@ fn a_successful_live_run_returns_the_blocking_exit_status() {
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     let running = run::start(&request, &BTreeMap::new()).expect("the graph starts");
@@ -447,6 +452,7 @@ fn a_library_caller_redirects_a_members_in_flight_turn() {
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     let running = run::start(&request, &env).expect("the graph starts");
@@ -581,6 +587,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     let running = run::start(&request, &BTreeMap::new()).expect("the graph starts");
@@ -695,6 +702,7 @@ fn the_hosting_process_directory_never_moves_for_a_member_that_works_elsewhere()
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     let before = std::env::current_dir().expect("the hosting process has a working directory");
@@ -761,6 +769,7 @@ fn a_members_relative_directory_resolves_in_its_scratch_and_the_host_stays_put()
         filter: None,
         state_dir: workspace.state(),
         oneharness_bin: oneharness_bin(),
+        follow_events: None,
     };
 
     let before = std::env::current_dir().expect("the hosting process has a working directory");

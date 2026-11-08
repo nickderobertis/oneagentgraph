@@ -188,6 +188,11 @@ struct HoldState {
     /// the same stop. Read off the task by [`HOLD_STOP_UNTIL_SEEN`].
     #[cfg(feature = "test-doubles")]
     stop_seen: Option<PathBuf>,
+    /// The suite's lever for the instant a hold expires: a hold whose `every`
+    /// has elapsed pauses there, before it publishes `cron-fired` or opens the
+    /// turn, until the gate appears. Read off the task by [`HOLD_AT_EXPIRY`].
+    #[cfg(feature = "test-doubles")]
+    at_expiry: Option<FixtureGate>,
 }
 
 impl HoldState {
@@ -199,6 +204,8 @@ impl HoldState {
             holding: AtomicBool::new(false),
             #[cfg(feature = "test-doubles")]
             stop_seen: FixtureGate::parse(task, HOLD_STOP_UNTIL_SEEN).map(|gate| gate.gate),
+            #[cfg(feature = "test-doubles")]
+            at_expiry: FixtureGate::parse(task, HOLD_AT_EXPIRY),
         }
     }
 
@@ -239,6 +246,14 @@ impl HoldState {
 #[cfg(feature = "test-doubles")]
 const HOLD_STOP_UNTIL_SEEN: &str = "oneagentgraph-fixture:hold-stop-until-seen=";
 
+/// The marker a journey puts in its **task** to pause a hold at the instant its
+/// `every` elapses, naming the gate file it will release — the one boundary at
+/// which a scheduled note admitted "at the same instant" a hold expires can be
+/// made to happen on purpose rather than by luck. In the task for
+/// [`HOLD_STOP_UNTIL_SEEN`]'s reason, and with the same prefix.
+#[cfg(feature = "test-doubles")]
+const HOLD_AT_EXPIRY: &str = "oneagentgraph-fixture:hold-at-expiry=";
+
 /// The pace, held: the state one paced conversation's sink keeps between
 /// observations, and the hold it takes at the boundary.
 ///
@@ -265,6 +280,9 @@ struct Hold {
     seen_offered: u64,
     /// What this hold shares with the supervising thread.
     state: Arc<HoldState>,
+    /// The member's run-time clocks: its schedule's `reset_on` subscription,
+    /// and its scheduled notes — see [`crate::scheduled`].
+    clocks: Option<Arc<crate::scheduled::MemberClocks>>,
 }
 
 impl Hold {
@@ -276,7 +294,25 @@ impl Hold {
             offered,
             seen_offered: 0,
             state,
+            clocks: crate::scheduled::of(scratch),
         }
+    }
+
+    /// Whether a scheduled note's copy is admitted and still untaken — a hold
+    /// that would start now is skipped, and the next turn opens with it.
+    fn note_untaken(&self) -> bool {
+        self.clocks
+            .as_ref()
+            .and_then(|clocks| clocks.notes.as_ref())
+            .is_some_and(|notes| notes.has_unanswered())
+    }
+
+    /// The `reset_on` match this member's schedule has not read yet.
+    fn reset_on(&self) -> Option<crate::event::ResetCause> {
+        self.clocks
+            .as_ref()
+            .and_then(|clocks| clocks.schedule_reset.as_ref())
+            .and_then(crate::resets::ResetOn::take)
     }
 
     /// Whether `observation` is the supervisor's close that opens a hold.
@@ -349,6 +385,14 @@ impl Hold {
         let mut counting_since = Instant::now();
         #[cfg(feature = "test-doubles")]
         let mut deaf_since = None;
+        // A scheduled note admitted while the turn before was live and still
+        // untaken: the hold is skipped, and the next turn opens with it.
+        if self.note_untaken() {
+            self.seen_offered = self.offered.load(Ordering::SeqCst);
+            self.state.holding.store(false, Ordering::SeqCst);
+            emitter.emit(EventKind::CronFired, serde_json::Map::new());
+            return ControlFlow::Continue(());
+        }
         loop {
             std::thread::sleep(HOLD_TICK);
             // The wait is the schedule's, not silence: the activity watchdog on
@@ -382,17 +426,36 @@ impl Hold {
                 emitter.emit(EventKind::CronReset, serde_json::Map::new());
                 continue;
             }
+            // The hold in progress, restarted by a match of the schedule's own
+            // `reset_on` — the same restart a resettable reset is, naming the
+            // envelope that caused it.
+            if let Some(cause) = self.reset_on() {
+                counting_since = Instant::now();
+                emitter.emit(
+                    EventKind::CronReset,
+                    as_payload(&crate::event::CronReset {
+                        scheduled_note: None,
+                        cause: Some(cause),
+                    }),
+                );
+                continue;
+            }
             let offered = self.offered.load(Ordering::SeqCst);
             let fired = if trigger.exists() {
                 let _ = std::fs::remove_file(&trigger);
                 true
-            } else if offered != self.seen_offered {
+            } else if offered != self.seen_offered || self.note_untaken() {
                 // A note is delivered into the next turn to open, so the turn
                 // opens now rather than after `every`: a manager's note to a
-                // paced monitor is never held for the cadence.
+                // paced monitor is never held for the cadence, and nor is a
+                // scheduled one.
+                true
+            } else if counting_since.elapsed() >= self.pace.every {
+                #[cfg(feature = "test-doubles")]
+                self.pause_at_expiry();
                 true
             } else {
-                counting_since.elapsed() >= self.pace.every
+                false
             };
             if !fired {
                 continue;
@@ -401,6 +464,21 @@ impl Hold {
             self.state.holding.store(false, Ordering::SeqCst);
             emitter.emit(EventKind::CronFired, serde_json::Map::new());
             return ControlFlow::Continue(());
+        }
+    }
+
+    /// Hold at the instant this hold expired, while [`HOLD_AT_EXPIRY`] says so:
+    /// the gate's `.entered` sibling is written, and nothing happens until the
+    /// gate appears or [`FIXTURE_HOLD`] passes.
+    #[cfg(feature = "test-doubles")]
+    fn pause_at_expiry(&self) {
+        let Some(gate) = self.state.at_expiry.as_ref() else {
+            return;
+        };
+        let _ = std::fs::write(&gate.entered, "entered");
+        let deadline = Instant::now() + FIXTURE_HOLD;
+        while !gate.gate.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -438,6 +516,22 @@ fn signal_dir(scratch: &Path) -> PathBuf {
         .unwrap_or_default()
 }
 
+/// Tells a member's scheduled notes its conversation is over, on whichever path
+/// [`run`] leaves by — the conversation's own refusal reached them first when it
+/// ended normally, and this is the end for one that never opened or was
+/// abandoned.
+struct ScheduledClosing(Option<Arc<crate::note::ScheduledNotes>>);
+
+impl Drop for ScheduledClosing {
+    fn drop(&mut self) {
+        if let Some(scheduled) = &self.0 {
+            scheduled.end(&crate::note::Undelivered::MemberSettled {
+                outcome: "the member's conversation is over".to_string(),
+            });
+        }
+    }
+}
+
 /// Run one two-party member to its end, publishing every envelope it produces.
 #[must_use]
 pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Path) -> Outcome {
@@ -465,6 +559,13 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         }
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
+
+    // The member's scheduled notes, when it declares any: their clocks run on
+    // the run's own threads, and this conversation is what they offer into —
+    // from the moment it opens below until it ends, which the guard makes sure
+    // they hear of on every path out of here, a refusal included.
+    let scheduled = crate::scheduled::of(scratch).and_then(|clocks| clocks.notes.clone());
+    let _closing = ScheduledClosing(scheduled.clone());
 
     // The note endpoint is bound before the plan is built, because the engine's
     // end of the conversation's channel goes *on* that plan. A member that could
@@ -544,6 +645,21 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let offered = Arc::new(AtomicU64::new(0));
     let state = Arc::new(HoldState::new(&launch.task));
 
+    let relayed = endpoint.as_ref().map(crate::note::Endpoint::relayed);
+    // Opened before the engine is started, not after: a scheduled note that
+    // fired before this conversation opened is admitted as the relay opens, and
+    // it has to be in the inbox before the first turn is.
+    let relay = match (endpoint, notes) {
+        (Some(endpoint), Some(notes)) => Some(crate::note::Relay::open(
+            endpoint,
+            notes,
+            emitter,
+            Arc::clone(&offered),
+            scheduled.clone(),
+        )),
+        _ => None,
+    };
+
     let engine = {
         let (emitter, activity, abort) =
             (emitter.clone(), Arc::clone(&activity), Arc::clone(&abort));
@@ -551,8 +667,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         // announced, so the turn that received a caller's note is published as
         // a delivery rather than as the supervising side's own words — see
         // [`crate::note::Deliveries`].
-        let mut deliveries =
-            crate::note::Deliveries::of(endpoint.as_ref().map(crate::note::Endpoint::relayed));
+        let mut deliveries = crate::note::Deliveries::of(relayed);
+        let scheduled = scheduled.clone();
         // The pace this member's schedule asked for, if it asked for one.
         let mut hold = launch
             .pace
@@ -575,6 +691,12 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             let mut journal = TurnJournal::default();
             let mut sink = |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
+                // A turn's opening waits out a scheduled note's admission in
+                // progress, so the note a turn takes is admitted on the stream
+                // before the turn that takes it is.
+                if let (Some(scheduled), Observation::TurnOpened(_)) = (&scheduled, observation) {
+                    scheduled.pass();
+                }
                 if let Some(hold) = hold.as_ref() {
                     hold.announce(observation);
                 }
@@ -636,10 +758,8 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // relay rather than being killed over one, and every note offered to it is
     // then answered by the endpoint's own close. The reachable half — a relay
     // that carries notes into the conversation — is `tests/e2e/note.rs`.
-    let ending = match (endpoint, notes) {
-        (Some(endpoint), Some(notes)) => {
-            let (relay, ending) =
-                crate::note::Relay::open(endpoint, notes, emitter, Arc::clone(&offered));
+    let ending = match relay {
+        Some((relay, ending)) => {
             // The answer hold a journey's task asked for, if it asked for one.
             #[cfg(feature = "test-doubles")]
             let relay = relay.holding_answers(FixtureGate::parse(
@@ -651,7 +771,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
                 Err(_) => None,
             }
         }
-        _ => None,
+        None => None,
     };
     // llmlint: ignore-end[changed_behavior_has_e2e]
     // Started once the engine is, and kept by a thread of its own for

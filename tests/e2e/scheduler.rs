@@ -859,7 +859,17 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
         "run did not quiesce"
     );
     let output = child.wait_with_output().expect("finished output");
-    assert_eq!(output.status.code(), Some(0));
+    // What a failure has to say for itself: this has failed on the slower
+    // platforms' legs with an exit code and nothing else to go on.
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nsettled: {:?}",
+        String::from_utf8_lossy(&output.stderr),
+        events()
+            .lines()
+            .rfind(|line| line.contains("graph-settled"))
+    );
 }
 
 #[test]

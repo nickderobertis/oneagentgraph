@@ -27,6 +27,7 @@
 // folding the exit code into an `exited` variant would change what this stack emits.
 
 use std::fmt;
+use std::sync::Arc;
 
 use onemessagebus::{Message, Reserved, SchemaId, Vocabulary};
 use schemars::JsonSchema;
@@ -1121,6 +1122,11 @@ pub struct NoteAdmitted {
     /// The offer's id — unique per offer within the run, and the id every later
     /// event about this note names.
     pub offer: String,
+    /// The member's scheduled note this copy was offered for, by its `id` —
+    /// present exactly when the run's own clock offered it, and absent for a
+    /// note offered through [`crate::control::offer_note`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_note: Option<String>,
 }
 
 /// The payload of an [`EventKind::NoteWithdrawn`] event.
@@ -1129,10 +1135,16 @@ pub struct NoteAdmitted {
 pub struct NoteWithdrawn {
     /// The member the note was offered to.
     pub member: String,
-    /// The offer's id, as its [`NoteAdmitted`] named it.
+    /// The offer's id, as its [`NoteAdmitted`] named it. A scheduled note's
+    /// copy held for a conversation that has not opened has one too, and its
+    /// withdrawal may name an offer no [`NoteAdmitted`] named.
     pub offer: String,
     /// Why no turn will ever take it.
     pub reason: WithdrawnReason,
+    /// The member's scheduled note this copy was offered for — see
+    /// [`NoteAdmitted::scheduled_note`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_note: Option<String>,
 }
 
 /// Why an admitted note was taken back before any turn took it.
@@ -1143,6 +1155,101 @@ pub enum WithdrawnReason {
     Expired,
     /// Its sender took it back.
     Withdrawn,
+    /// A scheduled note's clock was restarted by a `reset_on` match while this
+    /// copy was untaken.
+    Reset,
+    /// A scheduled note's clock fired again while this copy was untaken, and a
+    /// newer copy replaced it — one copy of a note is ever outstanding.
+    Superseded,
+}
+
+/// The payload of an [`EventKind::CronFired`] event.
+///
+/// Empty — exactly as every firing serialized before scheduled notes existed —
+/// for a member's own schedule; a scheduled note's clock names its note, and a
+/// firing after the conversation ended says why nothing was offered.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CronFired {
+    /// The scheduled note whose clock fired, by its `id`; absent for a member's
+    /// own schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_note: Option<String>,
+    /// Why this firing offered nothing: the conversation had already ended, in
+    /// onejudge's refusal words. Present only on a scheduled note's last firing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undelivered: Option<UndeliveredReason>,
+}
+
+/// The payload of an [`EventKind::CronReset`] event.
+///
+/// Empty — exactly as before — for a reset a deprecated `reset-timer` caused;
+/// a `reset_on` match names the envelope that matched, and a scheduled note's
+/// clock names its note.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CronReset {
+    /// The scheduled note whose clock restarted, by its `id`; absent for a
+    /// member's own schedule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_note: Option<String>,
+    /// The envelope whose match restarted the clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cause: Option<ResetCause>,
+}
+
+/// The envelope a `reset_on` filter matched, by the four values that name one
+/// envelope on any stream of the stack.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResetCause {
+    /// Its producer, as the wire string it arrived as.
+    pub source: String,
+    /// Its kind, as the wire string it arrived as.
+    pub kind: String,
+    /// Its sequence number on its stream.
+    pub seq: u64,
+    /// The stream that carried it.
+    pub stream: String,
+}
+
+impl ResetCause {
+    /// The cause naming `envelope`.
+    #[must_use]
+    pub fn of(envelope: &Envelope) -> Self {
+        Self {
+            source: envelope.source.as_str().to_string(),
+            kind: envelope.kind.as_str().to_string(),
+            seq: envelope.seq,
+            stream: envelope.stream.clone(),
+        }
+    }
+}
+
+/// Why a scheduled note's firing offered nothing: onejudge's
+/// [`crate::note::Undelivered`], by the word a consumer branches on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum UndeliveredReason {
+    /// The supervisor had already answered completion.
+    ConversationCompleted,
+    /// The conversation had ended without completing.
+    MemberSettled,
+    /// No conversation ever read the member's inbox.
+    NoConversation,
+}
+
+impl UndeliveredReason {
+    /// The word onejudge's refusal is published as.
+    #[must_use]
+    pub fn of(undelivered: &crate::note::Undelivered) -> Self {
+        use crate::note::Undelivered;
+        match undelivered {
+            Undelivered::ConversationCompleted { .. } => Self::ConversationCompleted,
+            Undelivered::MemberSettled { .. } => Self::MemberSettled,
+            Undelivered::NoConversation { .. } => Self::NoConversation,
+        }
+    }
 }
 
 /// The payload of an [`EventKind::FallbackAdvanced`] event.
@@ -1470,8 +1577,10 @@ payload_messages! {
     TurnCompleted => TurnCompleted, "turn-completed", 1;
     JudgeDecided => JudgeDecided, "judge-decided", 1;
     TurnInterrupted => TurnInterrupted, "turn-interrupted", 1;
-    NoteAdmitted => NoteAdmitted, "note-admitted", 1;
-    NoteWithdrawn => NoteWithdrawn, "note-withdrawn", 1;
+    NoteAdmitted => NoteAdmitted, "note-admitted", 2;
+    NoteWithdrawn => NoteWithdrawn, "note-withdrawn", 2;
+    CronFired => CronFired, "cron-fired", 1;
+    CronReset => CronReset, "cron-reset", 1;
     FallbackAdvanced => FallbackAdvanced, "fallback-advanced", 1;
     OneharnessSession => OneharnessSession, "oneharness-session", 1;
     MemberDied => MemberDied, "member-died", 1;
@@ -1496,6 +1605,25 @@ pub struct Emitter {
     /// The labels every envelope this emitter writes carries, before the
     /// session rule is applied to them.
     labels: Labels,
+    /// What the run itself reads off every envelope it produces — admitted by
+    /// the filter or not — before it is returned: the `reset_on` clocks.
+    observer: Option<Observer>,
+}
+
+/// A reader of every envelope an [`Emitter`] produces, unfiltered.
+#[derive(Clone)]
+pub(crate) struct Observer(Arc<dyn Fn(&Envelope) + Send + Sync>);
+
+impl Observer {
+    pub(crate) fn new(read: impl Fn(&Envelope) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(read))
+    }
+}
+
+impl fmt::Debug for Observer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Observer")
+    }
 }
 
 impl Emitter {
@@ -1505,6 +1633,23 @@ impl Emitter {
         Self {
             bus: onemessagebus::Emitter::new(stream, Source::from(SOURCE_WORD), sink),
             labels: Labels::default(),
+            observer: None,
+        }
+    }
+
+    /// The same emitter, handing every envelope it produces — and every one an
+    /// emitter derived from it produces — to `observer` as well, whether or not
+    /// the filter admits it onto the stream.
+    ///
+    /// Set once, at the run's own emitter, for the reason
+    /// [`with_filter`](Self::with_filter) is: what the run *acts on* is
+    /// unfiltered whatever its stream shows.
+    #[must_use]
+    pub(crate) fn with_observer(&self, observer: Observer) -> Self {
+        Self {
+            bus: self.bus.clone(),
+            labels: self.labels.clone(),
+            observer: Some(observer),
         }
     }
 
@@ -1529,6 +1674,7 @@ impl Emitter {
         Self {
             bus: self.bus.clone().with_filter(filter),
             labels: self.labels.clone(),
+            observer: self.observer.clone(),
         }
     }
 
@@ -1555,6 +1701,7 @@ impl Emitter {
         Self {
             bus: self.bus.clone(),
             labels: merged,
+            observer: self.observer.clone(),
         }
     }
 
@@ -1614,10 +1761,14 @@ impl Emitter {
         artifacts: Vec<Artifact>,
     ) -> Envelope {
         let stamped = self.bus.clone().with_labels(self.stamp_session(kind));
-        match stamped.try_emit(kind, payload, artifacts) {
+        let envelope = match stamped.try_emit(kind, payload, artifacts) {
             Ok(envelope) => envelope,
             Err(unrecorded) => unrecorded.envelope,
+        };
+        if let Some(observer) = &self.observer {
+            (observer.0)(&envelope);
         }
+        envelope
     }
 }
 
@@ -2091,11 +2242,18 @@ mod tests {
         let registry = registry();
         let ids: Vec<String> = registry.ids().iter().map(ToString::to_string).collect();
         let declared = payload_schemas();
-        assert_eq!(declared.len(), 13);
+        assert_eq!(declared.len(), 15);
         for (kind, schema) in &declared {
+            // A version moves with any change to its payload's shape: the turn
+            // records lost their always-present content fields, and the two
+            // note payloads gained `scheduled_note` and two withdrawal reasons.
             let version = if matches!(
                 kind,
-                EventKind::TurnStarted | EventKind::TurnMessage | EventKind::TurnActivity
+                EventKind::TurnStarted
+                    | EventKind::TurnMessage
+                    | EventKind::TurnActivity
+                    | EventKind::NoteAdmitted
+                    | EventKind::NoteWithdrawn
             ) {
                 2
             } else {

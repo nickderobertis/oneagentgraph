@@ -15,22 +15,22 @@ use std::collections::{BTreeMap, BTreeSet};
 use oneagentgraph::cli::{MinAgeHours, DEFAULT_MIN_AGE_HOURS};
 use oneagentgraph::config::{
     AgentSide, ConfigRef, GraphConfig, JudgeSide, Member, OneharnessMember, OnejudgeMember,
-    PreTurn, Schedule, DEFAULT_PRE_TURN_SECONDS, FIRST_BACKGROUND_VERSION,
+    PreTurn, Schedule, ScheduledNote, DEFAULT_PRE_TURN_SECONDS, FIRST_BACKGROUND_VERSION,
     FIRST_EVENT_FILTER_VERSION, FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION,
-    FIRST_SCHEMA_VERSION, FIRST_START_AFTER_VERSION, MAX_PRE_TURN_COMMANDS, MAX_PRE_TURN_SECONDS,
-    SCHEMA_VERSION,
+    FIRST_SCHEDULED_NOTE_VERSION, FIRST_SCHEMA_VERSION, FIRST_START_AFTER_VERSION,
+    MAX_PRE_TURN_COMMANDS, MAX_PRE_TURN_SECONDS, SCHEMA_VERSION,
 };
 use oneagentgraph::error::{
     Error, EXIT_INVALID_CONFIG, EXIT_MEMBER_FAILED, EXIT_NO_CONTROLLABLE_TURN, EXIT_SUCCESS,
 };
 use oneagentgraph::event::{
-    session_label, Artifact, AttemptedCandidate, Cause, Dimensions, Disposition, Envelope,
-    EventFilter, EventKind, FallbackAdvanced, Labels, MatchFields, Matcher, MemberDied,
-    MemberStarted, NoteAccepted, NoteAdmitted, NoteWithdrawn, OneharnessSession, Origin, Party,
-    PreTurnContext, PreTurnOutcome, Role, Runner, Source, TurnActivity, TurnCompleted,
-    TurnInterrupted, TurnMessage, TurnStarted, Usage, WithdrawnReason, ENVELOPE_VERSION,
-    MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES, MAX_SESSION_CHARS,
-    ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL, SOURCE_WORD,
+    session_label, Artifact, AttemptedCandidate, Cause, CronFired, CronReset, Dimensions,
+    Disposition, Envelope, EventFilter, EventKind, FallbackAdvanced, Labels, MatchFields, Matcher,
+    MemberDied, MemberStarted, NoteAccepted, NoteAdmitted, NoteWithdrawn, OneharnessSession,
+    Origin, Party, PreTurnContext, PreTurnOutcome, ResetCause, Role, Runner, Source, TurnActivity,
+    TurnCompleted, TurnInterrupted, TurnMessage, TurnStarted, UndeliveredReason, Usage,
+    WithdrawnReason, ENVELOPE_VERSION, MAX_ACTIVITY_DETAIL_CHARS, MAX_PAYLOAD_TEXT_BYTES,
+    MAX_SESSION_CHARS, ONEHARNESS_SESSION_ARTIFACT, SESSION_LABEL, SOURCE_WORD,
 };
 use oneagentgraph::liveness::{
     BACKGROUND_ENV, DEFAULT_HEARTBEAT_TIMEOUT, DEFAULT_STALL_TIMEOUT, HEARTBEAT_TIMEOUT_ENV,
@@ -834,6 +834,212 @@ fn a_turn_interrupted_payload_names_the_member_and_whether_it_landed() {
 /// carries `accepted` and `party` only when it was accepted, so a turn-end
 /// delivery and an interrupted one read apart on `accepted` while `delivered`
 /// stays the boolean every consumer already reads.
+/// The scheduled-note payload fields — `scheduled_note`, `undelivered`, `cause`
+/// — and the two new withdrawal reasons are what the contract shows, each
+/// driven through the type this build publishes and parsed back; and a payload
+/// naming none of them serializes exactly as it did before they existed.
+#[test]
+fn the_documented_scheduled_note_payloads_round_trip_and_older_shapes_are_unchanged() {
+    let documented = |name: &str| -> Value {
+        serde_json::from_str(&fenced_block(name)).unwrap_or_else(|err| panic!("{name}: {err}"))
+    };
+
+    let admitted: NoteAdmitted = serde_json::from_value(documented("json note-admitted-scheduled"))
+        .expect("a scheduled note-admitted parses");
+    assert_eq!(admitted.scheduled_note.as_deref(), Some("progress-report"));
+    assert_eq!(
+        serde_json::to_value(&admitted).expect("serializes"),
+        documented("json note-admitted-scheduled")
+    );
+    let unscheduled: NoteAdmitted =
+        serde_json::from_value(documented("json note-admitted")).expect("parses");
+    assert_eq!(unscheduled.scheduled_note, None);
+    assert!(
+        serde_json::to_value(&unscheduled)
+            .expect("serializes")
+            .get("scheduled_note")
+            .is_none(),
+        "a caller's note gained a key an older consumer would not expect"
+    );
+
+    let withdrawn: NoteWithdrawn =
+        serde_json::from_value(documented("json note-withdrawn-scheduled")).expect("parses");
+    assert_eq!(withdrawn.reason, WithdrawnReason::Superseded);
+    assert_eq!(withdrawn.scheduled_note.as_deref(), Some("progress-report"));
+    assert_eq!(
+        withdrawn.offer, admitted.offer,
+        "the two examples name one copy"
+    );
+    assert_eq!(
+        serde_json::to_value(&withdrawn).expect("serializes"),
+        documented("json note-withdrawn-scheduled")
+    );
+
+    let fired: CronFired =
+        serde_json::from_value(documented("json cron-fired-undelivered")).expect("parses");
+    assert_eq!(fired.scheduled_note.as_deref(), Some("progress-report"));
+    assert_eq!(
+        fired.undelivered,
+        Some(UndeliveredReason::ConversationCompleted)
+    );
+    assert_eq!(
+        serde_json::to_value(&fired).expect("serializes"),
+        documented("json cron-fired-undelivered")
+    );
+    for (undelivered, reason, word) in [
+        (
+            oneagentgraph::note::Undelivered::ConversationCompleted {
+                completion_reason: "done".to_string(),
+            },
+            UndeliveredReason::ConversationCompleted,
+            "conversation-completed",
+        ),
+        (
+            oneagentgraph::note::Undelivered::MemberSettled {
+                outcome: "capped".to_string(),
+            },
+            UndeliveredReason::MemberSettled,
+            "member-settled",
+        ),
+        (
+            oneagentgraph::note::Undelivered::NoConversation {
+                reason: "never ran".to_string(),
+            },
+            UndeliveredReason::NoConversation,
+            "no-conversation",
+        ),
+    ] {
+        assert_eq!(UndeliveredReason::of(&undelivered), reason);
+        assert_eq!(
+            serde_json::to_value(reason).expect("serializes"),
+            json!(word)
+        );
+        // Unbackticked, as the contract writes every payload word that is
+        // kebab-case and not an event kind — `accepted`'s among them.
+        assert!(
+            CONTRACT.contains(word),
+            "the contract does not name the `{word}` refusal"
+        );
+    }
+
+    let reset: CronReset =
+        serde_json::from_value(documented("json cron-reset-caused")).expect("parses");
+    let cause = ResetCause {
+        source: "pipeline".to_string(),
+        kind: "planner-surfaced".to_string(),
+        seq: 42,
+        stream: "pipeline-run-1".to_string(),
+    };
+    assert_eq!(reset.cause.as_ref(), Some(&cause));
+    assert_eq!(
+        serde_json::to_value(&reset).expect("serializes"),
+        documented("json cron-reset-caused")
+    );
+    // The cause names the envelope it came from by the words it arrived with.
+    let foreign: Envelope = serde_json::from_value(json!({
+        "v": 1, "ts": "2026-11-08T00:00:00.000Z", "stream": "pipeline-run-1", "seq": 42,
+        "source": "pipeline", "kind": "planner-surfaced", "labels": {}, "payload": {}
+    }))
+    .expect("another producer's envelope reads");
+    assert_eq!(ResetCause::of(&foreign), cause);
+
+    // A member's own firing, and a reset `reset-timer` caused, are what they
+    // always were on the wire.
+    assert_eq!(
+        serde_json::to_value(CronFired::default()).expect("serializes"),
+        json!({})
+    );
+    assert_eq!(
+        serde_json::to_value(CronReset::default()).expect("serializes"),
+        json!({})
+    );
+    for field in ["scheduled_note", "undelivered", "cause", "seq", "stream"] {
+        assert!(
+            CONTRACT.contains(&format!("`{field}`")),
+            "the contract no longer names `{field}`"
+        );
+    }
+}
+
+/// A run names the stream it follows through `run::Request::follow_events` and
+/// `--follow-events`, and the deprecated `reset-timer` takes exactly the
+/// arguments it always did.
+#[test]
+fn a_run_names_the_stream_it_follows_and_reset_timer_gains_nothing() {
+    use clap::Parser as _;
+    let request = oneagentgraph::run::Request {
+        graph: ConfigRef("./graph.yaml".to_string()),
+        task: None,
+        dir: std::path::PathBuf::from("."),
+        labels: Vec::new(),
+        overrides: Vec::new(),
+        filter: None,
+        state_dir: std::path::PathBuf::from("/state"),
+        oneharness_bin: "oneharness".to_string(),
+        follow_events: Some(std::path::PathBuf::from("/runs/pipeline/events.jsonl")),
+    };
+    assert_eq!(
+        request.follow_events.as_deref(),
+        Some(std::path::Path::new("/runs/pipeline/events.jsonl"))
+    );
+    assert!(
+        CONTRACT.contains("`run::Request::follow_events: Option<PathBuf>`"),
+        "the contract no longer names the request's field"
+    );
+
+    let cli = oneagentgraph::cli::Cli::try_parse_from([
+        "oneagentgraph",
+        "run",
+        "./graph.yaml",
+        "--follow-events",
+        "/runs/pipeline/events.jsonl",
+    ])
+    .expect("the flag parses");
+    let oneagentgraph::cli::Command::Run(args) = cli.command else {
+        panic!("a run")
+    };
+    assert_eq!(
+        args.follow_events.as_deref(),
+        Some(std::path::Path::new("/runs/pipeline/events.jsonl"))
+    );
+    assert!(fenced_block("").contains("[--follow-events PATH]"));
+
+    assert!(oneagentgraph::cli::Cli::try_parse_from([
+        "oneagentgraph",
+        "reset-timer",
+        "R",
+        "worker"
+    ])
+    .is_ok());
+    for extra in [&["note"][..], &["--clock", "note"][..]] {
+        let mut argv = vec!["oneagentgraph", "reset-timer", "R", "worker"];
+        argv.extend_from_slice(extra);
+        assert!(
+            oneagentgraph::cli::Cli::try_parse_from(argv).is_err(),
+            "reset-timer accepted {extra:?}"
+        );
+    }
+}
+
+/// The documented graph's scheduled note and `reset_on` are schema 11's, and the
+/// same document declaring schema 10 is refused by the field's name.
+#[test]
+fn the_documented_scheduled_notes_and_reset_on_require_schema_eleven() {
+    assert_eq!(FIRST_SCHEDULED_NOTE_VERSION, 11);
+    assert_eq!(SCHEMA_VERSION, FIRST_SCHEDULED_NOTE_VERSION);
+    let documented = fenced_block("yaml");
+    let older = documented.replace("version: 11\n", "version: 10\n");
+    let graph: GraphConfig = oneagentgraph::yaml::from_str(&older).expect("parses");
+    let err = oneagentgraph::config::validate(&graph)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains("requires graph schema version 11")
+            && (err.contains("`scheduled_notes`") || err.contains("`schedule.reset_on`")),
+        "{err}"
+    );
+}
+
 #[test]
 fn the_documented_note_payloads_are_the_ones_this_build_publishes() {
     let admitted: NoteAdmitted =
@@ -857,6 +1063,8 @@ fn the_documented_note_payloads_are_the_ones_this_build_publishes() {
     for (reason, word) in [
         (WithdrawnReason::Expired, "expired"),
         (WithdrawnReason::Withdrawn, "withdrawn"),
+        (WithdrawnReason::Reset, "reset"),
+        (WithdrawnReason::Superseded, "superseded"),
     ] {
         assert_eq!(
             serde_json::to_value(reason).expect("serializes"),
@@ -1778,6 +1986,19 @@ fn the_documented_sweep_report_round_trips_through_the_document_type() {
     assert!("abc".parse::<MinAgeHours>().is_err());
 }
 
+/// The `reset_on` filter the documented graph declares on the worker's schedule
+/// and on its scheduled note: another program's envelope, by its own words.
+fn surfaced() -> EventFilter {
+    EventFilter {
+        include: vec![Matcher {
+            source: Some(Source::from("pipeline")),
+            kind: Some("planner-surfaced".to_string()),
+            ..Matcher::default()
+        }],
+        exclude: Vec::new(),
+    }
+}
+
 #[test]
 fn the_documented_graph_round_trips_through_the_config_schema() {
     let yaml = fenced_block("yaml");
@@ -1844,7 +2065,16 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
                 every: 300,
                 start_after: Some(0),
                 resettable: false,
+                reset_on: Some(surfaced()),
             }),
+            scheduled_notes: vec![ScheduledNote {
+                id: "progress-report".to_string(),
+                every: 1800,
+                start_after: Some(1800),
+                reset_on: Some(surfaced()),
+                addressee: oneagentgraph::note::Addressee::Supervisor,
+                text: "Write the progress report now.".to_string(),
+            }],
             background: Some(false),
             deps: Vec::new(),
         }
@@ -1864,6 +2094,7 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
                 every: 1800,
                 start_after: Some(1800),
                 resettable: true,
+                reset_on: None,
             }),
             background: Some(true),
             pre_turn: vec![PreTurn {
@@ -2365,6 +2596,7 @@ fn drop_what_postdates_the_schedule(graph: &mut GraphConfig) {
             Member::Onejudge(member) => {
                 member.dir = None;
                 member.schedule = None;
+                member.scheduled_notes.clear();
             }
         }
     }
@@ -2532,7 +2764,10 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
     };
-    let documented = reporter.schedule.expect("the reporter is scheduled");
+    let documented = reporter
+        .schedule
+        .clone()
+        .expect("the reporter is scheduled");
     assert_eq!(documented.start_after, Some(1800));
     assert_eq!(documented.first_turn_after(SCHEMA_VERSION), 1800);
 
@@ -2543,7 +2778,10 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
     let Member::Oneharness(reporter) = &graph.members["reporter"] else {
         panic!("reporter is oneharness")
     };
-    let inherited = reporter.schedule.expect("the reporter is scheduled");
+    let inherited = reporter
+        .schedule
+        .clone()
+        .expect("the reporter is scheduled");
     assert_eq!(inherited.start_after, None);
     assert_eq!(inherited.first_turn_after(SCHEMA_VERSION), inherited.every);
     let round_trip = oneagentgraph::yaml::to_string(&graph).expect("graph serializes");
@@ -2605,6 +2843,7 @@ fn the_documented_start_after_defaults_to_every_and_stays_omitted_when_unset() {
     assert_eq!(
         reporter
             .schedule
+            .clone()
             .expect("the reporter is scheduled")
             .first_turn_after(SCHEMA_VERSION),
         0
@@ -2880,6 +3119,11 @@ fn the_two_member_kinds_accept_the_same_settings_up_to_the_named_exceptions() {
             "onejudge settings for the provider block a conversation's judge side composes, \
              which a single-sided member does not have",
         ),
+        (
+            "scheduled_notes",
+            "a scheduled note is held for a turn's end, and holding a note for a turn's end \
+             needs a conversation",
+        ),
     ]);
 
     // A judge's own `settings` is two-party-only one level down: every judge
@@ -3096,6 +3340,7 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "--label",
         "--set",
         "--event-filter",
+        "--follow-events",
         "--output",
         "--detach",
         "--kill",

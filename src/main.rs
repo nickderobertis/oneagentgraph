@@ -188,15 +188,44 @@ fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error
             .collect::<Result<Vec<_>, _>>()?,
         state_dir: state_dir(env),
         oneharness_bin: oneharness_bin(env),
+        follow_events: args.follow_events.clone(),
     };
     if args.detach {
         return detach(&args, env);
     }
+    announce_deprecations(&args.graph, &request.overrides, env);
     let sink: Box<dyn std::io::Write + Send> = match args.output {
         OutputFormat::Json => Box::new(std::io::stdout()),
         OutputFormat::Text => Box::new(Text::new(std::io::stdout())),
     };
     run::run(&request, sink, env)
+}
+
+/// Say on standard error what the graph a foreground `run` is about to run
+/// declares that this release deprecates — once per declaring member, before
+/// anything is launched.
+///
+/// Read through the reader `run` itself uses, with the same overrides and the
+/// same environment, so it warns about the graph that runs. A graph this cannot
+/// read is left to `run`, which refuses it with the reason.
+fn announce_deprecations(
+    graph_ref: &str,
+    overrides: &[run::Override],
+    env: &BTreeMap<String, String>,
+) {
+    let mut resolver = Resolver::new();
+    let Ok(document) = resolver.resolve(&config::ConfigRef(graph_ref.to_string()), None) else {
+        return;
+    };
+    let read = run::read_graph(&document.content, graph_ref, |parsed| {
+        run::apply_background_env(parsed, env)?;
+        run::apply_overrides(parsed, overrides)
+    });
+    if let Ok(graph) = read {
+        for warning in graph.deprecations() {
+            eprintln!("{warning}");
+        }
+    }
 }
 
 /// `oneagentgraph run --detach`: relaunch this same binary without `--detach`,
@@ -226,13 +255,16 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     // or a matcher that could match nothing, is an invalid invocation whichever
     // side of the fork runs it.
     requested_filter(args)?;
-    preflight(
+    let graph = preflight(
         &args.graph,
         &overrides,
         RunEnvironment::Read,
         env,
         task.as_deref(),
     )?;
+    for warning in graph.deprecations() {
+        eprintln!("{warning}");
+    }
 
     let state = state_dir(env);
     let before: Vec<run::RunId> = history::list(&state)
@@ -260,6 +292,9 @@ fn detach(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> 
     }
     if let Some(spec) = &args.event_filter {
         command.args(["--event-filter", spec]);
+    }
+    if let Some(path) = &args.follow_events {
+        command.arg("--follow-events").arg(path);
     }
     let child = command
         .stdin(std::process::Stdio::null())
@@ -320,6 +355,9 @@ fn validate(args: &ValidateArgs, env: &BTreeMap<String, String>) -> Result<i32, 
         env,
         Some(VALIDATE_TASK),
     )?;
+    for warning in graph.deprecations() {
+        eprintln!("{warning}");
+    }
     println!("{}: {} member(s) OK", graph.name, graph.members.len());
     Ok(EXIT_SUCCESS)
 }
@@ -402,6 +440,12 @@ fn signal(
     env: &BTreeMap<String, String>,
     kind: run::Signal,
 ) -> Result<i32, Error> {
+    if kind == run::Signal::Reset {
+        eprintln!(
+            "oneagentgraph: `reset-timer` is deprecated and will be removed in a later release — \
+             declare `reset_on` on the member's schedule instead"
+        );
+    }
     let member = run::MemberName::parse(&args.member)?;
     let run_id = run::RunId::parse(&args.run)?;
     run::signal(&state_dir(env), &run_id, &member, kind)?;

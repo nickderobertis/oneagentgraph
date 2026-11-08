@@ -164,6 +164,71 @@ kind alone, and is what the run spawns a clock from after a wave.
   record names its provisional address, nothing is listening on the agent side's
   socket between turns, and `control::deliver` reports the fact.
 
+## Scheduled notes and `reset_on`
+
+`config::ScheduledNote` is one entry of `config::OnejudgeMember::scheduled_notes`,
+and `config::Schedule::reset_on` / `ScheduledNote::reset_on` are the shared
+`event::EventFilter`. `config::validate` holds both to
+`config::FIRST_SCHEDULED_NOTE_VERSION` by the field's name (`scheduled_notes`,
+`schedule_spans`, `reset_filter`); a single-sided member has no such field, so
+serde refuses it by name. `run::apply_overrides` addresses a list entry by its
+`id` as well as by its index (`run::index_of`), which is what reaches
+`members.<m>.scheduled_notes.<id>.<field>`.
+
+- **Run-time state is keyed by scratch.** A launch is built before the run and
+  by `validate` alike, so nothing live rides it. `scheduled::MemberClocks` — a
+  member's `schedule.reset_on` subscription and its `note::ScheduledNotes` seam —
+  is registered by `run::run` for each member before the first wave
+  (`scheduled::Registered`, forgotten on every way out), and read back by
+  `run::cron`, `judge::Hold` and `judge::run` through `scheduled::of(scratch)`,
+  the same derivation a hold makes for its signal directory.
+- **What resets.** `resets::Resets` holds one subscription per clock declaring
+  `reset_on`. The run's emitter is given an `event::Observer` that hands it every
+  envelope `Emitter::emit_with` produces, before the filter decides what is
+  written; `Resets::observe` skips only the subscription of the clock whose own
+  `cron-reset` it is, so a clock cannot loop on its own restart. `resets::follow` reads `--follow-events` (`run::Request::follow_events`)
+  from its length at graph start, waits for a path that does not exist yet,
+  keeps a line without its newline until it has one, and counts what does not
+  parse as an envelope; `run::run` says the count on standard error. A clock
+  reads its subscription on its own tick: `run::cron` restarts the interval it
+  is counting, `judge::Hold::hold` the hold in progress, and
+  `scheduled::run_note_clock` its pending span — each publishing `cron-reset`
+  with `event::CronReset::cause`. A match while a turn is live waits in the
+  subscription and is honoured at the next hold, as a reset file is.
+- **A scheduled note's clock** is `scheduled::spawn_note_clock`, started by
+  `run::run` when the member's wave is reached, beside a deferred schedule's
+  clock and before `run_wave` blocks. It holds nothing open: `run::run` stops it
+  once the graph settles, and it stops on `stop`, the member's own `cancel`, and
+  after `note::Fired::Undelivered`.
+- **The seam.** `note::ScheduledNotes::fire` is where every timing rule is
+  decided, under one lock: before the conversation opens a firing is a held copy
+  under an offer id minted then, and a later firing or a reset publishes its
+  `note-withdrawn`;
+  `note::Relay::open` — now called before the engine thread starts — admits held
+  copies before the first turn; while open, an earlier untaken copy is withdrawn
+  `superseded` (`Book::withdraw_as`) and the note is offered as a
+  `Delivery::TurnEnd` note into the same inbox and `Book` a caller's note uses,
+  so answers, probes and `Deliveries` attribution are shared; after the inbox
+  closes, or `Ending::end` reaches `ScheduledNotes::end`, a firing publishes
+  `cron-fired` with `undelivered` and the clock stops. `judge::ScheduledClosing`
+  ends the seam on every way out of `judge::run`.
+- **Admission before waking.** `fire` holds the seam's barrier from the offer
+  until `note-admitted` is published; the sink passes that barrier
+  (`ScheduledNotes::pass`) before publishing any `TurnOpened`, and a hold sees a
+  copy only through `ScheduledNotes::has_unanswered`, which is set after the event.
+  A hold that would start with a copy untaken is skipped; one in progress ends on
+  it. `Relay::admit` now publishes a caller's `note-admitted` before counting the
+  offer, for the same reason.
+- **Fixtures.** `oneagentgraph-fixture:note-clock-from=` (in `scheduled`) starts a
+  member's note clocks only when its gate exists, and
+  `oneagentgraph-fixture:hold-at-expiry=` (in `judge`) pauses a hold at the instant
+  its `every` elapses; both are `test-doubles` only, and
+  `tests/e2e/scheduled_notes.rs` is what drives them.
+
+`resettable` and `run::Signal::Reset` are untouched apart from the warning:
+`config::GraphConfig::deprecations` is the one wording `validate` and `run` print,
+and the `reset-timer` arm of the binary's `signal` prints its own.
+
 ## Background and foreground
 
 Whether a member holds the run open is a declaration the document makes per
@@ -233,7 +298,9 @@ completes before the cron thread joins. `run::run` joins those threads before
 emitting `graph-settled`, so the last admitted turn is present in the final
 stream and record, and a failure among them is the run's exit 1.
 
-The event vocabulary gains no kind. `member-started` gains one payload field,
+The event vocabulary gains no kind. (Version 11's payload fields on `cron-fired`,
+`cron-reset`, `note-admitted` and `note-withdrawn` are committed in
+`tests/golden/clock-and-note-payloads.v2.json`.) `member-started` gains one payload field,
 `start_after`, on the one a deferred member publishes when it comes up without
 taking a turn; `tests/golden/member-started.json` commits every shape of that
 payload, with and without it. There is still no wave-boundary event; consumers
