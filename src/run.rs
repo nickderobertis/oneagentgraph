@@ -2108,7 +2108,8 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     replaced
 }
 
-/// Rename `from` onto `to`.
+/// Rename `from` onto `to`: on Unix a rename replaces a name another process
+/// holds open, so there is no refusal to wait out.
 #[cfg(not(windows))]
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
@@ -2120,6 +2121,12 @@ fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
 /// deletion — a reader that is not this crate, which always shares it — and
 /// the refusal lasts only as long as that read. So a refusal is retried, a
 /// bounded number of times, rather than failing the run's write.
+// llmlint: ignore-block[changed_behavior_has_e2e] this body compiles only for
+// Windows, and the refusal it waits out needs a second process holding the
+// record open without sharing deletion — a reader outside this crate, which
+// always shares it. Linux's `check` never compiles it; the rename it wraps is
+// what the concurrent-read journeys in `tests/e2e/verbs.rs` and
+// `tests/e2e/interrupt.rs` drive on every leg, Windows included.
 #[cfg(windows)]
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
     const ATTEMPTS: u32 = 50;
@@ -2136,6 +2143,7 @@ fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
         }
     }
 }
+// llmlint: ignore-end[changed_behavior_has_e2e]
 
 /// The exit code a run failed to start with.
 #[must_use]

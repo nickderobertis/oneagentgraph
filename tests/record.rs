@@ -68,7 +68,7 @@ use oneagentgraph::event::{
 };
 use oneagentgraph::member::Rule;
 use oneagentgraph::resolve::ResolvedRef;
-use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_SCHEMA_VERSION};
+use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_FILE, RECORD_SCHEMA_VERSION};
 
 /// The graph the config goldens describe, at the current schema version.
 ///
@@ -1111,6 +1111,25 @@ fn a_record_from_a_newer_build_is_refused_by_its_version() {
     );
     // And such a record is skipped in a listing rather than hiding the rest.
     assert!(oneagentgraph::history::list(state.path()).is_empty());
+}
+
+/// A record write that cannot land is refused naming the record, and leaves the
+/// run's directory as it found it: no partial beside a record that never moved.
+#[test]
+fn a_record_write_that_cannot_land_leaves_no_partial() {
+    let state = tempfile::tempdir().expect("a state dir");
+    let run = state.path().join("node-scope-1786171301679-1447994");
+    std::fs::create_dir_all(run.join(RECORD_FILE)).expect("occupy the record's name");
+
+    let err = oneagentgraph::run::write_record(&run, &golden_record())
+        .expect_err("a record cannot replace a directory");
+    assert!(err.to_string().contains(RECORD_FILE), "{err}");
+    let left: Vec<_> = std::fs::read_dir(&run)
+        .expect("the run's directory")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, vec![RECORD_FILE.to_string()], "{left:?}");
 }
 
 /// One state directory, and the compiled binary pointed at it.

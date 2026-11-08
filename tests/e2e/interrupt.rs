@@ -29,7 +29,11 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 use crate::support::assert_session_labels;
-use crate::support::{graph_with, until, Hermetic, Workspace};
+use oneagentgraph::control::{Turn, CONTROL_FILE};
+
+use crate::support::{
+    graph_with, partials, until, while_rewritten, Hermetic, Workspace, CONCURRENT_READS,
+};
 
 /// One run whose member is parked on a controllable turn, and the run id an
 /// operator addresses it by.
@@ -397,6 +401,77 @@ fn a_single_sided_member_it_cannot_interrupt_in_place_opens_no_controllable_turn
             ),
         "{}",
         interrupted.stdout
+    );
+}
+
+/// `interrupt` reads a member's turn-control record while the run is rewriting
+/// it, and every read sees a whole record: the reason the run wrote down, never
+/// a record "this build can read" none of.
+///
+/// The writer is the run's own, [`oneagentgraph::control::write`], driven
+/// without pause, because a member rewrites its record only as its turns open.
+#[test]
+fn interrupt_reads_a_whole_control_record_while_it_is_being_rewritten() {
+    const REASON: &str = "the rewritten member opened no controllable turn";
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let scratch = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter");
+    assert!(
+        scratch.join(CONTROL_FILE).is_file(),
+        "the run wrote no control record at {}",
+        scratch.display()
+    );
+
+    let failed = {
+        let scratch = scratch.clone();
+        let turn = Turn::Unavailable {
+            reason: REASON.to_string(),
+        };
+        while_rewritten(
+            move || oneagentgraph::control::write(&scratch, &turn),
+            || {
+                let interrupted = workspace.run(&["interrupt", &run_id, "reporter"]);
+                let events = interrupted.of_kind("turn-interrupted");
+                let reason = events
+                    .first()
+                    .and_then(|event| event["payload"]["reason"].as_str());
+                match (interrupted.code, reason) {
+                    (3, Some(REASON)) => Ok(()),
+                    (code, reason) => Err(format!("exit {code}, reason {reason:?}\n")),
+                }
+            },
+        )
+    };
+    assert!(
+        failed.is_empty(),
+        "{} of {CONCURRENT_READS} reads of a control record being rewritten failed:\n{}",
+        failed.len(),
+        failed.join("")
+    );
+    assert!(
+        partials(&scratch).is_empty(),
+        "rewrites left partial records: {:?}",
+        partials(&scratch)
     );
 }
 

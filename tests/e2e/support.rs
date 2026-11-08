@@ -857,3 +857,59 @@ pub fn until(what: &str, condition: impl Fn() -> bool) {
     }
     panic!("timed out waiting for {what}");
 }
+
+/// How many times a journey reads a store `while_rewritten` is rewriting.
+///
+/// Enough that a writer replacing the store in place is caught every time: with
+/// the run record written in place, 184 of 200 reads saw it empty.
+pub const CONCURRENT_READS: usize = 200;
+
+/// Run `rewrite` without pause on a thread of its own while `read` runs
+/// [`CONCURRENT_READS`] times, and return what each read that failed said.
+///
+/// The verdict rests on no clock: each read waits for at least one more rewrite
+/// before it starts, so every read lands on a store a writer is still
+/// replacing. A rewrite that panics fails the journey rather than leaving the
+/// reads to pass against a store nothing is writing any more.
+pub fn while_rewritten(
+    mut rewrite: impl FnMut() + Send + 'static,
+    mut read: impl FnMut() -> Result<(), String>,
+) -> Vec<String> {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicUsize::new(0));
+    let writer = {
+        let (stop, writes) = (Arc::clone(&stop), Arc::clone(&writes));
+        std::thread::spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                rewrite();
+                writes.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+    let mut failed = Vec::new();
+    for attempt in 0..CONCURRENT_READS {
+        let before = writes.load(Ordering::SeqCst);
+        while writes.load(Ordering::SeqCst) == before && !writer.is_finished() {
+            std::thread::yield_now();
+        }
+        if let Err(why) = read() {
+            failed.push(format!("read {attempt}: {why}"));
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    writer.join().expect("the writer kept writing");
+    failed
+}
+
+/// The names in `dir` a whole-file replacement left behind as its partial.
+pub fn partials(dir: &Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .expect("the directory lists")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".partial"))
+        .collect()
+}

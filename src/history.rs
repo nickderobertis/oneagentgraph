@@ -222,22 +222,4 @@ mod tests {
             "{names:?}"
         );
     }
-
-    /// A write that cannot land leaves neither a record nor its partial.
-    #[test]
-    fn a_write_that_cannot_land_leaves_no_partial() {
-        let state = tempfile::tempdir().expect("tempdir");
-        let written = record(state.path(), "r-4", 1);
-        let occupied = state.path().join("r-5");
-        std::fs::create_dir_all(occupied.join(RECORD_FILE)).expect("occupy the record's name");
-
-        let err = crate::run::write_record(&occupied, &written).unwrap_err();
-        assert!(err.to_string().contains(RECORD_FILE), "{err}");
-        let names: Vec<_> = std::fs::read_dir(&occupied)
-            .expect("the run's directory")
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec![RECORD_FILE.to_string()]);
-    }
 }
