@@ -187,7 +187,9 @@ pub fn write_parties(scratch: &Path, turn: &Turn, supervisor: Option<&Turn>, not
         supervisor: supervisor.cloned(),
     };
     if let Ok(rendered) = serde_json::to_string(&record) {
-        let _ = std::fs::write(path(scratch), rendered);
+        // Whole, because `interrupt` and `note` read it from another process
+        // while a turn is rewriting it — see [`crate::run::replace_whole`].
+        let _ = crate::run::replace_whole(&path(scratch), rendered.as_bytes());
     }
 }
 

@@ -9,10 +9,11 @@
 // same double reached under a second `ONEHARNESS_BIN_*` key.
 
 use oneagentgraph::config::{FIRST_SCHEMA_VERSION, SCHEMA_VERSION};
+use oneagentgraph::run::{RECORD_FILE, SIGNAL_DIR};
 
 use crate::support::{
-    fake_harness, graph_with, single_sided_graph, two_party_graph, until, Hermetic, Workspace,
-    CHAIN, FAKE_HARNESS_KEY, NO_ENV,
+    fake_harness, graph_with, partials, single_sided_graph, two_party_graph, until,
+    while_rewritten, Hermetic, Workspace, CHAIN, CONCURRENT_READS, FAKE_HARNESS_KEY, NO_ENV,
 };
 
 /// `validate` reads every ref the graph names, so a pass means the graph could
@@ -2265,6 +2266,110 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
         "{}",
         traversal.stderr
     );
+}
+
+/// `reset-timer` reads a run's record while the run is rewriting it — the way a
+/// consumed surface restarts an observer's check-in clock while the detached
+/// driver writes — and every read sees a whole record, so none reports the run
+/// as missing.
+///
+/// The writer is the store's own, [`oneagentgraph::run::write_record`], driven
+/// without pause, because a run rewrites its record only three times.
+#[test]
+fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: rewritten")
+        .expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+    let mut record = oneagentgraph::history::show(&state, &id).expect("the run's record");
+    let root = state.join(&id);
+
+    let failed = {
+        let root = root.clone();
+        let mut finished = 0;
+        while_rewritten(
+            move || {
+                finished += 1;
+                record.finished_ms = Some(finished);
+                oneagentgraph::run::write_record(&root, &record).expect("the record rewrites");
+            },
+            || {
+                let reset = workspace.run(&["reset-timer", &id, "worker"]);
+                match reset.code {
+                    0 => Ok(()),
+                    code => Err(format!("exit {code}: {}", reset.stderr)),
+                }
+            },
+        )
+    };
+    assert!(
+        failed.is_empty(),
+        "{} of {CONCURRENT_READS} reads of a record being rewritten failed:\n{}",
+        failed.len(),
+        failed.join("")
+    );
+    assert!(
+        partials(&root).is_empty(),
+        "rewrites left partial records: {:?}",
+        partials(&root)
+    );
+}
+
+/// A record that is there and does not read — empty, not JSON, not a record,
+/// from a newer build, or not a file at all — with nothing writing it, is
+/// refused naming the file: not reported as a run that does not exist, and not
+/// read as a fresh one.
+#[test]
+fn a_record_that_does_not_read_is_refused_by_its_file() {
+    let workspace = Workspace::new();
+    let newer = format!(
+        "{{\"schema_version\":{}}}",
+        oneagentgraph::run::RECORD_SCHEMA_VERSION + 1
+    );
+    for (id, content, why) in [
+        ("empty-run", Some(""), "EOF while parsing"),
+        ("torn-run", Some("{\"run_id\":"), "EOF while parsing"),
+        (
+            "shapeless-run",
+            Some("{\"schema_version\":3}"),
+            "missing field",
+        ),
+        (
+            "newer-run",
+            Some(newer.as_str()),
+            "newer than this build reads",
+        ),
+        ("directory-run", None, ""),
+    ] {
+        let record = workspace.state().join(id).join(RECORD_FILE);
+        match content {
+            Some(content) => {
+                std::fs::create_dir_all(record.parent().expect("a run directory")).expect("mkdir");
+                std::fs::write(&record, content).expect("write");
+            }
+            None => std::fs::create_dir_all(&record).expect("a directory where the record goes"),
+        }
+
+        let refused = workspace.run(&["reset-timer", id, "worker"]);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains(&record.display().to_string()) && refused.stderr.contains(why),
+            "{id}: the refusal does not name {} and why ({why}): {}",
+            record.display(),
+            refused.stderr
+        );
+        assert!(
+            !refused.stderr.contains("no run"),
+            "{id}: a record that is there was reported missing: {}",
+            refused.stderr
+        );
+        assert!(
+            !workspace.state().join(id).join(SIGNAL_DIR).exists(),
+            "{id}: a signal was left for a run whose record does not read"
+        );
+    }
 }
 
 /// A typo is refused *while the run is in flight*, which is when these verbs are

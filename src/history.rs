@@ -45,11 +45,21 @@ pub fn list(state_dir: &Path) -> Vec<Record> {
 /// is no such run, or when its record cannot be read.
 pub fn show(state_dir: &Path, run_id: &str) -> Result<Record, Error> {
     let run_id = RunId::parse(run_id)?;
-    read(&state_dir.join(&run_id)).map_err(|err| {
-        Error::InvalidConfig(format!(
-            "no run {:?} under {}: {err}",
+    let dir = state_dir.join(&run_id);
+    if !dir.join(RECORD_FILE).exists() {
+        return Err(Error::InvalidConfig(format!(
+            "no run {:?} under {}",
             run_id.as_str(),
             state_dir.display()
+        )));
+    }
+    // A record that is there and does not read is not a missing run: the writer
+    // replaces it whole, so no write in progress leaves it empty or partial, and
+    // what is wrong with it is the file's, which is named.
+    read(&dir).map_err(|err| {
+        Error::InvalidConfig(format!(
+            "run {:?} has a record that does not read: {err}",
+            run_id.as_str()
         ))
     })
 }
@@ -77,19 +87,20 @@ pub fn events(state_dir: &Path, run_id: &str) -> Result<String, Error> {
 /// blame whichever key that build added instead of the version that explains it.
 fn read(dir: &Path) -> Result<Record, String> {
     let path = dir.join(RECORD_FILE);
-    let raw = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    let loose: serde_json::Value = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    let named = |err: &dyn std::fmt::Display| format!("{}: {err}", path.display());
+    let raw = std::fs::read_to_string(&path).map_err(|err| named(&err))?;
+    let loose: serde_json::Value = serde_json::from_str(&raw).map_err(|err| named(&err))?;
     let version = loose
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
     if version > u64::from(RECORD_SCHEMA_VERSION) {
-        return Err(format!(
+        return Err(named(&format!(
             "record schema version {version} is newer than this build reads \
              ({RECORD_SCHEMA_VERSION}); the run was recorded by a later oneagentgraph"
-        ));
+        )));
     }
-    serde_json::from_str(&raw).map_err(|err| err.to_string())
+    serde_json::from_str(&raw).map_err(|err| named(&err))
 }
 
 #[cfg(test)]
@@ -172,5 +183,43 @@ mod tests {
         std::fs::remove_file(&record.events_path).expect("remove");
         let err = events(state.path(), "r-2").unwrap_err();
         assert!(err.to_string().contains("events.jsonl"), "{err}");
+    }
+
+    /// A record that is there and does not read is refused naming its file —
+    /// never reported as a run that does not exist.
+    #[test]
+    fn a_record_that_does_not_read_names_its_file() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let dir = state.path().join("blank");
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        std::fs::write(dir.join(RECORD_FILE), "").expect("write");
+
+        let err = show(state.path(), "blank").unwrap_err().to_string();
+        assert!(
+            err.contains(&dir.join(RECORD_FILE).display().to_string()),
+            "{err}"
+        );
+        assert!(!err.contains("no run"), "{err}");
+    }
+
+    /// Rewriting a record through the run's writer replaces it whole and leaves
+    /// no partial beside it.
+    #[test]
+    fn a_rewritten_record_reads_back_whole() {
+        let state = tempfile::tempdir().expect("tempdir");
+        let mut written = record(state.path(), "r-3", 1);
+        written.exit_code = Some(0);
+        crate::run::write_record(&state.path().join("r-3"), &written).expect("rewrite");
+
+        assert_eq!(show(state.path(), "r-3").expect("a record"), written);
+        let names: Vec<_> = std::fs::read_dir(state.path().join("r-3"))
+            .expect("the run's directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.ends_with(".partial")),
+            "{names:?}"
+        );
     }
 }
