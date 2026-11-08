@@ -2418,6 +2418,66 @@ fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves(
     );
 }
 
+/// A record an earlier build wrote has no lock file beside it, and a reader
+/// that finds none may meet a writer of this build that creates the lock and
+/// begins replacing the record in the instant after it looked. `reset-timer`
+/// arriving there still acts on a whole record — the replacement — and never
+/// reports the run missing; and reading such a record writes nothing, so a
+/// store the reader cannot write reads as it always did.
+///
+/// The store is made legacy by removing the lock file the run left. The
+/// replacement is made by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_AFTER_NO_LOCK` lever: it begins the moment
+/// the reader finds no lock, and holds the name missing inside the lock it
+/// created until the reader has reached the name or the lock — deterministic,
+/// with no clock. The replacement declares a member the run as recorded does
+/// not have, so the verb can only accept it by having read the replacement.
+#[test]
+fn reset_timer_reads_a_whole_legacy_record_a_writer_begins_replacing_after_the_reader_finds_no_lock(
+) {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: legacy")
+        .expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+    let root = state.join(&id);
+    let lock = root.join(format!(".{RECORD_FILE}.lock"));
+    std::fs::remove_file(&lock).expect("the run left its record's lock");
+
+    workspace.run(&["history", "show", &id]).expect_code(0);
+    assert!(!lock.exists(), "reading a legacy record wrote its lock");
+
+    let mut replacement = oneagentgraph::history::show(&state, &id).expect("the run's record");
+    replacement.declared_members = vec!["worker".to_string(), "late".to_string()];
+    let staged = workspace.path().join("replacement");
+    std::fs::create_dir_all(&staged).expect("a staging directory");
+    oneagentgraph::run::write_record(&staged, &replacement).expect("the replacement stages");
+
+    let lever = format!("{RECORD_FILE}={}", staged.join(RECORD_FILE).display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a writer beginning to replace a lock-less legacy record just after a reader found no lock — is one a real concurrent writer reaches only some of the time, and it is forced here deterministically with no clock; the replacement is the store's production writer creating its production lock, and the verb, the binary and the record it acts on are all real.
+    let reset = workspace.run_with(
+        &["reset-timer", &id, "late"],
+        &[("ONEAGENTGRAPH_FIXTURE_REPLACE_AFTER_NO_LOCK", &lever)],
+    );
+    reset.expect_code(0);
+    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+    assert_eq!(
+        oneagentgraph::history::show(&state, &id).expect("the record reads"),
+        replacement,
+        "the replacement did not land"
+    );
+    assert!(
+        lock.is_file(),
+        "the writer did not create the record's lock"
+    );
+    assert!(
+        root.join(SIGNAL_DIR).join("late.reset").is_file(),
+        "the reset was not signalled to the replacement's member"
+    );
+    assert!(partials(&root).is_empty(), "{:?}", partials(&root));
+}
+
 /// A volume that cannot rename with POSIX semantics refuses the run's rewrite
 /// of its record, saying so and naming the record, and leaves the whole record
 /// that was there — it never falls back to the classic Windows replace, whose

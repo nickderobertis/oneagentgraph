@@ -2133,11 +2133,20 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
 // - *Anything else* is the file's own, and the caller reports it naming the
 //   file — never as an absent record.
 //
-// A record with no lock file beside it has never been written by this build's
-// writer, so no such writer can be replacing it: either nothing is recorded yet
-// — its first write creates the lock before the name exists, and a name that
-// appears appears whole — or it was written by an earlier build, and it is read
-// without the lock.
+// A record with no lock file beside it is one no writer of this build has
+// begun to write when the reader looked: either nothing is recorded yet — its
+// first write creates the lock before the name exists, and a name that appears
+// appears whole — or it was written by an earlier build. Either may have such a
+// writer begin the instant after the reader looked, so the reader opens it
+// without the lock and, when that open is refused, looks for the lock again
+// ([`read_opened`]). Every writer creates the lock before it touches the name,
+// so a refusal met inside a replacement that began after the first look finds
+// the lock there, and the open is made once more under it, where no
+// replacement can be in flight; with still no lock beside it, the refusal is
+// the record's own. That second open is not a retry against a window: it is
+// made under the lock, and its answer stands. The reader never creates the
+// lock itself, so it writes nothing to a store it only reads, and a store it
+// cannot write reads as it always did.
 //
 // So no reader reports a run or a turn control as missing because a writer was
 // replacing it, and none reads a partial. `history::show` and `control::record`
@@ -2154,28 +2163,43 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
 /// lock, the open or the read met.
 pub(crate) fn read_whole(path: &Path) -> std::io::Result<String> {
     #[cfg(feature = "test-doubles")]
-    let during = read_during_replace::start(path)?;
-    let read = read_opened(path);
+    read_during_replace::at_read(path)?;
+    let raw = read_opened(path);
     #[cfg(feature = "test-doubles")]
-    if let Some(during) = during {
-        let finished = during.finish();
-        let raw = read?;
-        finished?;
-        return Ok(raw);
-    }
-    read
+    let raw = {
+        let finished = read_during_replace::finish();
+        raw.and_then(|raw| finished.map(|()| raw))
+    };
+    raw
 }
 
 /// Open `path` under its record's shared lock, release the lock, and read the
 /// whole file through the handle.
+///
+/// A record with no lock beside it is opened without one, and when that open
+/// is refused the lock is looked for again: a writer creates the lock before
+/// it touches the name, so a refusal met inside a replacement that began after
+/// the first look always finds the lock there, and the open is made once more
+/// under it — where no replacement can be in flight, so its answer stands. A
+/// refusal with still no lock beside it is the record's own.
 fn read_opened(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let mut file = {
-        let _lock = lock_shared(path)?;
+    let open = |lock: Option<std::fs::File>| {
         let opened = open_shared(path);
         #[cfg(feature = "test-doubles")]
         read_during_replace::reached();
-        opened?
+        drop(lock);
+        opened
+    };
+    let mut file = match lock_shared(path)? {
+        Some(lock) => open(Some(lock))?,
+        None => match open(None) {
+            Ok(file) => file,
+            Err(unlocked) => match lock_shared(path)? {
+                Some(lock) => open(Some(lock))?,
+                None => return Err(unlocked),
+            },
+        },
     };
     #[cfg(feature = "test-doubles")]
     replace_under_read::land(path)?;
@@ -2195,8 +2219,8 @@ fn lock_path(path: &Path) -> PathBuf {
 }
 
 /// Take the shared lock of the record at `path`, waiting while a writer holds
-/// it exclusively, or `None` when no writer of this build has written the
-/// record — see the contract above.
+/// it exclusively, or `None` when there is no lock file beside the record yet —
+/// see the contract above, and [`read_opened`] for what a reader does then.
 ///
 /// The lock is first asked for without waiting, so that a reader that does
 /// have to wait is one the suite's [`read_during_replace`] lever can see
@@ -2204,7 +2228,11 @@ fn lock_path(path: &Path) -> PathBuf {
 fn lock_shared(path: &Path) -> std::io::Result<Option<std::fs::File>> {
     let lock = match std::fs::File::open(lock_path(path)) {
         Ok(lock) => lock,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            #[cfg(feature = "test-doubles")]
+            read_during_replace::at_no_lock(path)?;
+            return Ok(None);
+        }
         Err(err) => return Err(err),
     };
     match lock.try_lock_shared() {
@@ -2278,18 +2306,27 @@ mod replace_under_read {
 /// replacement is in progress, with the name missing — the instant a Windows
 /// rename exposed to an open — forced with no clock, on every host.
 ///
-/// `ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE=<file name>=<replacement>` makes
-/// this process's first read through [`read_whole`] of a record by that file
-/// name — `record.json`, `control.json` — begin by starting a replacement of
-/// the record with the bytes of the file at `<replacement>`, on a thread of its
-/// own, through the production [`replace_whole`]. That writer takes the
-/// record's lock as it always does, and inside it removes the name before
-/// renaming onto it, so the name is missing for as long as this lever holds it
-/// there: until the reader has either waited on the record's lock or opened
-/// the name. Only then does it rename, release the lock, and let the read go
-/// on. A reader that honours the lock waits, then opens the replacement whole;
-/// one that does not opens the missing name and reports the record absent.
-/// Compiled only under `test-doubles`; no shipped build reads the variable.
+/// Two variables start it, each at its own point of the read, and each names
+/// a record by its file name — `record.json`, `control.json` — and a file
+/// holding the replacement's bytes, as `<file name>=<replacement>`:
+///
+/// - `ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE` starts it as this process's
+///   first read through [`read_whole`] of that record begins.
+/// - `ONEAGENTGRAPH_FIXTURE_REPLACE_AFTER_NO_LOCK` starts it the first time
+///   this process's reader of that record finds no lock file beside it — a
+///   record an earlier build wrote — so the replacement begins after the
+///   reader has looked for the lock and before it opens the name.
+///
+/// Either way the replacement runs on a thread of its own through the
+/// production [`replace_whole`]. That writer takes the record's lock as it
+/// always does — creating the lock file when there is none — and inside it
+/// removes the name before renaming onto it, so the name is missing for as
+/// long as this lever holds it there: until the reader has either waited on
+/// the record's lock or opened the name. Only then does it rename, release the
+/// lock, and let the read go on. A reader that honours the lock reads the
+/// replacement whole; one that opens the name without it meets the missing
+/// name. Compiled only under `test-doubles`; no shipped build reads either
+/// variable.
 #[cfg(feature = "test-doubles")]
 mod read_during_replace {
     use std::cell::RefCell;
@@ -2312,24 +2349,38 @@ mod read_during_replace {
     /// Where the reader says it has arrived — at the lock, or at the name.
     static ARRIVED: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
 
-    /// The replacement in progress under one read.
-    pub(super) struct During {
-        writer: std::thread::JoinHandle<std::io::Result<()>>,
+    /// The replacement in progress under this process's read, if one started.
+    static WRITER: Mutex<Option<std::thread::JoinHandle<std::io::Result<()>>>> = Mutex::new(None);
+
+    /// The read of `path` is beginning.
+    pub(super) fn at_read(path: &Path) -> std::io::Result<()> {
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        start(path, "ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE", &STARTED)
     }
 
-    /// Start the requested replacement of `path` and return once its writer
-    /// holds the record's lock with the name missing — or once it has failed.
-    pub(super) fn start(path: &Path) -> std::io::Result<Option<During>> {
+    /// The reader of `path` found no lock file beside it.
+    pub(super) fn at_no_lock(path: &Path) -> std::io::Result<()> {
         static STARTED: AtomicBool = AtomicBool::new(false);
-        let Ok(request) = std::env::var("ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE") else {
-            return Ok(None);
+        start(
+            path,
+            "ONEAGENTGRAPH_FIXTURE_REPLACE_AFTER_NO_LOCK",
+            &STARTED,
+        )
+    }
+
+    /// Start the replacement `variable` asks for, once, and return once its
+    /// writer holds the record's lock with the name missing — or once it has
+    /// failed, which [`finish`] reports.
+    fn start(path: &Path, variable: &str, started: &AtomicBool) -> std::io::Result<()> {
+        let Ok(request) = std::env::var(variable) else {
+            return Ok(());
         };
         let Some((name, replacement)) = request.split_once('=') else {
-            return Ok(None);
+            return Ok(());
         };
-        if path.file_name().is_none_or(|file| file != name) || STARTED.swap(true, Ordering::SeqCst)
+        if path.file_name().is_none_or(|file| file != name) || started.swap(true, Ordering::SeqCst)
         {
-            return Ok(None);
+            return Ok(());
         }
         let bytes = std::fs::read(replacement)?;
         let (missing, gone) = mpsc::channel();
@@ -2340,10 +2391,11 @@ mod read_during_replace {
             GAP.with(|gap| *gap.borrow_mut() = Some(Gap { missing, arrived }));
             super::replace_whole(&path, &bytes)
         });
+        *WRITER.lock().unwrap_or_else(PoisonError::into_inner) = Some(writer);
         // A writer that failed before the gap drops its sender, which ends
-        // this wait too; `finish` reports why.
+        // this wait too.
         let _ = gone.recv();
-        Ok(Some(During { writer }))
+        Ok(())
     }
 
     /// The reader has arrived at the record's lock or at its name.
@@ -2370,17 +2422,19 @@ mod read_during_replace {
         Ok(())
     }
 
-    impl During {
-        /// Wait for the replacement to finish, and say how it went.
-        pub(super) fn finish(self) -> std::io::Result<()> {
-            ARRIVED
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .take();
-            self.writer
-                .join()
-                .map_err(|_| std::io::Error::other("the replacement under the read panicked"))?
-        }
+    /// Wait for a replacement this process started to finish, and say how it
+    /// went; `Ok` when none started.
+    pub(super) fn finish() -> std::io::Result<()> {
+        ARRIVED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let Some(writer) = WRITER.lock().unwrap_or_else(PoisonError::into_inner).take() else {
+            return Ok(());
+        };
+        writer
+            .join()
+            .map_err(|_| std::io::Error::other("the replacement under the read panicked"))?
     }
 }
 
