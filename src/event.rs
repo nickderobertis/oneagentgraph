@@ -1613,7 +1613,6 @@ pub struct Emitter {
 pub(crate) struct Observer(Arc<dyn Fn(&Envelope) + Send + Sync>);
 
 impl Observer {
-    /// `read`, called with every envelope.
     pub(crate) fn new(read: impl Fn(&Envelope) + Send + Sync + 'static) -> Self {
         Self(Arc::new(read))
     }

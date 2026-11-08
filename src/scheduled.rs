@@ -57,12 +57,12 @@ pub(crate) fn of(scratch: &Path) -> Option<Arc<MemberClocks>> {
 pub(crate) struct Registered(Vec<PathBuf>);
 
 impl Registered {
-    /// Nothing registered yet.
     pub(crate) fn new() -> Self {
         Self(Vec::new())
     }
 
-    /// Register `clocks` for the member whose scratch is `scratch`.
+    /// Register `clocks` under `scratch`, replacing what a previous run in the
+    /// same scratch left — a scratch is one run's, so there is none in practice.
     pub(crate) fn register(&mut self, scratch: &Path, clocks: MemberClocks) -> Arc<MemberClocks> {
         let clocks = Arc::new(clocks);
         registry()
@@ -96,7 +96,7 @@ pub(crate) struct NoteClock {
     /// The run's signal directory.
     pub(crate) signals: PathBuf,
     /// The member's name, for its own `cancel`.
-    pub(crate) member: String,
+    pub(crate) member: crate::run::MemberName,
     /// Set once the graph is settling: every clock stops.
     pub(crate) over: Arc<AtomicBool>,
     /// The suite's lever for *when* this clock starts counting — see
@@ -135,12 +135,14 @@ pub(crate) fn spawn_note_clock(clock: NoteClock) -> Option<std::thread::JoinHand
 }
 
 fn run_note_clock(clock: &NoteClock) {
-    let id = clock.note.id.as_str();
+    let id = crate::note::ScheduledNoteId::of(&clock.note);
     let Ok(note) = ScheduledNotes::note(clock.note.addressee, &clock.note.text) else {
         return;
     };
     let stop = clock.signals.join("stop");
-    let own_stop = clock.signals.join(format!("{}.stop", clock.member));
+    let own_stop = clock
+        .signals
+        .join(format!("{}.stop", clock.member.as_str()));
     // Measured against `elapsed` rather than as a deadline, for the reason
     // `crate::run::cron` gives.
     let mut span = Duration::from_secs(clock.note.first_after());
@@ -165,17 +167,17 @@ fn run_note_clock(clock: &NoteClock) {
             clock.emitter.emit(
                 EventKind::CronReset,
                 as_payload(&CronReset {
-                    scheduled_note: Some(id.to_string()),
+                    scheduled_note: Some(id.as_str().to_string()),
                     cause: Some(cause),
                 }),
             );
-            clock.seam.withdraw_untaken(id, WithdrawnReason::Reset);
+            clock.seam.withdraw_untaken(&id, WithdrawnReason::Reset);
             continue;
         }
         if counting_since.elapsed() < span {
             continue;
         }
-        if clock.seam.fire(id, &note, &clock.emitter) == Fired::Undelivered {
+        if clock.seam.fire(&id, &note, &clock.emitter) == Fired::Undelivered {
             return;
         }
         span = Duration::from_secs(clock.note.every);

@@ -1276,7 +1276,7 @@ fn run_announcing(
     let observed = Arc::clone(&resets);
     let emitter = Emitter::new(run_id.to_string(), Box::new(Tee { sink, file }))
         .with_observer(crate::event::Observer::new(move |envelope| {
-            observed.observe(envelope, true);
+            observed.observe(envelope, crate::resets::Provenance::Own);
         }))
         .with_filter(filter)
         .with_labels(crate::event::Labels {
@@ -1466,7 +1466,7 @@ fn run_announcing(
                         reset_on: reset_on.clone(),
                         emitter: member_emitter.clone(),
                         signals: root.join(SIGNAL_DIR),
-                        member: name.clone(),
+                        member: MemberName::parse(name)?,
                         over: Arc::clone(&over),
                         #[cfg(feature = "test-doubles")]
                         from: match &invocation.launch {

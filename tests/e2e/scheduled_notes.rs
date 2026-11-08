@@ -123,6 +123,11 @@ fn single(name: &str, schedule: &str) -> String {
 /// Start the run of this workspace's graph on `task`, following `follow` when
 /// it names a stream.
 fn launch(workspace: &Workspace, task: &str, follow: Option<&Path>) -> Child {
+    launch_with(workspace, task, follow, &[])
+}
+
+/// [`launch`], with `extra` arguments after the rest.
+fn launch_with(workspace: &Workspace, task: &str, follow: Option<&Path>, extra: &[&str]) -> Child {
     let mut args = vec![
         "run".to_string(),
         "./graph.yaml".to_string(),
@@ -135,6 +140,7 @@ fn launch(workspace: &Workspace, task: &str, follow: Option<&Path>) -> Child {
         args.push("--follow-events".to_string());
         args.push(path.display().to_string());
     }
+    args.extend(extra.iter().map(|arg| (*arg).to_string()));
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     workspace.spawn_with(&borrowed, &[])
 }
@@ -144,7 +150,6 @@ fn clocked(task: &str, gate: &Path) -> String {
     format!("{task} {CLOCK_FROM}{}", gate.display())
 }
 
-/// Release a gate.
 fn release(gate: &Path) {
     std::fs::write(gate, "go").expect("a gate is writable");
 }
@@ -165,7 +170,6 @@ fn envelope(seq: u64, source: &str, kind: &str) -> String {
     .to_string()
 }
 
-/// Append one line to a followed stream.
 fn append(path: &Path, line: &str) {
     let mut file = std::fs::OpenOptions::new()
         .create(true)
@@ -218,14 +222,12 @@ impl Ledger {
         }
     }
 
-    /// The `offer` of the `index`th copy admitted.
     fn offer(&self, index: usize) -> &str {
         self.admitted[index]["payload"]["offer"]
             .as_str()
             .expect("an admitted copy names its offer")
     }
 
-    /// Every accepted delivery of the copy `offer`.
     fn accepted_for(&self, offer: &str) -> Vec<&Value> {
         self.accepted
             .iter()
@@ -233,7 +235,6 @@ impl Ledger {
             .collect()
     }
 
-    /// Every withdrawal of the copy `offer`.
     fn withdrawn_for(&self, offer: &str) -> Vec<&Value> {
         self.withdrawn
             .iter()
@@ -677,16 +678,28 @@ fn a_note_firing_before_a_deferred_conversation_opens_is_delivered_into_its_firs
             ),
         ),
     );
+    // The note as written would not fire for an hour; `--set` addresses it by
+    // its id and makes it fire at once, then every second, while the
+    // conversation is still waiting to open.
     workspace.graph(&graph(
         Some("{every: 120, start_after: 600}"),
         1,
-        &note_entry(NOTE, 3600, 0, None),
+        &note_entry(NOTE, 1, 3600, None),
         "",
     ));
-    let child = launch(&workspace, "fake:complete-now finish at once", None);
-    until("the note to fire before the conversation opens", || {
-        !note_fired(&stream(&workspace), NOTE).is_empty()
-    });
+    let child = launch_with(
+        &workspace,
+        "fake:complete-now finish at once",
+        None,
+        &[
+            "--set",
+            &format!("members.worker.scheduled_notes.{NOTE}.start_after=0"),
+        ],
+    );
+    until(
+        "the note to fire twice before the conversation opens",
+        || note_fired(&stream(&workspace), NOTE).len() >= 2,
+    );
     let early = stream(&workspace);
     assert!(
         Ledger::of(&early, NOTE).admitted.is_empty()
@@ -701,16 +714,22 @@ fn a_note_firing_before_a_deferred_conversation_opens_is_delivered_into_its_firs
 
     let events = stream(&workspace);
     let ledger = Ledger::of(&events, NOTE);
-    assert_eq!(ledger.admitted.len(), 1, "{events:#?}");
-    assert_eq!(ledger.accepted.len(), 1, "{events:#?}");
-    assert_eq!(ledger.accepted[0]["payload"]["accepted"], "queued");
-    assert!(ledger.withdrawn.is_empty());
     let first_turn = turns_of(&events, "worker", "assistant", "turn-started")[0];
-    assert!(precedes(
-        &events,
-        note_fired(&events, NOTE)[0],
-        &ledger.admitted[0]
-    ));
+    // However many firings were held, one copy — the latest — is admitted as
+    // the conversation opens; a firing after that is its own copy.
+    let before_first: Vec<&Value> = ledger
+        .admitted
+        .iter()
+        .filter(|event| precedes(&events, event, first_turn))
+        .collect();
+    assert_eq!(before_first.len(), 1, "{events:#?}");
+    let opened_with = ledger.offer(0);
+    let accepted = ledger.accepted_for(opened_with);
+    assert_eq!(accepted.len(), 1, "{events:#?}");
+    assert_eq!(accepted[0]["payload"]["accepted"], "queued");
+    assert!(ledger.withdrawn_for(opened_with).is_empty());
+    let held = note_fired(&events, NOTE);
+    assert!(held.len() >= 2 && precedes(&events, held[1], &ledger.admitted[0]));
     assert!(
         precedes(&events, &ledger.admitted[0], first_turn),
         "the held note was not admitted before the first turn: {events:#?}"
@@ -795,6 +814,20 @@ fn clocks_without_reset_on_keep_a_fixed_cadence_whatever_is_followed() {
     for pair in ticks.windows(2) {
         near("a later note firing", gap(pair[0], pair[1]), EVERY);
     }
+    // A note refired after a turn took its earlier copy is a copy of its own:
+    // each is delivered at most once, none is both delivered and withdrawn, and
+    // more than one was delivered over the run.
+    let ledger = Ledger::of(&events, "tick");
+    for index in 0..ledger.admitted.len() {
+        let offer = ledger.offer(index);
+        let accepted = ledger.accepted_for(offer).len();
+        assert!(accepted <= 1, "copy {offer} was delivered {accepted} times");
+        assert!(
+            accepted == 0 || ledger.withdrawn_for(offer).is_empty(),
+            "copy {offer} was delivered and withdrawn"
+        );
+    }
+    assert!(ledger.accepted.len() >= 2, "{}", run.stdout);
     let reporter_up = of(&events, "member-started", "reporter")[0];
     assert_eq!(reporter_up["payload"]["start_after"], json!(START));
     let firings = schedule_fired(&events, "reporter");
@@ -910,9 +943,18 @@ fn reset_on_restarts_every_clock_declaring_it_on_a_followed_or_own_envelope() {
         KEEP_GOING,
         "--dir",
         &own.dir().display().to_string(),
+        // The run's stream leaves out the very kind the reporter resets on:
+        // what a run acts on is unfiltered whatever its stream shows.
+        "--event-filter",
+        r#"{"exclude": [{"kind": "turn-started"}]}"#,
     ]);
     run.expect_code(1);
     let events = run.events();
+    assert!(
+        events.iter().all(|event| event["kind"] != "turn-started"),
+        "{}",
+        run.stdout
+    );
     let stream_id = events[0]["stream"].clone();
     let restarted = of(&events, "cron-reset", "reporter");
     assert!(!restarted.is_empty(), "{}", run.stdout);
@@ -1151,4 +1193,242 @@ fn validate_gates_scheduled_notes_and_reset_on_and_accepts_them_at_schema_eleven
     let run = workspace.run(&["validate", "./graph.yaml"]);
     run.expect_code(0);
     assert!(run.stderr.is_empty(), "{}", run.stderr);
+}
+
+/// A member schedule's `reset_on` match that lands while a turn is live is held
+/// and honoured at the next hold, as a reset is: a scheduled note's clock on the
+/// same filter restarts at once, which is how the journey knows the match was
+/// read, and the conversation's own `cron-reset` comes only once the hold opens.
+#[test]
+fn a_reset_on_match_during_a_live_turn_is_honoured_at_the_next_hold() {
+    let workspace = Workspace::new();
+    let (entered, hold) = (workspace.at("turn-entered"), workspace.at("turn-hold"));
+    workspace.write(
+        "base.yaml",
+        &base_without_done_when(&format!(
+            "fake:entered={} fake:hold={}",
+            entered.display(),
+            hold.display()
+        )),
+    );
+    workspace.graph(&graph(
+        Some(&format!(
+            "{{every: 120, start_after: 0, reset_on: {SURFACED}}}"
+        )),
+        2,
+        &note_entry("witness", 3600, 3600, Some(SURFACED)),
+        "",
+    ));
+    let followed = workspace.at("pipeline.jsonl");
+    let child = launch(&workspace, KEEP_GOING, Some(&followed));
+    until("the first worker turn to be live", || entered.exists());
+    append(&followed, &envelope(7, "pipeline", "planner-surfaced"));
+    let witnessed = |events: &[Value]| {
+        of(events, "cron-reset", "worker")
+            .into_iter()
+            .any(|event| event["payload"]["scheduled_note"] == "witness")
+    };
+    until("the match to be read", || witnessed(&stream(&workspace)));
+    let during = stream(&workspace);
+    assert_eq!(
+        of(&during, "cron-reset", "worker").len(),
+        1,
+        "the conversation's hold restarted mid-turn: {during:#?}"
+    );
+    release(&hold);
+    until("the next hold to honour the match", || {
+        of(&stream(&workspace), "cron-reset", "worker").len() >= 2
+    });
+    workspace
+        .run(&["trigger", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let events = stream(&workspace);
+    let paced: Vec<&Value> = of(&events, "cron-reset", "worker")
+        .into_iter()
+        .filter(|event| event["payload"].get("scheduled_note").is_none())
+        .collect();
+    assert_eq!(paced.len(), 1, "{events:#?}");
+    assert_eq!(paced[0]["payload"]["cause"]["seq"], 7);
+    let closed = turns_of(&events, "worker", "user", "turn-completed")[0];
+    assert!(
+        precedes(&events, closed, paced[0]),
+        "the hold's reset came before the hold: {events:#?}"
+    );
+}
+
+/// A `reset_on` match while a firing is held for a conversation that has not
+/// opened lets the held copy go: the conversation opens with nothing admitted.
+#[test]
+fn a_reset_on_match_lets_a_held_copy_go_before_the_conversation_opens() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 600}"),
+        1,
+        &note_entry(NOTE, 3600, 0, Some(SURFACED)),
+        "",
+    ));
+    let followed = workspace.at("pipeline.jsonl");
+    let child = launch(
+        &workspace,
+        "fake:complete-now finish at once",
+        Some(&followed),
+    );
+    until("the note to fire and be held", || {
+        !note_fired(&stream(&workspace), NOTE).is_empty()
+    });
+    append(&followed, &envelope(9, "pipeline", "planner-surfaced"));
+    until("the held note's clock to restart", || {
+        !of(&stream(&workspace), "cron-reset", "worker").is_empty()
+    });
+    workspace
+        .run(&["trigger", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let events = stream(&workspace);
+    let ledger = Ledger::of(&events, NOTE);
+    assert!(
+        ledger.admitted.is_empty(),
+        "a copy held before a reset was admitted when the conversation opened: {events:#?}"
+    );
+    assert!(
+        ledger.withdrawn.is_empty(),
+        "a copy never admitted was published withdrawn"
+    );
+    assert_eq!(delivered_turns(&events), Vec::<u64>::new());
+    assert_eq!(
+        note_fired(&events, NOTE).len(),
+        1,
+        "the restarted span is a whole hour"
+    );
+}
+
+/// A member's own `cancel` stops its scheduled notes' clocks at once — no firing
+/// after it, not even one saying the conversation is over — while another
+/// member keeps the graph alive.
+#[test]
+fn a_member_cancel_stops_its_note_clocks_while_the_graph_lives_on() {
+    let workspace = Workspace::new();
+    let keep_open = workspace.at("keeper-hold");
+    let (entered, hold) = (workspace.at("turn-entered"), workspace.at("turn-hold"));
+    workspace.write(
+        "base.yaml",
+        &base_without_done_when(&format!(
+            "fake:entered={} fake:hold={}",
+            entered.display(),
+            hold.display()
+        )),
+    );
+    let keeper = format!(
+        "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    task: \
+         'fake:hold={} keep the run open'\n",
+        keep_open.display()
+    );
+    workspace.graph(&graph(None, 4, &note_entry(NOTE, 1, 0, None), &keeper));
+    let child = launch(&workspace, KEEP_GOING, None);
+    until("the worker's turn to be live", || entered.exists());
+    until("the note to fire twice", || {
+        note_fired(&stream(&workspace), NOTE).len() >= 2
+    });
+    workspace
+        .run(&["cancel", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    until("the worker to end", || {
+        !of(&stream(&workspace), "member-died", "worker").is_empty()
+    });
+    // Three of its spans with the graph still open: a clock that went on would
+    // fire in each of them.
+    std::thread::sleep(Duration::from_millis(3_000));
+    release(&keep_open);
+    release(&hold);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let events = stream(&workspace);
+    let died = of(&events, "member-died", "worker")[0];
+    let after: Vec<&Value> = note_fired(&events, NOTE)
+        .into_iter()
+        .filter(|event| precedes(&events, died, event))
+        .collect();
+    assert!(
+        after.is_empty(),
+        "the note clock fired after its member's cancel: {after:#?}"
+    );
+    assert!(
+        !of(&events, "member-settled", "keeper").is_empty(),
+        "the graph did not live on past the cancel"
+    );
+}
+
+/// A detached run forwards `--follow-events` to the run it starts, which resets
+/// on what is appended there, and the detaching process says on its own standard
+/// error what the graph declares that is deprecated.
+#[test]
+fn a_detached_run_follows_the_stream_it_was_given_and_warns_of_deprecation() {
+    let workspace = Workspace::new();
+    let keep_open = workspace.at("keeper-hold");
+    let skeleton = concat!(
+        "version: 11\nname: detached\nenv: {}\nmembers:\n",
+        "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+        "  reporter:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+        "    task: write one status update\n",
+        "    schedule: {every: 60, start_after: 60, resettable: true,\n",
+        "               reset_on: {include: [{source: pipeline, kind: planner-surfaced}]}}\n",
+    );
+    workspace.graph(&graph_with(
+        skeleton,
+        &[
+            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+            (
+                "members.keeper.task".to_string(),
+                format!("fake:hold={} keep the run open", keep_open.display()),
+            ),
+        ],
+    ));
+    let followed = workspace.at("pipeline.jsonl");
+    let detached = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--task",
+        "unused",
+        "--dir",
+        &workspace.dir().display().to_string(),
+        "--follow-events",
+        &followed.display().to_string(),
+        "--detach",
+    ]);
+    detached.expect_code(0);
+    let warned = detached
+        .stderr
+        .lines()
+        .filter(|line| {
+            line.contains("member \"reporter\"")
+                && line.contains("`resettable` is deprecated")
+                && line.contains("`reset_on`")
+        })
+        .count();
+    assert_eq!(warned, 1, "{}", detached.stderr);
+    until("the detached graph to start", || {
+        stream(&workspace)
+            .iter()
+            .any(|event| event["kind"] == "graph-started")
+    });
+    append(&followed, &envelope(5, "pipeline", "planner-surfaced"));
+    until("the reporter's clock to restart", || {
+        !of(&stream(&workspace), "cron-reset", "reporter").is_empty()
+    });
+    release(&keep_open);
+    until("the detached run to settle", || {
+        stream(&workspace)
+            .iter()
+            .any(|event| event["kind"] == "graph-settled")
+    });
+    let events = stream(&workspace);
+    let resets = of(&events, "cron-reset", "reporter");
+    assert_eq!(resets.len(), 1, "{events:#?}");
+    assert_eq!(resets[0]["payload"]["cause"]["seq"], 5);
 }

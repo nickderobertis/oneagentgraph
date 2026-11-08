@@ -55,13 +55,23 @@ pub(crate) struct ResetOn {
     index: usize,
 }
 
+/// Where an envelope a subscription is matched against came from — which
+/// decides whether it can be a reset's own echo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Provenance {
+    /// This run produced it.
+    Own,
+    /// It was appended to the stream this run follows.
+    Followed,
+}
+
 impl Resets {
-    /// A run's subscriptions, none yet.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
     }
 
-    /// Subscribe one clock to `filter`.
+    /// The handle a clock reads its matches through; its index is the clock's
+    /// place in the list, which only grows.
     pub(crate) fn subscribe(self: &Arc<Self>, filter: EventFilter) -> ResetOn {
         let mut subscriptions = self.lock();
         subscriptions.push(Subscription {
@@ -74,10 +84,11 @@ impl Resets {
         }
     }
 
-    /// Match `envelope` against every subscription. `own` is an envelope this
-    /// run produced rather than one it read off the followed stream.
-    pub(crate) fn observe(&self, envelope: &Envelope, own: bool) {
-        if own
+    /// Match `envelope` against every subscription. The run's own `cron-reset`
+    /// is never matched, so a filter naming it cannot loop a clock on its own
+    /// restart; another run's, followed, is matched like any envelope.
+    pub(crate) fn observe(&self, envelope: &Envelope, from: Provenance) {
+        if from == Provenance::Own
             && envelope.kind.as_str() == EventKind::CronReset.as_str()
             && envelope.source.as_str() == SOURCE_WORD
         {
@@ -149,12 +160,19 @@ pub(crate) fn follow(path: PathBuf, resets: Arc<Resets>) -> Follower {
                     std::thread::sleep(FOLLOW_TICK);
                     let appended = read_from(&path, &mut offset, &mut partial);
                     for line in appended {
+                        // A line that is not UTF-8 is not an envelope: it is
+                        // counted rather than repaired into one whose words
+                        // are not the ones its producer wrote.
+                        let Ok(line) = String::from_utf8(line) else {
+                            skipped.fetch_add(1, Ordering::SeqCst);
+                            continue;
+                        };
                         let line = line.trim();
                         if line.is_empty() {
                             continue;
                         }
                         match serde_json::from_str::<Envelope>(line) {
-                            Ok(envelope) => resets.observe(&envelope, false),
+                            Ok(envelope) => resets.observe(&envelope, Provenance::Followed),
                             Err(_) => {
                                 skipped.fetch_add(1, Ordering::SeqCst);
                             }
@@ -173,7 +191,7 @@ pub(crate) fn follow(path: PathBuf, resets: Arc<Resets>) -> Follower {
 
 /// The complete lines appended to `path` past `offset`, advancing it; a line
 /// still being written stays in `partial` until its newline arrives.
-fn read_from(path: &std::path::Path, offset: &mut u64, partial: &mut Vec<u8>) -> Vec<String> {
+fn read_from(path: &std::path::Path, offset: &mut u64, partial: &mut Vec<u8>) -> Vec<Vec<u8>> {
     let Ok(mut file) = std::fs::File::open(path) else {
         return Vec::new();
     };
@@ -193,8 +211,9 @@ fn read_from(path: &std::path::Path, offset: &mut u64, partial: &mut Vec<u8>) ->
     partial.extend_from_slice(&read);
     let mut lines = Vec::new();
     while let Some(end) = partial.iter().position(|byte| *byte == b'\n') {
-        let line: Vec<u8> = partial.drain(..=end).collect();
-        lines.push(String::from_utf8_lossy(&line[..line.len() - 1]).into_owned());
+        let mut line: Vec<u8> = partial.drain(..=end).collect();
+        line.pop();
+        lines.push(line);
     }
     lines
 }
@@ -219,7 +238,7 @@ mod tests {
         let other = resets.subscribe(
             serde_json::from_str(r#"{"include":[{"kind":"member-died"}]}"#).expect("a filter"),
         );
-        resets.observe(&envelope(SURFACED), false);
+        resets.observe(&envelope(SURFACED), Provenance::Followed);
         let cause = clock.take().expect("the match is pending");
         assert_eq!(
             (cause.source.as_str(), cause.kind.as_str(), cause.seq),
@@ -243,10 +262,10 @@ mod tests {
             "\"pipeline\",\"kind\":\"planner-surfaced\"",
             "\"agentgraph\",\"kind\":\"cron-reset\"",
         );
-        resets.observe(&envelope(&reset), true);
+        resets.observe(&envelope(&reset), Provenance::Own);
         assert!(clock.take().is_none());
         // The same kind on a followed stream is another run's, and does.
-        resets.observe(&envelope(&reset), false);
+        resets.observe(&envelope(&reset), Provenance::Followed);
         assert!(clock.take().is_some());
     }
 
@@ -270,6 +289,7 @@ mod tests {
             .open(&path)
             .expect("appendable");
         std::io::Write::write_all(&mut file, b"not an envelope\n").expect("append");
+        std::io::Write::write_all(&mut file, b"\xff\xfe{}\n").expect("append");
         std::io::Write::write_all(&mut file, SURFACED.as_bytes()).expect("append");
         std::thread::sleep(FOLLOW_TICK * 3);
         assert!(
@@ -284,7 +304,7 @@ mod tests {
             cause = clock.take();
         }
         assert!(cause.is_some(), "an appended envelope never matched");
-        assert_eq!(follower.finish(), 1, "the malformed line was not counted");
+        assert_eq!(follower.finish(), 2, "a malformed line was not counted");
     }
 
     #[test]

@@ -1667,7 +1667,7 @@ enum Conversation {
 struct Seam {
     conversation: Conversation,
     /// Each note's one outstanding copy, by the note's id.
-    copies: HashMap<String, Copy>,
+    copies: HashMap<ScheduledNoteId, Copy>,
 }
 
 /// One note's outstanding copy.
@@ -1676,6 +1676,22 @@ enum Copy {
     Held(Note),
     /// Admitted as this offer — untaken until its book says otherwise.
     Admitted(OfferId),
+}
+
+/// A scheduled note's `id`, as `config::validate` checked it — the only way to
+/// hold one is from the validated declaration, so a copy is never keyed by text
+/// that skipped that check.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct ScheduledNoteId(String);
+
+impl ScheduledNoteId {
+    pub(crate) fn of(note: &crate::config::ScheduledNote) -> Self {
+        Self(note.id.clone())
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 /// What one firing of a scheduled note did.
@@ -1717,14 +1733,14 @@ impl ScheduledNotes {
 
     /// One firing of note `id`, published on `emitter` as `cron-fired` and
     /// offered, held, or refused as the conversation's state decides.
-    pub(crate) fn fire(&self, id: &str, note: &Note, emitter: &Emitter) -> Fired {
+    pub(crate) fn fire(&self, id: &ScheduledNoteId, note: &Note, emitter: &Emitter) -> Fired {
         let _admitting = self.barrier.lock().unwrap_or_else(PoisonError::into_inner);
         let mut seam = self.lock();
         let fired = |undelivered: Option<&Undelivered>| {
             emitter.emit(
                 EventKind::CronFired,
                 as_payload(&CronFired {
-                    scheduled_note: Some(id.to_string()),
+                    scheduled_note: Some(id.as_str().to_string()),
                     undelivered: undelivered.map(UndeliveredReason::of),
                 }),
             );
@@ -1736,7 +1752,7 @@ impl ScheduledNotes {
             }
             Conversation::Waiting => {
                 fired(None);
-                seam.copies.insert(id.to_string(), Copy::Held(note.clone()));
+                seam.copies.insert(id.clone(), Copy::Held(note.clone()));
                 Fired::Offered
             }
             Conversation::Open { notes, book } => {
@@ -1750,7 +1766,7 @@ impl ScheduledNotes {
                     Ok(handle) => {
                         fired(None);
                         let offer = admitted(&book, id, note, handle, emitter);
-                        seam.copies.insert(id.to_string(), Copy::Admitted(offer));
+                        seam.copies.insert(id.clone(), Copy::Admitted(offer));
                         Fired::Offered
                     }
                     Err(refused) => {
@@ -1769,7 +1785,7 @@ impl ScheduledNotes {
     fn open(&self, notes: onejudge::note::Notes, book: Arc<Book>) {
         let _admitting = self.barrier.lock().unwrap_or_else(PoisonError::into_inner);
         let mut seam = self.lock();
-        let mut held: Vec<(String, Note)> = seam
+        let mut held: Vec<(ScheduledNoteId, Note)> = seam
             .copies
             .iter()
             .filter_map(|(id, copy)| match copy {
@@ -1823,7 +1839,7 @@ impl ScheduledNotes {
 
     /// Note `id`'s clock restarted: its untaken copy is withdrawn, published as
     /// `reason`, and a held one is let go.
-    pub(crate) fn withdraw_untaken(&self, id: &str, reason: WithdrawnReason) {
+    pub(crate) fn withdraw_untaken(&self, id: &ScheduledNoteId, reason: WithdrawnReason) {
         let mut seam = self.lock();
         let book = match &seam.conversation {
             Conversation::Open { book, .. } => Some(Arc::clone(book)),
@@ -1849,7 +1865,7 @@ impl ScheduledNotes {
 /// `note-admitted` first, and answer the offer's id.
 fn admitted(
     book: &Book,
-    id: &str,
+    id: &ScheduledNoteId,
     note: &Note,
     handle: onemessagebus::Offer<Accepted>,
     emitter: &Emitter,
@@ -1861,12 +1877,14 @@ fn admitted(
             member: emitter.member().unwrap_or_default().to_string(),
             addressee: note.addressee,
             offer: offer.to_string(),
-            scheduled_note: Some(id.to_string()),
+            scheduled_note: Some(id.as_str().to_string()),
         }),
     );
     book.relayed.handing();
     let mut ledger = book.lock();
-    ledger.scheduled.insert(offer.clone(), id.to_string());
+    ledger
+        .scheduled
+        .insert(offer.clone(), id.as_str().to_string());
     ledger.held.insert(
         offer.clone(),
         Held {
