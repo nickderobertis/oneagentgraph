@@ -750,7 +750,7 @@ fn a_note_firing_before_a_deferred_conversation_opens_is_delivered_into_its_firs
         "{early:#?}"
     );
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(0), "{stderr}");
@@ -926,7 +926,7 @@ fn reset_on_restarts_every_clock_declaring_it_on_a_followed_or_own_envelope() {
         resets(&stream(&workspace)).len() >= 3
     });
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");
@@ -979,7 +979,7 @@ fn reset_on_restarts_every_clock_declaring_it_on_a_followed_or_own_envelope() {
             "{every: 60, start_after: 60, reset_on: {include: [{kind: turn-started, member: worker}]}}",
         ),
     ));
-    let run = own.run(&[
+    let run = own.run_bounded(&[
         "run",
         "./graph.yaml",
         "--task",
@@ -1108,7 +1108,7 @@ fn the_deprecated_reset_still_restarts_a_resettable_schedule_and_nothing_else() 
     );
     assert_eq!(
         workspace
-            .run(&["reset-timer", &id, "worker", "--clock", NOTE])
+            .run_bounded(&["reset-timer", &id, "worker", "--clock", NOTE])
             .code,
         2
     );
@@ -1304,7 +1304,7 @@ fn a_reset_on_match_during_a_live_turn_is_honoured_at_the_next_hold() {
         of(&stream(&workspace), "cron-reset", "worker").len() >= 2
     });
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");
@@ -1349,7 +1349,7 @@ fn a_reset_on_match_withdraws_a_held_copy_before_the_conversation_opens() {
         !of(&stream(&workspace), "cron-reset", "worker").is_empty()
     });
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(0), "{stderr}");
@@ -1615,7 +1615,7 @@ fn a_followed_stream_is_read_as_it_is_written_and_every_other_clocks_cron_reset_
             && of(&stream(&workspace), "cron-reset", "reporter").len() == 3
     });
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");
@@ -1658,7 +1658,7 @@ fn a_note_without_start_after_first_fires_after_one_every() {
     });
     let events = stream(&workspace);
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(0), "{stderr}");
@@ -1691,7 +1691,7 @@ fn a_later_firing_supersedes_a_held_copy_before_the_conversation_opens() {
         note_fired(&stream(&workspace), NOTE).len() >= 3
     });
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(0), "{stderr}");
@@ -1766,7 +1766,7 @@ fn a_clock_resets_on_another_clocks_cron_reset_and_never_on_its_own() {
     until("the note clock's second restart", || resets().1 >= 2);
     assert_eq!(resets(), (2, 2), "a clock restarted on its own cron-reset");
     workspace
-        .run(&["trigger", &run_id(&workspace), "worker"])
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
         .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(0), "{stderr}");
