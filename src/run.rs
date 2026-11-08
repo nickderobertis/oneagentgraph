@@ -2105,8 +2105,9 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
 //   run or turn control that does not exist. Under POSIX semantics the old file
 //   leaves the namespace in the same step the new one enters it, so there is no
 //   such instant for a reader to meet. A volume that cannot rename with POSIX
-//   semantics (FAT, some network shares, Windows before 10 1607) falls back to
-//   `std::fs::rename`, and the contract holds only as far as that rename does.
+//   semantics (FAT, some network shares, Windows before 10 1607) gets no
+//   classic fallback: the write is refused with an error naming the record,
+//   and the whole record already there is left as it was — see [`rename_over`].
 //
 // **The reader**, [`read_whole`], opens the name once, sharing read, write and
 // *delete* ([`open_shared`]), and reads the whole file through that handle.
@@ -2226,62 +2227,194 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     replaced
 }
 
-/// Rename `from` onto `to`: on Unix a rename replaces a name in one step, even
-/// one another process holds open.
-#[cfg(not(windows))]
-fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::rename(from, to)
-}
-
-/// Rename `from` onto `to` with POSIX semantics — the Windows half of the
-/// writer in the replace-and-read contract above.
+/// Rename `from` onto `to` in one step — the writer half of the replace-and-read
+/// contract above — or refuse, leaving the record at `to` as it was.
 ///
-/// A holder of `to` that is not this crate's — this crate's readers always
-/// share deletion — may have opened it without sharing deletion, which refuses
-/// any rename over it for as long as it holds it. That refusal is the
-/// *writer's*, never a reader's, so it is retried, a bounded number of times,
-/// rather than failing the run's write; readers meanwhile go on reading the
-/// whole record from before it.
-// llmlint: ignore-block[changed_behavior_has_e2e] this body compiles only for
-// Windows. Linux's `check` never compiles it; the rename it performs is what the
-// concurrent-read journeys and the replace-under-read journeys in
-// `tests/e2e/verbs.rs` and `tests/e2e/interrupt.rs` drive on every leg, Windows
-// included.
-#[cfg(windows)]
+/// The one rename is [`rename_once`]: `rename(2)` on Unix, and on Windows the
+/// POSIX-semantics rename and nothing else. What a refusal of it means is read
+/// from its Windows error code ([`rename_refusal`]):
+///
+/// - *Held*: a holder of `to` that is not this crate's — this crate's readers
+///   always share deletion — opened it without sharing deletion, which refuses
+///   any rename over it for as long as it holds it. That refusal is the
+///   writer's, never a reader's, so it is retried, a bounded number of times,
+///   rather than failing the run's write; readers meanwhile go on reading the
+///   whole record from before it.
+/// - *Unsupported*: the volume cannot rename with POSIX semantics at all (FAT,
+///   some network shares, Windows before 10 1607). There is **no fallback** to
+///   `std::fs::rename`: the classic replace it would make is the very one that
+///   leaves the name missing for an instant under a reader. The write is
+///   refused instead, with an error naming the record and why, and the record
+///   at `to` stays the whole one that was there — the rename never happened,
+///   and [`replace_whole`] removes its sibling.
+///
+/// Unix answers neither, because its rename replaces a name in one step even
+/// under an open reader, so there every refusal is returned as it came.
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
-    use windows_sys::Win32::Foundation::{
-        ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
-        ERROR_SHARING_VIOLATION,
-    };
     const ATTEMPTS: u32 = 50;
-    let code = |err: &std::io::Error| err.raw_os_error().and_then(|c| u32::try_from(c).ok());
     let mut attempt = 1;
     loop {
-        match rename_posix(from, to) {
-            Err(err)
-                if matches!(
-                    code(&err),
-                    Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
-                ) && attempt < ATTEMPTS =>
-            {
+        match rename_once(from, to) {
+            Err(err) if rename_refusal(&err) == Some(Refusal::Held) && attempt < ATTEMPTS => {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(10));
             }
-            Err(err)
-                if matches!(
-                    code(&err),
-                    Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION)
-                ) =>
-            {
-                return std::fs::rename(from, to);
+            Err(err) if rename_refusal(&err) == Some(Refusal::Unsupported) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!(
+                        "this volume cannot replace {} with POSIX rename semantics, which a \
+                         whole read of it depends on, so the record there is left as it was \
+                         ({err})",
+                        to.display()
+                    ),
+                ));
             }
             done => return done,
         }
     }
 }
 
+/// One rename of `from` onto `to`, which the suite's [`rename_refusal_fixture`]
+/// can answer as Windows answers it.
+fn rename_once(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(feature = "test-doubles")]
+    if let Some(refusal) = rename_refusal_fixture::refusal(to) {
+        return Err(refusal);
+    }
+    #[cfg(windows)]
+    return rename_posix(from, to);
+    #[cfg(not(windows))]
+    return std::fs::rename(from, to);
+}
+
+/// What a refused rename onto a record means to its writer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    /// Another holder has the record open without sharing deletion.
+    Held,
+    /// The volume cannot rename with POSIX semantics.
+    Unsupported,
+}
+
+/// The file system has no rename-by-handle at all.
+const ERROR_INVALID_FUNCTION: u32 = 1;
+/// A holder of the target opened it without sharing deletion (also how a
+/// read-only or delete-pending target answers).
+const ERROR_ACCESS_DENIED: u32 = 5;
+/// A holder of the target, or of the sibling, refuses the sharing a rename needs.
+const ERROR_SHARING_VIOLATION: u32 = 32;
+/// The volume does not support POSIX-semantics renames.
+const ERROR_NOT_SUPPORTED: u32 = 50;
+/// A system that predates `FileRenameInfoEx` or its POSIX flag rejects it.
+const ERROR_INVALID_PARAMETER: u32 = 87;
+
+/// What `err`, a refused rename, means — decided by its Windows error code, so
+/// only on Windows, or in the suite's build for a refusal its
+/// [`rename_refusal_fixture`] made, on any host.
+///
+/// The codes are this module's rather than `windows-sys`'s so this compiles on
+/// every host; the Windows leg holds each one to `windows-sys`'s definition.
+fn rename_refusal(err: &std::io::Error) -> Option<Refusal> {
+    #[cfg(feature = "test-doubles")]
+    let injected = rename_refusal_fixture::code(err);
+    #[cfg(not(feature = "test-doubles"))]
+    let injected = None;
+    let code = injected.or_else(|| {
+        cfg!(windows)
+            .then(|| err.raw_os_error())
+            .flatten()
+            .and_then(|code| u32::try_from(code).ok())
+    })?;
+    match code {
+        ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION => Some(Refusal::Held),
+        ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER => {
+            Some(Refusal::Unsupported)
+        }
+        _ => None,
+    }
+}
+
+/// The suite's lever on the writer's refusals: a rename answered as Windows
+/// answers it, on any host and with no clock.
+///
+/// `ONEAGENTGRAPH_FIXTURE_RENAME_REFUSAL=<file name>=<landed>@<code>` lets this
+/// process's first `<landed>` renames onto a record by that file name —
+/// `record.json`, `control.json` — through, and answers every later one with a
+/// refusal carrying the Windows error `code`. [`rename_refusal`] classifies that
+/// code exactly as it classifies the system's own on Windows, so a journey
+/// drives the very decision a Windows writer makes — `50`, `ERROR_NOT_SUPPORTED`,
+/// is the volume that cannot rename with POSIX semantics. Compiled only under
+/// `test-doubles`; no shipped build reads the variable.
+#[cfg(feature = "test-doubles")]
+mod rename_refusal_fixture {
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    /// The Windows error code an injected refusal carries.
+    #[derive(Debug)]
+    struct Injected(u32);
+
+    impl std::fmt::Display for Injected {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "Windows error {} (oneagentgraph-fixture:rename-refusal)",
+                self.0
+            )
+        }
+    }
+
+    impl std::error::Error for Injected {}
+
+    /// What a journey asked for: which record, how many renames land, which code.
+    struct Request {
+        name: String,
+        landed: u64,
+        code: u32,
+    }
+
+    /// The refusal this rename onto `to` is to meet, once the requested renames
+    /// have landed.
+    pub(super) fn refusal(to: &Path) -> Option<std::io::Error> {
+        static REQUESTED: OnceLock<Option<Request>> = OnceLock::new();
+        static SEEN: AtomicU64 = AtomicU64::new(0);
+        let request = REQUESTED
+            .get_or_init(|| {
+                let request = std::env::var("ONEAGENTGRAPH_FIXTURE_RENAME_REFUSAL").ok()?;
+                let (name, held) = request.rsplit_once('=')?;
+                let (landed, code) = held.split_once('@')?;
+                Some(Request {
+                    name: name.to_string(),
+                    landed: landed.parse().ok()?,
+                    code: code.parse().ok()?,
+                })
+            })
+            .as_ref()?;
+        let named = to
+            .file_name()
+            .is_some_and(|file| file == request.name.as_str());
+        (named && SEEN.fetch_add(1, Ordering::SeqCst) >= request.landed)
+            .then(|| std::io::Error::other(Injected(request.code)))
+    }
+
+    /// The code a refusal [`refusal`] made carries.
+    pub(super) fn code(err: &std::io::Error) -> Option<u32> {
+        err.get_ref()?
+            .downcast_ref::<Injected>()
+            .map(|injected| injected.0)
+    }
+}
+
 /// One `SetFileInformationByHandle(FileRenameInfoEx)` of `from` onto `to`, with
 /// `FILE_RENAME_FLAG_POSIX_SEMANTICS | FILE_RENAME_FLAG_REPLACE_IF_EXISTS`.
+// llmlint: ignore-block[changed_behavior_has_e2e] this body compiles only for
+// Windows. Linux's `check` never compiles it; the rename it performs is what the
+// concurrent-read journeys and the replace-under-read journeys in
+// `tests/e2e/verbs.rs` and `tests/e2e/interrupt.rs` drive on every leg, Windows
+// included, and how its refusals are decided is driven on every host through
+// `rename_refusal`.
 #[cfg(windows)]
 fn rename_posix(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -2370,6 +2503,32 @@ mod tests {
 
     fn graph(document: &str) -> GraphConfig {
         crate::yaml::from_str(document).expect("a graph")
+    }
+
+    /// The codes [`rename_refusal`] decides on are Windows' own, held to
+    /// `windows-sys` on the leg where that crate is linked.
+    #[cfg(windows)]
+    #[test]
+    fn the_rename_refusal_codes_are_windows_own() {
+        use windows_sys::Win32::Foundation as win;
+        assert_eq!(ERROR_INVALID_FUNCTION, win::ERROR_INVALID_FUNCTION);
+        assert_eq!(ERROR_ACCESS_DENIED, win::ERROR_ACCESS_DENIED);
+        assert_eq!(ERROR_SHARING_VIOLATION, win::ERROR_SHARING_VIOLATION);
+        assert_eq!(ERROR_NOT_SUPPORTED, win::ERROR_NOT_SUPPORTED);
+        assert_eq!(ERROR_INVALID_PARAMETER, win::ERROR_INVALID_PARAMETER);
+    }
+
+    /// Off Windows no rename refusal is classified — Unix's rename replaces a
+    /// name in one step, so a refusal is returned as it came, never retried.
+    #[cfg(unix)]
+    #[test]
+    fn unix_classifies_no_rename_refusal() {
+        for code in [1, 5, 32, 50, 87] {
+            assert_eq!(
+                rename_refusal(&std::io::Error::from_raw_os_error(code)),
+                None
+            );
+        }
     }
 
     const TWO_MEMBERS: &str = concat!(

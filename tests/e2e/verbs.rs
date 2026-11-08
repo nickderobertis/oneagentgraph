@@ -2364,6 +2364,70 @@ fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_r
     assert!(!after.stderr.contains("no run"), "{}", after.stderr);
 }
 
+/// A volume that cannot rename with POSIX semantics refuses the run's rewrite
+/// of its record, saying so and naming the record, and leaves the whole record
+/// that was there — it never falls back to the classic Windows replace, whose
+/// instant with the name missing is the one a reader must never meet.
+///
+/// The refusal is Windows' own `ERROR_NOT_SUPPORTED`, put on every rename onto
+/// the record after the first by the suite's
+/// `ONEAGENTGRAPH_FIXTURE_RENAME_REFUSAL` lever and decided by the writer's
+/// production classification. A holder's refusal, by contrast, is waited out a
+/// bounded number of times and then returned as itself.
+#[test]
+fn a_record_whose_volume_cannot_rename_with_posix_semantics_is_left_whole() {
+    let refused = |code: &str| {
+        let workspace = Workspace::new();
+        let lever = format!("{RECORD_FILE}=1@{code}");
+        // llmlint: ignore[tests_mirror_real_usage] no volume on this Linux host refuses a POSIX-semantics rename, and the refusal under test is one only a Windows volume (FAT, some network shares) gives; the lever injects that refusal alone, with its Windows code, for the production writer's classification to decide on, and the run, the binary, the record and the verb that reads it back are all real.
+        let run = workspace.run_task_with(
+            "fake:complete-now: refused",
+            &[("ONEAGENTGRAPH_FIXTURE_RENAME_REFUSAL", &lever)],
+        );
+        let state = workspace.state();
+        let id = run_id(&state).expect("the first write landed");
+        let root = state.join(&id);
+        let record: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join(RECORD_FILE)).expect("the record reads"),
+        )
+        .expect("the record is whole");
+        assert_eq!(record["run_id"], id.as_str(), "{record}");
+        assert!(record["finished_ms"].is_null(), "{record}");
+        assert!(partials(&root).is_empty(), "{:?}", partials(&root));
+        workspace.run(&["history", "show", &id]).expect_code(0);
+        (run, root.join(RECORD_FILE).display().to_string())
+    };
+
+    // ERROR_INVALID_FUNCTION, ERROR_NOT_SUPPORTED, ERROR_INVALID_PARAMETER.
+    for code in ["1", "50", "87"] {
+        let (unsupported, file) = refused(code);
+        unsupported.expect_code(2);
+        assert!(
+            unsupported.stderr.contains(&format!(
+                "cannot replace {file} with POSIX rename semantics"
+            )) && unsupported.stderr.contains("left as it was")
+                && unsupported
+                    .stderr
+                    .contains(&format!("Windows error {code} ")),
+            "{code}: {}",
+            unsupported.stderr
+        );
+    }
+
+    // ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION: a holder, waited out and
+    // then returned as itself.
+    for code in ["5", "32"] {
+        let (held, _) = refused(code);
+        held.expect_code(2);
+        assert!(
+            held.stderr.contains(&format!("Windows error {code} "))
+                && !held.stderr.contains("POSIX rename"),
+            "{code}: {}",
+            held.stderr
+        );
+    }
+}
+
 /// A record that is there and does not read — empty, not JSON, not a record,
 /// from a newer build, or not a file at all — with nothing writing it, is
 /// refused naming the file: not reported as a run that does not exist, and not
