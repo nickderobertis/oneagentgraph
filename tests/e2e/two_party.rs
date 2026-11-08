@@ -288,6 +288,7 @@ fn a_two_party_members_empty_dir_is_refused_by_both_verbs() {
 }
 
 use std::process::Child;
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use oneagentgraph::control::{self, Accepted, Addressee, Note, NoteDelivery};
@@ -513,20 +514,45 @@ pub(crate) fn until_held(workspace: &Workspace, turn: usize) {
 /// The run's exit code once it ends, and its stderr; a run that outlives the
 /// suite's patience is ended here rather than left holding its members open.
 pub(crate) fn exit_of(mut child: Child) -> (Option<i32>, String) {
+    // Read while the run is alive, so a full pipe cannot stall it.
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
     let deadline = Instant::now() + Duration::from_secs(120);
     while child.try_wait().expect("waitable").is_none() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
-    if child.try_wait().expect("waitable").is_none() {
+    let Some(status) = child.try_wait().expect("waitable") else {
         let _ = child.kill();
         let _ = child.wait();
         panic!("the run never settled");
-    }
-    let output = child.wait_with_output().expect("the run finishes");
+    };
+    // The pipes end when their last holder closes them, and on Windows a
+    // descendant inherits them, so the run's own exit does not end this wait.
+    let _ = closed(&stdout, "stdout");
     (
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        status.code(),
+        String::from_utf8_lossy(&closed(&stderr, "stderr")).into_owned(),
     )
+}
+
+/// `pipe`'s bytes, delivered once its last holder has closed it.
+fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        let _ = sender.send(bytes);
+    });
+    receiver
+}
+
+/// What [`drain`] read, or a failure naming the pipe something outlived the run
+/// holding open.
+fn closed(pipe: &Receiver<Vec<u8>>, name: &str) -> Vec<u8> {
+    pipe.recv_timeout(Duration::from_secs(30))
+        .unwrap_or_else(|_| panic!("the run exited but its {name} stayed open"))
 }
 
 /// The id of the one run this workspace has recorded.

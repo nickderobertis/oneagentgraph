@@ -23,6 +23,7 @@
 )]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -177,6 +178,53 @@ impl Workspace {
             code: output.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+
+    /// Run the binary as [`run`](Workspace::run) does, with a bound on the wait,
+    /// for a journey whose run could outlive the command that started it.
+    ///
+    /// Output goes to files rather than pipes because a pipe is only finished
+    /// when *every* holder closes it. Windows hands a child every inheritable
+    /// handle its parent holds, so a process `--detach` leaves behind keeps the
+    /// launcher's pipes open however its own output is redirected, and reading
+    /// them to their end waits for the whole detached run.
+    ///
+    /// # Panics
+    ///
+    /// When the process has not exited inside [`BOUNDED_RUN`], naming `args`,
+    /// having killed it.
+    pub fn run_bounded(&self, args: &[&str]) -> Run {
+        let capture = || tempfile::tempfile().expect("a capture file");
+        let (mut stdout, mut stderr) = (capture(), capture());
+        let mut child = self
+            .command(args, &[])
+            .stdout(stdout.try_clone().expect("a capture handle"))
+            .stderr(stderr.try_clone().expect("a capture handle"))
+            .spawn()
+            .expect("the binary starts");
+        let deadline = std::time::Instant::now() + BOUNDED_RUN;
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("waitable") {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("`oneagentgraph {args:?}` did not exit within {BOUNDED_RUN:?}");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let read = |file: &mut std::fs::File| {
+            file.seek(std::io::SeekFrom::Start(0)).expect("rewound");
+            let mut text = Vec::new();
+            file.read_to_end(&mut text).expect("the capture reads");
+            String::from_utf8_lossy(&text).into_owned()
+        };
+        Run {
+            code: status.code().unwrap_or(-1),
+            stdout: read(&mut stdout),
+            stderr: read(&mut stderr),
         }
     }
 
@@ -857,6 +905,9 @@ pub fn until(what: &str, condition: impl Fn() -> bool) {
     }
     panic!("timed out waiting for {what}");
 }
+
+/// How long [`Workspace::run_bounded`] waits, matching [`until`]'s patience.
+pub const BOUNDED_RUN: std::time::Duration = std::time::Duration::from_secs(240);
 
 /// How many times a journey reads a store `while_rewritten` is rewriting.
 ///

@@ -43,8 +43,8 @@ use crate::support::{
     fake_harness, fake_provider, graph_with, until, Workspace, BASE, FAKE_HARNESS_KEY,
 };
 use crate::two_party::{
-    base_without_done_when, exit_of, gap, of, precedes, run_id, stream, turns_of, until_held,
-    FAKE_JUDGE, KEEP_GOING,
+    base_without_done_when, gap, of, precedes, run_id, stream, turns_of, until_held, FAKE_JUDGE,
+    KEEP_GOING,
 };
 
 /// The id every journey's note is declared under.
@@ -120,14 +120,39 @@ fn single(name: &str, schedule: &str) -> String {
     )
 }
 
+/// A run this file started, ended with the journey that started it: a journey
+/// that panics at a bounded wait would otherwise leave its run alive, still
+/// holding every handle it inherited, for as long as its gates stay shut.
+struct Launched(Option<Child>);
+
+impl Drop for Launched {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The run's exit code once it ends, and its stderr, within
+/// [`crate::two_party::exit_of`]'s bounds.
+fn exit_of(mut run: Launched) -> (Option<i32>, String) {
+    crate::two_party::exit_of(run.0.take().expect("a run is ended once"))
+}
+
 /// Start the run of this workspace's graph on `task`, following `follow` when
 /// it names a stream.
-fn launch(workspace: &Workspace, task: &str, follow: Option<&Path>) -> Child {
+fn launch(workspace: &Workspace, task: &str, follow: Option<&Path>) -> Launched {
     launch_with(workspace, task, follow, &[])
 }
 
 /// [`launch`], with `extra` arguments after the rest.
-fn launch_with(workspace: &Workspace, task: &str, follow: Option<&Path>, extra: &[&str]) -> Child {
+fn launch_with(
+    workspace: &Workspace,
+    task: &str,
+    follow: Option<&Path>,
+    extra: &[&str],
+) -> Launched {
     let mut args = vec![
         "run".to_string(),
         "./graph.yaml".to_string(),
@@ -142,7 +167,7 @@ fn launch_with(workspace: &Workspace, task: &str, follow: Option<&Path>, extra: 
     }
     args.extend(extra.iter().map(|arg| (*arg).to_string()));
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-    workspace.spawn_with(&borrowed, &[])
+    Launched(Some(workspace.spawn_with(&borrowed, &[])))
 }
 
 // llmlint: ignore-block[tests_mirror_real_usage] the task names a
@@ -791,7 +816,7 @@ fn clocks_without_reset_on_keep_a_fixed_cadence_whatever_is_followed() {
             }
         })
     };
-    let run = workspace.run(&[
+    let run = workspace.run_bounded(&[
         "run",
         "./graph.yaml",
         "--task",
@@ -1013,7 +1038,7 @@ fn the_deprecated_reset_still_restarts_a_resettable_schedule_and_nothing_else() 
         &extra,
     ));
 
-    let validated = workspace.run(&["validate", "./graph.yaml"]);
+    let validated = workspace.run_bounded(&["validate", "./graph.yaml"]);
     validated.expect_code(0);
     let deprecated = |stderr: &str, member: &str| {
         stderr
@@ -1053,7 +1078,7 @@ fn the_deprecated_reset_still_restarts_a_resettable_schedule_and_nothing_else() 
     });
     let id = run_id(&workspace);
     for member in ["worker", "ticker", "reporter"] {
-        let reset = workspace.run(&["reset-timer", &id, member]);
+        let reset = workspace.run_bounded(&["reset-timer", &id, member]);
         reset.expect_code(0);
         assert!(
             reset.stderr.contains("`reset-timer` is deprecated")
@@ -1075,7 +1100,12 @@ fn the_deprecated_reset_still_restarts_a_resettable_schedule_and_nothing_else() 
     )
     .expect("the library's reset reaches the run");
     // The verb takes what it took before and no more.
-    assert_eq!(workspace.run(&["reset-timer", &id, "worker", NOTE]).code, 2);
+    assert_eq!(
+        workspace
+            .run_bounded(&["reset-timer", &id, "worker", NOTE])
+            .code,
+        2
+    );
     assert_eq!(
         workspace
             .run(&["reset-timer", &id, "worker", "--clock", NOTE])
@@ -1094,7 +1124,9 @@ fn the_deprecated_reset_still_restarts_a_resettable_schedule_and_nothing_else() 
     until("the worker's next hold to read its reset", || {
         !of(&stream(&workspace), "cron-reset", "worker").is_empty()
     });
-    workspace.run(&["trigger", &id, "worker"]).expect_code(0);
+    workspace
+        .run_bounded(&["trigger", &id, "worker"])
+        .expect_code(0);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");
     assert_eq!(deprecated(&stderr, "worker"), 1, "{stderr}");
@@ -1146,7 +1178,7 @@ fn validate_gates_scheduled_notes_and_reset_on_and_accepts_them_at_schema_eleven
         format!("    schedule: {{every: 60, start_after: 0, reset_on: {SURFACED}}}\n");
     let refused = |text: &str, says: &[&str]| {
         workspace.graph(text);
-        let run = workspace.run(&["validate", "./graph.yaml"]);
+        let run = workspace.run_bounded(&["validate", "./graph.yaml"]);
         run.expect_code(2);
         for word in says {
             assert!(run.stderr.contains(word), "{word}: {}", run.stderr);
@@ -1222,7 +1254,7 @@ fn validate_gates_scheduled_notes_and_reset_on_and_accepts_them_at_schema_eleven
     );
 
     workspace.graph(&document(11, &format!("{reset_schedule}{notes}"), ""));
-    let run = workspace.run(&["validate", "./graph.yaml"]);
+    let run = workspace.run_bounded(&["validate", "./graph.yaml"]);
     run.expect_code(0);
     assert!(run.stderr.is_empty(), "{}", run.stderr);
 }
@@ -1383,7 +1415,7 @@ fn a_cancel_or_stop_stops_note_clocks_at_once() {
         let id = run_id(&workspace);
         let mut cancel = vec!["cancel", id.as_str()];
         cancel.extend(scope);
-        workspace.run(&cancel).expect_code(0);
+        workspace.run_bounded(&cancel).expect_code(0);
         until("the worker to end", || {
             !of(&stream(&workspace), "member-died", "worker").is_empty()
         });
@@ -1470,7 +1502,7 @@ fn a_detached_run_follows_the_stream_it_was_given_and_warns_of_deprecation() {
         ],
     ));
     let followed = workspace.at("pipeline.jsonl");
-    let detached = workspace.run(&[
+    let detached = workspace.run_bounded(&[
         "run",
         "./graph.yaml",
         "--task",
