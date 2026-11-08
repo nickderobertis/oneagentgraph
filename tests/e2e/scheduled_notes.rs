@@ -1609,6 +1609,39 @@ fn a_followed_stream_is_read_as_it_is_written_and_every_other_clocks_cron_reset_
     assert_eq!(seqs, vec![&json!(1), &json!(3)], "{events:#?}");
 }
 
+/// A note that leaves `start_after` out waits one `every` before its first
+/// firing, counted from when its member's wave is reached.
+#[test]
+fn a_note_without_start_after_first_fires_after_one_every() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 600}"),
+        1,
+        &format!("      - {{id: {NOTE}, every: 2, addressee: worker, text: '{NOTE_TEXT}'}}\n"),
+        "",
+    ));
+    let child = launch(&workspace, "fake:complete-now finish at once", None);
+    until("the note's first firing", || {
+        !note_fired(&stream(&workspace), NOTE).is_empty()
+    });
+    let events = stream(&workspace);
+    workspace
+        .run(&["trigger", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let started = events
+        .iter()
+        .find(|event| event["kind"] == "graph-started")
+        .expect("the graph started");
+    let waited = gap(started, note_fired(&events, NOTE)[0]);
+    assert!(
+        (1_900..60_000).contains(&waited),
+        "the first firing came {waited}ms after the graph started, not one 2-second `every`"
+    );
+}
+
 /// A later firing before the conversation opens supersedes the held copy: each
 /// replaced copy is published withdrawn, reason `superseded`, under an offer of
 /// its own that no `note-admitted` names, and only the last is admitted.
