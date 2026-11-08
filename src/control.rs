@@ -212,11 +212,25 @@ pub fn read(scratch: &Path) -> Result<Turn, String> {
 /// As [`read`].
 pub fn record(scratch: &Path) -> Result<Record, String> {
     let path = path(scratch);
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Err(
-            "this member opened no controllable turn: this run recorded no turn control for it"
-                .to_string(),
-        );
+    // Absent is the one answer that means no turn control: the writer never
+    // removes a record it is replacing — see the replace-and-read contract over
+    // `crate::run::read_whole` — so anything else that does not read is the
+    // file's, which is named.
+    let raw = match crate::run::read_whole(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(
+                "this member opened no controllable turn: this run recorded no turn control \
+                 for it"
+                    .to_string(),
+            );
+        }
+        Err(err) => {
+            return Err(format!(
+                "the turn-control record at {} does not read ({err})",
+                path.display()
+            ));
+        }
     };
     let record: Record = serde_json::from_str(&raw).map_err(|err| {
         format!(

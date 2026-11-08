@@ -2317,6 +2317,54 @@ fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
     );
 }
 
+/// `reset-timer` reads a run's record that a replacement holds mid-replace —
+/// the window a Windows rename opens, where an open of the name is refused
+/// while the old record is delete-pending under it — and reads it again until
+/// the replacement lands, so it acts on the run instead of reporting it
+/// missing.
+///
+/// The window is forced through the reader's own loop by the suite's
+/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE` lever, on every host and with no clock:
+/// the first three reads of the record meet Windows' refusal.
+#[test]
+fn reset_timer_reads_a_record_again_while_a_replacement_holds_it() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: replaced")
+        .expect_code(0);
+    let id = run_id(&workspace.state()).expect("a run");
+
+    let reset = workspace.run_with(
+        &["reset-timer", &id, "worker"],
+        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=3")],
+    );
+    reset.expect_code(0);
+}
+
+/// A record a replacement holds mid-replace for longer than a rename ever
+/// takes is refused as a record that does not read, naming its file — never as
+/// a run that does not exist, and never acted on.
+#[test]
+fn reset_timer_refuses_a_record_held_mid_replace_by_its_file() {
+    let workspace = Workspace::new();
+    workspace.run_task("fake:complete-now: held").expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+
+    let reset = workspace.run_with(
+        &["reset-timer", &id, "worker"],
+        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=1000")],
+    );
+    reset.expect_code(2);
+    let file = state.join(&id).join(RECORD_FILE).display().to_string();
+    assert!(
+        reset.stderr.contains("does not read") && reset.stderr.contains(&file),
+        "{}",
+        reset.stderr
+    );
+    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+}
+
 /// A record that is there and does not read — empty, not JSON, not a record,
 /// from a newer build, or not a file at all — with nothing writing it, is
 /// refused naming the file: not reported as a run that does not exist, and not

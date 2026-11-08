@@ -475,6 +475,67 @@ fn interrupt_reads_a_whole_control_record_while_it_is_being_rewritten() {
     );
 }
 
+/// `interrupt` reads a member's turn-control record that a replacement holds
+/// mid-replace — the window a Windows rename opens — and reads it again until
+/// the replacement lands, so it answers with the reason the run wrote down
+/// instead of reporting that the member recorded no turn control.
+///
+/// Forced through the reader's own loop by the suite's
+/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE` lever, on the control record alone and
+/// with no clock; a count past the reader's bound is refused naming the file.
+#[test]
+fn interrupt_reads_a_control_record_again_while_a_replacement_holds_it() {
+    let workspace = Workspace::new();
+    workspace.write("oneharness.toml", QWEN_CHAIN);
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 1\nname: node-scope\n",
+            "env: {}\n",
+            "members:\n  reporter:\n    kind: oneharness\n",
+            "    oneharness_config: ./oneharness.toml\n",
+        ),
+        &[("env.ONEHARNESS_BIN_QWEN", crate::support::fake_harness())],
+    ));
+    workspace
+        .run_task("fake:complete-now: one agent")
+        .expect_code(0);
+    let run_id = workspace.record()["run_id"]
+        .as_str()
+        .expect("the run recorded its id")
+        .to_string();
+    let reason = |held: &str| {
+        let interrupted = workspace.run_with(
+            &["interrupt", &run_id, "reporter"],
+            &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", held)],
+        );
+        interrupted.expect_code(3);
+        interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
+            .as_str()
+            .expect("a reason")
+            .to_string()
+    };
+
+    let landed = reason("control.json=3");
+    assert!(
+        landed.contains("opened no controllable turn") && landed.contains("qwen"),
+        "{landed}"
+    );
+    assert!(!landed.contains("recorded no turn control"), "{landed}");
+
+    let held = reason("control.json=1000");
+    let file = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter")
+        .join(CONTROL_FILE);
+    assert!(
+        held.contains("does not read") && held.contains(&file.display().to_string()),
+        "{held}"
+    );
+    assert!(!held.contains("recorded no turn control"), "{held}");
+}
+
 /// A single-sided member on a **Codex** chain keeps its turn on `codex exec`, as
 /// it always ran: oneharness would interrupt Codex only by moving the turn onto
 /// its app-server, so the member opens no controllable turn, and `interrupt`

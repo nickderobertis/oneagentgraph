@@ -2082,14 +2082,156 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
         .map_err(|err| Error::InvalidConfig(format!("cannot write {}: {err}", path.display())))
 }
 
+// The replace-and-read contract for a record another process reads while this
+// one rewrites it — the run record and each member's turn-control record.
+//
+// **The writer**, [`replace_whole`], never writes the name in place. It writes
+// the whole new record to a sibling unique to this process and call, then
+// renames that sibling onto the name in one step. It never removes the name:
+// from the record's first write on, the name always holds a whole record.
+//
+// **The reader**, [`read_whole`], reads the name, and what it does with a
+// refusal depends on what the refusal means:
+//
+// - *Absent* (`NotFound`) is answered at once. The writer never removes the
+//   name, so a replacement in flight never makes it absent, and a reader that
+//   meets an absent name has met a run or a turn that recorded nothing.
+// - *Mid-replace* — the answers Windows gives an open, or a metadata query, of
+//   a name a rename is replacing at that instant: `ERROR_ACCESS_DENIED` while
+//   the old file is delete-pending under the name, `ERROR_SHARING_VIOLATION`
+//   while the rename holds it, `ERROR_DELETE_PENDING` — see
+//   [`windows_mid_replace`]. Unix answers none of these to a rename, which
+//   replaces a name in one step even under an open reader. Such a refusal is
+//   **read again**, up to [`REPLACE_READS`] times [`REPLACE_PAUSE`] apart: the
+//   rename it waits out is a single step, so the window closes in far less. One
+//   that outlasts the bound is returned as itself — the caller says the record
+//   does not read, naming its file — and never as an absent record.
+//
+// So no reader reports a run or a turn control as missing because a writer was
+// replacing it, and none reads a partial: what it reads is the whole record
+// from before the rename or after it. `history::show` and `control::record`
+// are the two readers, and every verb that acts on a live run reads through
+// one of them.
+
+/// How many times [`read_whole`] reads a name a replacement held mid-replace.
+const REPLACE_READS: u32 = 50;
+
+/// How long [`read_whole`] waits before it reads a mid-replace name again.
+const REPLACE_PAUSE: Duration = Duration::from_millis(10);
+
+/// Read the whole of `path`, a record [`replace_whole`] replaces, under the
+/// replace-and-read contract above: a refusal that means a replacement is in
+/// flight is read again, and every other answer — the bytes, an absent name,
+/// any other refusal — is returned as it came.
+///
+/// # Errors
+///
+/// The refusal the last read met: `NotFound` when nothing is recorded there,
+/// and a mid-replace refusal only when it outlasted [`REPLACE_READS`].
+pub(crate) fn read_whole(path: &Path) -> std::io::Result<String> {
+    let mut read = 1;
+    loop {
+        match read_once(path) {
+            Err(err) if mid_replace(&err) && read < REPLACE_READS => {
+                read += 1;
+                std::thread::sleep(REPLACE_PAUSE);
+            }
+            done => return done,
+        }
+    }
+}
+
+/// One read of `path`, which the suite's [`mid_replace_fixture`] can answer as
+/// Windows answers a name a replacement holds.
+fn read_once(path: &Path) -> std::io::Result<String> {
+    #[cfg(feature = "test-doubles")]
+    if let Some(refusal) = mid_replace_fixture::refusal(path) {
+        return Err(refusal);
+    }
+    std::fs::read_to_string(path)
+}
+
+/// Whether `err` is the platform telling a reader a replacement is in flight.
+fn mid_replace(err: &std::io::Error) -> bool {
+    #[cfg(feature = "test-doubles")]
+    if mid_replace_fixture::injected(err) {
+        return true;
+    }
+    cfg!(windows) && windows_mid_replace(err.raw_os_error())
+}
+
+/// Whether a Windows error code is one an open or a metadata query meets on a
+/// name a rename is replacing: `ERROR_ACCESS_DENIED` (5),
+/// `ERROR_SHARING_VIOLATION` (32) and `ERROR_DELETE_PENDING` (303).
+///
+/// A pure function of the code, compiled everywhere, so the codes are held by
+/// the suite on every host; only [`mid_replace`] restricts it to Windows, where
+/// those numbers mean these errors.
+const fn windows_mid_replace(code: Option<i32>) -> bool {
+    matches!(code, Some(5 | 32 | 303))
+}
+
+/// The suite's lever on the replace-and-read contract: the mid-replace window
+/// that only a Windows rename opens, forced without a clock on any host.
+///
+/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE=<file name>=<n>` makes this process's
+/// first `n` reads through [`read_whole`] of a record by that file name —
+/// `record.json`, `control.json` — meet the refusal Windows gives a name a
+/// rename is replacing. So a journey drives the very loop a Windows reader
+/// runs, on the one record it names, and a count of [`REPLACE_READS`] or more
+/// drives the refusal that outlasts it. Compiled only under `test-doubles`; no
+/// shipped build reads the variable.
+#[cfg(feature = "test-doubles")]
+mod mid_replace_fixture {
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::OnceLock;
+
+    /// The marker an injected refusal carries, so it is classified mid-replace
+    /// on a host whose own codes never are.
+    #[derive(Debug)]
+    struct Injected;
+
+    impl std::fmt::Display for Injected {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("the name is being replaced (oneagentgraph-fixture:mid-replace)")
+        }
+    }
+
+    impl std::error::Error for Injected {}
+
+    /// The refusal this read of `path` is to meet, while the requested count
+    /// lasts.
+    pub(super) fn refusal(path: &Path) -> Option<std::io::Error> {
+        static REQUESTED: OnceLock<Option<(String, u64)>> = OnceLock::new();
+        static MET: AtomicU64 = AtomicU64::new(0);
+        let (name, count) = REQUESTED
+            .get_or_init(|| {
+                let request = std::env::var("ONEAGENTGRAPH_FIXTURE_MID_REPLACE").ok()?;
+                let (name, count) = request.rsplit_once('=')?;
+                Some((name.to_string(), count.parse().ok()?))
+            })
+            .as_ref()?;
+        let named = path.file_name().is_some_and(|file| file == name.as_str());
+        (named && MET.fetch_add(1, Ordering::SeqCst) < *count)
+            .then(|| std::io::Error::new(std::io::ErrorKind::PermissionDenied, Injected))
+    }
+
+    /// Whether `err` is one [`refusal`] made.
+    pub(super) fn injected(err: &std::io::Error) -> bool {
+        err.get_ref().is_some_and(|inner| inner.is::<Injected>())
+    }
+}
+
 /// Replace `path` with `bytes` so that a concurrent reader opens either the file
 /// that was there or the whole of this one — never an empty or partial file.
 ///
-/// The bytes go to a sibling first and are renamed onto `path`: a rename within
-/// one directory replaces the name in a single step on every platform this
-/// ships for, where an in-place write truncates and then fills. The sibling's
-/// name is unique to this process and this call, so two writers in one run —
-/// member threads rewriting their own control records — never share one.
+/// The writer half of the replace-and-read contract above. The bytes go to a
+/// sibling first and are renamed onto `path`: a rename within one directory
+/// replaces the name in a single step on every platform this ships for, where
+/// an in-place write truncates and then fills. The sibling's name is unique to
+/// this process and this call, so two writers in one run — member threads
+/// rewriting their own control records — never share one.
 pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let name = path
@@ -2178,6 +2320,29 @@ mod tests {
 
     fn graph(document: &str) -> GraphConfig {
         crate::yaml::from_str(document).expect("a graph")
+    }
+
+    /// The refusals a Windows reader reads again are exactly the three a name
+    /// mid-replace answers — never an absent name, which is answered at once.
+    #[test]
+    fn windows_reads_again_only_a_name_mid_replace() {
+        for code in [5, 32, 303] {
+            assert!(windows_mid_replace(Some(code)), "{code}");
+        }
+        // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, and an error with no code.
+        for code in [Some(2), Some(3), None] {
+            assert!(!windows_mid_replace(code), "{code:?}");
+        }
+    }
+
+    /// Off Windows a rename never refuses a reader, so no platform refusal is
+    /// read again: a permission refusal is answered at once.
+    #[cfg(unix)]
+    #[test]
+    fn unix_reads_no_refusal_again() {
+        let err = std::io::Error::from_raw_os_error(13);
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(!mid_replace(&err));
     }
 
     const TWO_MEMBERS: &str = concat!(
