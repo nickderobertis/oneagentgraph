@@ -29,6 +29,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::event::{Envelope, EventFilter, EventKind, ResetCause, SOURCE_WORD};
+use crate::note::ScheduledNoteId;
+use crate::run::MemberName;
 
 /// How often a followed stream is read for what was appended to it — the
 /// run's own clock tick, so a followed match reaches a clock no later than a
@@ -50,46 +52,44 @@ struct Subscription {
     pending: Option<ResetCause>,
 }
 
-/// Which clock of a run a subscription belongs to, and which one published a
-/// `cron-reset`: its member, and the scheduled note when it is a note's clock
-/// rather than the member's own `schedule`.
+/// Which clock of a run a subscription belongs to: its member, and the
+/// scheduled note when it is a note's clock rather than the member's own
+/// `schedule`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ClockId {
-    member: String,
-    scheduled_note: Option<String>,
+    member: MemberName,
+    scheduled_note: Option<ScheduledNoteId>,
 }
 
 impl ClockId {
     /// The member's own `schedule`.
-    pub(crate) fn schedule(member: &str) -> Self {
+    pub(crate) fn schedule(member: MemberName) -> Self {
         Self {
-            member: member.to_string(),
+            member,
             scheduled_note: None,
         }
     }
 
     /// The clock of `member`'s scheduled note `id`.
-    pub(crate) fn note(member: &str, id: &str) -> Self {
+    pub(crate) fn note(member: MemberName, id: ScheduledNoteId) -> Self {
         Self {
-            member: member.to_string(),
-            scheduled_note: Some(id.to_string()),
+            member,
+            scheduled_note: Some(id),
         }
     }
 
-    /// The clock whose restart `envelope` announces, when it is this run's own
-    /// `cron-reset`; a followed one is another run's, whatever it calls itself.
-    fn restarted_by(envelope: &Envelope, from: Provenance) -> Option<Self> {
-        (from == Provenance::Own
+    /// Whether `envelope` is this run's own `cron-reset` about this clock's
+    /// restart. A followed one is another run's, whatever it calls itself.
+    fn restarted_by(&self, envelope: &Envelope, from: Provenance) -> bool {
+        from == Provenance::Own
             && envelope.kind.as_str() == EventKind::CronReset.as_str()
-            && envelope.source.as_str() == SOURCE_WORD)
-            .then(|| Self {
-                member: envelope.labels.member.clone().unwrap_or_default(),
-                scheduled_note: envelope
-                    .payload
-                    .get("scheduled_note")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string),
-            })
+            && envelope.source.as_str() == SOURCE_WORD
+            && envelope.labels.member.as_deref() == Some(self.member.as_str())
+            && envelope
+                .payload
+                .get("scheduled_note")
+                .and_then(serde_json::Value::as_str)
+                == self.scheduled_note.as_ref().map(ScheduledNoteId::as_str)
     }
 }
 
@@ -135,10 +135,9 @@ impl Resets {
     /// clock on its own restart. Any other clock's, this run's or a followed
     /// one, is matched like any envelope.
     pub(crate) fn observe(&self, envelope: &Envelope, from: Provenance) {
-        let restarted = ClockId::restarted_by(envelope, from);
         let mut subscriptions = self.lock();
         for subscription in subscriptions.iter_mut() {
-            if restarted.as_ref() != Some(&subscription.clock)
+            if !subscription.clock.restarted_by(envelope, from)
                 && subscription.pending.is_none()
                 && subscription.filter.matches(envelope)
             {
@@ -271,6 +270,27 @@ fn read_from(path: &std::path::Path, offset: &mut u64, partial: &mut Vec<u8>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ScheduledNote;
+    use crate::note::Addressee;
+
+    fn schedule_of(member: &str) -> ClockId {
+        ClockId::schedule(MemberName::parse(member).expect("a member"))
+    }
+
+    fn note_of(member: &str, id: &str) -> ClockId {
+        let note = ScheduledNote {
+            id: id.to_string(),
+            every: 1,
+            start_after: None,
+            reset_on: None,
+            addressee: Addressee::Worker,
+            text: "t".to_string(),
+        };
+        ClockId::note(
+            MemberName::parse(member).expect("a member"),
+            ScheduledNoteId::of(&note),
+        )
+    }
 
     fn envelope(line: &str) -> Envelope {
         serde_json::from_str(line).expect("an envelope")
@@ -284,9 +304,9 @@ mod tests {
         let filter: EventFilter =
             serde_json::from_str(r#"{"include":[{"source":"pipeline","kind":"planner-*"}]}"#)
                 .expect("a filter");
-        let clock = resets.subscribe(ClockId::schedule("a"), filter);
+        let clock = resets.subscribe(schedule_of("a"), filter);
         let other = resets.subscribe(
-            ClockId::schedule("b"),
+            schedule_of("b"),
             serde_json::from_str(r#"{"include":[{"kind":"member-died"}]}"#).expect("a filter"),
         );
         resets.observe(&envelope(SURFACED), Provenance::Followed);
@@ -307,8 +327,8 @@ mod tests {
     fn a_clock_is_restarted_by_every_cron_reset_but_its_own() {
         let resets = Resets::new();
         let any_reset = || serde_json::from_str(r#"{"include":[{"kind":"cron-*"}]}"#).unwrap();
-        let schedule = resets.subscribe(ClockId::schedule("m"), any_reset());
-        let note = resets.subscribe(ClockId::note("m", "n"), any_reset());
+        let schedule = resets.subscribe(schedule_of("m"), any_reset());
+        let note = resets.subscribe(note_of("m", "n"), any_reset());
         let reset = SURFACED
             .replace(
                 "\"pipeline\",\"kind\":\"planner-surfaced\"",
@@ -337,7 +357,7 @@ mod tests {
         std::fs::write(&path, format!("{SURFACED}\n")).expect("written before the start");
         let resets = Resets::new();
         let clock = resets.subscribe(
-            ClockId::schedule("m"),
+            schedule_of("m"),
             serde_json::from_str(r#"{"include":[{"kind":"planner-surfaced"}]}"#).expect("a filter"),
         );
         let follower = follow(path.clone(), Arc::clone(&resets)).expect("a follower");
@@ -375,7 +395,7 @@ mod tests {
         let path = dir.path().join("later.jsonl");
         let resets = Resets::new();
         let clock = resets.subscribe(
-            ClockId::schedule("m"),
+            schedule_of("m"),
             serde_json::from_str(r#"{"include":[{"source":"pipeline"}]}"#).expect("a filter"),
         );
         let follower = follow(path.clone(), Arc::clone(&resets)).expect("a follower");
