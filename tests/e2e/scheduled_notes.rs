@@ -1919,3 +1919,65 @@ fn a_reset_before_the_first_firing_restores_the_whole_first_span() {
         .expect("the first turn's delay ended");
     near("the deferred first turn", gap(reset[0], opened));
 }
+
+/// Matches that land before a clock next reads its subscription restart it
+/// once, and name the first of them; and a blank line of a followed stream is
+/// spacing rather than a malformed line, so it is not counted as skipped.
+///
+/// The note's clock reads nothing until its gate opens, and the reporter's filter
+/// matches only the last line appended, so its `cron-reset` shows every line
+/// before it was read while the note's clock was still shut.
+#[test]
+fn matches_between_two_reads_restart_a_clock_once_and_blank_lines_are_not_counted() {
+    let workspace = Workspace::new();
+    workspace.write("base.yaml", &base_without_done_when(""));
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 0}"),
+        2,
+        &note_entry(NOTE, 3600, 3600, Some(SURFACED)),
+        &single(
+            "reporter",
+            "{every: 60, start_after: 60, reset_on: {include: [{source: pipeline, kind: witness}]}}",
+        ),
+    ));
+    let followed = workspace.at("pipeline.jsonl");
+    let gate = workspace.at("note-clock");
+    let child = launch(&workspace, &clocked(KEEP_GOING, &gate), Some(&followed));
+    until_held(&workspace, 1);
+
+    let lines = [
+        String::new(),
+        "   ".to_string(),
+        "not an envelope".to_string(),
+        envelope(1, "pipeline", "planner-surfaced"),
+        envelope(2, "pipeline", "planner-surfaced"),
+        envelope(3, "pipeline", "witness"),
+    ];
+    append(&followed, &lines.join("\n"));
+    until("the last appended line to be read", || {
+        !of(&stream(&workspace), "cron-reset", "reporter").is_empty()
+    });
+    release(&gate);
+    let note_resets = |events: &[Value]| -> Vec<Value> {
+        of(events, "cron-reset", "worker")
+            .into_iter()
+            .filter(|event| event["payload"]["scheduled_note"] == NOTE)
+            .cloned()
+            .collect()
+    };
+    until("the note's clock to read its match", || {
+        !note_resets(&stream(&workspace)).is_empty()
+    });
+
+    workspace
+        .run_bounded(&["trigger", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let events = stream(&workspace);
+    let resets = note_resets(&events);
+    assert_eq!(resets.len(), 1, "{events:#?}");
+    assert_eq!(resets[0]["payload"]["cause"]["seq"], 1, "{events:#?}");
+    assert!(stderr.contains("skipped 1 line(s)"), "{stderr}");
+}
