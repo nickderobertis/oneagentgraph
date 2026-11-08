@@ -1446,28 +1446,26 @@ fn a_cancel_or_stop_stops_note_clocks_at_once() {
 }
 
 /// A scheduled note may be addressed to the supervisor or to both parties, and
-/// each is admitted naming that addressee and delivered exactly once.
+/// each is admitted naming that addressee and delivered exactly once. Each
+/// addressee gets its own run: two clocks in one fire independently, so the turn
+/// the first note opens could end a two-turn conversation before the second one
+/// fires, and that firing would rightly be published as undelivered.
 #[test]
 fn notes_for_the_supervisor_and_for_both_are_admitted_and_delivered_once() {
-    let workspace = Workspace::new();
-    workspace.write("base.yaml", &base_without_done_when(""));
-    let notes = ["supervisor", "both"]
-        .iter()
-        .map(|addressee| {
-            note_entry(addressee, 3600, 0, None)
-                .replace("addressee: worker", &format!("addressee: {addressee}"))
-        })
-        .collect::<String>();
-    workspace.graph(&graph(Some("{every: 120, start_after: 0}"), 2, &notes, ""));
-    let gate = workspace.at("note-clock");
-    let child = launch(&workspace, &clocked(KEEP_GOING, &gate), None);
-    until_held(&workspace, 1);
-    release(&gate);
-    let (code, stderr) = exit_of(child);
-    assert_eq!(code, Some(1), "{stderr}");
-
-    let events = stream(&workspace);
     for addressee in ["supervisor", "both"] {
+        let workspace = Workspace::new();
+        workspace.write("base.yaml", &base_without_done_when(""));
+        let note = note_entry(addressee, 3600, 0, None)
+            .replace("addressee: worker", &format!("addressee: {addressee}"));
+        workspace.graph(&graph(Some("{every: 120, start_after: 0}"), 2, &note, ""));
+        let gate = workspace.at("note-clock");
+        let child = launch(&workspace, &clocked(KEEP_GOING, &gate), None);
+        until_held(&workspace, 1);
+        release(&gate);
+        let (code, stderr) = exit_of(child);
+        assert_eq!(code, Some(1), "{addressee}: {stderr}");
+
+        let events = stream(&workspace);
         let ledger = Ledger::of(&events, addressee);
         assert_eq!(ledger.admitted.len(), 1, "{addressee}: {events:#?}");
         assert_eq!(ledger.admitted[0]["payload"]["addressee"], addressee);
