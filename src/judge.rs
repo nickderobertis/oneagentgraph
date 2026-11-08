@@ -166,6 +166,79 @@ enum Ended {
     Quiescent,
 }
 
+/// What a paced conversation's hold shares with the supervising thread.
+///
+/// A stop file is read by both threads: by the hold, which ends the conversation
+/// on it, and by [`supervise`], which condemns a member whose engine is blocked
+/// and could never read it. Which one saw the stop first used to decide how the
+/// member died — `provider-failure` when the hold did, `signalled` when the
+/// supervisor did — so one operator's `cancel` was recorded two ways depending
+/// on a race between two polls. This is what lets the supervisor defer to a hold
+/// that is going to end the conversation itself.
+struct HoldState {
+    /// Why the hold ended the conversation, when it did — read by [`finish`].
+    ended: Mutex<Option<Ended>>,
+    /// Whether the conversation is at its hold. Set **before** the supervisor
+    /// turn that opens the hold is published, so anyone who saw that turn on the
+    /// stream and then stopped the run finds it set; cleared when the hold opens
+    /// the next turn.
+    holding: AtomicBool,
+    /// The suite's lever for the order the race used to lose: a hold that will
+    /// not act on a stop until the supervisor has written this file on seeing
+    /// the same stop. Read off the task by [`HOLD_STOP_UNTIL_SEEN`].
+    #[cfg(feature = "test-doubles")]
+    stop_seen: Option<PathBuf>,
+}
+
+impl HoldState {
+    fn new(task: &str) -> Self {
+        #[cfg(not(feature = "test-doubles"))]
+        let _ = task;
+        Self {
+            ended: Mutex::new(None),
+            holding: AtomicBool::new(false),
+            #[cfg(feature = "test-doubles")]
+            stop_seen: FixtureGate::parse(task, HOLD_STOP_UNTIL_SEEN).map(|gate| gate.gate),
+        }
+    }
+
+    /// Why the hold ended the conversation, if it did.
+    fn ended(&self) -> Option<Ended> {
+        *self
+            .ended
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The engine's answer to a stop the supervisor saw while the conversation
+    /// is at its hold.
+    ///
+    /// The hold reads the same stop within one [`HOLD_TICK`] and ends the
+    /// conversation on it, so the engine answers, and that answer is what the
+    /// member's outcome is decided from — exactly as when the hold saw the stop
+    /// first. `None` when the hold opened a turn instead, when the engine is gone,
+    /// or when no answer came inside [`TEARDOWN_GRACE`]; the caller then condemns
+    /// the member as it would mid-turn.
+    fn answer_to_stop(&self, rx: &mpsc::Receiver<Answer>) -> Option<Answer> {
+        let deadline = Instant::now() + TEARDOWN_GRACE;
+        while self.holding.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match rx.recv_timeout(TEARDOWN_POLL) {
+                Ok(answer) => return Some(answer),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        None
+    }
+}
+
+/// The marker a journey puts in its **task** to make a hold act on a stop only
+/// once the supervisor has seen it too, naming the file the supervisor writes
+/// when it does. In the task for [`HOLD_BETWEEN_TURNS`]'s reason, and with the
+/// same prefix.
+#[cfg(feature = "test-doubles")]
+const HOLD_STOP_UNTIL_SEEN: &str = "oneagentgraph-fixture:hold-stop-until-seen=";
+
 /// The pace, held: the state one paced conversation's sink keeps between
 /// observations, and the hold it takes at the boundary.
 ///
@@ -190,24 +263,34 @@ struct Hold {
     /// How many offered notes this hold has already seen — so a note that
     /// arrived and was delivered into an earlier turn does not end a later hold.
     seen_offered: u64,
-    /// Why the hold ended the conversation, when it did.
-    ended: Arc<Mutex<Option<Ended>>>,
+    /// What this hold shares with the supervising thread.
+    state: Arc<HoldState>,
 }
 
 impl Hold {
-    fn new(
-        pace: Pace,
-        scratch: &Path,
-        offered: Arc<AtomicU64>,
-        ended: Arc<Mutex<Option<Ended>>>,
-    ) -> Self {
+    fn new(pace: Pace, scratch: &Path, offered: Arc<AtomicU64>, state: Arc<HoldState>) -> Self {
         Self {
             pace,
             scratch: scratch.to_path_buf(),
             continued: false,
             offered,
             seen_offered: 0,
-            ended,
+            state,
+        }
+    }
+
+    /// Whether `observation` is the supervisor's close that opens a hold.
+    fn opens_hold(&self, observation: &Observation<'_>) -> bool {
+        self.continued
+            && matches!(observation, Observation::TurnClosed(closed)
+                if matches!(closed.role, onejudge::Role::User))
+    }
+
+    /// Mark the conversation as at its hold, **before** the observation that
+    /// opens it is published — see [`HoldState::holding`].
+    fn announce(&self, observation: &Observation<'_>) {
+        if self.opens_hold(observation) {
+            self.state.holding.store(true, Ordering::SeqCst);
         }
     }
 
@@ -231,9 +314,7 @@ impl Hold {
             Observation::Message(message) if matches!(message.role, onejudge::Role::User) => {
                 self.continued = true;
             }
-            Observation::TurnClosed(closed)
-                if matches!(closed.role, onejudge::Role::User) && self.continued =>
-            {
+            Observation::TurnClosed(_) if self.opens_hold(observation) => {
                 self.continued = false;
                 return self.hold(emitter, activity, started, abort);
             }
@@ -266,6 +347,8 @@ impl Hold {
         // `crate::run::cron` gives: the span comes from a document, and an
         // `Instant + Duration` panics on a sum the platform cannot represent.
         let mut counting_since = Instant::now();
+        #[cfg(feature = "test-doubles")]
+        let mut deaf_since = None;
         loop {
             std::thread::sleep(HOLD_TICK);
             // The wait is the schedule's, not silence: the activity watchdog on
@@ -282,6 +365,10 @@ impl Hold {
             // the reason the run's clock reads it after its sleep: a trigger
             // beside a cancel must not win the member a paid turn.
             if stop.exists() || own_stop.exists() {
+                #[cfg(feature = "test-doubles")]
+                if self.deaf_to_stop(&mut deaf_since) {
+                    continue;
+                }
                 self.end(Ended::Stopped);
                 return ControlFlow::Break(());
             }
@@ -311,6 +398,7 @@ impl Hold {
                 continue;
             }
             self.seen_offered = offered;
+            self.state.holding.store(false, Ordering::SeqCst);
             emitter.emit(EventKind::CronFired, serde_json::Map::new());
             return ControlFlow::Continue(());
         }
@@ -318,9 +406,22 @@ impl Hold {
 
     fn end(&self, ended: Ended) {
         *self
+            .state
             .ended
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(ended);
+    }
+
+    /// Whether [`HOLD_STOP_UNTIL_SEEN`] still holds this hold deaf to a stop:
+    /// until the supervisor has written the file it names, bounded by
+    /// [`FIXTURE_HOLD`] from the first stop this hold ignored.
+    #[cfg(feature = "test-doubles")]
+    fn deaf_to_stop(&self, since: &mut Option<Instant>) -> bool {
+        let Some(seen) = self.state.stop_seen.as_ref() else {
+            return false;
+        };
+        let since = since.get_or_insert_with(Instant::now);
+        !seen.exists() && since.elapsed() < FIXTURE_HOLD
     }
 }
 
@@ -439,9 +540,9 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let started = Instant::now();
     let (tx, rx) = mpsc::channel();
     // The note relay's count of notes offered, which a hold reads — see
-    // [`Hold`] — and why a hold ended the conversation, which [`finish`] reads.
+    // [`Hold`] — and what the hold shares with the supervisor, [`HoldState`].
     let offered = Arc::new(AtomicU64::new(0));
-    let ended: Arc<Mutex<Option<Ended>>> = Arc::new(Mutex::new(None));
+    let state = Arc::new(HoldState::new(&launch.task));
 
     let engine = {
         let (emitter, activity, abort) =
@@ -456,7 +557,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         let mut hold = launch
             .pace
             .clone()
-            .map(|pace| Hold::new(pace, scratch, Arc::clone(&offered), Arc::clone(&ended)));
+            .map(|pace| Hold::new(pace, scratch, Arc::clone(&offered), Arc::clone(&state)));
         // The gate this run's task asked for, if it asked for one — see
         // [`hold_between_turns`], which is compiled only for the suite.
         #[cfg(feature = "test-doubles")]
@@ -474,6 +575,9 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
             let mut journal = TurnJournal::default();
             let mut sink = |observation: &Observation<'_>| {
                 activity.store(elapsed_millis(started), Ordering::SeqCst);
+                if let Some(hold) = hold.as_ref() {
+                    hold.announce(observation);
+                }
                 journal.observe(observation, &emitter, &mut deliveries);
                 #[cfg(feature = "test-doubles")]
                 hold_between_turns(observation, &mut gate);
@@ -554,7 +658,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // `Heartbeat`'s reason. The task is read for the suite's fixtures only.
     let heartbeat = Heartbeat::start(scratch, started, &launch.task);
     supervise(
-        &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &ended, heartbeat,
+        &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &state, heartbeat,
     )
 }
 
@@ -675,8 +779,7 @@ fn hold_turn_open(observation: &Observation<'_>, gate: &mut Option<FixtureGate>)
 // Ten values, none derivable from another: where the answer arrives, the lever
 // that stops the engine, where the events go, the bounds, the member's scratch,
 // the two halves of the activity clock, how this member's note seam is closed,
-// why a hold ended the conversation if one did, and the beat the heartbeat rule
-// reads.
+// what a hold shares with this loop, and the beat the heartbeat rule reads.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -687,7 +790,7 @@ fn supervise(
     started: Instant,
     activity: &Arc<AtomicU64>,
     ending: Option<crate::note::Ending>,
-    ended: &Mutex<Option<Ended>>,
+    hold: &HoldState,
     mut heartbeat: Heartbeat,
 ) -> Outcome {
     // Published far more rarely than the beat is refreshed, for the reason
@@ -696,27 +799,25 @@ fn supervise(
     let publish_every = (bounds.heartbeat / 4).max(HEARTBEAT_INTERVAL * 2);
     let mut published = Instant::now();
     let mut stall = Stall::new(bounds.stall, started);
+    let answered = |answer: Answer| {
+        // Before the settle, because the settle is what makes the record say
+        // this member is over: a note already in the spool is answered by the
+        // conversation that could not take it rather than left for a caller to
+        // time out on.
+        if let Some(ending) = ending.as_ref() {
+            ending.end(&terminal_refusal(&answer));
+        }
+        finish(
+            answer,
+            emitter,
+            scratch,
+            ending.as_ref().map(crate::note::Ending::endpoint),
+            hold.ended(),
+        )
+    };
     loop {
         match rx.recv_timeout(HEARTBEAT_INTERVAL) {
-            Ok(answer) => {
-                // Before the settle, because the settle is what makes the record
-                // say this member is over: a note already in the spool is
-                // answered by the conversation that could not take it rather than
-                // left for a caller to time out on.
-                if let Some(ending) = ending.as_ref() {
-                    ending.end(&terminal_refusal(&answer));
-                }
-                let held = *ended
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                return finish(
-                    answer,
-                    emitter,
-                    scratch,
-                    ending.as_ref().map(crate::note::Ending::endpoint),
-                    held,
-                );
-            }
+            Ok(answer) => return answered(answer),
             // A sender dropped without an answer means the engine thread
             // panicked: this member's failure, not the graph's.
             //
@@ -741,6 +842,16 @@ fn supervise(
         // the same stop files here and keep reaping during bounded teardown,
         // including processes the engine starts while an earlier turn unwinds.
         if cancellation_requested(scratch) {
+            #[cfg(feature = "test-doubles")]
+            if let Some(seen) = hold.stop_seen.as_ref() {
+                let _ = std::fs::write(seen, "seen");
+            }
+            // A conversation at its hold is not blocked: the hold ends it on this
+            // same stop, and the member's outcome is the one it gets when the hold
+            // sees the stop first — see [`HoldState`].
+            if let Some(answer) = hold.answer_to_stop(rx) {
+                return answered(answer);
+            }
             if let Some(ending) = ending.as_ref() {
                 ending.end(&crate::note::Undelivered::MemberSettled {
                     outcome: "the member was cancelled".to_string(),
@@ -2610,7 +2721,7 @@ mod tests {
             started,
             &Arc::new(AtomicU64::new(0)),
             None,
-            &Mutex::new(None),
+            &HoldState::new("write the thing"),
             Heartbeat::start(dir.path(), started, "write the thing"),
         );
         let Outcome::Died(death) = outcome else {

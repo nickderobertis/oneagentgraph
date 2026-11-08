@@ -808,13 +808,34 @@ fn a_note_offered_during_a_hold_opens_the_next_turn_and_is_delivered_queued() {
 
 /// A member `cancel` during a hold ends the conversation without another turn,
 /// as a cancel ends it mid-turn; so does the whole run's `stop`.
+///
+/// The hold and the supervising loop both read the stop, and the member dies by
+/// the same rule whichever reads it first. Each scope runs twice: in whatever
+/// order the two polls happen to meet, and with the hold made to wait until the
+/// supervisor has seen the stop — the order that used to record `signalled`
+/// instead. The second is forced through the fixture, not hoped for, so the
+/// verdict does not depend on which poll a busy host runs first.
 #[test]
 fn a_cancel_or_stop_during_a_hold_ends_the_conversation_without_another_turn() {
-    for scope in [Some("worker"), None] {
+    for (scope, supervisor_first) in [
+        (Some("worker"), false),
+        (Some("worker"), true),
+        (None, false),
+        (None, true),
+    ] {
         let workspace = Workspace::new();
         workspace.write("base.yaml", &base_without_done_when(""));
         workspace.graph(&held_worker(60, 3, "    background: false\n"));
-        let child = spawn(&workspace, KEEP_GOING, &[]);
+        let seen = workspace.at("stop-seen");
+        let task = if supervisor_first {
+            format!(
+                "{KEEP_GOING} oneagentgraph-fixture:hold-stop-until-seen={}",
+                seen.display()
+            )
+        } else {
+            KEEP_GOING.to_string()
+        };
+        let child = spawn(&workspace, &task, &[]);
         until_held(&workspace, 1);
         let id = run_id(&workspace);
 
@@ -832,10 +853,20 @@ fn a_cancel_or_stop_during_a_hold_ends_the_conversation_without_another_turn() {
         let died = of(&events, "member-died", "worker");
         assert_eq!(died.len(), 1, "{scope:?}: {events:?}");
         assert_eq!(died[0]["payload"]["cause"], "cancelled", "{scope:?}");
+        assert_eq!(
+            died[0]["payload"]["rule"], "provider-failure",
+            "{scope:?}, supervisor first: {supervisor_first}"
+        );
         assert!(of(&events, "member-settled", "worker").is_empty());
         assert_eq!(
             workspace.record()["members"]["worker"],
-            "died (provider-failure)"
+            "died (provider-failure)",
+            "{scope:?}, supervisor first: {supervisor_first}"
+        );
+        assert_eq!(
+            seen.exists(),
+            supervisor_first,
+            "{scope:?}: the supervisor did not see the stop the hold waited on"
         );
     }
 }
