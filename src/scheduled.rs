@@ -179,7 +179,9 @@ fn run_note_clock(clock: &NoteClock) {
                     cause: Some(cause),
                 }),
             );
-            clock.seam.withdraw_untaken(&id, WithdrawnReason::Reset);
+            clock
+                .seam
+                .withdraw_untaken(&id, WithdrawnReason::Reset, &clock.emitter);
             continue;
         }
         if counting_since.elapsed() < span {

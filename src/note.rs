@@ -1641,9 +1641,10 @@ fn awaited(handle: onemessagebus::Offer<Accepted>, deadline: Option<Instant>) ->
 /// never, and ends before the clock does. This is where the two meet, and it
 /// holds the conversation's state across both ends of its life:
 ///
-/// * **Before it opens**, a firing is *held*: one copy per note, a later firing
-///   replacing the earlier, admitted when the conversation opens and before its
-///   first turn ([`ScheduledNotes::open`]).
+/// * **Before it opens**, a firing is *held* under an offer id minted then: one
+///   copy per note, a later firing withdrawing the earlier `superseded`, admitted
+///   under that same id when the conversation opens and before its first turn
+///   ([`ScheduledNotes::open`]).
 /// * **While it is open**, a firing is offered into the conversation's own
 ///   inbox as onejudge's [`Delivery::TurnEnd`] note with no criterion, through
 ///   the member's [`Book`] like a caller's note — so every answer, withdrawal and
@@ -1683,8 +1684,9 @@ struct Seam {
 
 /// One note's outstanding copy.
 enum Copy {
-    /// Fired before the conversation opened; admitted when it does.
-    Held(Note),
+    /// Fired before the conversation opened; admitted when it does, under the
+    /// offer id it was held with.
+    Held(OfferId, Note),
     /// Admitted as this offer — untaken until its book says otherwise.
     Admitted(OfferId),
 }
@@ -1762,8 +1764,12 @@ impl ScheduledNotes {
                 Fired::Undelivered
             }
             Conversation::Waiting => {
+                if let Some(Copy::Held(earlier, _)) = seam.copies.remove(id) {
+                    withdrawn_held(&earlier, id, WithdrawnReason::Superseded, emitter);
+                }
                 fired(None);
-                seam.copies.insert(id.clone(), Copy::Held(note.clone()));
+                seam.copies
+                    .insert(id.clone(), Copy::Held(OfferId::mint(), note.clone()));
                 Fired::Offered
             }
             Conversation::Open { notes, book } => {
@@ -1776,7 +1782,7 @@ impl ScheduledNotes {
                 match notes.offer(note.clone()) {
                     Ok(handle) => {
                         fired(None);
-                        let offer = admitted(&book, id, note, handle, emitter);
+                        let offer = admitted(&book, id, note, handle, emitter, OfferId::mint());
                         seam.copies.insert(id.clone(), Copy::Admitted(offer));
                         Fired::Offered
                     }
@@ -1796,20 +1802,20 @@ impl ScheduledNotes {
     fn open(&self, notes: onejudge::note::Notes, book: Arc<Book>) {
         let _admitting = self.barrier.lock().unwrap_or_else(PoisonError::into_inner);
         let mut seam = self.lock();
-        let mut held: Vec<(ScheduledNoteId, Note)> = seam
+        let mut held: Vec<(ScheduledNoteId, OfferId, Note)> = seam
             .copies
             .iter()
             .filter_map(|(id, copy)| match copy {
-                Copy::Held(note) => Some((id.clone(), note.clone())),
+                Copy::Held(offer, note) => Some((id.clone(), offer.clone(), note.clone())),
                 Copy::Admitted(_) => None,
             })
             .collect();
         held.sort_by(|a, b| a.0.cmp(&b.0));
         seam.copies.clear();
-        for (id, note) in held {
+        for (id, offer, note) in held {
             match notes.offer(note.clone()) {
                 Ok(handle) => {
-                    let offer = admitted(&book, &id, &note, handle, &book.emitter);
+                    let offer = admitted(&book, &id, &note, handle, &book.emitter, offer);
                     seam.copies.insert(id, Copy::Admitted(offer));
                 }
                 // An inbox that refuses before its engine has started is one
@@ -1845,13 +1851,18 @@ impl ScheduledNotes {
         };
         seam.copies.values().any(|copy| match copy {
             Copy::Admitted(offer) => book.unanswered(offer),
-            Copy::Held(_) => false,
+            Copy::Held(..) => false,
         })
     }
 
-    /// Note `id`'s clock restarted: its untaken copy is withdrawn, published as
-    /// `reason`, and a held one is let go.
-    pub(crate) fn withdraw_untaken(&self, id: &ScheduledNoteId, reason: WithdrawnReason) {
+    /// Note `id`'s clock restarted: its untaken copy, admitted or still held,
+    /// is withdrawn and published as `reason`.
+    pub(crate) fn withdraw_untaken(
+        &self,
+        id: &ScheduledNoteId,
+        reason: WithdrawnReason,
+        emitter: &Emitter,
+    ) {
         let mut seam = self.lock();
         let book = match &seam.conversation {
             Conversation::Open { book, .. } => Some(Arc::clone(book)),
@@ -1863,7 +1874,8 @@ impl ScheduledNotes {
                     book.withdraw_as(&offer, reason);
                 }
             }
-            Some(Copy::Held(_)) | None => {}
+            Some(Copy::Held(offer, _)) => withdrawn_held(&offer, id, reason, emitter),
+            None => {}
         }
     }
 
@@ -1873,7 +1885,26 @@ impl ScheduledNotes {
     }
 }
 
-/// Put one scheduled note's admitted offer in `book`, publishing its
+/// Publish that a copy held for a conversation not yet open was taken back. No
+/// book has it and no `note-admitted` named it, so its offer is named here first.
+fn withdrawn_held(
+    offer: &OfferId,
+    id: &ScheduledNoteId,
+    reason: WithdrawnReason,
+    emitter: &Emitter,
+) {
+    emitter.emit(
+        EventKind::NoteWithdrawn,
+        as_payload(&NoteWithdrawn {
+            member: emitter.member().unwrap_or_default().to_string(),
+            offer: offer.to_string(),
+            reason,
+            scheduled_note: Some(id.as_str().to_string()),
+        }),
+    );
+}
+
+/// Put one scheduled note's admitted `offer` in `book`, publishing its
 /// `note-admitted` first, and answer the offer's id.
 fn admitted(
     book: &Book,
@@ -1881,8 +1912,8 @@ fn admitted(
     note: &Note,
     handle: onemessagebus::Offer<Accepted>,
     emitter: &Emitter,
+    offer: OfferId,
 ) -> OfferId {
-    let offer = OfferId::mint();
     book.emitter.emit(
         EventKind::NoteAdmitted,
         as_payload(&NoteAdmitted {

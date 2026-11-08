@@ -185,8 +185,8 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
 - **What resets.** `resets::Resets` holds one subscription per clock declaring
   `reset_on`. The run's emitter is given an `event::Observer` that hands it every
   envelope `Emitter::emit_with` produces, before the filter decides what is
-  written — except the run's own `cron-reset`, so a clock cannot loop on its own
-  restart. `resets::follow` reads `--follow-events` (`run::Request::follow_events`)
+  written; `Resets::observe` skips only the subscription of the clock whose own
+  `cron-reset` it is, so a clock cannot loop on its own restart. `resets::follow` reads `--follow-events` (`run::Request::follow_events`)
   from its length at graph start, waits for a path that does not exist yet,
   keeps a line without its newline until it has one, and counts what does not
   parse as an envelope; `run::run` says the count on standard error. A clock
@@ -201,7 +201,9 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
   once the graph settles, and it stops on `stop`, the member's own `cancel`, and
   after `note::Fired::Undelivered`.
 - **The seam.** `note::ScheduledNotes::fire` is where every timing rule is
-  decided, under one lock: before the conversation opens a firing is a held copy;
+  decided, under one lock: before the conversation opens a firing is a held copy
+  under an offer id minted then, and a later firing or a reset publishes its
+  `note-withdrawn`;
   `note::Relay::open` — now called before the engine thread starts — admits held
   copies before the first turn; while open, an earlier untaken copy is withdrawn
   `superseded` (`Book::withdraw_as`) and the note is offered as a

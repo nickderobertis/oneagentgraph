@@ -1135,7 +1135,9 @@ pub struct NoteAdmitted {
 pub struct NoteWithdrawn {
     /// The member the note was offered to.
     pub member: String,
-    /// The offer's id, as its [`NoteAdmitted`] named it.
+    /// The offer's id, as its [`NoteAdmitted`] named it. A scheduled note's
+    /// copy held for a conversation that has not opened has one too, and its
+    /// withdrawal may name an offer no [`NoteAdmitted`] named.
     pub offer: String,
     /// Why no turn will ever take it.
     pub reason: WithdrawnReason,

@@ -1292,9 +1292,10 @@ fn a_reset_on_match_during_a_live_turn_is_honoured_at_the_next_hold() {
 }
 
 /// A `reset_on` match while a firing is held for a conversation that has not
-/// opened lets the held copy go: the conversation opens with nothing admitted.
+/// opened withdraws the held copy, reason `reset`, under an offer no
+/// `note-admitted` ever names: the conversation opens with nothing admitted.
 #[test]
-fn a_reset_on_match_lets_a_held_copy_go_before_the_conversation_opens() {
+fn a_reset_on_match_withdraws_a_held_copy_before_the_conversation_opens() {
     let workspace = Workspace::new();
     workspace.graph(&graph(
         Some("{every: 120, start_after: 600}"),
@@ -1327,9 +1328,20 @@ fn a_reset_on_match_lets_a_held_copy_go_before_the_conversation_opens() {
         ledger.admitted.is_empty(),
         "a copy held before a reset was admitted when the conversation opened: {events:#?}"
     );
+    assert_eq!(
+        ledger.withdrawn.len(),
+        1,
+        "the held copy's reset was not published as its withdrawal: {events:#?}"
+    );
+    let withdrawn = &ledger.withdrawn[0];
+    assert_eq!(withdrawn["payload"]["reason"], "reset", "{withdrawn}");
+    assert_eq!(withdrawn["payload"]["scheduled_note"], NOTE, "{withdrawn}");
+    assert_eq!(withdrawn["payload"]["member"], "worker", "{withdrawn}");
     assert!(
-        ledger.withdrawn.is_empty(),
-        "a copy never admitted was published withdrawn"
+        withdrawn["payload"]["offer"]
+            .as_str()
+            .is_some_and(|offer| offer.starts_with("note-")),
+        "a held copy's withdrawal names no offer: {withdrawn}"
     );
     assert_eq!(delivered_turns(&events), Vec::<u64>::new());
     assert_eq!(
@@ -1503,11 +1515,11 @@ fn a_detached_run_follows_the_stream_it_was_given_and_warns_of_deprecation() {
 
 /// The followed stream as another program really writes it: a path that does
 /// not exist yet, a line that is not UTF-8, an envelope whose newline has not
-/// arrived, and a file replaced by a shorter one. And the run's own `cron-reset`
-/// never restarts a clock filtered on `cron-reset`, while one appended to the
-/// followed stream — another run's — does.
+/// arrived, and a file replaced by a shorter one. And a clock filtered on
+/// `cron-reset` restarts on another clock's, whether this run's or one appended
+/// to the followed stream by another run — never on its own.
 #[test]
-fn a_followed_stream_is_read_as_it_is_written_and_only_anothers_cron_reset_resets() {
+fn a_followed_stream_is_read_as_it_is_written_and_every_other_clocks_cron_reset_resets() {
     let workspace = Workspace::new();
     workspace.write("base.yaml", &base_without_done_when(""));
     workspace.graph(&graph(
@@ -1545,15 +1557,19 @@ fn a_followed_stream_is_read_as_it_is_written_and_only_anothers_cron_reset_reset
         echo_resets(&stream(&workspace)) == 1
     });
 
-    // That reset published the run's own `cron-reset`; another run's, followed,
-    // is what restarts the reporter.
+    // That reset published the note clock's `cron-reset`, another clock's as
+    // far as the reporter is concerned; and so is another run's, followed.
+    until(
+        "the note clock's cron-reset to restart the reporter",
+        || of(&stream(&workspace), "cron-reset", "reporter").len() == 1,
+    );
     let other_run = json!({
         "v": 1, "ts": "2026-11-08T00:00:00.000Z", "stream": "another-run", "seq": 2,
         "source": "agentgraph", "kind": "cron-reset", "labels": {}, "payload": {}
     });
     append(&followed, &other_run.to_string());
     until("the followed cron-reset to restart the reporter", || {
-        !of(&stream(&workspace), "cron-reset", "reporter").is_empty()
+        of(&stream(&workspace), "cron-reset", "reporter").len() == 2
     });
 
     // Replaced by a shorter file: read again from its start.
@@ -1564,6 +1580,7 @@ fn a_followed_stream_is_read_as_it_is_written_and_only_anothers_cron_reset_reset
     .expect("the stream is replaced");
     until("the replaced stream to be read from its start", || {
         echo_resets(&stream(&workspace)) == 2
+            && of(&stream(&workspace), "cron-reset", "reporter").len() == 3
     });
     workspace
         .run(&["trigger", &run_id(&workspace), "worker"])
@@ -1579,15 +1596,128 @@ fn a_followed_stream_is_read_as_it_is_written_and_only_anothers_cron_reset_reset
     let reporter = of(&events, "cron-reset", "reporter");
     assert_eq!(
         reporter.len(),
-        1,
-        "the run's own cron-reset restarted a clock: {events:#?}"
+        3,
+        "the reporter did not restart once per other clock's cron-reset: {events:#?}"
     );
-    assert_eq!(reporter[0]["payload"]["cause"]["stream"], "another-run");
+    assert_ne!(reporter[0]["payload"]["cause"]["stream"], "another-run");
+    assert_eq!(reporter[1]["payload"]["cause"]["stream"], "another-run");
+    assert_ne!(reporter[2]["payload"]["cause"]["stream"], "another-run");
     let seqs: Vec<&Value> = of(&events, "cron-reset", "worker")
         .into_iter()
         .map(|event| &event["payload"]["cause"]["seq"])
         .collect();
     assert_eq!(seqs, vec![&json!(1), &json!(3)], "{events:#?}");
+}
+
+/// A later firing before the conversation opens supersedes the held copy: each
+/// replaced copy is published withdrawn, reason `superseded`, under an offer of
+/// its own that no `note-admitted` names, and only the last is admitted.
+#[test]
+fn a_later_firing_supersedes_a_held_copy_before_the_conversation_opens() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 600}"),
+        1,
+        &note_entry(NOTE, 1, 0, None),
+        "",
+    ));
+    let child = launch(&workspace, "fake:complete-now finish at once", None);
+    until("the note to fire three times while held", || {
+        note_fired(&stream(&workspace), NOTE).len() >= 3
+    });
+    workspace
+        .run(&["trigger", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let events = stream(&workspace);
+    let ledger = Ledger::of(&events, NOTE);
+    let opened_with = &ledger.admitted[0];
+    let held = note_fired(&events, NOTE)
+        .into_iter()
+        .filter(|firing| precedes(&events, firing, opened_with))
+        .count();
+    let superseded: Vec<&Value> = ledger
+        .withdrawn
+        .iter()
+        .filter(|event| precedes(&events, event, opened_with))
+        .collect();
+    assert!(held >= 3, "{events:#?}");
+    assert_eq!(
+        superseded.len(),
+        held - 1,
+        "each copy a later firing replaced is one withdrawal: {events:#?}"
+    );
+    let mut offers = BTreeSet::new();
+    for withdrawn in superseded {
+        assert_eq!(withdrawn["payload"]["reason"], "superseded", "{withdrawn}");
+        assert_eq!(withdrawn["payload"]["member"], "worker", "{withdrawn}");
+        let offer = withdrawn["payload"]["offer"].as_str().expect("an offer");
+        assert_ne!(offer, ledger.offer(0), "the surviving copy was withdrawn");
+        assert!(offers.insert(offer.to_string()), "an offer named twice");
+    }
+}
+
+/// A clock filtered on `cron-reset` restarts on another clock's restart of this
+/// same run, and its own restart — which matches its filter too — does not
+/// restart it again: each followed match is one restart of each clock.
+#[test]
+fn a_clock_resets_on_another_clocks_cron_reset_and_never_on_its_own() {
+    let workspace = Workspace::new();
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 600}"),
+        1,
+        &note_entry(NOTE, 3600, 3600, Some("{include: [{kind: cron-reset}]}")),
+        &single(
+            "reporter",
+            &format!("{{every: 3600, start_after: 3600, reset_on: {SURFACED}}}"),
+        ),
+    ));
+    let followed = workspace.at("pipeline.jsonl");
+    let child = launch(
+        &workspace,
+        "fake:complete-now finish at once",
+        Some(&followed),
+    );
+    until("both clocks to be counting", || {
+        !of(&stream(&workspace), "member-started", "reporter").is_empty()
+    });
+    let resets = || {
+        let events = stream(&workspace);
+        (
+            of(&events, "cron-reset", "reporter").len(),
+            of(&events, "cron-reset", "worker").len(),
+        )
+    };
+    append(&followed, &envelope(1, "pipeline", "planner-surfaced"));
+    until("the note clock to restart on the reporter's", || {
+        resets() == (1, 1)
+    });
+    // A clock looping on its own restart is past this count within a tick,
+    // long before the second envelope has been read.
+    append(&followed, &envelope(2, "pipeline", "planner-surfaced"));
+    until("the second restart of each clock", || resets().0 == 2);
+    until("the note clock's second restart", || resets().1 >= 2);
+    assert_eq!(resets(), (2, 2), "a clock restarted on its own cron-reset");
+    workspace
+        .run(&["trigger", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(0), "{stderr}");
+
+    let events = stream(&workspace);
+    let reporter = of(&events, "cron-reset", "reporter");
+    let note = of(&events, "cron-reset", "worker");
+    assert_eq!((reporter.len(), note.len()), (2, 2), "{events:#?}");
+    for (restart, cause) in note.iter().zip(&reporter) {
+        let named = &restart["payload"]["cause"];
+        assert_eq!(restart["payload"]["scheduled_note"], NOTE, "{restart}");
+        assert_eq!(named["kind"], "cron-reset", "{restart}");
+        assert_eq!(named["source"], "agentgraph", "{restart}");
+        assert_eq!(named["seq"], cause["seq"], "{restart}");
+        assert_eq!(named["stream"], cause["stream"], "{restart}");
+    }
 }
 
 /// Two scheduled notes of one conversation keep clocks of their own: a reset of

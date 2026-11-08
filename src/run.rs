@@ -1350,13 +1350,17 @@ fn run_announcing(
         let schedule_reset = member
             .schedule()
             .and_then(|schedule| schedule.reset_on)
-            .map(|filter| resets.subscribe(filter));
+            .map(|filter| resets.subscribe(crate::resets::ClockId::schedule(name), filter));
         let notes = (!member.scheduled_notes().is_empty())
             .then(|| Arc::new(crate::note::ScheduledNotes::default()));
         let note_resets: Vec<_> = member
             .scheduled_notes()
             .iter()
-            .map(|note| note.reset_on.clone().map(|filter| resets.subscribe(filter)))
+            .map(|note| {
+                note.reset_on.clone().map(|filter| {
+                    resets.subscribe(crate::resets::ClockId::note(name, &note.id), filter)
+                })
+            })
             .collect();
         let registered_clocks = registered.register(
             scratch,
