@@ -2267,6 +2267,111 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
     );
 }
 
+/// How many times the reader reads a record the writer is rewriting.
+const CONCURRENT_READS: usize = 200;
+
+/// `reset-timer` reads a run's record while the run is rewriting it — the way a
+/// consumed surface restarts an observer's check-in clock while the detached
+/// driver writes — and every read sees a whole record, so none reports the run
+/// as missing.
+///
+/// The writer is the store's own, [`oneagentgraph::run::write_record`], driven
+/// without pause, because a run rewrites its record only three times. The
+/// verdict rests on no clock: the reader waits for at least one more rewrite
+/// before each read, so every read lands on a store a write is still replacing.
+#[test]
+fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: rewritten")
+        .expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+    let record = oneagentgraph::history::show(&state, &id).expect("the run's record");
+    let root = state.join(&id);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let writes = Arc::new(AtomicUsize::new(0));
+    let writer = {
+        let (stop, writes, root, mut record) =
+            (Arc::clone(&stop), Arc::clone(&writes), root.clone(), record);
+        std::thread::spawn(move || {
+            let mut finished = 0;
+            while !stop.load(Ordering::SeqCst) {
+                finished += 1;
+                record.finished_ms = Some(finished);
+                oneagentgraph::run::write_record(&root, &record).expect("the record rewrites");
+                writes.fetch_add(1, Ordering::SeqCst);
+            }
+        })
+    };
+
+    let mut refused = Vec::new();
+    for read in 0..CONCURRENT_READS {
+        let before = writes.load(Ordering::SeqCst);
+        while writes.load(Ordering::SeqCst) == before && !writer.is_finished() {
+            std::thread::yield_now();
+        }
+        let reset = workspace.run(&["reset-timer", &id, "worker"]);
+        if reset.code != 0 {
+            refused.push(format!(
+                "read {read}: exit {}: {}",
+                reset.code, reset.stderr
+            ));
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    writer.join().expect("the writer kept writing");
+    assert!(
+        refused.is_empty(),
+        "{} of {CONCURRENT_READS} reads of a record being rewritten failed:\n{}",
+        refused.len(),
+        refused.join("")
+    );
+    // Every rewrite was renamed into place, so none left its partial behind.
+    let left: Vec<_> = std::fs::read_dir(&root)
+        .expect("the run's directory")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".partial"))
+        .collect();
+    assert!(left.is_empty(), "rewrites left partial records: {left:?}");
+}
+
+/// A record that is there and does not read — empty, or not JSON — with nothing
+/// writing it, is refused naming the file, not reported as a run that does not
+/// exist and not read as a fresh one.
+#[test]
+fn a_record_that_does_not_read_is_refused_by_its_file() {
+    let workspace = Workspace::new();
+    for (id, content) in [("empty-run", ""), ("torn-run", "{\"run_id\":")] {
+        let record = workspace.state().join(id).join("record.json");
+        std::fs::create_dir_all(record.parent().expect("a run directory")).expect("mkdir");
+        std::fs::write(&record, content).expect("write");
+
+        let refused = workspace.run(&["reset-timer", id, "worker"]);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains(&record.display().to_string()),
+            "{id}: the refusal does not name {}: {}",
+            record.display(),
+            refused.stderr
+        );
+        assert!(
+            !refused.stderr.contains("no run"),
+            "{id}: a record that is there was reported missing: {}",
+            refused.stderr
+        );
+        assert!(
+            !workspace.state().join(id).join("signals").exists(),
+            "{id}: a signal was left for a run whose record does not read"
+        );
+    }
+}
+
 /// A typo is refused *while the run is in flight*, which is when these verbs are
 /// actually used.
 ///

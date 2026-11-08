@@ -2057,13 +2057,84 @@ pub fn expand(value: &str, env: &BTreeMap<String, String>) -> String {
     out
 }
 
-/// Write the run record, replacing whatever was there.
-fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
+/// Write the run record under `root`, the run's own directory, replacing whatever
+/// was there **whole**.
+///
+/// The record is read by other processes while the run is still writing it —
+/// `trigger`, `reset-timer`, `cancel`, `interrupt` and `history` all read it to
+/// learn which members a live run has — so it is never rewritten in place: an
+/// in-place write truncates first, and a reader landing in that window read an
+/// empty file and reported a live run as missing. See [`replace_whole`].
+///
+/// Public for the one reason a reader can check: it is the store's only
+/// writer, and a run rewrites its record just three times — so a journey that
+/// proves a reader never sees half a record has to drive this writer
+/// continuously itself, and a second copy of it there would prove only the copy.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] when the record cannot be rendered or written.
+pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
     let path = root.join(RECORD_FILE);
     let rendered = serde_json::to_string_pretty(record)
         .map_err(|err| Error::InvalidConfig(format!("cannot render the run record: {err}")))?;
-    std::fs::write(&path, rendered)
+    replace_whole(&path, rendered.as_bytes())
         .map_err(|err| Error::InvalidConfig(format!("cannot write {}: {err}", path.display())))
+}
+
+/// Replace `path` with `bytes` so that a concurrent reader opens either the file
+/// that was there or the whole of this one — never an empty or partial file.
+///
+/// The bytes go to a sibling first and are renamed onto `path`: a rename within
+/// one directory replaces the name in a single step on every platform this
+/// ships for, where an in-place write truncates and then fills. The sibling's
+/// name is unique to this process and this call, so two writers in one run —
+/// member threads rewriting their own control records — never share one.
+pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let partial = path.with_file_name(format!(
+        ".{name}.{}.{}.partial",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let replaced = std::fs::write(&partial, bytes).and_then(|()| rename_over(&partial, path));
+    if replaced.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    replaced
+}
+
+/// Rename `from` onto `to`.
+#[cfg(not(windows))]
+fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
+
+/// Rename `from` onto `to`, waiting out a reader that holds `to` open.
+///
+/// Windows refuses to replace a file another process opened without sharing
+/// deletion — a reader that is not this crate, which always shares it — and
+/// the refusal lasts only as long as that read. So a refusal is retried, a
+/// bounded number of times, rather than failing the run's write.
+#[cfg(windows)]
+fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    const ATTEMPTS: u32 = 50;
+    let mut attempt = 1;
+    loop {
+        match std::fs::rename(from, to) {
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied && attempt < ATTEMPTS =>
+            {
+                attempt += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            done => return done,
+        }
+    }
 }
 
 /// The exit code a run failed to start with.
