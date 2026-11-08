@@ -1339,61 +1339,97 @@ fn a_reset_on_match_lets_a_held_copy_go_before_the_conversation_opens() {
     );
 }
 
-/// A member's own `cancel` stops its scheduled notes' clocks at once — no firing
-/// after it, not even one saying the conversation is over — while another
-/// member keeps the graph alive.
+/// A member's own `cancel`, and the whole run's `stop`, stop that member's
+/// scheduled-note clocks at once — no firing after it, not even one saying the
+/// conversation is over — and a member cancel leaves another member keeping the
+/// graph alive.
 #[test]
-fn a_member_cancel_stops_its_note_clocks_while_the_graph_lives_on() {
+fn a_cancel_or_stop_stops_note_clocks_at_once() {
+    for scope in [Some("worker"), None] {
+        let workspace = Workspace::new();
+        let keep_open = workspace.at("keeper-hold");
+        let (entered, hold) = (workspace.at("turn-entered"), workspace.at("turn-hold"));
+        workspace.write(
+            "base.yaml",
+            &base_without_done_when(&format!(
+                "fake:entered={} fake:hold={}",
+                entered.display(),
+                hold.display()
+            )),
+        );
+        let keeper = format!(
+            "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    task: \
+             'fake:hold={} keep the run open'\n",
+            keep_open.display()
+        );
+        workspace.graph(&graph(None, 4, &note_entry(NOTE, 1, 0, None), &keeper));
+        let child = launch(&workspace, KEEP_GOING, None);
+        until("the worker's turn to be live", || entered.exists());
+        until("the note to fire twice", || {
+            note_fired(&stream(&workspace), NOTE).len() >= 2
+        });
+        let id = run_id(&workspace);
+        let mut cancel = vec!["cancel", id.as_str()];
+        cancel.extend(scope);
+        workspace.run(&cancel).expect_code(0);
+        until("the worker to end", || {
+            !of(&stream(&workspace), "member-died", "worker").is_empty()
+        });
+        // Three of its spans: a clock that went on would fire in each of them.
+        std::thread::sleep(Duration::from_millis(3_000));
+        release(&keep_open);
+        release(&hold);
+        let (code, stderr) = exit_of(child);
+        assert_eq!(code, Some(1), "{scope:?}: {stderr}");
+
+        let events = stream(&workspace);
+        let died = of(&events, "member-died", "worker")[0];
+        let after: Vec<&Value> = note_fired(&events, NOTE)
+            .into_iter()
+            .filter(|event| precedes(&events, died, event))
+            .collect();
+        assert!(
+            after.is_empty(),
+            "{scope:?}: the note clock fired after the stop: {after:#?}"
+        );
+        if scope.is_some() {
+            assert!(
+                !of(&events, "member-settled", "keeper").is_empty(),
+                "the graph did not live on past the member's cancel"
+            );
+        }
+    }
+}
+
+/// A scheduled note may be addressed to the supervisor or to both parties, and
+/// each is admitted naming that addressee and delivered exactly once.
+#[test]
+fn notes_for_the_supervisor_and_for_both_are_admitted_and_delivered_once() {
     let workspace = Workspace::new();
-    let keep_open = workspace.at("keeper-hold");
-    let (entered, hold) = (workspace.at("turn-entered"), workspace.at("turn-hold"));
-    workspace.write(
-        "base.yaml",
-        &base_without_done_when(&format!(
-            "fake:entered={} fake:hold={}",
-            entered.display(),
-            hold.display()
-        )),
-    );
-    let keeper = format!(
-        "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n    task: \
-         'fake:hold={} keep the run open'\n",
-        keep_open.display()
-    );
-    workspace.graph(&graph(None, 4, &note_entry(NOTE, 1, 0, None), &keeper));
-    let child = launch(&workspace, KEEP_GOING, None);
-    until("the worker's turn to be live", || entered.exists());
-    until("the note to fire twice", || {
-        note_fired(&stream(&workspace), NOTE).len() >= 2
-    });
-    workspace
-        .run(&["cancel", &run_id(&workspace), "worker"])
-        .expect_code(0);
-    until("the worker to end", || {
-        !of(&stream(&workspace), "member-died", "worker").is_empty()
-    });
-    // Three of its spans with the graph still open: a clock that went on would
-    // fire in each of them.
-    std::thread::sleep(Duration::from_millis(3_000));
-    release(&keep_open);
-    release(&hold);
+    workspace.write("base.yaml", &base_without_done_when(""));
+    let notes = ["supervisor", "both"]
+        .iter()
+        .map(|addressee| {
+            note_entry(addressee, 3600, 0, None)
+                .replace("addressee: worker", &format!("addressee: {addressee}"))
+        })
+        .collect::<String>();
+    workspace.graph(&graph(Some("{every: 120, start_after: 0}"), 2, &notes, ""));
+    let gate = workspace.at("note-clock");
+    let child = launch(&workspace, &clocked(KEEP_GOING, &gate), None);
+    until_held(&workspace, 1);
+    release(&gate);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");
 
     let events = stream(&workspace);
-    let died = of(&events, "member-died", "worker")[0];
-    let after: Vec<&Value> = note_fired(&events, NOTE)
-        .into_iter()
-        .filter(|event| precedes(&events, died, event))
-        .collect();
-    assert!(
-        after.is_empty(),
-        "the note clock fired after its member's cancel: {after:#?}"
-    );
-    assert!(
-        !of(&events, "member-settled", "keeper").is_empty(),
-        "the graph did not live on past the cancel"
-    );
+    for addressee in ["supervisor", "both"] {
+        let ledger = Ledger::of(&events, addressee);
+        assert_eq!(ledger.admitted.len(), 1, "{addressee}: {events:#?}");
+        assert_eq!(ledger.admitted[0]["payload"]["addressee"], addressee);
+        assert_eq!(ledger.accepted.len(), 1, "{addressee}: {events:#?}");
+        assert!(ledger.withdrawn.is_empty(), "{addressee}");
+    }
 }
 
 /// A detached run forwards `--follow-events` to the run it starts, which resets
