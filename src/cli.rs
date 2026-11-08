@@ -38,7 +38,8 @@ pub enum Command {
     Validate(ValidateArgs),
     /// Fire a scheduled member now.
     Trigger(MemberArgs),
-    /// Restart a resettable schedule's clock.
+    /// Restart a resettable schedule's clock. Deprecated: declare `reset_on`
+    /// on the schedule instead.
     ResetTimer(MemberArgs),
     /// Cancel a run, or one member of it.
     Cancel(CancelArgs),
@@ -84,6 +85,11 @@ pub struct RunArgs {
     /// Wins over the graph's own `events.filter`.
     #[arg(long, value_name = "SPEC")]
     pub event_filter: Option<String>,
+    /// Follow an outside NDJSON event stream: every envelope appended to it
+    /// after the graph starts is matched against the graph's `reset_on`
+    /// filters. A path that does not exist yet is waited for.
+    #[arg(long, value_name = "PATH")]
+    pub follow_events: Option<PathBuf>,
     /// How to render the events. `text` is a deterministic rendering of the same
     /// events, never separate content.
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]

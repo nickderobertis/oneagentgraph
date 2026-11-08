@@ -1,0 +1,156 @@
+//! A run's clocks beyond a member's own `schedule`: what each member's clocks
+//! reset on, and the clocks that fire a two-party member's scheduled notes.
+//!
+//! A member's launch is built before the run starts and is the same value
+//! `validate` builds, so nothing that exists only while a run is live rides it.
+//! What a clock needs at run time — its `reset_on` subscription, and the seam its
+//! scheduled notes are offered through — is kept here instead, keyed by the
+//! member's scratch directory: the one value every part of a member already
+//! derives its run-time state from, the way a hold derives its signal
+//! directory. The run registers a member's clocks before its first wave and
+//! forgets them once the graph has settled.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::time::{Duration, Instant};
+
+use crate::config::ScheduledNote;
+use crate::event::{CronReset, Emitter, EventKind, WithdrawnReason};
+use crate::member::as_payload;
+use crate::note::{Fired, ScheduledNotes};
+use crate::resets::ResetOn;
+
+/// How often a scheduled note's clock looks at what moves it — the run's own
+/// clock tick.
+const TICK: Duration = Duration::from_millis(100);
+
+/// One member's run-time clock state.
+#[derive(Default)]
+pub(crate) struct MemberClocks {
+    /// The member's own `schedule.reset_on` subscription, when it declares one:
+    /// read by the run's clock for a single-sided member or a deferred first
+    /// turn, and by the hold between a paced conversation's turns.
+    pub(crate) schedule_reset: Option<ResetOn>,
+    /// Where a two-party member's scheduled notes are offered into its
+    /// conversation, when it declares any.
+    pub(crate) notes: Option<Arc<ScheduledNotes>>,
+}
+
+fn registry() -> &'static Mutex<HashMap<PathBuf, Arc<MemberClocks>>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<PathBuf, Arc<MemberClocks>>>> = OnceLock::new();
+    REGISTRY.get_or_init(Mutex::default)
+}
+
+/// The clocks of the member whose scratch is `scratch`, while its run is live.
+pub(crate) fn of(scratch: &Path) -> Option<Arc<MemberClocks>> {
+    registry()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(scratch)
+        .cloned()
+}
+
+/// A run's registered members, forgotten together when it is dropped — on the
+/// way out of every path, a refusal included.
+pub(crate) struct Registered(Vec<PathBuf>);
+
+impl Registered {
+    /// Nothing registered yet.
+    pub(crate) fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    /// Register `clocks` for the member whose scratch is `scratch`.
+    pub(crate) fn register(&mut self, scratch: &Path, clocks: MemberClocks) -> Arc<MemberClocks> {
+        let clocks = Arc::new(clocks);
+        registry()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(scratch.to_path_buf(), Arc::clone(&clocks));
+        self.0.push(scratch.to_path_buf());
+        clocks
+    }
+}
+
+impl Drop for Registered {
+    fn drop(&mut self) {
+        let mut registry = registry().lock().unwrap_or_else(PoisonError::into_inner);
+        for scratch in &self.0 {
+            registry.remove(scratch);
+        }
+    }
+}
+
+/// What one scheduled note's clock is given.
+pub(crate) struct NoteClock {
+    /// The note as declared.
+    pub(crate) note: ScheduledNote,
+    /// Where it is offered.
+    pub(crate) seam: Arc<ScheduledNotes>,
+    /// Its own `reset_on` subscription, when it declares one.
+    pub(crate) reset_on: Option<ResetOn>,
+    /// The member's emitter.
+    pub(crate) emitter: Emitter,
+    /// The run's signal directory.
+    pub(crate) signals: PathBuf,
+    /// The member's name, for its own `cancel`.
+    pub(crate) member: String,
+    /// Set once the graph is settling: every clock stops.
+    pub(crate) over: Arc<AtomicBool>,
+}
+
+/// Start one scheduled note's clock, from now.
+///
+/// It counts `start_after`, then `every`, by wall clock and independently of
+/// the conversation's turns; a firing is [`ScheduledNotes::fire`]'s to offer,
+/// hold or refuse. A `reset_on` match restarts the span pending — the first
+/// span before the first firing, `every` after — and withdraws the untaken
+/// copy. It stops when the run settles, on the run's `stop` or the member's
+/// own `cancel`, and after the first firing that found the conversation over.
+pub(crate) fn spawn_note_clock(clock: NoteClock) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name(format!("note-{}", clock.note.id))
+        .spawn(move || run_note_clock(&clock))
+        .ok()
+}
+
+fn run_note_clock(clock: &NoteClock) {
+    let id = clock.note.id.as_str();
+    let Ok(note) = ScheduledNotes::note(clock.note.addressee, &clock.note.text) else {
+        return;
+    };
+    let stop = clock.signals.join("stop");
+    let own_stop = clock.signals.join(format!("{}.stop", clock.member));
+    // Measured against `elapsed` rather than as a deadline, for the reason
+    // `crate::run::cron` gives.
+    let mut span = Duration::from_secs(clock.note.first_after());
+    let mut counting_since = Instant::now();
+    loop {
+        std::thread::sleep(TICK);
+        if clock.over.load(Ordering::SeqCst) || stop.exists() || own_stop.exists() {
+            return;
+        }
+        if let Some(cause) = clock.reset_on.as_ref().and_then(ResetOn::take) {
+            counting_since = Instant::now();
+            clock.emitter.emit(
+                EventKind::CronReset,
+                as_payload(&CronReset {
+                    scheduled_note: Some(id.to_string()),
+                    cause: Some(cause),
+                }),
+            );
+            clock.seam.withdraw_untaken(id, WithdrawnReason::Reset);
+            continue;
+        }
+        if counting_since.elapsed() < span {
+            continue;
+        }
+        if clock.seam.fire(id, &note, &clock.emitter) == Fired::Undelivered {
+            return;
+        }
+        span = Duration::from_secs(clock.note.every);
+        counting_since = Instant::now();
+    }
+}

@@ -391,7 +391,7 @@ fn onejudge(
             // The hold between turns, from the schedule as written: `every` is
             // the cadence whatever the schema, and the first delay is the run's
             // clock's — resolved there, where the schema is known.
-            pace: member.schedule.map(|schedule| crate::judge::Pace {
+            pace: member.schedule.as_ref().map(|schedule| crate::judge::Pace {
                 every: std::time::Duration::from_secs(schedule.every),
                 resettable: schedule.resettable,
                 background: context.background,

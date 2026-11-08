@@ -108,8 +108,18 @@ impl Member {
     #[must_use]
     pub fn schedule(&self) -> Option<Schedule> {
         match self {
-            Member::Onejudge(member) => member.schedule,
-            Member::Oneharness(member) => member.schedule,
+            Member::Onejudge(member) => member.schedule.clone(),
+            Member::Oneharness(member) => member.schedule.clone(),
+        }
+    }
+
+    /// The timed notes this member's conversation is given, when it declares
+    /// any — a two-party member's alone; a single-sided member has none.
+    #[must_use]
+    pub fn scheduled_notes(&self) -> &[ScheduledNote] {
+        match self {
+            Member::Onejudge(member) => &member.scheduled_notes,
+            Member::Oneharness(_) => &[],
         }
     }
 
@@ -155,6 +165,27 @@ impl GraphConfig {
     #[must_use]
     pub fn is_background(&self, name: &str) -> bool {
         self.background_memoized(name, &mut BTreeMap::new())
+    }
+
+    /// One warning per member that declares a setting this release deprecates:
+    /// today `resettable: true` on a schedule, which still works unchanged and
+    /// whose replacement is `reset_on`.
+    ///
+    /// Hidden, and outside the contract's surface: public only so the binary's
+    /// `validate` and `run` print the one wording from one place.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn deprecations(&self) -> Vec<String> {
+        self.members
+            .iter()
+            .filter(|(_, member)| member.schedule().is_some_and(|schedule| schedule.resettable))
+            .map(|(name, _)| {
+                format!(
+                    "oneagentgraph: member {name:?}: `resettable` is deprecated and will be removed \
+                     in a later release — declare `reset_on` on its schedule instead"
+                )
+            })
+            .collect()
     }
 
     /// [`is_background`](Self::is_background), sharing one memo across the
@@ -254,6 +285,18 @@ pub struct OnejudgeMember {
     /// [`FIRST_TWO_PARTY_JOB_VERSION`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schedule: Option<Schedule>,
+    /// Timed notes this conversation is given in context, each on a clock of
+    /// its own.
+    ///
+    /// A supervising conversation told something on a timer otherwise needs a
+    /// second scheduled member — a fresh paid turn each time, with none of the
+    /// conversation's context. A scheduled note is one more message instead:
+    /// offered into the conversation's own inbox to be taken at a turn's end,
+    /// never interrupting one. A two-party member's alone, because holding a
+    /// note for a turn's end needs a conversation. Requires graph schema
+    /// version [`FIRST_SCHEDULED_NOTE_VERSION`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scheduled_notes: Vec<ScheduledNote>,
     /// Whether this member holds the run open. Absent is decided by the schedule.
     ///
     /// Read through [`GraphConfig::is_background`], because what its absence
@@ -615,7 +658,7 @@ mod judge_sides {
 }
 
 /// A cron member's schedule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {
     /// Interval in seconds.
@@ -630,8 +673,74 @@ pub struct Schedule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_after: Option<u64>,
     /// Whether `reset-timer` may restart this schedule's clock.
+    ///
+    /// **Deprecated**, and kept working unchanged through this release:
+    /// [`reset_on`](Self::reset_on) is the one way forward for a clock to
+    /// restart, and `validate` and `run` say so on standard error for every
+    /// member that still declares this.
     #[serde(default)]
     pub resettable: bool,
+    /// The envelopes that restart this schedule's pending interval — or the
+    /// hold in progress, on a paced conversation — when one matches.
+    ///
+    /// The shared filter grammar, evaluated against every envelope the run
+    /// itself produces, unfiltered, and every envelope appended to the stream
+    /// the run follows (`--follow-events`). Absent is a fixed cadence. Requires
+    /// graph schema version [`FIRST_SCHEDULED_NOTE_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_on: Option<EventFilter>,
+}
+
+// `EventFilter` is `PartialEq` and not `Eq` only because the bus does not derive
+// it; every field it compares is a string or an optional one, so equality is
+// reflexive and a schedule carrying one is as `Eq` as one without.
+impl Eq for Schedule {}
+
+/// One timed note a two-party member's conversation is given — see
+/// [`OnejudgeMember::scheduled_notes`].
+///
+/// Its clock starts when the member's wave is reached, counts `start_after`
+/// and then `every` by wall clock, independently of turns, and offers the note
+/// for the end of whichever turn is live — never interrupting one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScheduledNote {
+    /// What this note is called on the stream (`scheduled_note`) and by
+    /// `--set members.<m>.scheduled_notes.<id>.<field>`: `[a-z][a-z0-9-]{0,63}`,
+    /// unique within the member.
+    pub id: String,
+    /// Seconds between firings, once the first has happened.
+    pub every: u64,
+    /// Seconds before the first firing; absent is `every`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_after: Option<u64>,
+    /// The envelopes that restart this note's pending span and withdraw its
+    /// untaken copy, in the shared filter grammar — see
+    /// [`Schedule::reset_on`]. Absent is a fixed cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_on: Option<EventFilter>,
+    /// Who the note is for: onejudge's `worker`, `supervisor`, or `both`.
+    pub addressee: crate::note::Addressee,
+    /// What the addressee reads. Not blank.
+    pub text: String,
+}
+
+// For `Schedule`'s reason.
+impl Eq for ScheduledNote {}
+
+impl ScheduledNote {
+    /// Seconds before this note's first firing.
+    pub(crate) fn first_after(&self) -> u64 {
+        self.start_after.unwrap_or(self.every)
+    }
+}
+
+/// Whether `id` is one a scheduled note may have: `[a-z][a-z0-9-]{0,63}`.
+fn is_scheduled_note_id(id: &str) -> bool {
+    let mut chars = id.chars();
+    chars.next().is_some_and(|first| first.is_ascii_lowercase())
+        && id.len() <= 64
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
 impl Schedule {
@@ -706,7 +815,7 @@ pub const MAX_PRE_TURN_COMMANDS: usize = 4;
 pub const FIRST_SCHEMA_VERSION: u32 = 1;
 
 /// The latest graph schema version this crate reads and writes in examples.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 /// onejudge settings a graph passes through untouched: top-level keys, each
 /// with any value, merged verbatim into what this crate composes.
@@ -885,6 +994,15 @@ pub const FIRST_TWO_PARTY_JOB_VERSION: u32 = 9;
 /// so what the gate buys is that a document *using* one says which schema it was
 /// written against.
 pub const FIRST_JUDGE_SETTINGS_VERSION: u32 = 10;
+
+/// The first graph schema version in which a two-party member may declare
+/// [`scheduled_notes`](OnejudgeMember::scheduled_notes), and in which any
+/// [`Schedule`] or scheduled note may declare a `reset_on` filter.
+///
+/// A gate on the *fields*, the way [`FIRST_JUDGE_SETTINGS_VERSION`] is one: a
+/// document naming neither runs exactly as it did, so what the gate buys is that
+/// a document *using* one says which schema it was written against.
+pub const FIRST_SCHEDULED_NOTE_VERSION: u32 = 11;
 
 /// Whether `name` is one a member may have.
 ///
@@ -1172,9 +1290,10 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                     }
                 }
                 own_dir(name, member.dir.as_deref())?;
-                if let Some(schedule) = member.schedule {
-                    schedule_spans(name, &schedule, graph.version)?;
+                if let Some(schedule) = &member.schedule {
+                    schedule_spans(name, schedule, graph.version)?;
                 }
+                scheduled_notes(name, &member.scheduled_notes, graph.version)?;
             }
             Member::Oneharness(member) => {
                 // A member's own job, gated the way `deps` is: a document that
@@ -1213,8 +1332,8 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
                     )));
                 }
                 pre_turn(name, member, graph.version)?;
-                if let Some(schedule) = member.schedule {
-                    schedule_spans(name, &schedule, graph.version)?;
+                if let Some(schedule) = &member.schedule {
+                    schedule_spans(name, schedule, graph.version)?;
                 }
             }
         }
@@ -1282,6 +1401,99 @@ fn schedule_spans(name: &str, schedule: &Schedule, schema: u32) -> Result<(), cr
                 "member {name:?}: `{field}` of {seconds} seconds is longer than any run this \
                  will ever pace — the ceiling is {MAX_SCHEDULE_SECONDS}"
             )));
+        }
+    }
+    if let Some(filter) = &schedule.reset_on {
+        if schema < FIRST_SCHEDULED_NOTE_VERSION {
+            return Err(Error::InvalidConfig(format!(
+                "member {name:?} uses `schedule.reset_on`, which requires graph schema version \
+                 {FIRST_SCHEDULED_NOTE_VERSION}"
+            )));
+        }
+        reset_filter(filter).map_err(|why| {
+            Error::InvalidConfig(format!("member {name:?}: `schedule.reset_on`: {why}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// A `reset_on` filter a clock can honour, or why it cannot.
+///
+/// The shared grammar's own refusal — a matcher naming no field, or one that
+/// could match nothing — and one more: a filter with no matcher at all admits
+/// every envelope, which would restart the clock on every heartbeat and so is a
+/// clock that never fires.
+fn reset_filter(filter: &EventFilter) -> Result<(), String> {
+    if filter.include.is_empty() && filter.exclude.is_empty() {
+        return Err(
+            "names no matcher, so every envelope would restart this clock and it would never \
+             fire — name the envelopes that should restart it"
+                .to_string(),
+        );
+    }
+    filter.validate()
+}
+
+/// Everything a member's [`scheduled_notes`](OnejudgeMember::scheduled_notes)
+/// have to be before any clock starts.
+///
+/// # Errors
+///
+/// [`crate::error::Error::InvalidConfig`] naming the member, the note, and what
+/// is wrong with it.
+fn scheduled_notes(
+    name: &str,
+    notes: &[ScheduledNote],
+    schema: u32,
+) -> Result<(), crate::error::Error> {
+    use crate::error::Error;
+    if notes.is_empty() {
+        return Ok(());
+    }
+    if schema < FIRST_SCHEDULED_NOTE_VERSION {
+        return Err(Error::InvalidConfig(format!(
+            "member {name:?} uses onejudge `scheduled_notes`, which requires graph schema version \
+             {FIRST_SCHEDULED_NOTE_VERSION}"
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for note in notes {
+        let id = &note.id;
+        if !is_scheduled_note_id(id) {
+            return Err(Error::InvalidConfig(format!(
+                "member {name:?}: scheduled note id {id:?} — an id is a lowercase letter, then up \
+                 to 63 lowercase letters, digits and hyphens, because it names the note on the \
+                 stream and in `--set`"
+            )));
+        }
+        if !seen.insert(id.as_str()) {
+            return Err(Error::InvalidConfig(format!(
+                "member {name:?}: scheduled note id {id:?} is declared twice — an id names one \
+                 note on the stream and in `--set`"
+            )));
+        }
+        let at = format!("member {name:?}: scheduled note {id:?}");
+        if note.every == 0 {
+            return Err(Error::InvalidConfig(format!(
+                "{at}: every 0 seconds never stops firing"
+            )));
+        }
+        for (field, seconds) in [("every", note.every), ("start_after", note.first_after())] {
+            if seconds > MAX_SCHEDULE_SECONDS {
+                return Err(Error::InvalidConfig(format!(
+                    "{at}: `{field}` of {seconds} seconds is longer than any run this will ever \
+                     pace — the ceiling is {MAX_SCHEDULE_SECONDS}"
+                )));
+            }
+        }
+        if note.text.trim().is_empty() {
+            return Err(Error::InvalidConfig(format!(
+                "{at}: `text` is what the addressee reads, and a blank one is no note"
+            )));
+        }
+        if let Some(filter) = &note.reset_on {
+            reset_filter(filter)
+                .map_err(|why| Error::InvalidConfig(format!("{at}: `reset_on`: {why}")))?;
         }
     }
     Ok(())
@@ -1483,7 +1695,7 @@ mod tests {
             let Member::Oneharness(member) = &graph.members["ticker"] else {
                 panic!("a scheduled member is single-sided")
             };
-            member.schedule.expect("the member is scheduled")
+            member.schedule.clone().expect("the member is scheduled")
         };
 
         // Every schema that predates the field: a schedule naming none takes its
@@ -2147,6 +2359,7 @@ mod tests {
                 every: 300,
                 start_after: Some(0),
                 resettable: true,
+                reset_on: None,
             })
         );
         // Through the accessors every caller reads them by, so a two-party
@@ -2478,5 +2691,120 @@ mod tests {
             )))
             .expect("a split leaves a provider key to the judge's entry");
         }
+    }
+
+    /// A two-party member's `scheduled_notes`, and `reset_on` on any clock, are
+    /// held to their rules: gated on schema 11 by the field's name, a note id of
+    /// the documented shape and unique within its member, spans as a schedule's
+    /// are, a readable text, and a filter that could restart something.
+    #[test]
+    fn scheduled_notes_and_reset_on_are_gated_and_held_to_their_rules() {
+        let two_party = |version: u32, extra: &str| {
+            format!(
+                concat!(
+                    "version: {}\nname: g\nmembers:\n",
+                    "  monitor:\n    kind: onejudge\n    base_config: ./b.yaml\n",
+                    "    agent: {{oneharness_config: ./a.toml}}\n",
+                    "    judge: {{oneharness_config: ./j.toml}}\n    mode: bypass\n{}",
+                ),
+                version, extra
+            )
+        };
+        let note = |body: &str| format!("    scheduled_notes:\n      - {body}\n");
+        let good = note(
+            "{id: progress-report, every: 1800, addressee: supervisor, text: write the report, \
+             reset_on: {include: [{source: pipeline, kind: planner-surfaced}]}}",
+        );
+        let current = parse(&two_party(SCHEMA_VERSION, &good));
+        validate(&current).expect("a schema-11 note reads");
+        let Member::Onejudge(monitor) = &current.members["monitor"] else {
+            panic!("two-party")
+        };
+        assert_eq!(
+            monitor.scheduled_notes[0].first_after(),
+            1800,
+            "start_after defaults to every"
+        );
+        assert_eq!(current.members["monitor"].scheduled_notes().len(), 1);
+
+        for older in FIRST_SCHEMA_VERSION..FIRST_SCHEDULED_NOTE_VERSION {
+            let err = validate(&parse(&two_party(older.max(2), &good))).unwrap_err();
+            assert!(
+                err.to_string().contains("`scheduled_notes`")
+                    && err.to_string().contains("requires graph schema version 11"),
+                "{older}: {err}"
+            );
+        }
+        let reset_schedule = "    schedule: {every: 60, reset_on: {include: [{kind: member-*}]}}\n";
+        validate(&parse(&two_party(SCHEMA_VERSION, reset_schedule))).expect("reset_on reads");
+        let err = validate(&parse(&two_party(10, reset_schedule))).unwrap_err();
+        assert!(err.to_string().contains("`schedule.reset_on`"), "{err}");
+
+        for (body, says) in [
+            (
+                "{id: Bad, every: 5, addressee: worker, text: t}",
+                "id \"Bad\"",
+            ),
+            (
+                "{id: 9lives, every: 5, addressee: worker, text: t}",
+                "id \"9lives\"",
+            ),
+            ("{id: a, every: 0, addressee: worker, text: t}", "every 0"),
+            (
+                "{id: a, every: 5, start_after: 99999999999, addressee: worker, text: t}",
+                "`start_after`",
+            ),
+            ("{id: a, every: 5, addressee: worker, text: '  '}", "`text`"),
+            (
+                "{id: a, every: 5, addressee: worker, text: t, reset_on: {}}",
+                "names no matcher",
+            ),
+            (
+                "{id: a, every: 5, addressee: worker, text: t, reset_on: {include: [{}]}}",
+                "`reset_on`",
+            ),
+        ] {
+            let err = validate(&parse(&two_party(SCHEMA_VERSION, &note(body)))).unwrap_err();
+            assert!(err.to_string().contains(says), "{body}: {err}");
+        }
+        let long = format!("a{}", "b".repeat(64));
+        let err = validate(&parse(&two_party(
+            SCHEMA_VERSION,
+            &note(&format!(
+                "{{id: {long}, every: 5, addressee: worker, text: t}}"
+            )),
+        )))
+        .unwrap_err();
+        assert!(err.to_string().contains(&long), "{err}");
+        let twice = "    scheduled_notes:\n      - {id: a, every: 5, addressee: worker, text: t}\n      - {id: a, every: 9, addressee: both, text: u}\n";
+        let err = validate(&parse(&two_party(SCHEMA_VERSION, twice))).unwrap_err();
+        assert!(err.to_string().contains("declared twice"), "{err}");
+
+        // A single-sided member has no conversation to hold a note for its
+        // turn's end, and is refused by the field's name.
+        let single = format!(
+            "version: {SCHEMA_VERSION}\nname: g\nmembers:\n  r:\n    kind: oneharness\n    \
+             oneharness_config: ./a.toml\n{}",
+            note("{id: a, every: 5, addressee: worker, text: t}")
+        );
+        let err = crate::yaml::from_str::<GraphConfig>(&single).unwrap_err();
+        assert!(err.to_string().contains("scheduled_notes"), "{err}");
+    }
+
+    /// `resettable` still reads and still works, and every member declaring it
+    /// is named once in the deprecation warnings, which name `reset_on`.
+    #[test]
+    fn a_resettable_schedule_is_named_once_as_deprecated() {
+        let graph = parse(concat!(
+            "version: 11\nname: g\nmembers:\n",
+            "  a:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+            "    schedule: {every: 60, resettable: true}\n",
+            "  b:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
+            "    schedule: {every: 60}\n",
+        ));
+        validate(&graph).expect("still valid");
+        let warnings = graph.deprecations();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("\"a\"") && warnings[0].contains("`reset_on`"));
     }
 }

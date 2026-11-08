@@ -290,6 +290,11 @@ pub struct Request {
     pub state_dir: PathBuf,
     /// The `oneharness` binary.
     pub oneharness_bin: String,
+    /// An outside NDJSON event stream this run follows, by path: every envelope
+    /// appended to it after graph start is matched against every `reset_on` in
+    /// the graph, and none is re-emitted. `None` follows nothing, and a run's
+    /// clocks still reset on its own events.
+    pub follow_events: Option<PathBuf>,
 }
 
 /// A run that has started: what a caller needs to watch or cancel it.
@@ -917,7 +922,7 @@ fn present_depth(document: &Value, parents: &[&str]) -> usize {
     let mut cursor = document;
     for (depth, segment) in parents.iter().enumerate() {
         let next = match cursor {
-            Value::Array(items) => segment.parse::<usize>().ok().and_then(|i| items.get(i)),
+            Value::Array(items) => element(items, segment),
             other => other.get(segment),
         };
         match next {
@@ -934,11 +939,31 @@ fn slot<'a>(document: &'a mut Value, path: &[&str]) -> Option<&'a mut Value> {
     let mut cursor = document;
     for segment in path {
         cursor = match cursor {
-            Value::Array(items) => items.get_mut(segment.parse::<usize>().ok()?)?,
+            Value::Array(items) => {
+                let at = index_of(items, segment)?;
+                items.get_mut(at)?
+            }
             other => other.get_mut(segment)?,
         };
     }
     Some(cursor)
+}
+
+/// The element of a list one `--set` segment names: its zero-based index, or —
+/// for a list of entries that carry an `id`, such as `scheduled_notes` — the
+/// entry whose `id` it is.
+fn element<'a>(items: &'a [Value], segment: &str) -> Option<&'a Value> {
+    items.get(index_of(items, segment)?)
+}
+
+/// Where in `items` the element [`element`] names sits.
+fn index_of(items: &[Value], segment: &str) -> Option<usize> {
+    match segment.parse::<usize>() {
+        Ok(index) => (index < items.len()).then_some(index),
+        Err(_) => items
+            .iter()
+            .position(|item| item.get("id").and_then(Value::as_str) == Some(segment)),
+    }
 }
 
 /// Apply what [`BACKGROUND_ENV`](crate::liveness::BACKGROUND_ENV) in `env` says
@@ -1218,6 +1243,7 @@ fn run_announcing(
             .unwrap_or_default(),
     };
     let waves = ready_order(&graph)?;
+    let resets = crate::resets::Resets::new();
 
     let run_id = RunId::mint(&graph.name, SystemTime::now());
     let root = request.state_dir.join(&run_id);
@@ -1245,7 +1271,13 @@ fn run_announcing(
     let file = std::fs::File::create(&events_path).map_err(|err| {
         Error::InvalidConfig(format!("cannot create {}: {err}", events_path.display()))
     })?;
+    // Every envelope this run produces is matched against every `reset_on`,
+    // before the filter decides whether a consumer sees it.
+    let observed = Arc::clone(&resets);
     let emitter = Emitter::new(run_id.to_string(), Box::new(Tee { sink, file }))
+        .with_observer(crate::event::Observer::new(move |envelope| {
+            observed.observe(envelope, true);
+        }))
         .with_filter(filter)
         .with_labels(crate::event::Labels {
             run_id: Some(run_id.to_string()),
@@ -1303,6 +1335,46 @@ fn run_announcing(
     }
     record.refs = resolver.inventory();
     write_record(&root, &record)?;
+
+    // Each member's run-time clocks, by its scratch: what its own schedule
+    // resets on, and where its scheduled notes are offered. Forgotten when this
+    // run returns, on every path.
+    let mut registered = crate::scheduled::Registered::new();
+    let mut clocks = BTreeMap::new();
+    for (name, member) in &graph.members {
+        let (_, scratch) = &invocations[name];
+        let schedule_reset = member
+            .schedule()
+            .and_then(|schedule| schedule.reset_on)
+            .map(|filter| resets.subscribe(filter));
+        let notes = (!member.scheduled_notes().is_empty())
+            .then(|| Arc::new(crate::note::ScheduledNotes::default()));
+        let note_resets: Vec<_> = member
+            .scheduled_notes()
+            .iter()
+            .map(|note| note.reset_on.clone().map(|filter| resets.subscribe(filter)))
+            .collect();
+        let registered_clocks = registered.register(
+            scratch,
+            crate::scheduled::MemberClocks {
+                schedule_reset,
+                notes,
+            },
+        );
+        clocks.insert(name.clone(), (registered_clocks, note_resets));
+    }
+    // Set once the graph is settling, so every scheduled note's clock stops.
+    let over = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut note_threads = Vec::new();
+
+    // From its end *now*: an envelope written to the followed stream before the
+    // graph started is one this run never saw happen.
+    let follower = request.follow_events.clone().map(|path| {
+        (
+            crate::resets::follow(path.clone(), Arc::clone(&resets)),
+            path,
+        )
+    });
 
     announce(run_id.clone());
     emitter.emit(
@@ -1368,6 +1440,38 @@ fn run_announcing(
                 }
             }
         }
+        // A scheduled note's clock starts when its member's wave is reached —
+        // the moment a deferred schedule's clock starts below, and before
+        // `run_wave` blocks, for the same reason.
+        for name in runnable.iter().chain(&deferred) {
+            let (registered_clocks, note_resets) = &clocks[name];
+            let Some(seam) = &registered_clocks.notes else {
+                continue;
+            };
+            let (invocation, _) = &invocations[name];
+            let member_emitter = emitter.with_labels(member::labels(
+                emitter.stream(),
+                name,
+                invocation.persona.as_deref(),
+            ));
+            for (note, reset_on) in graph.members[name]
+                .scheduled_notes()
+                .iter()
+                .zip(note_resets)
+            {
+                note_threads.extend(crate::scheduled::spawn_note_clock(
+                    crate::scheduled::NoteClock {
+                        note: note.clone(),
+                        seam: Arc::clone(seam),
+                        reset_on: reset_on.clone(),
+                        emitter: member_emitter.clone(),
+                        signals: root.join(SIGNAL_DIR),
+                        member: name.clone(),
+                        over: Arc::clone(&over),
+                    },
+                ));
+            }
+        }
         // Before this wave runs, not after it: `run_wave` blocks until every
         // member in the wave has settled, and the sibling `start_after` exists to
         // pace is exactly the one that takes the whole run.
@@ -1393,9 +1497,10 @@ fn run_announcing(
                         truncated: false,
                     }),
                 );
+            let span = first_span(&schedule, graph.version);
             cron_threads.push(spawn_cron(
                 schedule,
-                first_span(&schedule, graph.version),
+                span,
                 name,
                 graph.clone(),
                 invocations.clone(),
@@ -1434,9 +1539,10 @@ fn run_announcing(
         // schedule started it no second one.
         for (name, _) in outcomes {
             if let Some(schedule) = clocked(&graph.members[&name]) {
+                let span = first_span(&schedule, graph.version);
                 cron_threads.push(spawn_cron(
                     schedule,
-                    first_span(&schedule, graph.version),
+                    span,
                     name,
                     graph.clone(),
                     invocations.clone(),
@@ -1457,6 +1563,25 @@ fn run_announcing(
     for (name, outcome) in cron_rx {
         failed |= !outcome.is_success();
         record.members.insert(name, describe(&outcome));
+    }
+    // A scheduled note's clock holds nothing open: the graph is settling, so
+    // each stops within a tick.
+    over.store(true, Ordering::SeqCst);
+    for thread in note_threads {
+        let _ = thread.join();
+    }
+    if let Some((follower, path)) = follower {
+        let skipped = follower.finish();
+        // Counted rather than fatal, and said once rather than per line: a
+        // stream another program writes is that program's to get right, and a
+        // run that refused over it would be a run hostage to its neighbour.
+        if skipped > 0 {
+            eprintln!(
+                "oneagentgraph: --follow-events {}: skipped {skipped} line(s) that were not \
+                 envelopes",
+                path.display()
+            );
+        }
     }
 
     let exit = if failed {
@@ -1627,7 +1752,7 @@ impl Foreground {
 /// else: whether the first turn defers, and what the member is by default.
 fn clocked(member: &Member) -> Option<crate::config::Schedule> {
     match member {
-        Member::Oneharness(member) => member.schedule,
+        Member::Oneharness(member) => member.schedule.clone(),
         Member::Onejudge(_) => None,
     }
 }
@@ -1859,6 +1984,9 @@ fn cron(
     let trigger = signals.join(format!("{name}.trigger"));
     let reset = signals.join(format!("{name}.reset"));
     let stopped = || stop.exists() || own_stop.exists();
+    // The schedule's own `reset_on`, when it declares one — see
+    // [`crate::resets`].
+    let reset_on = crate::scheduled::of(scratch).and_then(|clocks| clocks.schedule_reset.clone());
     let mut last = None;
     // The interval this clock is currently counting down — `first_span` while it
     // owes the member a first turn, and the cadence after that
@@ -1888,6 +2016,19 @@ fn cron(
             // the member to its steady cadence.
             counting_since = Instant::now();
             emitter.emit(EventKind::CronReset, Map::new());
+            continue;
+        }
+        // The same restart, caused by a matching envelope rather than a file,
+        // and naming the envelope.
+        if let Some(cause) = reset_on.as_ref().and_then(crate::resets::ResetOn::take) {
+            counting_since = Instant::now();
+            emitter.emit(
+                EventKind::CronReset,
+                member::as_payload(&crate::event::CronReset {
+                    scheduled_note: None,
+                    cause: Some(cause),
+                }),
+            );
             continue;
         }
         let fired = if trigger.exists() {
@@ -2231,6 +2372,7 @@ mod tests {
             every,
             start_after,
             resettable: false,
+            reset_on: None,
         };
         let current = crate::config::SCHEMA_VERSION;
         assert_eq!(
@@ -2440,6 +2582,56 @@ mod tests {
 
     /// `--set` reaches the field it names, keeping the field's own type, and a
     /// path naming nothing refuses rather than being dropped.
+    /// `--set members.<m>.scheduled_notes.<id>.<field>` addresses one note by
+    /// its `id` rather than by where it sits in the list, and reaches a field the
+    /// note left out; an id the member does not declare names nothing.
+    #[test]
+    fn set_overrides_address_a_scheduled_note_by_its_id() {
+        let mut document: Value = serde_json::json!({
+            "version": 11,
+            "name": "g",
+            "members": {"monitor": {
+                "kind": "onejudge",
+                "base_config": "base.yaml",
+                "agent": {"oneharness_config": "agent.toml"},
+                "judge": {"oneharness_config": "judge.toml"},
+                "mode": "bypass",
+                "scheduled_notes": [
+                    {"id": "first", "every": 60, "addressee": "worker", "text": "one"},
+                    {"id": "progress-report", "every": 1800, "addressee": "supervisor", "text": "two"}
+                ]
+            }}
+        });
+        let set = |raw: &str| parse_set(raw).expect("a parsed override");
+        apply_overrides(
+            &mut document,
+            &[
+                set("members.monitor.scheduled_notes.progress-report.every=600"),
+                set("members.monitor.scheduled_notes.progress-report.text=write it now"),
+                set("members.monitor.scheduled_notes.first.start_after=5"),
+                set("members.monitor.scheduled_notes.first.reset_on={include: [{source: pipeline}]}"),
+            ],
+        )
+        .expect("each note is addressed by its id");
+        let notes = &document["members"]["monitor"]["scheduled_notes"];
+        assert_eq!(notes[1]["every"], Value::from(600u64));
+        assert_eq!(notes[1]["text"], Value::from("write it now"));
+        assert_eq!(notes[0]["start_after"], Value::from(5u64));
+        assert_eq!(notes[0]["reset_on"]["include"][0]["source"], "pipeline");
+        assert_eq!(
+            notes[0]["every"],
+            Value::from(60u64),
+            "a sibling field was touched"
+        );
+
+        let err = apply_overrides(
+            &mut document,
+            &[set("members.monitor.scheduled_notes.no-such-note.every=5")],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no-such-note"), "{err}");
+    }
+
     #[test]
     fn set_overrides_reach_the_field_they_name() {
         let mut document: Value = serde_json::json!({
