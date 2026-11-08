@@ -711,7 +711,9 @@ libc = "0.2"
 # ownership lock is `LockFileEx`, the start token is `GetProcessTimes`, and both
 # the grouping and the teardown of a member's process tree are a job object —
 # the only thing on this platform that holds a descendant whose parent has
-# already exited. `src/scratch.rs` documents the mapping and what differs.
+# already exited. `src/scratch.rs` documents the mapping and what differs. A
+# fifth, `SetFileInformationByHandle` with POSIX rename semantics, is how a run's
+# state is replaced whole under a reader; `src/run.rs` documents it.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
@@ -721,6 +723,7 @@ windows-sys = { version = "0.61", features = [
   "Win32_System_JobObjects",
   "Win32_System_SystemServices",
   "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
 ] }
 
 [dev-dependencies]

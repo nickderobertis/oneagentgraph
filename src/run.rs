@@ -2085,191 +2085,129 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
 // The replace-and-read contract for a record another process reads while this
 // one rewrites it — the run record and each member's turn-control record.
 //
-// **The writer**, [`replace_whole`], never writes the name in place. It writes
-// the whole new record to a sibling unique to this process and call, then
-// renames that sibling onto the name in one step. It never removes the name:
-// from the record's first write on, the name always holds a whole record.
+// **The writer**, [`replace_whole`], never writes the name in place and never
+// removes it. It writes the whole new record to a sibling unique to this
+// process and call, then renames the sibling onto the name with a rename that
+// moves the name from the old file to the new one in a single step, so from the
+// record's first write on the name always resolves to a whole record — the one
+// from before the rename or the one after it:
 //
-// **The reader**, [`read_whole`], reads the name, and what it does with a
-// refusal depends on what the refusal means:
+// - On Unix that rename is `rename(2)`, which replaces an existing name
+//   atomically even while readers hold the old file open.
+// - On Windows it is `SetFileInformationByHandle(FileRenameInfoEx)` with
+//   `FILE_RENAME_FLAG_POSIX_SEMANTICS | FILE_RENAME_FLAG_REPLACE_IF_EXISTS`
+//   ([`rename_over`]) — and deliberately not `std::fs::rename`, which (as of the
+//   1.97 toolchain this crate pins) calls `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`
+//   first and reaches POSIX semantics only when that is refused. A classic
+//   replace deletes the old file with classic semantics, which leaves the name
+//   on a delete-pending file for an instant; an open of the name in that
+//   instant is refused with `ERROR_ACCESS_DENIED`, and a reader took that for a
+//   run or turn control that does not exist. Under POSIX semantics the old file
+//   leaves the namespace in the same step the new one enters it, so there is no
+//   such instant for a reader to meet. A volume that cannot rename with POSIX
+//   semantics (FAT, some network shares, Windows before 10 1607) falls back to
+//   `std::fs::rename`, and the contract holds only as far as that rename does.
 //
-// - *Absent* (`NotFound`) is answered at once. The writer never removes the
-//   name, so a replacement in flight never makes it absent, and a reader that
-//   meets an absent name has met a run or a turn that recorded nothing.
-// - *Mid-replace* — the answers Windows gives an open, or a metadata query, of
-//   a name a rename is replacing at that instant — see [`windows_mid_replace`]
-//   for which. Unix answers none of these to a rename, which
-//   replaces a name in one step even under an open reader. Such a refusal is
-//   **read again**, up to [`REPLACE_READS`] times [`REPLACE_PAUSE`] apart: the
-//   rename it waits out is a single step, so the window closes in far less. One
-//   that outlasts the bound is returned as itself — the caller says the record
-//   does not read, naming its file — and never as an absent record.
+// **The reader**, [`read_whole`], opens the name once, sharing read, write and
+// *delete* ([`open_shared`]), and reads the whole file through that handle.
+// Sharing deletion is what lets the writer's rename land while a read is in
+// progress — Windows refuses to rename over a file opened without it — and the
+// handle goes on reading the file it opened, so a read a replacement lands
+// under still returns the whole record from before it. The reader never reads
+// again and never waits, because there is no window to wait out. What it does
+// with a refusal is decided by what the refusal means:
+//
+// - *Absent* (`NotFound`) is a run or a turn that recorded nothing: the writer
+//   never removes the name, so a replacement in flight never makes it absent.
+// - *Anything else* is the file's own, and the caller reports it naming the
+//   file — never as an absent record.
 //
 // So no reader reports a run or a turn control as missing because a writer was
-// replacing it, and none reads a partial: what it reads is the whole record
-// from before the rename or after it. `history::show` and `control::record`
-// are the two readers, and every verb that acts on a live run reads through
-// one of them.
-
-/// How many times [`read_whole`] reads a name a replacement held mid-replace.
-const REPLACE_READS: u32 = 50;
-
-/// How long [`read_whole`] waits before it reads a mid-replace name again.
-const REPLACE_PAUSE: Duration = Duration::from_millis(10);
+// replacing it, and none reads a partial. `history::show` and `control::record`
+// are the two readers, and every verb that acts on a live run reads through one
+// of them.
 
 /// Read the whole of `path`, a record [`replace_whole`] replaces, under the
-/// replace-and-read contract above: a refusal that means a replacement is in
-/// flight is read again, and every other answer — the bytes, an absent name,
-/// any other refusal — is returned as it came.
+/// replace-and-read contract above: one shared open, and the whole file read
+/// through it.
 ///
 /// # Errors
 ///
-/// The refusal the last read met: `NotFound` when nothing is recorded there,
-/// and a mid-replace refusal only when it outlasted [`REPLACE_READS`].
+/// `NotFound` when nothing is recorded there, and otherwise the refusal the
+/// open or the read met.
 pub(crate) fn read_whole(path: &Path) -> std::io::Result<String> {
-    let mut read = 1;
-    loop {
-        match read_once(path) {
-            Err(err) if mid_replace(&err) && read < REPLACE_READS => {
-                read += 1;
-                std::thread::sleep(REPLACE_PAUSE);
-            }
-            done => return done,
-        }
-    }
-}
-
-/// One read of `path`, which the suite's [`mid_replace_fixture`] can answer as
-/// Windows answers a name a replacement holds.
-fn read_once(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    let mut file = open_shared(path)?;
     #[cfg(feature = "test-doubles")]
-    if let Some(refusal) = mid_replace_fixture::refusal(path) {
-        return Err(refusal);
+    replace_under_read::land(path)?;
+    let mut raw = String::new();
+    file.read_to_string(&mut raw)?;
+    Ok(raw)
+}
+
+/// Open `path` for reading without standing in the way of a replacement: on
+/// Windows the open shares read, write and delete, so the writer's rename lands
+/// while this handle is open. `std`'s default share mode is the same today; it
+/// is spelled out because the contract above depends on it.
+fn open_shared(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
     }
-    std::fs::read_to_string(path)
+    options.open(path)
 }
 
-/// Whether `err` is the platform telling a reader a replacement is in flight.
-fn mid_replace(err: &std::io::Error) -> bool {
-    windows_code(err).is_some_and(windows_mid_replace)
-}
-
-/// The Windows error code `err` carries: the system's own on Windows, and none
-/// anywhere else — except, in the suite's build, the one the
-/// [`mid_replace_fixture`] made a refusal with, on any host.
-fn windows_code(err: &std::io::Error) -> Option<u32> {
-    #[cfg(feature = "test-doubles")]
-    if let Some(code) = mid_replace_fixture::code(err) {
-        return Some(code);
-    }
-    cfg!(windows)
-        .then(|| err.raw_os_error())
-        .flatten()
-        .and_then(|code| u32::try_from(code).ok())
-}
-
-/// `ERROR_ACCESS_DENIED`: an open of a name whose old file is delete-pending.
-const ERROR_ACCESS_DENIED: u32 = 5;
-/// `ERROR_SHARING_VIOLATION`: an open of a name the rename holds.
-const ERROR_SHARING_VIOLATION: u32 = 32;
-/// `ERROR_DELETE_PENDING`: a query of a name whose old file is delete-pending.
-const ERROR_DELETE_PENDING: u32 = 303;
-
-/// Whether a Windows error code is one an open or a metadata query meets on a
-/// name a rename is replacing.
+/// The suite's lever on the replace-and-read contract: a replacement landed by
+/// the writer's own [`replace_whole`] at the one instant between a reader's
+/// open and its read — the window a concurrent writer hits only some of the
+/// time — forced with no clock, on every host.
 ///
-/// The codes are this module's rather than `windows-sys`'s so this compiles on
-/// every host, where the suite drives it through [`mid_replace_fixture`]; the
-/// Windows leg holds each one to `windows-sys`'s definition.
-const fn windows_mid_replace(code: u32) -> bool {
-    matches!(
-        code,
-        ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION | ERROR_DELETE_PENDING
-    )
-}
-
-/// The suite's lever on the replace-and-read contract: the mid-replace window
-/// that only a Windows rename opens, forced without a clock on any host.
-///
-/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE=<file name>=<n>@<code>` makes this
-/// process's first `n` reads through [`read_whole`] of a record by that file
-/// name — `record.json`, `control.json` — meet a refusal carrying the Windows
-/// error `code`. [`mid_replace`] classifies that code exactly as it classifies
-/// the system's own on Windows, so a journey drives the very loop and the very
-/// classification a Windows reader runs, on the one record it names; a count
-/// of [`REPLACE_READS`] or more drives the refusal that outlasts the loop.
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ=<file name>=<replacement>` makes
+/// this process's first read through [`read_whole`] of a record by that file
+/// name — `record.json`, `control.json` — replace the record with the bytes of
+/// the file at `<replacement>` after opening it and before reading it. The
+/// reader then reads through the handle it already holds, exactly as it does
+/// when a real writer lands there. A replacement the open stood in the way of
+/// fails the read with the rename's refusal, so a reader that stopped a rename
+/// landing — on Windows, one that opened without sharing deletion — is caught.
 /// Compiled only under `test-doubles`; no shipped build reads the variable.
 #[cfg(feature = "test-doubles")]
-mod mid_replace_fixture {
+mod replace_under_read {
     use std::path::Path;
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// The Windows error code an injected refusal carries.
-    #[derive(Debug)]
-    struct Injected(u32);
-
-    impl std::fmt::Display for Injected {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(
-                f,
-                "Windows error {} (oneagentgraph-fixture:mid-replace)",
-                self.0
-            )
+    /// Land the requested replacement under the read of `path`, once.
+    pub(super) fn land(path: &Path) -> std::io::Result<()> {
+        static LANDED: AtomicBool = AtomicBool::new(false);
+        let Ok(request) = std::env::var("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ") else {
+            return Ok(());
+        };
+        let Some((name, replacement)) = request.split_once('=') else {
+            return Ok(());
+        };
+        if path.file_name().is_none_or(|file| file != name) || LANDED.swap(true, Ordering::SeqCst) {
+            return Ok(());
         }
-    }
-
-    impl std::error::Error for Injected {}
-
-    /// What a journey asked for: which record, how many reads, which code.
-    struct Request {
-        name: String,
-        count: u64,
-        code: u32,
-    }
-
-    /// The refusal this read of `path` is to meet, while the requested count
-    /// lasts.
-    pub(super) fn refusal(path: &Path) -> Option<std::io::Error> {
-        static REQUESTED: OnceLock<Option<Request>> = OnceLock::new();
-        static MET: AtomicU64 = AtomicU64::new(0);
-        let request = REQUESTED
-            .get_or_init(|| {
-                let request = std::env::var("ONEAGENTGRAPH_FIXTURE_MID_REPLACE").ok()?;
-                let (name, held) = request.rsplit_once('=')?;
-                let (count, code) = held.split_once('@')?;
-                Some(Request {
-                    name: name.to_string(),
-                    count: count.parse().ok()?,
-                    code: code.parse().ok()?,
-                })
-            })
-            .as_ref()?;
-        let named = path
-            .file_name()
-            .is_some_and(|file| file == request.name.as_str());
-        (named && MET.fetch_add(1, Ordering::SeqCst) < request.count).then(|| {
-            std::io::Error::new(std::io::ErrorKind::PermissionDenied, Injected(request.code))
-        })
-    }
-
-    /// The code a refusal [`refusal`] made carries.
-    pub(super) fn code(err: &std::io::Error) -> Option<u32> {
-        err.get_ref()?
-            .downcast_ref::<Injected>()
-            .map(|injected| injected.0)
+        super::replace_whole(path, &std::fs::read(replacement)?)
     }
 }
 
 /// Replace `path` with `bytes` so that a concurrent reader opens either the file
-/// that was there or the whole of this one — never an empty or partial file.
+/// that was there or the whole of this one — never an empty, partial or absent
+/// one.
 ///
 /// The writer half of the replace-and-read contract above. The bytes go to a
-/// sibling first and are renamed onto `path`: a rename within one directory
-/// replaces the name in a single step on every platform this ships for, where
-/// an in-place write truncates and then fills. The sibling's name is unique to
-/// this process and this call, so two writers in one run — member threads
-/// rewriting their own control records — never share one.
+/// sibling first and are renamed onto `path` by [`rename_over`], which moves the
+/// name in a single step, where an in-place write truncates and then fills. The
+/// sibling's name is unique to this process and this call, so two writers in
+/// one run — member threads rewriting their own control records — never share
+/// one.
 pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let name = path
@@ -2288,40 +2226,114 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     replaced
 }
 
-/// Rename `from` onto `to`: on Unix a rename replaces a name another process
-/// holds open, so there is no refusal to wait out.
+/// Rename `from` onto `to`: on Unix a rename replaces a name in one step, even
+/// one another process holds open.
 #[cfg(not(windows))]
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::rename(from, to)
 }
 
-/// Rename `from` onto `to`, waiting out a reader that holds `to` open.
+/// Rename `from` onto `to` with POSIX semantics — the Windows half of the
+/// writer in the replace-and-read contract above.
 ///
-/// Windows refuses to replace a file another process opened without sharing
-/// deletion — a reader that is not this crate, which always shares it — and
-/// the refusal lasts only as long as that read. So a refusal is retried, a
-/// bounded number of times, rather than failing the run's write.
+/// A holder of `to` that is not this crate's — this crate's readers always
+/// share deletion — may have opened it without sharing deletion, which refuses
+/// any rename over it for as long as it holds it. That refusal is the
+/// *writer's*, never a reader's, so it is retried, a bounded number of times,
+/// rather than failing the run's write; readers meanwhile go on reading the
+/// whole record from before it.
 // llmlint: ignore-block[changed_behavior_has_e2e] this body compiles only for
-// Windows, and the refusal it waits out needs a second process holding the
-// record open without sharing deletion — a reader outside this crate, which
-// always shares it. Linux's `check` never compiles it; the rename it wraps is
-// what the concurrent-read journeys in `tests/e2e/verbs.rs` and
-// `tests/e2e/interrupt.rs` drive on every leg, Windows included.
+// Windows. Linux's `check` never compiles it; the rename it performs is what the
+// concurrent-read journeys and the replace-under-read journeys in
+// `tests/e2e/verbs.rs` and `tests/e2e/interrupt.rs` drive on every leg, Windows
+// included.
 #[cfg(windows)]
 fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_INVALID_FUNCTION, ERROR_INVALID_PARAMETER, ERROR_NOT_SUPPORTED,
+        ERROR_SHARING_VIOLATION,
+    };
     const ATTEMPTS: u32 = 50;
+    let code = |err: &std::io::Error| err.raw_os_error().and_then(|c| u32::try_from(c).ok());
     let mut attempt = 1;
     loop {
-        match std::fs::rename(from, to) {
+        match rename_posix(from, to) {
             Err(err)
-                if err.kind() == std::io::ErrorKind::PermissionDenied && attempt < ATTEMPTS =>
+                if matches!(
+                    code(&err),
+                    Some(ERROR_ACCESS_DENIED | ERROR_SHARING_VIOLATION)
+                ) && attempt < ATTEMPTS =>
             {
                 attempt += 1;
                 std::thread::sleep(Duration::from_millis(10));
             }
+            Err(err)
+                if matches!(
+                    code(&err),
+                    Some(ERROR_INVALID_PARAMETER | ERROR_NOT_SUPPORTED | ERROR_INVALID_FUNCTION)
+                ) =>
+            {
+                return std::fs::rename(from, to);
+            }
             done => return done,
         }
     }
+}
+
+/// One `SetFileInformationByHandle(FileRenameInfoEx)` of `from` onto `to`, with
+/// `FILE_RENAME_FLAG_POSIX_SEMANTICS | FILE_RENAME_FLAG_REPLACE_IF_EXISTS`.
+#[cfg(windows)]
+fn rename_posix(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileRenameInfoEx, SetFileInformationByHandle, DELETE, FILE_RENAME_INFO, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::{
+        FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+    };
+    let too_long = || std::io::Error::from(std::io::ErrorKind::InvalidFilename);
+    let source = std::fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .open(from)?;
+    let name: Vec<u16> = std::path::absolute(to)?.as_os_str().encode_wide().collect();
+    let name_bytes = name.len() * size_of::<u16>();
+    // The structure, its name, and the terminating NUL the zeroed buffer
+    // already holds, in a buffer aligned for the structure's handle field.
+    let size = std::mem::offset_of!(FILE_RENAME_INFO, FileName) + name_bytes + size_of::<u16>();
+    let mut buffer = vec![0u64; size.div_ceil(size_of::<u64>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: `buffer` is zeroed, aligned to 8 — `FILE_RENAME_INFO`'s own
+    // alignment — and at least `size` bytes, which holds the structure up to
+    // `FileName` plus `name` and its NUL, so every write below is in bounds.
+    unsafe {
+        (*info).Anonymous.Flags =
+            FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
+        (*info).RootDirectory = std::ptr::null_mut();
+        (*info).FileNameLength = u32::try_from(name_bytes).map_err(|_| too_long())?;
+        std::ptr::copy_nonoverlapping(
+            name.as_ptr(),
+            (&raw mut (*info).FileName).cast::<u16>(),
+            name.len(),
+        );
+    }
+    // SAFETY: `source` is an open handle with `DELETE` access, and `buffer`
+    // holds a `FILE_RENAME_INFO` of `size` bytes built above, alive for the call.
+    let renamed = unsafe {
+        SetFileInformationByHandle(
+            source.as_raw_handle(),
+            FileRenameInfoEx,
+            buffer.as_ptr().cast(),
+            u32::try_from(size).map_err(|_| too_long())?,
+        )
+    };
+    if renamed == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 // llmlint: ignore-end[changed_behavior_has_e2e]
 
@@ -2358,44 +2370,6 @@ mod tests {
 
     fn graph(document: &str) -> GraphConfig {
         crate::yaml::from_str(document).expect("a graph")
-    }
-
-    /// The refusals a Windows reader reads again are exactly the three a name
-    /// mid-replace answers — never an absent name, which is answered at once.
-    #[test]
-    fn windows_reads_again_only_a_name_mid_replace() {
-        for code in [
-            ERROR_ACCESS_DENIED,
-            ERROR_SHARING_VIOLATION,
-            ERROR_DELETE_PENDING,
-        ] {
-            assert!(windows_mid_replace(code), "{code}");
-        }
-        // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND.
-        for code in [2, 3] {
-            assert!(!windows_mid_replace(code), "{code}");
-        }
-    }
-
-    /// The codes [`windows_mid_replace`] names are Windows' own, held to
-    /// `windows-sys` on the leg where that crate is linked.
-    #[cfg(windows)]
-    #[test]
-    fn the_mid_replace_codes_are_windows_own() {
-        use windows_sys::Win32::Foundation as win;
-        assert_eq!(ERROR_ACCESS_DENIED, win::ERROR_ACCESS_DENIED);
-        assert_eq!(ERROR_SHARING_VIOLATION, win::ERROR_SHARING_VIOLATION);
-        assert_eq!(ERROR_DELETE_PENDING, win::ERROR_DELETE_PENDING);
-    }
-
-    /// Off Windows a rename never refuses a reader, so no platform refusal is
-    /// read again: a permission refusal is answered at once.
-    #[cfg(unix)]
-    #[test]
-    fn unix_reads_no_refusal_again() {
-        let err = std::io::Error::from_raw_os_error(13);
-        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
-        assert!(!mid_replace(&err));
     }
 
     const TWO_MEMBERS: &str = concat!(

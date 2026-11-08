@@ -2317,54 +2317,50 @@ fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
     );
 }
 
-/// `reset-timer` reads a run's record that a replacement holds mid-replace —
-/// the window a Windows rename opens, where an open of the name is refused
-/// while the old record is delete-pending under it — and reads it again until
-/// the replacement lands, so it acts on the run instead of reporting it
-/// missing.
+/// `reset-timer` reads a run's record that the run replaces while the read is
+/// in progress, and acts on the whole record it opened — never on the
+/// replacement half-read, and never reporting the run missing.
 ///
-/// The window is forced through the reader's own loop by the suite's
-/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE` lever, on every host and with no clock:
-/// the first three reads of the record meet Windows' refusal.
+/// The replacement lands at the one instant between the reader's open and its
+/// read, by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ` lever — see the same journey in
+/// `tests/e2e/interrupt.rs`. The replacement is the record's own first half, so
+/// a verb that read anything but the record it opened would refuse it.
 #[test]
-fn reset_timer_reads_a_record_again_while_a_replacement_holds_it() {
+fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_read() {
     let workspace = Workspace::new();
     workspace
         .run_task("fake:complete-now: replaced")
         .expect_code(0);
-    let id = run_id(&workspace.state()).expect("a run");
-
-    // llmlint: ignore[tests_mirror_real_usage] the window under test is one only a Windows rename opens, which no filesystem operation on this host can produce; the lever injects that refusal alone, with its Windows code, for the production classifier and retry loop to decide on — see the same marker in `tests/e2e/interrupt.rs`.
-    let reset = workspace.run_with(
-        &["reset-timer", &id, "worker"],
-        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=3@32")],
-    );
-    reset.expect_code(0);
-}
-
-/// A record a replacement holds mid-replace for longer than a rename ever
-/// takes is refused as a record that does not read, naming its file — never as
-/// a run that does not exist, and never acted on.
-#[test]
-fn reset_timer_refuses_a_record_held_mid_replace_by_its_file() {
-    let workspace = Workspace::new();
-    workspace.run_task("fake:complete-now: held").expect_code(0);
     let state = workspace.state();
     let id = run_id(&state).expect("a run");
+    let file = state.join(&id).join(RECORD_FILE);
+    let whole = std::fs::read_to_string(&file).expect("the run wrote a record");
+    let half = workspace.write("half-record.json", &whole[..whole.len() / 2]);
 
-    // llmlint: ignore[tests_mirror_real_usage] the window under test is one only a Windows rename opens, which no filesystem operation on this host can produce; the lever injects that refusal alone, with its Windows code, for the production classifier and retry loop to decide on — see the same marker in `tests/e2e/interrupt.rs`.
+    let lever = format!("{RECORD_FILE}={}", half.display());
     let reset = workspace.run_with(
         &["reset-timer", &id, "worker"],
-        &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", "record.json=1000@5")],
+        &[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)],
     );
-    reset.expect_code(2);
-    let file = state.join(&id).join(RECORD_FILE).display().to_string();
+    reset.expect_code(0);
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the record reads"),
+        whole[..whole.len() / 2],
+        "the replacement did not land under the read"
+    );
+
+    // The next read meets the replacement: a record that does not read,
+    // refused by its file — never a run that does not exist.
+    let after = workspace.run(&["reset-timer", &id, "worker"]);
+    after.expect_code(2);
     assert!(
-        reset.stderr.contains("does not read") && reset.stderr.contains(&file),
+        after.stderr.contains("does not read")
+            && after.stderr.contains(&file.display().to_string()),
         "{}",
-        reset.stderr
+        after.stderr
     );
-    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+    assert!(!after.stderr.contains("no run"), "{}", after.stderr);
 }
 
 /// A record that is there and does not read — empty, not JSON, not a record,

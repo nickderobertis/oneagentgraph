@@ -475,16 +475,21 @@ fn interrupt_reads_a_whole_control_record_while_it_is_being_rewritten() {
     );
 }
 
-/// `interrupt` reads a member's turn-control record that a replacement holds
-/// mid-replace — the window a Windows rename opens — and reads it again until
-/// the replacement lands, so it answers with the reason the run wrote down
-/// instead of reporting that the member recorded no turn control.
+/// `interrupt` reads a member's turn-control record that the run replaces
+/// while the read is in progress, and answers from the whole record it opened
+/// — never from the replacement half-read, and never as a member that recorded
+/// no turn control.
 ///
-/// Forced through the reader's own loop by the suite's
-/// `ONEAGENTGRAPH_FIXTURE_MID_REPLACE` lever, on the control record alone and
-/// with no clock; a count past the reader's bound is refused naming the file.
+/// The replacement lands at the one instant between the reader's open and its
+/// read, by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ` lever: deterministic where the
+/// concurrent journey above catches that instant only some of the time, and on
+/// Windows the very POSIX-semantics rename over a reader's shared handle that
+/// the replace-and-read contract in `src/run.rs` rests on. The replacement is
+/// the record's own first half — the partial no reader may ever see — so the
+/// answer can only have come from the record as it stood before.
 #[test]
-fn interrupt_reads_a_control_record_again_while_a_replacement_holds_it() {
+fn interrupt_answers_from_the_record_it_opened_when_a_replacement_lands_under_the_read() {
     let workspace = Workspace::new();
     workspace.write("oneharness.toml", QWEN_CHAIN);
     workspace.graph(&graph_with(
@@ -503,12 +508,16 @@ fn interrupt_reads_a_control_record_again_while_a_replacement_holds_it() {
         .as_str()
         .expect("the run recorded its id")
         .to_string();
-    let reason = |held: &str| {
-        // llmlint: ignore[tests_mirror_real_usage] this host is Linux, where a rename never refuses a reader, and the window under test is the one a Windows rename opens for an instant: no real filesystem operation here can produce Windows' refusal, and racing a real writer on the Windows leg catches it only some of the time — the flake this journey exists to replace. The lever injects only the refusal, carrying a Windows error code that the production classifier and retry loop decide on unchanged; the verb, the binary, the record and the answer asserted on are all real.
-        let interrupted = workspace.run_with(
-            &["interrupt", &run_id, "reporter"],
-            &[("ONEAGENTGRAPH_FIXTURE_MID_REPLACE", held)],
-        );
+    let file = workspace
+        .state()
+        .join(&run_id)
+        .join("members")
+        .join("reporter")
+        .join(CONTROL_FILE);
+    let whole = std::fs::read_to_string(&file).expect("the run wrote a control record");
+    let half = workspace.write("half-control.json", &whole[..whole.len() / 2]);
+    let interrupt = |env: &[(&str, &str)]| {
+        let interrupted = workspace.run_with(&["interrupt", &run_id, "reporter"], env);
         interrupted.expect_code(3);
         interrupted.of_kind("turn-interrupted")[0]["payload"]["reason"]
             .as_str()
@@ -516,32 +525,35 @@ fn interrupt_reads_a_control_record_again_while_a_replacement_holds_it() {
             .to_string()
     };
 
-    let landed = reason("control.json=3@303");
+    let lever = format!("{CONTROL_FILE}={}", half.display());
+    let read = interrupt(&[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)]);
     assert!(
-        landed.contains("opened no controllable turn") && landed.contains("qwen"),
-        "{landed}"
+        read.contains("opened no controllable turn") && read.contains("qwen"),
+        "{read}"
     );
-    assert!(!landed.contains("recorded no turn control"), "{landed}");
+    assert!(!read.contains("recorded no turn control"), "{read}");
+    assert_eq!(
+        std::fs::read_to_string(&file).expect("the record reads"),
+        whole[..whole.len() / 2],
+        "the replacement did not land under the read"
+    );
 
-    let held = reason("control.json=1000@5");
-    let file = workspace
-        .state()
-        .join(&run_id)
-        .join("members")
-        .join("reporter")
-        .join(CONTROL_FILE);
+    // The replacement is what the name holds now, and the next read meets it:
+    // a record that does not read, reported by its file — not an absent one.
+    let after = interrupt(&[]);
     assert!(
-        held.contains("does not read") && held.contains(&file.display().to_string()),
-        "{held}"
+        after.contains("not one this build can read")
+            && after.contains(&file.display().to_string()),
+        "{after}"
     );
-    assert!(!held.contains("recorded no turn control"), "{held}");
+    assert!(!after.contains("recorded no turn control"), "{after}");
 
-    // A refusal no replacement explains, made by the filesystem itself: a
-    // directory where the record belongs reads as nothing, at once, and is
-    // reported by its file rather than as a turn control never recorded.
+    // A refusal made by the filesystem itself: a directory where the record
+    // belongs reads as nothing, and is reported by its file rather than as a
+    // turn control never recorded.
     std::fs::remove_file(&file).expect("the record removes");
     std::fs::create_dir(&file).expect("a directory in its place");
-    let unreadable = reason("control.json=0@5");
+    let unreadable = interrupt(&[]);
     assert!(
         unreadable.contains("does not read") && unreadable.contains(&file.display().to_string()),
         "{unreadable}"
