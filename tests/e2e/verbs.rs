@@ -2339,6 +2339,7 @@ fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_r
     let half = workspace.write("half-record.json", &whole[..whole.len() / 2]);
 
     let lever = format!("{RECORD_FILE}={}", half.display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test is one a real concurrent writer reaches only some of the time, and the task requires it forced deterministically; the replacement is the store's production writer landing over the production reader's held handle — see the same marker in `tests/e2e/interrupt.rs`.
     let reset = workspace.run_with(
         &["reset-timer", &id, "worker"],
         &[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)],

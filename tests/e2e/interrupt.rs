@@ -526,6 +526,7 @@ fn interrupt_answers_from_the_record_it_opened_when_a_replacement_lands_under_th
     };
 
     let lever = format!("{CONTROL_FILE}={}", half.display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a replacement landing between a reader's open and its read — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires that instant forced deterministically with no clock. The lever adds nothing of its own: the replacement is written by the store's production writer (`replace_whole`, the POSIX-semantics rename on Windows) over the production reader's held shared handle, and the verb, the binary, the record and the answer asserted on are all real; the concurrent journey above still drives the same race through the public interface alone.
     let read = interrupt(&[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)]);
     assert!(
         read.contains("opened no controllable turn") && read.contains("qwen"),
