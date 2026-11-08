@@ -593,70 +593,72 @@ fn a_reset_on_match_withdraws_the_untaken_copy_and_the_next_firing_waits_a_full_
 /// `cron-fired` saying why, opens no turn, and that clock fires no more.
 #[test]
 fn a_note_firing_after_the_conversation_ended_says_why_and_its_clock_stops() {
-    let workspace = Workspace::new();
-    let keep_open = workspace.at("keeper-hold");
-    let gate = workspace.at("note-clock");
-    let skeleton = format!(
-        concat!(
-            "version: 11\nname: notes\nenv: {{}}\nmembers:\n",
-            "  worker:\n    kind: onejudge\n",
-            "    base_config: ./base.yaml\n    persona: engineer\n",
-            "    agent:\n      oneharness_config: ./oneharness.toml\n",
-            "    judge:\n      command: [placeholder]\n",
-            "    mode: bypass\n    max_turns: 2\n",
-            "    scheduled_notes:\n{notes}",
-            "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+    // A conversation its supervisor passed, and one that reached its turn cap
+    // without being passed: each refuses in onejudge's own words.
+    for (task, refusal, code, turns) in [
+        (
+            "fake:complete-now finish at once",
+            "conversation-completed",
+            0,
+            1,
         ),
-        notes = note_entry(NOTE, 1, 0, None),
-    );
-    workspace.graph(&graph_with(
-        &skeleton,
-        &[
-            (FAKE_HARNESS_KEY.to_string(), fake_harness()),
-            (format!("members.worker.{FAKE_JUDGE}"), fake_provider()),
-            (
-                "members.worker.task".to_string(),
-                clocked("fake:complete-now finish at once", &gate),
+        ("fake:should-fail never done", "member-settled", 1, 2),
+    ] {
+        let workspace = Workspace::new();
+        let keep_open = workspace.at("keeper-hold");
+        let gate = workspace.at("note-clock");
+        let skeleton = format!(
+            concat!(
+                "version: 11\nname: notes\nenv: {{}}\nmembers:\n",
+                "  worker:\n    kind: onejudge\n",
+                "    base_config: ./base.yaml\n    persona: engineer\n",
+                "    agent:\n      oneharness_config: ./oneharness.toml\n",
+                "    judge:\n      command: [placeholder]\n",
+                "    mode: bypass\n    max_turns: 2\n",
+                "    scheduled_notes:\n{notes}",
+                "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             ),
-            (
-                "members.keeper.task".to_string(),
-                format!("fake:hold={} keep the run open", keep_open.display()),
-            ),
-        ],
-    ));
-    let child = launch(&workspace, "unused", None);
-    until("the conversation to settle", || {
-        !of(&stream(&workspace), "member-settled", "worker").is_empty()
-    });
-    release(&gate);
-    until("the firing after the end", || {
-        !note_fired(&stream(&workspace), NOTE).is_empty()
-    });
-    // Three more of its spans: a clock that went on would fire again in each.
-    std::thread::sleep(Duration::from_millis(3_000));
-    release(&keep_open);
-    let (code, stderr) = exit_of(child);
-    assert_eq!(code, Some(0), "{stderr}");
+            notes = note_entry(NOTE, 1, 0, None),
+        );
+        workspace.graph(&graph_with(
+            &skeleton,
+            &[
+                (FAKE_HARNESS_KEY.to_string(), fake_harness()),
+                (format!("members.worker.{FAKE_JUDGE}"), fake_provider()),
+                ("members.worker.task".to_string(), clocked(task, &gate)),
+                (
+                    "members.keeper.task".to_string(),
+                    format!("fake:hold={} keep the run open", keep_open.display()),
+                ),
+            ],
+        ));
+        let child = launch(&workspace, "unused", None);
+        until("the conversation to settle", || {
+            !of(&stream(&workspace), "member-settled", "worker").is_empty()
+        });
+        release(&gate);
+        until("the firing after the end", || {
+            !note_fired(&stream(&workspace), NOTE).is_empty()
+        });
+        // Three more of its spans: a clock that went on would fire in each.
+        std::thread::sleep(Duration::from_millis(3_000));
+        release(&keep_open);
+        let (exit, stderr) = exit_of(child);
+        assert_eq!(exit, Some(code), "{task}: {stderr}");
 
-    let events = stream(&workspace);
-    let fired = note_fired(&events, NOTE);
-    assert_eq!(
-        fired.len(),
-        1,
-        "the clock fired again after the end: {events:#?}"
-    );
-    assert_eq!(
-        fired[0]["payload"]["undelivered"], "conversation-completed",
-        "{events:#?}"
-    );
-    let settled = of(&events, "member-settled", "worker")[0];
-    assert!(precedes(&events, settled, fired[0]));
-    assert!(Ledger::of(&events, NOTE).admitted.is_empty(), "{events:#?}");
-    assert_eq!(
-        turns_of(&events, "worker", "assistant", "turn-started").len(),
-        1,
-        "the firing opened a turn"
-    );
+        let events = stream(&workspace);
+        let fired = note_fired(&events, NOTE);
+        assert_eq!(fired.len(), 1, "{task}: the clock fired again: {events:#?}");
+        assert_eq!(fired[0]["payload"]["undelivered"], refusal, "{events:#?}");
+        let settled = of(&events, "member-settled", "worker")[0];
+        assert!(precedes(&events, settled, fired[0]));
+        assert!(Ledger::of(&events, NOTE).admitted.is_empty(), "{events:#?}");
+        assert_eq!(
+            turns_of(&events, "worker", "assistant", "turn-started").len(),
+            turns,
+            "{task}: the firing opened a turn"
+        );
+    }
 }
 
 /// (7) A firing before a deferred conversation opens is held, admitted when the
@@ -1158,6 +1160,20 @@ fn validate_gates_scheduled_notes_and_reset_on_and_accepts_them_at_schema_eleven
         note_entry(NOTE, 30, 5, None)
     );
     refused(&document(11, &twice, ""), &["declared twice"]);
+    for (entry, says) in [
+        (note_entry(NOTE, 0, 5, None), "every 0 seconds"),
+        (note_entry(NOTE, 60, 99_999_999_999, None), "`start_after`"),
+        (note_entry(NOTE, 99_999_999_999, 5, None), "`every`"),
+        (
+            note_entry(NOTE, 60, 5, None).replace(NOTE_TEXT, "   "),
+            "`text`",
+        ),
+    ] {
+        refused(
+            &document(11, &format!("    scheduled_notes:\n{entry}"), ""),
+            &[says],
+        );
+    }
     refused(
         &document(
             11,
@@ -1431,4 +1447,147 @@ fn a_detached_run_follows_the_stream_it_was_given_and_warns_of_deprecation() {
     let resets = of(&events, "cron-reset", "reporter");
     assert_eq!(resets.len(), 1, "{events:#?}");
     assert_eq!(resets[0]["payload"]["cause"]["seq"], 5);
+}
+
+/// The followed stream as another program really writes it: a path that does
+/// not exist yet, a line that is not UTF-8, an envelope whose newline has not
+/// arrived, and a file replaced by a shorter one. And the run's own `cron-reset`
+/// never restarts a clock filtered on `cron-reset`, while one appended to the
+/// followed stream — another run's — does.
+#[test]
+fn a_followed_stream_is_read_as_it_is_written_and_only_anothers_cron_reset_resets() {
+    let workspace = Workspace::new();
+    workspace.write("base.yaml", &base_without_done_when(""));
+    workspace.graph(&graph(
+        Some("{every: 120, start_after: 0}"),
+        2,
+        &note_entry("echo", 3600, 3600, Some(SURFACED)),
+        &single(
+            "reporter",
+            "{every: 60, start_after: 60, reset_on: {include: [{kind: cron-reset}]}}",
+        ),
+    ));
+    let followed = workspace.at("later.jsonl");
+    let child = launch(&workspace, KEEP_GOING, Some(&followed));
+    until_held(&workspace, 1);
+    let echo_resets = |events: &[Value]| {
+        of(events, "cron-reset", "worker")
+            .into_iter()
+            .filter(|event| event["payload"]["scheduled_note"] == "echo")
+            .count()
+    };
+
+    // Created after the start; a non-UTF-8 line, then an envelope still being
+    // written.
+    let mut bytes = b"\xff\xfe not text\n".to_vec();
+    bytes.extend_from_slice(envelope(1, "pipeline", "planner-surfaced").as_bytes());
+    std::fs::write(&followed, &bytes).expect("the stream is created");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        echo_resets(&stream(&workspace)),
+        0,
+        "an envelope was read before its newline arrived"
+    );
+    append(&followed, "");
+    until("the completed envelope to reset the note", || {
+        echo_resets(&stream(&workspace)) == 1
+    });
+
+    // That reset published the run's own `cron-reset`; another run's, followed,
+    // is what restarts the reporter.
+    let other_run = json!({
+        "v": 1, "ts": "2026-11-08T00:00:00.000Z", "stream": "another-run", "seq": 2,
+        "source": "agentgraph", "kind": "cron-reset", "labels": {}, "payload": {}
+    });
+    append(&followed, &other_run.to_string());
+    until("the followed cron-reset to restart the reporter", || {
+        !of(&stream(&workspace), "cron-reset", "reporter").is_empty()
+    });
+
+    // Replaced by a shorter file: read again from its start.
+    std::fs::write(
+        &followed,
+        format!("{}\n", envelope(3, "pipeline", "planner-surfaced")),
+    )
+    .expect("the stream is replaced");
+    until("the replaced stream to be read from its start", || {
+        echo_resets(&stream(&workspace)) == 2
+    });
+    workspace
+        .run(&["trigger", &run_id(&workspace), "worker"])
+        .expect_code(0);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+    assert!(
+        stderr.contains("skipped 1 line(s) that were not envelopes"),
+        "{stderr}"
+    );
+
+    let events = stream(&workspace);
+    let reporter = of(&events, "cron-reset", "reporter");
+    assert_eq!(
+        reporter.len(),
+        1,
+        "the run's own cron-reset restarted a clock: {events:#?}"
+    );
+    assert_eq!(reporter[0]["payload"]["cause"]["stream"], "another-run");
+    let seqs: Vec<&Value> = of(&events, "cron-reset", "worker")
+        .into_iter()
+        .map(|event| &event["payload"]["cause"]["seq"])
+        .collect();
+    assert_eq!(seqs, vec![&json!(1), &json!(3)], "{events:#?}");
+}
+
+/// Two scheduled notes of one conversation keep clocks of their own: a reset of
+/// one withdraws its copy and leaves the other's to be delivered.
+#[test]
+fn two_notes_of_one_conversation_keep_independent_clocks() {
+    let workspace = Workspace::new();
+    let (entered, hold) = (workspace.at("turn-entered"), workspace.at("turn-hold"));
+    workspace.write(
+        "base.yaml",
+        &base_without_done_when(&format!(
+            "fake:entered={} fake:hold={}",
+            entered.display(),
+            hold.display()
+        )),
+    );
+    let notes = format!(
+        "{}{}",
+        note_entry("resets", 3600, 0, Some(SURFACED)),
+        note_entry("stands", 3600, 0, None)
+    );
+    workspace.graph(&graph(Some("{every: 120, start_after: 0}"), 2, &notes, ""));
+    let followed = workspace.at("pipeline.jsonl");
+    let gate = workspace.at("note-clock");
+    let child = launch(&workspace, &clocked(KEEP_GOING, &gate), Some(&followed));
+    until("the first worker turn to be live", || entered.exists());
+    release(&gate);
+    until("both notes to be admitted", || {
+        admitted_yet(&workspace, "resets", 1) && admitted_yet(&workspace, "stands", 1)
+    });
+    append(&followed, &envelope(11, "pipeline", "planner-surfaced"));
+    until("the one note's copy to be withdrawn", || {
+        !Ledger::of(&stream(&workspace), "resets")
+            .withdrawn
+            .is_empty()
+    });
+    release(&hold);
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let events = stream(&workspace);
+    let (resets, stands) = (Ledger::of(&events, "resets"), Ledger::of(&events, "stands"));
+    assert_eq!(resets.withdrawn.len(), 1, "{events:#?}");
+    assert_eq!(resets.withdrawn[0]["payload"]["reason"], "reset");
+    assert!(resets.accepted.is_empty(), "{events:#?}");
+    assert_eq!(stands.admitted.len(), 1, "{events:#?}");
+    assert!(
+        stands.withdrawn.is_empty(),
+        "the other note's copy went with the reset"
+    );
+    assert_eq!(stands.accepted.len(), 1, "{events:#?}");
+    let restarted: Vec<&Value> = of(&events, "cron-reset", "worker");
+    assert_eq!(restarted.len(), 1, "{events:#?}");
+    assert_eq!(restarted[0]["payload"]["scheduled_note"], "resets");
 }

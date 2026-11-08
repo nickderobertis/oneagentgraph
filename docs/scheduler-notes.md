@@ -213,7 +213,7 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
 - **Admission before waking.** `fire` holds the seam's barrier from the offer
   until `note-admitted` is published; the sink passes that barrier
   (`ScheduledNotes::pass`) before publishing any `TurnOpened`, and a hold sees a
-  copy only through `ScheduledNotes::has_untaken`, which is set after the event.
+  copy only through `ScheduledNotes::has_unanswered`, which is set after the event.
   A hold that would start with a copy untaken is skipped; one in progress ends on
   it. `Relay::admit` now publishes a caller's `note-admitted` before counting the
   offer, for the same reason.

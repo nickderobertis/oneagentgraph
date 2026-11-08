@@ -997,7 +997,7 @@ struct Ledger {
     // llmlint: ignore-end[changed_behavior_has_e2e]
     /// The offers the run's own clock made for a member's scheduled note, and
     /// that note's id — what every event about such an offer names besides it.
-    scheduled: HashMap<OfferId, String>,
+    scheduled: HashMap<OfferId, ScheduledNoteId>,
 }
 
 /// Every offer a member holds, and what it does as each is answered: write the
@@ -1205,16 +1205,23 @@ impl Book {
         true
     }
 
-    /// Whether `offer` is still in the conversation's inbox, untaken: settled
-    /// first, so an offer the engine has answered is not counted as waiting.
-    fn untaken(&self, offer: &OfferId) -> bool {
+    /// Whether `offer` is still held unanswered: settled first, so an offer the
+    /// engine has answered is not counted. An offer a turn has taken but not yet
+    /// answered — a supervisor deciding with it in hand — counts as unanswered;
+    /// the engine answers that one before it closes the turn, so no hold ever
+    /// starts while one is outstanding.
+    fn unanswered(&self, offer: &OfferId) -> bool {
         self.probe();
         self.lock().held.contains_key(offer)
     }
 
     /// Publish that `offer` was taken back, and why.
     fn publish_withdrawn(&self, offer: &OfferId, reason: WithdrawnReason) {
-        let scheduled_note = self.lock().scheduled.get(offer).cloned();
+        let scheduled_note = self
+            .lock()
+            .scheduled
+            .get(offer)
+            .map(|id| id.as_str().to_string());
         self.emitter.emit(
             EventKind::NoteWithdrawn,
             as_payload(&NoteWithdrawn {
@@ -1248,7 +1255,11 @@ impl Book {
                 party,
             })
         };
-        let scheduled_note = self.lock().scheduled.get(offer).cloned();
+        let scheduled_note = self
+            .lock()
+            .scheduled
+            .get(offer)
+            .map(|id| id.as_str().to_string());
         let withdrawn = |reason: WithdrawnReason| {
             as_payload(&NoteWithdrawn {
                 member: member.clone(),
@@ -1638,7 +1649,7 @@ fn awaited(handle: onemessagebus::Offer<Accepted>, deadline: Option<Instant>) ->
 ///   the member's [`Book`] like a caller's note — so every answer, withdrawal and
 ///   attribution is the one a caller's note gets — and `note-admitted` is
 ///   published *before* anything is let see it: a hold reads
-///   [`has_untaken`](ScheduledNotes::has_untaken), and a turn's opening waits on
+///   [`has_unanswered`](ScheduledNotes::has_unanswered), and a turn's opening waits on
 ///   [`pass`](ScheduledNotes::pass). One copy of a note is ever outstanding: an
 ///   earlier copy still untaken is withdrawn `superseded` first.
 /// * **Once it has ended**, a firing offers nothing and says why, in onejudge's
@@ -1823,16 +1834,17 @@ impl ScheduledNotes {
             .retain(|_, copy| matches!(copy, Copy::Admitted(_)));
     }
 
-    /// Whether any scheduled note's copy is admitted and still untaken — what a
-    /// hold that would start now skips itself for, so the next turn opens with
-    /// the note.
-    pub(crate) fn has_untaken(&self) -> bool {
+    /// Whether any scheduled note's copy is admitted and still unanswered — at a
+    /// hold, that is a copy no turn has taken (see [`Book::unanswered`]), which
+    /// is what a hold that would start now skips itself for, so the next turn
+    /// opens with the note.
+    pub(crate) fn has_unanswered(&self) -> bool {
         let seam = self.lock();
         let Conversation::Open { book, .. } = &seam.conversation else {
             return false;
         };
         seam.copies.values().any(|copy| match copy {
-            Copy::Admitted(offer) => book.untaken(offer),
+            Copy::Admitted(offer) => book.unanswered(offer),
             Copy::Held(_) => false,
         })
     }
@@ -1882,9 +1894,7 @@ fn admitted(
     );
     book.relayed.handing();
     let mut ledger = book.lock();
-    ledger
-        .scheduled
-        .insert(offer.clone(), id.as_str().to_string());
+    ledger.scheduled.insert(offer.clone(), id.clone());
     ledger.held.insert(
         offer.clone(),
         Held {

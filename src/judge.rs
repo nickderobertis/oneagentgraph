@@ -304,7 +304,7 @@ impl Hold {
         self.clocks
             .as_ref()
             .and_then(|clocks| clocks.notes.as_ref())
-            .is_some_and(|notes| notes.has_untaken())
+            .is_some_and(|notes| notes.has_unanswered())
     }
 
     /// The `reset_on` match this member's schedule has not read yet.
