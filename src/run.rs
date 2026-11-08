@@ -2064,7 +2064,7 @@ pub fn expand(value: &str, env: &BTreeMap<String, String>) -> String {
 /// `trigger`, `reset-timer`, `cancel`, `interrupt` and `history` all read it to
 /// learn which members a live run has — so it is never rewritten in place: an
 /// in-place write truncates first, and a reader landing in that window read an
-/// empty file and reported a live run as missing. See [`replace_whole`].
+/// empty file and reported a live run as missing. See `replace_whole` in this module.
 ///
 /// Public for the one reason a reader can check: it is the store's only
 /// writer, and a run rewrites its record just three times — so a journey that
