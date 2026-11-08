@@ -411,6 +411,10 @@ pub enum Signal {
     /// Fire a scheduled member now — `oneagentgraph trigger`.
     Trigger,
     /// Restart a resettable schedule's clock — `oneagentgraph reset-timer`.
+    ///
+    /// Deprecated, and working exactly as before through this release: it will
+    /// be removed with `resettable`, and a schedule declares `reset_on` instead.
+    /// It never reaches a scheduled-note clock or a non-resettable schedule.
     Reset,
 }
 
