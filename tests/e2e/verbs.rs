@@ -2364,6 +2364,60 @@ fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_r
     assert!(!after.stderr.contains("no run"), "{}", after.stderr);
 }
 
+/// `reset-timer` arriving while the run is replacing its record — at the
+/// instant a Windows rename left the name missing to an open — waits for the
+/// replacement and acts on the whole record it leaves, never reporting the run
+/// missing.
+///
+/// The replacement is made by the store's own writer, through the suite's
+/// `ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE` lever, which holds that writer
+/// inside the record's lock with the name removed until the reader has reached
+/// the lock: deterministic, with no clock, where the concurrent journey above
+/// meets that instant only when the scheduler happens to line it up. The
+/// replacement declares a member the run as recorded does not have, so the
+/// verb can only accept it by having read the replacement, whole.
+#[test]
+fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves() {
+    let workspace = Workspace::new();
+    workspace
+        .run_task("fake:complete-now: mid-replace")
+        .expect_code(0);
+    let state = workspace.state();
+    let id = run_id(&state).expect("a run");
+    let mut replacement = oneagentgraph::history::show(&state, &id).expect("the run's record");
+    replacement.declared_members = vec!["worker".to_string(), "late".to_string()];
+    let staged = workspace.path().join("replacement");
+    std::fs::create_dir_all(&staged).expect("a staging directory");
+    oneagentgraph::run::write_record(&staged, &replacement).expect("the replacement stages");
+
+    let lever = format!("{RECORD_FILE}={}", staged.join(RECORD_FILE).display());
+    // llmlint: ignore[tests_mirror_real_usage] the instant under test — a read arriving while a replacement has the name missing — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires it forced deterministically with no clock; the replacement is the store's production writer, under its production lock, and the verb, the binary and the record it acts on are all real.
+    let reset = workspace.run_with(
+        &["reset-timer", &id, "late"],
+        &[("ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE", &lever)],
+    );
+    reset.expect_code(0);
+    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+    assert_eq!(
+        oneagentgraph::history::show(&state, &id).expect("the record reads"),
+        replacement,
+        "the replacement did not land"
+    );
+    assert!(
+        state
+            .join(&id)
+            .join(SIGNAL_DIR)
+            .join("late.reset")
+            .is_file(),
+        "the reset was not signalled to the replacement's member"
+    );
+    assert!(
+        partials(&state.join(&id)).is_empty(),
+        "{:?}",
+        partials(&state.join(&id))
+    );
+}
+
 /// A volume that cannot rename with POSIX semantics refuses the run's rewrite
 /// of its record, saying so and naming the record, and leaves the whole record
 /// that was there — it never falls back to the classic Windows replace, whose

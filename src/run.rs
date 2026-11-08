@@ -2087,41 +2087,57 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
 //
 // **The writer**, [`replace_whole`], never writes the name in place and never
 // removes it. It writes the whole new record to a sibling unique to this
-// process and call, then renames the sibling onto the name with a rename that
-// moves the name from the old file to the new one in a single step, so from the
-// record's first write on the name always resolves to a whole record — the one
-// from before the rename or the one after it:
+// process and call, then — holding the record's lock exclusively — renames the
+// sibling onto the name, and releases the lock once the rename has returned.
+// The lock is a file of its own beside the record, `.<record>.lock`
+// ([`lock_path`]); the writer creates it before the record's first rename and
+// nothing ever replaces or removes it, so it is one file for the record's
+// whole life. The rename is the one that replaces a name in a single call:
 //
-// - On Unix that rename is `rename(2)`, which replaces an existing name
-//   atomically even while readers hold the old file open.
-// - On Windows it is `SetFileInformationByHandle(FileRenameInfoEx)` with
+// - On Unix `rename(2)`.
+// - On Windows `SetFileInformationByHandle(FileRenameInfoEx)` with
 //   `FILE_RENAME_FLAG_POSIX_SEMANTICS | FILE_RENAME_FLAG_REPLACE_IF_EXISTS`
-//   ([`rename_over`]) — and deliberately not `std::fs::rename`, which (as of the
-//   1.97 toolchain this crate pins) calls `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`
-//   first and reaches POSIX semantics only when that is refused. A classic
-//   replace deletes the old file with classic semantics, which leaves the name
-//   on a delete-pending file for an instant; an open of the name in that
-//   instant is refused with `ERROR_ACCESS_DENIED`, and a reader took that for a
-//   run or turn control that does not exist. Under POSIX semantics the old file
-//   leaves the namespace in the same step the new one enters it, so there is no
-//   such instant for a reader to meet. A volume that cannot rename with POSIX
-//   semantics (FAT, some network shares, Windows before 10 1607) gets no
-//   classic fallback: the write is refused with an error naming the record,
-//   and the whole record already there is left as it was — see [`rename_over`].
+//   ([`rename_over`]), and deliberately not `std::fs::rename`, which (as of the
+//   1.97 toolchain this crate pins) tries a classic `MoveFileExW` replace first.
+//   A volume that cannot rename with POSIX semantics (FAT, some network shares,
+//   Windows before 10 1607) gets no classic fallback: the write is refused with
+//   an error naming the record, and the whole record already there is left as
+//   it was — see [`rename_over`].
 //
-// **The reader**, [`read_whole`], opens the name once, sharing read, write and
-// *delete* ([`open_shared`]), and reads the whole file through that handle.
-// Sharing deletion is what lets the writer's rename land while a read is in
-// progress — Windows refuses to rename over a file opened without it — and the
-// handle goes on reading the file it opened, so a read a replacement lands
-// under still returns the whole record from before it. The reader never reads
-// again and never waits, because there is no window to wait out. What it does
-// with a refusal is decided by what the refusal means:
+// **Why the lock and not the rename alone.** A single rename call is not a
+// promise that a concurrent *open* of the name finds a file at every instant of
+// it. On Windows it does not: with the POSIX-semantics rename above, an open
+// racing it on the CI's NTFS volume was answered `ERROR_FILE_NOT_FOUND` once in
+// 200 reads (`cross (windows-latest)`, job 128752439322), and a reader took that
+// for a run that does not exist. So the reader does not rely on the rename
+// being instantaneous; it relies on never opening the name while one is in
+// progress.
+//
+// **The reader**, [`read_whole`], takes the record's lock *shared*
+// ([`lock_shared`]), opens the name, and releases the lock; then it reads the
+// whole file through the handle it opened. While a writer holds the lock the
+// shared request waits for it — a wait on the kernel's lock, granted the
+// instant the writer's rename has returned, not an attempt that can come back
+// empty — so the open always lands on the name before a rename or after one,
+// never inside one. Readers share the lock, so they never wait on each other.
+// The open shares read, write and *delete* ([`open_shared`]): releasing the lock
+// before reading lets the next rename land while this handle is open — Windows
+// refuses a rename over a file opened without sharing deletion — and the handle
+// goes on reading the file it opened, so a read a replacement lands under still
+// returns the whole record from before it. What the reader does with a
+// refusal is decided by what the refusal means:
 //
 // - *Absent* (`NotFound`) is a run or a turn that recorded nothing: the writer
-//   never removes the name, so a replacement in flight never makes it absent.
+//   never removes the name, and no open happens inside a rename, so a
+//   replacement in flight never makes it absent.
 // - *Anything else* is the file's own, and the caller reports it naming the
 //   file — never as an absent record.
+//
+// A record with no lock file beside it has never been written by this build's
+// writer, so no such writer can be replacing it: either nothing is recorded yet
+// — its first write creates the lock before the name exists, and a name that
+// appears appears whole — or it was written by an earlier build, and it is read
+// without the lock.
 //
 // So no reader reports a run or a turn control as missing because a writer was
 // replacing it, and none reads a partial. `history::show` and `control::record`
@@ -2129,21 +2145,78 @@ pub fn write_record(root: &Path, record: &Record) -> Result<(), Error> {
 // of them.
 
 /// Read the whole of `path`, a record [`replace_whole`] replaces, under the
-/// replace-and-read contract above: one shared open, and the whole file read
-/// through it.
+/// replace-and-read contract above: one open under the record's shared lock,
+/// and the whole file read through it.
 ///
 /// # Errors
 ///
 /// `NotFound` when nothing is recorded there, and otherwise the refusal the
-/// open or the read met.
+/// lock, the open or the read met.
 pub(crate) fn read_whole(path: &Path) -> std::io::Result<String> {
+    #[cfg(feature = "test-doubles")]
+    let during = read_during_replace::start(path)?;
+    let read = read_opened(path);
+    #[cfg(feature = "test-doubles")]
+    if let Some(during) = during {
+        let finished = during.finish();
+        let raw = read?;
+        finished?;
+        return Ok(raw);
+    }
+    read
+}
+
+/// Open `path` under its record's shared lock, release the lock, and read the
+/// whole file through the handle.
+fn read_opened(path: &Path) -> std::io::Result<String> {
     use std::io::Read;
-    let mut file = open_shared(path)?;
+    let mut file = {
+        let _lock = lock_shared(path)?;
+        let opened = open_shared(path);
+        #[cfg(feature = "test-doubles")]
+        read_during_replace::reached();
+        opened?
+    };
     #[cfg(feature = "test-doubles")]
     replace_under_read::land(path)?;
     let mut raw = String::new();
     file.read_to_string(&mut raw)?;
     Ok(raw)
+}
+
+/// The lock file beside the record at `path`: `.<record>.lock` in the same
+/// directory.
+fn lock_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    path.with_file_name(format!(".{name}.lock"))
+}
+
+/// Take the shared lock of the record at `path`, waiting while a writer holds
+/// it exclusively, or `None` when no writer of this build has written the
+/// record — see the contract above.
+///
+/// The lock is first asked for without waiting, so that a reader that does
+/// have to wait is one the suite's [`read_during_replace`] lever can see
+/// waiting; either way the lock is held when this returns.
+fn lock_shared(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let lock = match std::fs::File::open(lock_path(path)) {
+        Ok(lock) => lock,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    match lock.try_lock_shared() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            #[cfg(feature = "test-doubles")]
+            read_during_replace::reached();
+            lock.lock_shared()?;
+        }
+        Err(std::fs::TryLockError::Error(err)) => return Err(err),
+    }
+    Ok(Some(lock))
 }
 
 /// Open `path` for reading without standing in the way of a replacement: on
@@ -2176,7 +2249,9 @@ fn open_shared(path: &Path) -> std::io::Result<std::fs::File> {
 /// reader then reads through the handle it already holds, exactly as it does
 /// when a real writer lands there. A replacement the open stood in the way of
 /// fails the read with the rename's refusal, so a reader that stopped a rename
-/// landing — on Windows, one that opened without sharing deletion — is caught.
+/// landing — on Windows, one that opened without sharing deletion — is caught,
+/// and so is one that kept the record's lock past its open, on which the
+/// writer would wait forever.
 /// Compiled only under `test-doubles`; no shipped build reads the variable.
 #[cfg(feature = "test-doubles")]
 mod replace_under_read {
@@ -2199,16 +2274,127 @@ mod replace_under_read {
     }
 }
 
+/// The suite's lever on the lock: a read that arrives while the writer's
+/// replacement is in progress, with the name missing — the instant a Windows
+/// rename exposed to an open — forced with no clock, on every host.
+///
+/// `ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE=<file name>=<replacement>` makes
+/// this process's first read through [`read_whole`] of a record by that file
+/// name — `record.json`, `control.json` — begin by starting a replacement of
+/// the record with the bytes of the file at `<replacement>`, on a thread of its
+/// own, through the production [`replace_whole`]. That writer takes the
+/// record's lock as it always does, and inside it removes the name before
+/// renaming onto it, so the name is missing for as long as this lever holds it
+/// there: until the reader has either waited on the record's lock or opened
+/// the name. Only then does it rename, release the lock, and let the read go
+/// on. A reader that honours the lock waits, then opens the replacement whole;
+/// one that does not opens the missing name and reports the record absent.
+/// Compiled only under `test-doubles`; no shipped build reads the variable.
+#[cfg(feature = "test-doubles")]
+mod read_during_replace {
+    use std::cell::RefCell;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{mpsc, Mutex, PoisonError};
+
+    /// What the writer thread holds the name missing with: where to say the
+    /// name is gone, and where the reader says it has arrived.
+    struct Gap {
+        missing: mpsc::Sender<()>,
+        arrived: mpsc::Receiver<()>,
+    }
+
+    thread_local! {
+        /// Set on the lever's writer thread alone, and taken by its rename.
+        static GAP: RefCell<Option<Gap>> = const { RefCell::new(None) };
+    }
+
+    /// Where the reader says it has arrived — at the lock, or at the name.
+    static ARRIVED: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+
+    /// The replacement in progress under one read.
+    pub(super) struct During {
+        writer: std::thread::JoinHandle<std::io::Result<()>>,
+    }
+
+    /// Start the requested replacement of `path` and return once its writer
+    /// holds the record's lock with the name missing — or once it has failed.
+    pub(super) fn start(path: &Path) -> std::io::Result<Option<During>> {
+        static STARTED: AtomicBool = AtomicBool::new(false);
+        let Ok(request) = std::env::var("ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE") else {
+            return Ok(None);
+        };
+        let Some((name, replacement)) = request.split_once('=') else {
+            return Ok(None);
+        };
+        if path.file_name().is_none_or(|file| file != name) || STARTED.swap(true, Ordering::SeqCst)
+        {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(replacement)?;
+        let (missing, gone) = mpsc::channel();
+        let (arrive, arrived) = mpsc::channel();
+        *ARRIVED.lock().unwrap_or_else(PoisonError::into_inner) = Some(arrive);
+        let path = path.to_path_buf();
+        let writer = std::thread::spawn(move || {
+            GAP.with(|gap| *gap.borrow_mut() = Some(Gap { missing, arrived }));
+            super::replace_whole(&path, &bytes)
+        });
+        // A writer that failed before the gap drops its sender, which ends
+        // this wait too; `finish` reports why.
+        let _ = gone.recv();
+        Ok(Some(During { writer }))
+    }
+
+    /// The reader has arrived at the record's lock or at its name.
+    pub(super) fn reached() {
+        if let Some(arrive) = ARRIVED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+        {
+            let _ = arrive.send(());
+        }
+    }
+
+    /// On the lever's writer thread, inside the record's lock: remove the name
+    /// at `to` and hold it missing until the reader arrives. Anywhere else,
+    /// nothing.
+    pub(super) fn gap(to: &Path) -> std::io::Result<()> {
+        let Some(gap) = GAP.with(|gap| gap.borrow_mut().take()) else {
+            return Ok(());
+        };
+        std::fs::remove_file(to)?;
+        let _ = gap.missing.send(());
+        let _ = gap.arrived.recv();
+        Ok(())
+    }
+
+    impl During {
+        /// Wait for the replacement to finish, and say how it went.
+        pub(super) fn finish(self) -> std::io::Result<()> {
+            ARRIVED
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take();
+            self.writer
+                .join()
+                .map_err(|_| std::io::Error::other("the replacement under the read panicked"))?
+        }
+    }
+}
+
 /// Replace `path` with `bytes` so that a concurrent reader opens either the file
 /// that was there or the whole of this one — never an empty, partial or absent
 /// one.
 ///
 /// The writer half of the replace-and-read contract above. The bytes go to a
-/// sibling first and are renamed onto `path` by [`rename_over`], which moves the
-/// name in a single step, where an in-place write truncates and then fills. The
-/// sibling's name is unique to this process and this call, so two writers in
-/// one run — member threads rewriting their own control records — never share
-/// one.
+/// sibling first and are renamed onto `path` by [`rename_over`] while this
+/// holds the record's lock exclusively, where an in-place write truncates and
+/// then fills. The sibling's name is unique to this process and this call, so
+/// two writers in one run — member threads rewriting their own control records
+/// — never share one; the lock serializes their renames with each other and
+/// with every reader's open.
 pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let name = path
@@ -2220,7 +2406,17 @@ pub(crate) fn replace_whole(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    let replaced = std::fs::write(&partial, bytes).and_then(|()| rename_over(&partial, path));
+    let replaced = std::fs::write(&partial, bytes).and_then(|()| {
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path(path))?;
+        lock.lock()?;
+        rename_over(&partial, path)
+        // Dropping `lock` closes it, which releases the lock.
+    });
     if replaced.is_err() {
         let _ = std::fs::remove_file(&partial);
     }
@@ -2276,12 +2472,15 @@ fn rename_over(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 
 /// One rename of `from` onto `to`, which the suite's [`rename_refusal_fixture`]
-/// can answer as Windows answers it.
+/// can answer as Windows answers it, and its [`read_during_replace`] lever can
+/// hold open with the name missing.
 fn rename_once(from: &Path, to: &Path) -> std::io::Result<()> {
     #[cfg(feature = "test-doubles")]
     if let Some(refusal) = rename_refusal_fixture::refusal(to) {
         return Err(refusal);
     }
+    #[cfg(feature = "test-doubles")]
+    read_during_replace::gap(to)?;
     #[cfg(windows)]
     return rename_posix(from, to);
     #[cfg(not(windows))]
@@ -2407,6 +2606,34 @@ mod rename_refusal_fixture {
     }
 }
 
+/// `absolute`, a normalized absolute Windows path in UTF-16, as the verbatim
+/// (`\\?\`) path that names it.
+///
+/// `SetFileInformationByHandle` takes the rename's target as given and applies
+/// no long-path handling of its own, so a plain `C:\…` name longer than
+/// `MAX_PATH` is refused with `ERROR_FILENAME_EXCED_RANGE` — an over-long run
+/// id makes one. The verbatim form has no such limit, and it is the one
+/// `std::fs::rename` hands the same call. `\\?\` and `\??\` paths are kept,
+/// `\\.\` becomes `\\?\`, a UNC `\\server\share` becomes
+/// `\\?\UNC\server\share`, and a drive path gains the prefix.
+#[cfg(any(windows, test))]
+fn verbatim(absolute: &[u16]) -> Vec<u16> {
+    let wide = |text: &str| text.encode_utf16().collect::<Vec<u16>>();
+    let (prefix, rest) =
+        if absolute.starts_with(&wide(r"\\?\")) || absolute.starts_with(&wide(r"\??\")) {
+            (Vec::new(), absolute)
+        } else if absolute.starts_with(&wide(r"\\.\")) {
+            (wide(r"\\?\"), &absolute[4..])
+        } else if absolute.starts_with(&wide(r"\\")) {
+            (wide(r"\\?\UNC\"), &absolute[2..])
+        } else if absolute.get(1) == Some(&u16::from(b':')) {
+            (wide(r"\\?\"), absolute)
+        } else {
+            (Vec::new(), absolute)
+        };
+    [prefix.as_slice(), rest].concat()
+}
+
 /// One `SetFileInformationByHandle(FileRenameInfoEx)` of `from` onto `to`, with
 /// `FILE_RENAME_FLAG_POSIX_SEMANTICS | FILE_RENAME_FLAG_REPLACE_IF_EXISTS`.
 // llmlint: ignore-block[changed_behavior_has_e2e] this body compiles only for
@@ -2432,7 +2659,8 @@ fn rename_posix(from: &Path, to: &Path) -> std::io::Result<()> {
         .access_mode(DELETE)
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .open(from)?;
-    let name: Vec<u16> = std::path::absolute(to)?.as_os_str().encode_wide().collect();
+    let absolute: Vec<u16> = std::path::absolute(to)?.as_os_str().encode_wide().collect();
+    let name = verbatim(&absolute);
     let name_bytes = name.len() * size_of::<u16>();
     // The structure, its name, and the terminating NUL the zeroed buffer
     // already holds, in a buffer aligned for the structure's handle field.
@@ -2516,6 +2744,26 @@ mod tests {
         assert_eq!(ERROR_SHARING_VIOLATION, win::ERROR_SHARING_VIOLATION);
         assert_eq!(ERROR_NOT_SUPPORTED, win::ERROR_NOT_SUPPORTED);
         assert_eq!(ERROR_INVALID_PARAMETER, win::ERROR_INVALID_PARAMETER);
+    }
+
+    /// The rename's target is named verbatim, so an over-long one is not
+    /// refused for its length: a drive path and a UNC path gain their prefix,
+    /// and a path already verbatim is kept.
+    #[test]
+    fn a_rename_target_is_named_verbatim() {
+        let named = |path: &str| {
+            String::from_utf16(&verbatim(&path.encode_utf16().collect::<Vec<u16>>()))
+                .expect("utf-16")
+        };
+        let long = format!(r"C:\Temp\{}\record.json", "r".repeat(300));
+        assert_eq!(named(&long), format!(r"\\?\{long}"));
+        assert_eq!(
+            named(r"\\server\share\r\record.json"),
+            r"\\?\UNC\server\share\r\record.json"
+        );
+        assert_eq!(named(r"\\.\C:\r\record.json"), r"\\?\C:\r\record.json");
+        assert_eq!(named(r"\\?\C:\r\record.json"), r"\\?\C:\r\record.json");
+        assert_eq!(named(r"\??\C:\r\record.json"), r"\??\C:\r\record.json");
     }
 
     /// Off Windows no rename refusal is classified — Unix's rename replaces a
