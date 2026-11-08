@@ -1,0 +1,77 @@
+{
+  "cron-fired": [
+    {},
+    {
+      "scheduled_note": "progress-report"
+    },
+    {
+      "scheduled_note": "progress-report",
+      "undelivered": "conversation-completed"
+    },
+    {
+      "scheduled_note": "progress-report",
+      "undelivered": "member-settled"
+    },
+    {
+      "scheduled_note": "progress-report",
+      "undelivered": "no-conversation"
+    }
+  ],
+  "cron-reset": [
+    {},
+    {
+      "cause": {
+        "source": "pipeline",
+        "kind": "planner-surfaced",
+        "seq": 42,
+        "stream": "pipeline-run-1"
+      }
+    },
+    {
+      "scheduled_note": "progress-report",
+      "cause": {
+        "source": "pipeline",
+        "kind": "planner-surfaced",
+        "seq": 42,
+        "stream": "pipeline-run-1"
+      }
+    }
+  ],
+  "note-admitted": [
+    {
+      "member": "monitor",
+      "addressee": "supervisor",
+      "offer": "note-1792401955594017000-3399723-1"
+    },
+    {
+      "member": "monitor",
+      "addressee": "supervisor",
+      "offer": "note-1792401955594017000-3399723-1",
+      "scheduled_note": "progress-report"
+    }
+  ],
+  "note-withdrawn": [
+    {
+      "member": "monitor",
+      "offer": "note-1792401955594017000-3399723-1",
+      "reason": "expired"
+    },
+    {
+      "member": "monitor",
+      "offer": "note-1792401955594017000-3399723-1",
+      "reason": "withdrawn"
+    },
+    {
+      "member": "monitor",
+      "offer": "note-1792401955594017000-3399723-1",
+      "reason": "superseded",
+      "scheduled_note": "progress-report"
+    },
+    {
+      "member": "monitor",
+      "offer": "note-1792401955594017000-3399723-1",
+      "reason": "reset",
+      "scheduled_note": "progress-report"
+    }
+  ]
+}

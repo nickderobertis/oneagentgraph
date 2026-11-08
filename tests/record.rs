@@ -30,7 +30,12 @@
 //! * `member-started.json` — the three shapes of the payload a supervisor reads
 //!   first, on the same terms: one per runner, plus the one a member publishes
 //!   when it comes up without taking a turn.
-//! * `graph.v4.yaml` … `graph.v10.yaml` — the graph config
+//! * `clock-and-note-payloads.v2.json` — every shape of the four payloads a
+//!   scheduled note or a `reset_on` touches, the shapes they had before beside
+//!   the ones they gained: `note-admitted` and `note-withdrawn` at `@2`, and
+//!   `cron-fired` and `cron-reset` at `@1`. A payload naming no scheduled note
+//!   and no cause is byte for byte what it always was.
+//! * `graph.v4.yaml` … `graph.v11.yaml` — the graph config
 //!   schema, which is versioned for the same reason and read on the *other* side
 //!   of the same promise: this build does not write these, an author does, and a
 //!   document written against an older schema has to keep meaning what it said.
@@ -39,7 +44,8 @@
 //!   member's own pre-turn views in version 7, each member's own say over
 //!   whether it holds the run open in version 8, a two-party member's own
 //!   `dir` and `schedule` in version 9, and its onejudge `judge_settings` and
-//!   each judge's own `settings` in version 10.
+//!   each judge's own `settings` in version 10, and a two-party member's
+//!   `scheduled_notes` and every clock's `reset_on` in version 11.
 //!
 //! Regenerating an old golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
@@ -57,16 +63,19 @@ use std::collections::BTreeMap;
 
 use oneagentgraph::config::{
     AgentSide, ConfigRef, Events, GraphConfig, JudgeHarness, JudgeSide, Member, OneharnessMember,
-    OnejudgeMember, PreTurn, Schedule, FIRST_BACKGROUND_VERSION, FIRST_EVENT_FILTER_VERSION,
-    FIRST_JUDGE_SETTINGS_VERSION, FIRST_PERSONA_CATALOG_VERSION, FIRST_PRE_TURN_VERSION,
-    FIRST_TWO_PARTY_JOB_VERSION, SCHEMA_VERSION,
+    OnejudgeMember, PreTurn, Schedule, ScheduledNote, FIRST_BACKGROUND_VERSION,
+    FIRST_EVENT_FILTER_VERSION, FIRST_JUDGE_SETTINGS_VERSION, FIRST_PERSONA_CATALOG_VERSION,
+    FIRST_PRE_TURN_VERSION, FIRST_SCHEDULED_NOTE_VERSION, FIRST_TWO_PARTY_JOB_VERSION,
+    SCHEMA_VERSION,
 };
 use oneagentgraph::control::{Address, Record as ControlRecord, Turn, CONTROL_SCHEMA_VERSION};
 use oneagentgraph::event::{
-    AttemptedCandidate, Cause, Disposition, EventFilter, MatchFields, Matcher, MemberDied,
-    MemberStarted, Runner, Source, ENVELOPE_VERSION, SOURCE_WORD,
+    AttemptedCandidate, Cause, CronFired, CronReset, Disposition, EventFilter, MatchFields,
+    Matcher, MemberDied, MemberStarted, NoteAdmitted, NoteWithdrawn, ResetCause, Runner, Source,
+    UndeliveredReason, WithdrawnReason, ENVELOPE_VERSION, SOURCE_WORD,
 };
 use oneagentgraph::member::Rule;
+use oneagentgraph::note::Addressee;
 use oneagentgraph::resolve::ResolvedRef;
 use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_FILE, RECORD_SCHEMA_VERSION};
 
@@ -84,7 +93,8 @@ use oneagentgraph::run::{MemberOutcome, Record, RunId, RECORD_FILE, RECORD_SCHEM
 /// declaration rather than the default: a scheduled conversation that holds the
 /// run open, the observer shape this version exists for; and the onejudge
 /// settings version 10 added, at both levels — the member's `judge_settings`
-/// and its judge's own `settings`.
+/// and its judge's own `settings`; and the scheduled note and the `reset_on`
+/// version 11 added — on the note and on the paced conversation's schedule.
 fn golden_graph() -> GraphConfig {
     GraphConfig {
         version: SCHEMA_VERSION,
@@ -126,6 +136,7 @@ fn golden_graph() -> GraphConfig {
                         every: 1800,
                         start_after: Some(1800),
                         resettable: true,
+                        reset_on: None,
                     }),
                     background: Some(true),
                     pre_turn: vec![PreTurn {
@@ -167,7 +178,16 @@ fn golden_graph() -> GraphConfig {
                         every: 300,
                         start_after: Some(0),
                         resettable: false,
+                        reset_on: Some(surfaced()),
                     }),
+                    scheduled_notes: vec![ScheduledNote {
+                        id: "progress-report".into(),
+                        every: 1800,
+                        start_after: None,
+                        reset_on: Some(surfaced()),
+                        addressee: Addressee::Supervisor,
+                        text: "Write the progress report now.".into(),
+                    }],
                     background: Some(false),
                     deps: Vec::new(),
                 }),
@@ -176,11 +196,24 @@ fn golden_graph() -> GraphConfig {
     }
 }
 
+/// The `reset_on` the version 11 golden declares: another program's envelope,
+/// by the words it arrives with.
+fn surfaced() -> EventFilter {
+    EventFilter {
+        include: vec![Matcher {
+            source: Some(Source::from("pipeline")),
+            kind: Some("planner-surfaced".into()),
+            ..Matcher::default()
+        }],
+        exclude: Vec::new(),
+    }
+}
+
 /// The graph config golden is byte-for-byte what this build serializes, reads
 /// back to the same graph, and validates as a runnable one.
 #[test]
 fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
-    let golden = include_str!("golden/graph.v10.yaml");
+    let golden = include_str!("golden/graph.v11.yaml");
     let written = oneagentgraph::yaml::to_string(&golden_graph()).expect("a graph serializes");
     assert_eq!(
         written, golden,
@@ -261,6 +294,53 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
         "Run the suite before you decide."
     );
     assert_eq!(worker.judge[0].settings()["events"], true);
+
+    // The scheduled note and the `reset_on` this version added, read back: a
+    // list that survived the trip empty is a conversation never told anything
+    // on a timer, and a filter that did is a clock that never restarts.
+    assert_eq!(worker.scheduled_notes.len(), 1);
+    assert_eq!(worker.scheduled_notes[0].id, "progress-report");
+    assert_eq!(worker.scheduled_notes[0].reset_on, Some(surfaced()));
+    assert_eq!(pace.reset_on, Some(surfaced()));
+}
+
+/// A graph written against the schema before scheduled notes and `reset_on`
+/// reads unchanged, gains neither key when written back, and is refused by the
+/// field's name if it names either anyway.
+#[test]
+fn a_version_ten_graph_still_reads_and_is_refused_the_scheduled_notes_it_predates() {
+    let golden = include_str!("golden/graph.v10.yaml");
+    let graph: GraphConfig =
+        oneagentgraph::yaml::from_str(golden).expect("a version 10 graph still reads");
+    assert_eq!(graph.version, FIRST_SCHEDULED_NOTE_VERSION - 1);
+    oneagentgraph::config::validate(&graph).expect("a version 10 graph still validates");
+    let written = oneagentgraph::yaml::to_string(&graph).expect("a graph serializes");
+    assert_eq!(written, golden, "a version 10 document did not round-trip");
+
+    for (asking, field) in [
+        (
+            "    scheduled_notes:\n    - {id: n, every: 60, addressee: worker, text: t}\n    background: false\n",
+            "`scheduled_notes`",
+        ),
+        (
+            "      reset_on: {include: [{source: pipeline}]}\n    background: false\n",
+            "`schedule.reset_on`",
+        ),
+    ] {
+        let asking: GraphConfig = oneagentgraph::yaml::from_str(
+            &golden.replace("    background: false\n", asking),
+        )
+        .expect("it still parses");
+        let error = oneagentgraph::config::validate(&asking)
+            .expect_err("the field postdates the schema this document declares");
+        assert!(
+            error.to_string().contains(field)
+                && error.to_string().contains(&format!(
+                    "requires graph schema version {FIRST_SCHEDULED_NOTE_VERSION}"
+                )),
+            "{error}"
+        );
+    }
 }
 
 /// A graph written against the schema before onejudge settings could pass
@@ -836,6 +916,121 @@ fn the_member_started_goldens_are_exactly_what_this_build_writes() {
 
     let read: Vec<MemberStarted> = serde_json::from_str(golden).expect("the golden reads");
     assert_eq!(read, golden_starts(), "the golden did not round-trip");
+}
+
+/// Every shape of the payloads scheduled notes and `reset_on` touch, keyed by
+/// kind, in the order the golden commits them: the shape each had before — a
+/// caller's note, a member's own firing, a `reset-timer` reset — then the ones
+/// a scheduled note's clock and a `reset_on` match publish.
+fn golden_clock_and_note_payloads() -> BTreeMap<&'static str, Vec<serde_json::Value>> {
+    let offer = "note-1792401955594017000-3399723-1";
+    let note = Some("progress-report".to_string());
+    let cause = ResetCause {
+        source: "pipeline".into(),
+        kind: "planner-surfaced".into(),
+        seq: 42,
+        stream: "pipeline-run-1".into(),
+    };
+    let admitted = |scheduled_note: Option<String>| {
+        serde_json::to_value(NoteAdmitted {
+            member: "monitor".into(),
+            addressee: Addressee::Supervisor,
+            offer: offer.into(),
+            scheduled_note,
+        })
+        .expect("serializes")
+    };
+    let withdrawn = |reason: WithdrawnReason, scheduled_note: Option<String>| {
+        serde_json::to_value(NoteWithdrawn {
+            member: "monitor".into(),
+            offer: offer.into(),
+            reason,
+            scheduled_note,
+        })
+        .expect("serializes")
+    };
+    let fired = |scheduled_note: Option<String>, undelivered: Option<UndeliveredReason>| {
+        serde_json::to_value(CronFired {
+            scheduled_note,
+            undelivered,
+        })
+        .expect("serializes")
+    };
+    let reset = |scheduled_note: Option<String>, cause: Option<ResetCause>| {
+        serde_json::to_value(CronReset {
+            scheduled_note,
+            cause,
+        })
+        .expect("serializes")
+    };
+    BTreeMap::from([
+        (
+            "note-admitted",
+            vec![admitted(None), admitted(note.clone())],
+        ),
+        (
+            "note-withdrawn",
+            vec![
+                withdrawn(WithdrawnReason::Expired, None),
+                withdrawn(WithdrawnReason::Withdrawn, None),
+                withdrawn(WithdrawnReason::Superseded, note.clone()),
+                withdrawn(WithdrawnReason::Reset, note.clone()),
+            ],
+        ),
+        (
+            "cron-fired",
+            vec![
+                fired(None, None),
+                fired(note.clone(), None),
+                fired(note.clone(), Some(UndeliveredReason::ConversationCompleted)),
+                fired(note.clone(), Some(UndeliveredReason::MemberSettled)),
+                fired(note.clone(), Some(UndeliveredReason::NoConversation)),
+            ],
+        ),
+        (
+            "cron-reset",
+            vec![
+                reset(None, None),
+                reset(None, Some(cause.clone())),
+                reset(note, Some(cause)),
+            ],
+        ),
+    ])
+}
+
+/// The clock and note payload golden is exactly what this build writes, and
+/// every shape in it reads back through the type that describes it.
+#[test]
+fn the_clock_and_note_payload_goldens_are_exactly_what_this_build_writes() {
+    let golden = include_str!("golden/clock-and-note-payloads.v2.json");
+    let written = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&golden_clock_and_note_payloads())
+            .expect("the payloads serialize")
+    );
+    assert_eq!(
+        written, golden,
+        "a clock or note payload's shape changed. If that was deliberate, bump its schema \
+         version and commit a new golden beside this one — do not overwrite it."
+    );
+    let read: BTreeMap<String, Vec<serde_json::Value>> =
+        serde_json::from_str(golden).expect("the golden reads");
+    for shape in &read["note-admitted"] {
+        serde_json::from_value::<NoteAdmitted>(shape.clone()).expect("a note-admitted");
+    }
+    for shape in &read["note-withdrawn"] {
+        serde_json::from_value::<NoteWithdrawn>(shape.clone()).expect("a note-withdrawn");
+    }
+    for shape in &read["cron-fired"] {
+        serde_json::from_value::<CronFired>(shape.clone()).expect("a cron-fired");
+    }
+    for shape in &read["cron-reset"] {
+        serde_json::from_value::<CronReset>(shape.clone()).expect("a cron-reset");
+    }
+    // The shapes that predate scheduled notes carry none of their keys.
+    assert_eq!(read["cron-fired"][0], serde_json::json!({}));
+    assert_eq!(read["cron-reset"][0], serde_json::json!({}));
+    assert!(read["note-admitted"][0].get("scheduled_note").is_none());
 }
 
 /// The four turn-control records this build writes, in the order the golden

@@ -60,7 +60,7 @@ example declares is not a second source: `tests/contract.rs`'s
 `the_readme_graph_uses_the_current_schema_version` holds this line to
 `config::SCHEMA_VERSION`, so the example cannot drift from the schema. -->
 ```yaml
-version: 10
+version: 11
 name: node-scope
 members:
   worker:
@@ -75,6 +75,12 @@ members:
         diff_base: origin/main
       - command: [./scripts/checks]
     mode: bypass
+    scheduled_notes:                  # timed notes into the conversation, each on its own clock
+      - id: progress-report
+        every: 1800
+        addressee: supervisor
+        text: Write the progress report now.
+        reset_on: { include: [ { source: pipeline, kind: planner-surfaced } ] }
 ```
 
 `run` streams one envelope per line. Exit `0` means every member settled, `1`
@@ -115,6 +121,17 @@ A supervisory member's first act becomes reading a prepared view rather than
 spending tool calls rediscovering state that already exists. A view that cannot
 be started, fails, prints nothing, or outruns its own bound leaves the turn
 happening without it and publishes a `pre-turn-context` saying which.
+
+A two-party member may declare `scheduled_notes`: each is offered into its one
+conversation on a clock of its own, for whichever turn is live to take at its
+end — never interrupting one — so a long-running supervisor is told something on
+a timer at the cost of one more message rather than a fresh paid turn. Any clock
+may declare `reset_on`, a filter in the stack's shared grammar, and restarts on
+a matching envelope: one the run itself publishes, or one another program
+appends to the stream `oneagentgraph run --follow-events PATH` follows. A
+schedule's `resettable: true` and the `reset-timer` verb still work exactly as
+before, and say on standard error that they are deprecated in favour of
+`reset_on`.
 
 When a member's turn goes the wrong way, `oneagentgraph interrupt RUN MEMBER
 --input "do this instead"` redirects it in place instead of discarding it the way
