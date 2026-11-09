@@ -1908,45 +1908,55 @@ fn a_group_has_ended_every_process_by_the_time_terminate_returns() {
     );
 }
 
-/// A descendant started while the group is being terminated is over too when
+/// A process that joins the group while it is being terminated is over too when
 /// terminate returns.
 ///
 /// [`Group::terminate_pausing`] holds open the moment after the group's
-/// membership is read and before its job is ended, which nothing else can, and a
-/// parked process starts a burst of descendants inside it. None of them is in any
-/// list taken before that moment, so only a wait on the job itself covers them.
+/// membership is read and before its job is ended, which nothing else can. The
+/// members start inside it, so no list taken before that moment names them, and
+/// each process's own handle says whether it had really ended.
 #[cfg(windows)]
 #[test]
-fn a_group_has_ended_descendants_started_during_terminate() {
+fn a_group_has_ended_processes_started_during_terminate() {
     use oneagentgraph::scratch::{Group, SCRATCH_ENV};
 
     let root = tempfile::tempdir().expect("a workspace");
-    let scratch = root.path().join("oneagentgraph-burst");
+    let scratch = root.path().join("oneagentgraph-joining");
     std::fs::create_dir_all(&scratch).expect("the scratch");
     let group = Group::open(&scratch).expect("a group");
-    let go = root.path().join("burst");
-    let done = root.path().join("burst.done");
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
 
-    let mut parked = std::process::Command::new(fake_harness());
-    parked
-        .args(["-p", &format!("fake:spawn-burst={}", go.display())])
-        .env(SCRATCH_ENV, &scratch)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let mut child = group.spawn(&mut parked).expect("the spawner starts");
-
+    let joined = std::sync::Mutex::new(Vec::new());
     let (reaped, left) = group.terminate_pausing(&|| {
-        std::fs::write(&go, "go").expect("start the burst");
-        until("the burst to have started", || done.exists());
+        for index in 0..cores * 8 {
+            let ticks = root.path().join(format!("joined-{index}.ticks"));
+            let mut parked = std::process::Command::new(fake_harness());
+            parked
+                .args(["-p", &format!("fake:hang fake:tick={}", ticks.display())])
+                .env(SCRATCH_ENV, &scratch)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            let child = group.spawn(&mut parked).expect("a member starts");
+            until("the member to tick", || tick_bytes_written(&ticks) > 0);
+            joined.lock().expect("the joined list").push(child);
+        }
     });
 
+    let mut joined = joined.into_inner().expect("the joined list");
+    let still_running = joined
+        .iter_mut()
+        .filter_map(|child| match child.try_wait().expect("waitable") {
+            Some(_) => None,
+            None => Some(child.id()),
+        })
+        .collect::<Vec<_>>();
     assert_eq!(
-        left,
+        still_running,
         Vec::<u32>::new(),
-        "terminate reported {reaped} process(es) and returned with these still in the group"
+        "terminate reported {reaped} process(es) and returned with these still running"
     );
-    child.wait().expect("the spawner is reaped");
+    assert_eq!(left, Vec::<u32>::new(), "the group's job still lists these");
 }
 
 /// A finished run leaves nothing of its own running: the reap on the way out is

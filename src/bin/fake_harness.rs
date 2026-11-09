@@ -61,7 +61,6 @@
 //! | `fake:murmur=<path>` | consume **no** CPU and publish only the agent's own finished `text` items, one every [`MURMUR_EVERY`], until `<path>` exists, then take the turn |
 //! | `fake:tick=<path>` | while hanging, append to `<path>` — a descendant's own proof it is still alive |
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
-//! | `fake:spawn-burst=<path>` | wait for `<path>`, start [`BURST`] parked descendants, write `<path>.done`, then hang |
 //! | `fake:supervisor-hold=<path>` | *judge side only:* write `<path>.entered` as the supervisor's turn begins, then block until `<path>` exists or an interrupt arrives |
 //! | `fake:next-turn=<path>` | *judge side only:* while `<path>` exists, continue the conversation with that file's contents as the next user turn, and consume it |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
@@ -386,12 +385,6 @@ fn main() -> std::process::ExitCode {
     // that it is already running when the supervisor decides to end the tree.
     if let Some(path) = sentinel_path(&prompt, "spawn-ticker") {
         spawn_ticker(&path);
-    }
-
-    // A launch that does nothing else: it exists to start descendants at the
-    // moment a journey holds a group's termination open.
-    if let Some(path) = sentinel_path(&prompt, "spawn-burst") {
-        spawn_burst(&path);
     }
 
     // Before every refusal branch, because what a journey counts here is
@@ -1211,30 +1204,6 @@ fn work_until_released(release: &std::path::Path) -> bool {
         std::hint::black_box(spun);
     }
     false
-}
-
-/// How many descendants [`spawn_burst`] starts: many more than a runner has
-/// cores, so they cannot all have died by the time anything finished waiting.
-const BURST: usize = 64;
-
-/// Wait for `go`, start [`BURST`] parked descendants, say so, and park.
-fn spawn_burst(go: &std::path::Path) -> ! {
-    while !go.exists() {
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    if let Ok(own) = std::env::current_exe() {
-        for _ in 0..BURST {
-            let _ = std::process::Command::new(&own)
-                .arg("-p")
-                .arg(format!("{MARK}hang"))
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn();
-        }
-    }
-    let _ = std::fs::write(format!("{}.done", go.display()), "done");
-    hang(None)
 }
 
 /// Leave a ticker behind that outlives this process.
