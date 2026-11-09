@@ -1,0 +1,55 @@
+name: tmp-windows-stress
+on: pull_request
+jobs:
+  stress:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults: {run: {shell: bash}}
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+      - uses: taiki-e/install-action@v2
+        with: {tool: "just,nextest"}
+      - run: just bootstrap
+      - name: "FINISHED TREE: each journey by name"
+        continue-on-error: true
+        run: cargo nextest run --locked --all-features --test e2e -E 'test(cron_firings_repeat) | test(a_chain_) | test(a_group_reaps_a_descendant) | test(a_group_has_ended_)' --no-fail-fast --status-level all
+      - name: "FINISHED TREE: repeated"
+        continue-on-error: true
+        run: cargo nextest run --locked --all-features --test e2e -E 'test(cron_firings_repeat) | test(a_chain_) | test(a_group_reaps_a_descendant) | test(a_group_has_ended_)' --stress-count 20 --no-fail-fast --status-level fail
+      - name: "RUN.RS FIX REMOVED: forced overlap, journey as committed"
+        continue-on-error: true
+        run: |
+          git diff 4571f21^ 4571f21 -- src/run.rs | git apply -R
+          git diff --stat
+          cargo nextest run --locked --all-features --test e2e -E 'test(a_chain_waits_for)' --stress-count 5 --no-fail-fast --status-level fail
+      - name: "RUN.RS FIX REMOVED: forced overlap, sequencing assertion lifted to reach the exit status"
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import re
+          p = "tests/e2e/scheduler.rs"
+          s = open(p, encoding="utf-8").read()
+          s, n = re.subn(r'    assert_eq!\(\n        count_of\(&events\(\), "publish", "member-started"\),\n        1,\n        "the chain opened a second turn[^\n]*\n    \);\n', "", s)
+          assert n == 1, n
+          open(p, "w", encoding="utf-8", newline="").write(s)
+          PY
+          cargo nextest run --locked --all-features --test e2e -E 'test(a_chain_waits_for)' --stress-count 5 --no-fail-fast --status-level fail
+          git checkout -- src tests
+      - name: "TERMINATE WAIT REMOVED: journeys"
+        continue-on-error: true
+        run: |
+          git checkout -- src tests
+          python - <<'PY'
+          p = "src/scratch.rs"
+          s = open(p, encoding="utf-8").read()
+          sig = "fn drain(job: HANDLE, pids: &[u32], between: &dyn Fn()) -> Result<(), String> {\n"
+          assert s.count(sig) == 1
+          s = s.replace(sig, sig + "        if pids.len() < usize::MAX {\n            between();\n            return terminate_job(job);\n        }\n")
+          open(p, "w", encoding="utf-8", newline="").write(s)
+          PY
+          git diff --stat
+          cargo nextest run --locked --all-features --test e2e -E 'test(a_group_has_ended_) | test(a_group_reaps_a_descendant)' --stress-count 20 --no-fail-fast --status-level fail
