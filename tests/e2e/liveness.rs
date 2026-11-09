@@ -1909,53 +1909,45 @@ fn a_group_has_ended_every_process_by_the_time_terminate_returns() {
 }
 
 /// A descendant started while the group is being terminated is over too when
-/// [`Group::terminate`] returns.
+/// terminate returns.
 ///
-/// A list of the group taken before the job is ended cannot name a process that
-/// starts just after it. These members never stop starting descendants, so some
-/// are always newer than any such list, and each round asks the job itself,
-/// through [`stamped_for`](oneagentgraph::scratch::stamped_for), what is left.
+/// [`Group::terminate_pausing`] holds open the moment after the group's
+/// membership is read and before its job is ended, which nothing else can, and a
+/// parked process starts a burst of descendants inside it. None of them is in any
+/// list taken before that moment, so only a wait on the job itself covers them.
 #[cfg(windows)]
 #[test]
 fn a_group_has_ended_descendants_started_during_terminate() {
     use oneagentgraph::scratch::{stamped_for, Group, SCRATCH_ENV};
 
     let root = tempfile::tempdir().expect("a workspace");
-    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
-    for round in 0..10 {
-        let scratch = root.path().join(format!("oneagentgraph-storm-{round}"));
-        std::fs::create_dir_all(&scratch).expect("the scratch");
-        let group = Group::open(&scratch).expect("a group");
-        let mut spawners = Vec::new();
-        for index in 0..cores * 2 {
-            let started = root.path().join(format!("storm-{round}-{index}.started"));
-            let mut storm = std::process::Command::new(fake_harness());
-            storm
-                .args(["-p", &format!("fake:spawn-storm={}", started.display())])
-                .env(SCRATCH_ENV, &scratch)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null());
-            let child = group.spawn(&mut storm).expect("a spawner starts");
-            spawners.push((child, started));
-        }
-        until("every spawner to have a descendant up", || {
-            spawners.iter().all(|(_, started)| started.exists())
-        });
+    let scratch = root.path().join("oneagentgraph-burst");
+    std::fs::create_dir_all(&scratch).expect("the scratch");
+    let group = Group::open(&scratch).expect("a group");
+    let go = root.path().join("burst");
+    let done = root.path().join("burst.done");
 
-        let reaped = group.terminate();
+    let mut parked = std::process::Command::new(fake_harness());
+    parked
+        .args(["-p", &format!("fake:spawn-burst={}", go.display())])
+        .env(SCRATCH_ENV, &scratch)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = group.spawn(&mut parked).expect("the spawner starts");
 
-        let left = stamped_for(&scratch.display().to_string());
-        assert_eq!(
-            left,
-            Vec::new(),
-            "round {round}: terminate reported {reaped} process(es) and returned with these \
-             still in the group"
-        );
-        for (child, _) in &mut spawners {
-            let _ = child.wait();
-        }
-    }
+    let reaped = group.terminate_pausing(&|| {
+        std::fs::write(&go, "go").expect("start the burst");
+        until("the burst to have started", || done.exists());
+    });
+
+    let left = stamped_for(&scratch.display().to_string());
+    assert_eq!(
+        left,
+        Vec::new(),
+        "terminate reported {reaped} process(es) and returned with these still in the group"
+    );
+    child.wait().expect("the spawner is reaped");
 }
 
 /// A finished run leaves nothing of its own running: the reap on the way out is

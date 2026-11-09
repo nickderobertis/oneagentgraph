@@ -400,6 +400,17 @@ impl Group {
     pub fn terminate(&self) -> usize {
         self.inner.terminate(&self.scratch)
     }
+
+    /// [`Group::terminate`], running `between` at the moment after the group's
+    /// membership is read and before its job is ended.
+    ///
+    /// Exists for the suite alone: a process that starts in that window is the
+    /// case the terminate has to cover, and nothing else can hold the window open.
+    #[cfg(all(windows, feature = "test-doubles"))]
+    #[must_use]
+    pub fn terminate_pausing(&self, between: &dyn Fn()) -> usize {
+        self.inner.terminate_pausing(between)
+    }
 }
 
 /// The identity a scratch directory's lock file records.
@@ -1629,7 +1640,7 @@ mod platform {
             // SAFETY: `job` is a live job handle this frame owns; failure is
             // reported through the return value and there is nothing to do
             // about a job that has already gone.
-            if end_and_wait(job.as_raw(), &pids) {
+            if end_and_wait(job.as_raw(), &pids, &|| ()) {
                 ended += targets
                     .iter()
                     .filter(|identity| {
@@ -1772,7 +1783,21 @@ mod platform {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             std::iter::once(&self.job)
                 .chain(adopted.iter())
-                .map(|job| end(job.as_raw()))
+                .map(|job| end(job.as_raw(), &|| ()))
+                .sum()
+        }
+
+        /// [`Group::terminate`](super::Group::terminate) with its window held
+        /// open, for the suite.
+        #[cfg(feature = "test-doubles")]
+        pub fn terminate_pausing(&self, between: &dyn Fn()) -> usize {
+            let adopted = self
+                .adopted
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::iter::once(&self.job)
+                .chain(adopted.iter())
+                .map(|job| end(job.as_raw(), between))
                 .sum()
         }
     }
@@ -1821,9 +1846,9 @@ mod platform {
     }
 
     /// End one job, and say how many processes it held.
-    fn end(job: HANDLE) -> usize {
+    fn end(job: HANDLE, between: &dyn Fn()) -> usize {
         let pids = pids_in(job);
-        if !end_and_wait(job, &pids) {
+        if !end_and_wait(job, &pids, between) {
             return 0;
         }
         pids.len()
@@ -1845,7 +1870,7 @@ mod platform {
     /// running. The handles are opened before the job is ended, while the pids
     /// still name these processes, and a process handle signals only once every
     /// one of its threads is gone.
-    fn end_and_wait(job: HANDLE, pids: &[u32]) -> bool {
+    fn end_and_wait(job: HANDLE, pids: &[u32], between: &dyn Fn()) -> bool {
         let dying: Vec<OwnedHandle> = pids
             .iter()
             .filter_map(|pid| {
@@ -1856,6 +1881,7 @@ mod platform {
                 (!handle.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
             })
             .collect();
+        between();
         // SAFETY: the job is a live handle the caller holds; failure is reported
         // through the return value.
         if unsafe { TerminateJobObject(job, 1) } == 0 {
