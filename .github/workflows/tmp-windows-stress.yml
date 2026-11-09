@@ -1,0 +1,26 @@
+name: tmp-windows-stress
+on: pull_request
+jobs:
+  stress:
+    runs-on: windows-latest
+    defaults: {run: {shell: bash}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+      - uses: taiki-e/install-action@v2
+        with: {tool: "just,nextest"}
+      - run: just bootstrap
+      - run: cargo nextest run --locked --all-features --test e2e --no-run
+      - name: drain journey, repeated
+        continue-on-error: true
+        run: cargo nextest run --locked --all-features --test e2e -E 'test(a_group_has_ended_every_process) | test(a_group_reaps_a_descendant)' --stress-count 40 --no-fail-fast --status-level fail
+      - name: cron journey under load
+        continue-on-error: true
+        run: |
+          for w in 1 2 3 4 5 6; do
+            cargo nextest run --locked --all-features --test e2e -E 'test(cron_firings_repeat)' --stress-count 80 --no-fail-fast --status-level fail > out$w.log 2>&1 &
+          done
+          wait
+          cat out*.log | grep -E "left:|right:|stderr:|settled:|^\s*\{|FULL|Summary|error:" | cut -c1-6000 | head -80

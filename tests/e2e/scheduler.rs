@@ -864,11 +864,12 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "stderr: {}\nsettled: {:?}",
+        "stderr: {}\nsettled: {:?}\nFULL {}",
         String::from_utf8_lossy(&output.stderr),
         events()
             .lines()
-            .rfind(|line| line.contains("graph-settled"))
+            .rfind(|line| line.contains("graph-settled")),
+        events().lines().filter(|l| l.contains("died")||l.contains("settled")).collect::<Vec<_>>().join("\nFULL ")
     );
 }
 

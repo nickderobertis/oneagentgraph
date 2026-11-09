@@ -1848,6 +1848,66 @@ fn a_group_reaps_a_descendant_whose_parent_has_already_exited() {
     );
 }
 
+/// When [`Group::terminate`] returns, the group's processes are over — not merely
+/// told to be.
+///
+/// `TerminateJobObject` only *starts* termination: each process still has to be
+/// scheduled to die, and one that is mid-`WriteFile` finishes the write first.
+/// The journey above caught that as one last tick landing after it sampled the
+/// file. A single ticker hits that window about once in a hundred runs; a job
+/// holding many times more processes than the machine has cores cannot all be
+/// dead by the time the call that only asked them to die comes back, so this one
+/// fails every run against a group that does not wait.
+///
+/// Windows only because the wait it pins is the job object's; a `SIGKILL` has no
+/// job to return from.
+#[cfg(windows)]
+#[test]
+fn a_group_has_ended_every_process_by_the_time_terminate_returns() {
+    use oneagentgraph::scratch::{Group, SCRATCH_ENV};
+
+    let root = tempfile::tempdir().expect("a workspace");
+    let scratch = root.path().join("oneagentgraph-draining");
+    std::fs::create_dir_all(&scratch).expect("the scratch");
+    let group = Group::open(&scratch).expect("a group");
+
+    let cores = std::thread::available_parallelism().map_or(4, std::num::NonZero::get);
+    let mut members = Vec::new();
+    for index in 0..cores * 8 {
+        let ticks = root.path().join(format!("member-{index}.ticks"));
+        let mut parked = std::process::Command::new(fake_harness());
+        parked
+            .args(["-p", &format!("fake:hang fake:tick={}", ticks.display())])
+            .env(SCRATCH_ENV, &scratch)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let child = group.spawn(&mut parked).expect("a member starts");
+        members.push((child, ticks));
+    }
+    // Every one really running, so none of them is ended by never having begun.
+    until("every member to tick", || {
+        members
+            .iter()
+            .all(|(_, ticks)| tick_bytes_written(ticks) > 0)
+    });
+
+    let reaped = group.terminate();
+
+    let still_running = members
+        .iter_mut()
+        .filter_map(|(child, _)| match child.try_wait().expect("waitable") {
+            Some(_) => None,
+            None => Some(child.id()),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        still_running,
+        Vec::<u32>::new(),
+        "terminate reported {reaped} process(es) and returned with these still running"
+    );
+}
+
 /// A finished run leaves nothing of its own running: the reap on the way out is
 /// what stops one run's leavings from polluting the next.
 #[test]
