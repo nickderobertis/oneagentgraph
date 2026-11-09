@@ -1880,7 +1880,7 @@ mod platform {
             // finish, and no seam this crate sanctions fakes Win32. The journeys
             // that matter are the ordinary ones,
             // a_group_has_ended_every_process_by_the_time_terminate_returns and
-            // a_group_has_ended_descendants_started_during_terminate.
+            // a_group_has_ended_processes_started_during_terminate.
             Err(reason) => {
                 eprintln!("oneagentgraph: a process group was not confirmed over: {reason}");
                 false
