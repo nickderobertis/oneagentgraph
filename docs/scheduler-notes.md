@@ -193,7 +193,9 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
   reads its subscription on its own tick: `run::cron` restarts the interval it
   is counting, `judge::Hold::hold` the hold in progress, and
   `scheduled::run_note_clock` its pending span — each publishing `cron-reset`
-  with `event::CronReset::cause`. A match while a turn is live waits in the
+  with `event::CronReset::cause`, through `resets::Restart::announce`, which
+  publishes first and counts after so a stalled thread cannot leave the next
+  firing less than a span past the `ts` it announced. A match while a turn is live waits in the
   subscription and is honoured at the next hold, as a reset file is.
 - **A scheduled note's clock** is `scheduled::spawn_note_clock`, started by
   `run::run` when the member's wave is reached, beside a deferred schedule's
@@ -222,8 +224,9 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
 - **Fixtures.** `oneagentgraph-fixture:note-clock-from=` (in `scheduled`) starts a
   member's note clocks only when its gate exists, and
   `oneagentgraph-fixture:hold-at-expiry=` (in `judge`) pauses a hold at the instant
-  its `every` elapses; both are `test-doubles` only, and
-  `tests/e2e/scheduled_notes.rs` is what drives them.
+  its `every` elapses; `oneagentgraph-fixture:stall-reset-announcement=` (in
+  `resets`) holds a clock between reading a reset and publishing `cron-reset`. All
+  three are `test-doubles` only, and `tests/e2e/` is what drives them.
 
 `resettable` and `run::Signal::Reset` are untouched apart from the warning:
 `config::GraphConfig::deprecations` is the one wording `validate` and `run` print,
