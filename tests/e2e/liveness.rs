@@ -1918,7 +1918,7 @@ fn a_group_has_ended_every_process_by_the_time_terminate_returns() {
 #[cfg(windows)]
 #[test]
 fn a_group_has_ended_descendants_started_during_terminate() {
-    use oneagentgraph::scratch::{stamped_for, Group, SCRATCH_ENV};
+    use oneagentgraph::scratch::{Group, SCRATCH_ENV};
 
     let root = tempfile::tempdir().expect("a workspace");
     let scratch = root.path().join("oneagentgraph-burst");
@@ -1936,15 +1936,14 @@ fn a_group_has_ended_descendants_started_during_terminate() {
         .stderr(std::process::Stdio::null());
     let mut child = group.spawn(&mut parked).expect("the spawner starts");
 
-    let reaped = group.terminate_pausing(&|| {
+    let (reaped, left) = group.terminate_pausing(&|| {
         std::fs::write(&go, "go").expect("start the burst");
         until("the burst to have started", || done.exists());
     });
 
-    let left = stamped_for(&scratch.display().to_string());
     assert_eq!(
         left,
-        Vec::new(),
+        Vec::<u32>::new(),
         "terminate reported {reaped} process(es) and returned with these still in the group"
     );
     child.wait().expect("the spawner is reaped");
