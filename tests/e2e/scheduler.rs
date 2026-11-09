@@ -864,17 +864,58 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
     assert_eq!(
         output.status.code(),
         Some(0),
-        "stderr: {}\nsettled: {:?}\nFULL {}",
+        "stderr: {}\nsettled: {:?}",
         String::from_utf8_lossy(&output.stderr),
         events()
             .lines()
-            .rfind(|line| line.contains("graph-settled")),
-        events()
-            .lines()
-            .filter(|l| l.contains("died") || l.contains("settled"))
-            .collect::<Vec<_>>()
-            .join("\nFULL ")
+            .rfind(|line| line.contains("graph-settled"))
     );
+}
+
+/// The events of the newest run under `workspace`.
+fn newest_events(workspace: &Workspace) -> String {
+    let mut paths: Vec<_> = std::fs::read_dir(workspace.state())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("events.jsonl"))
+        .collect();
+    paths.sort();
+    paths
+        .last()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+}
+
+/// How many envelopes of `kind` `member` has on `stream`.
+fn count_of(stream: &str, member: &str, kind: &str) -> usize {
+    stream
+        .lines()
+        .filter(|line| {
+            line.contains(&format!("\"member\":\"{member}\""))
+                && line.contains(&format!("\"kind\":\"{kind}\""))
+        })
+        .count()
+}
+
+/// [`scheduled_graph`]'s chain with `publish`'s turn held on a path of its own,
+/// so a journey decides when the wave's turn of it ends.
+///
+/// Version 3 because a oneharness member's `task` needs it; a schedule naming no
+/// `start_after` still fires at t=0 there.
+fn held_publish_graph(keeper: &std::path::Path, publish: &std::path::Path) -> String {
+    graph_with(
+        &scheduled_graph(
+            &fake_harness(),
+            &keeper.display().to_string(),
+            "./oneharness.toml",
+        )
+        .replacen("version: 2", "version: 3", 1),
+        &[(
+            "members.publish.task",
+            format!("fake:complete-now fake:hold={}", publish.display()),
+        )],
+    )
 }
 
 /// A firing's chain reaches a member the initial waves have not finished with.
@@ -894,40 +935,8 @@ fn a_chain_waits_for_a_turn_of_its_member_the_initial_waves_still_hold() {
     let workspace = Workspace::new();
     let release = workspace.at("keeper-release");
     let publish_release = workspace.at("publish-release");
-    workspace.graph(&graph_with(
-        concat!(
-            "version: 3\nname: scheduled-chain\n",
-            "env: {}\n",
-            "members:\n",
-            "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
-            "  ticker:\n    kind: oneharness\n",
-            "    schedule: {every: 3600}\n",
-            "    oneharness_config: ./oneharness.toml\n",
-            "  bridge:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
-            "    deps: [anchor]\n",
-            "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
-            "    persona: engineer\n",
-            "    agent:\n      oneharness_config: ./oneharness.toml\n",
-            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
-            "    mode: bypass\n    deps: [bridge]\n",
-            "  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
-            "    deps: [ticker]\n",
-            "  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
-            "    deps: [report]\n",
-        ),
-        &[
-            (FAKE_HARNESS_KEY, &fake_harness()),
-            (
-                "members.keeper.task",
-                &format!("fake:complete-now fake:hold={}", release.display()),
-            ),
-            (
-                "members.publish.task",
-                &format!("fake:complete-now fake:hold={}", publish_release.display()),
-            ),
-        ],
-    ));
-    let mut child = workspace.spawn_with(
+    workspace.graph(&held_publish_graph(&release, &publish_release));
+    let child = workspace.spawn_with(
         &[
             "run",
             "./graph.yaml",
@@ -938,63 +947,87 @@ fn a_chain_waits_for_a_turn_of_its_member_the_initial_waves_still_hold() {
         ],
         &[],
     );
-    let events = || {
-        let mut paths: Vec<_> = std::fs::read_dir(workspace.state())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.path().join("events.jsonl"))
-            .collect();
-        paths.sort();
-        paths
-            .last()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            .unwrap_or_default()
-    };
-    let started = |stream: &str, member: &str| {
-        stream
-            .lines()
-            .filter(|line| {
-                line.contains(&format!("\"member\":\"{member}\""))
-                    && line.contains("\"kind\":\"member-started\"")
-            })
-            .count()
-    };
+    let events = || newest_events(&workspace);
     until("the wave's publish to be running", || {
-        started(&events(), "publish") == 1 && events().contains("\"member\":\"keeper\"")
+        let stream = events();
+        count_of(&stream, "publish", "member-started") == 1
+            && stream.contains("\"member\":\"keeper\"")
     });
     let run = workspace.record();
     let id = run["run_id"].as_str().expect("run id");
     workspace.run(&["trigger", id, "ticker"]).expect_code(0);
-    // The chain has reached `publish` when `report` has settled a second time.
+    // The chain has reached `publish` once `report` has settled a second time,
+    // and the pause is what gives an overlapping turn the chance to appear.
     until("the chain to reach publish", || {
-        events()
-            .lines()
-            .filter(|line| {
-                line.contains("\"member\":\"report\"")
-                    && line.contains("\"kind\":\"member-settled\"")
-            })
-            .count()
-            >= 2
+        count_of(&events(), "report", "member-settled") >= 2
     });
     std::thread::sleep(Duration::from_millis(500));
-    if std::env::var("OVERLAP_PROBE").is_err() { assert_eq!(
-        started(&events(), "publish"),
+    assert_eq!(
+        count_of(&events(), "publish", "member-started"),
         1,
         "the chain opened a second turn of publish beside the one still running"
-    ); }
+    );
     std::fs::write(&publish_release, "go").expect("release publish");
     until("the chain's own publish to run", || {
-        started(&events(), "publish") == 2
+        count_of(&events(), "publish", "member-started") == 2
     });
     std::fs::write(&release, "release").expect("release keeper");
     let output = child.wait_with_output().expect("finished output");
     assert_eq!(
         output.status.code(),
         Some(0),
-        "stderr: {}\nFULL {}",
+        "stderr: {}\n{}",
         String::from_utf8_lossy(&output.stderr),
-        events().lines().filter(|l| l.contains("died")||l.contains("graph-settled")).map(|l| l.chars().take(900).collect::<String>()).collect::<Vec<_>>().join("\nFULL ")
+        events()
+    );
+}
+
+/// A chain turn that waited behind its member past the run's quiescence does not
+/// start: no chain starts once the last foreground member has finished.
+#[test]
+fn a_chain_turn_held_behind_its_member_past_quiescence_never_starts() {
+    let workspace = Workspace::new();
+    let release = workspace.at("keeper-release");
+    let publish_release = workspace.at("publish-release");
+    workspace.graph(&held_publish_graph(&release, &publish_release));
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: scheduled",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events = || newest_events(&workspace);
+    until("the wave's publish to be running", || {
+        let stream = events();
+        count_of(&stream, "publish", "member-started") == 1
+            && stream.contains("\"member\":\"keeper\"")
+    });
+    let run = workspace.record();
+    let id = run["run_id"].as_str().expect("run id");
+    workspace.run(&["trigger", id, "ticker"]).expect_code(0);
+    until("the chain to reach publish", || {
+        count_of(&events(), "report", "member-settled") >= 2
+    });
+    let quiescent = workspace.state().join(id).join("signals").join("quiescent");
+    std::fs::write(&release, "release").expect("release keeper");
+    until("the run to quiesce", || quiescent.exists());
+    std::fs::write(&publish_release, "go").expect("release publish");
+    let output = child.wait_with_output().expect("finished output");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        count_of(&events(), "publish", "member-started"),
+        1,
+        "a chain turn started after the run had quiesced"
     );
 }
 

@@ -1442,6 +1442,7 @@ fn run_announcing(
         &root,
     ));
     let (cron_tx, cron_rx) = mpsc::channel();
+    let turns = Arc::new(MemberTurns::new(graph.members.keys()));
     let successful_members = Arc::new(Mutex::new(BTreeSet::new()));
     let mut cron_threads = Vec::new();
     let mut failed = false;
@@ -1556,6 +1557,7 @@ fn run_announcing(
                 Arc::clone(&foreground_live),
                 cron_tx.clone(),
                 Arc::clone(&successful_members),
+                Arc::clone(&turns),
             ));
         }
         // Each member is counted finished *as it settles* rather than once the
@@ -1564,11 +1566,19 @@ fn run_announcing(
         // is a moment inside the wave when the last foreground member is a
         // sibling of it. A member the run keeps a clock for is not finished by
         // its initial turn; the clock counts itself down when it stops.
-        let outcomes = run_wave(&runnable, &invocations, &emitter, bounds, &mut |name| {
-            if !graph.is_background(name) && clocked(&graph.members[name]).is_none() {
-                foreground_live.finish();
-            }
-        });
+        let outcomes = run_wave(
+            &runnable,
+            &invocations,
+            &emitter,
+            bounds,
+            &turns,
+            None,
+            &mut |name| {
+                if !graph.is_background(name) && clocked(&graph.members[name]).is_none() {
+                    foreground_live.finish();
+                }
+            },
+        );
         for (name, outcome) in &outcomes {
             record.members.insert(name.clone(), describe(outcome));
             failed |= !outcome.is_success();
@@ -1598,6 +1608,7 @@ fn run_announcing(
                     Arc::clone(&foreground_live),
                     cron_tx.clone(),
                     Arc::clone(&successful_members),
+                    Arc::clone(&turns),
                 ));
             }
         }
@@ -1829,6 +1840,7 @@ fn spawn_cron(
     live: Arc<Foreground>,
     outcomes: mpsc::Sender<(String, Outcome)>,
     successful: Arc<Mutex<BTreeSet<String>>>,
+    turns: Arc<MemberTurns>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let (invocation, scratch) = &invocations[&name];
@@ -1862,6 +1874,7 @@ fn spawn_cron(
                     &outcomes,
                     &successful,
                     &live,
+                    &turns,
                 );
             },
         );
@@ -1913,7 +1926,8 @@ fn run_cron_chain(
     bounds: Bounds,
     outcomes: &mpsc::Sender<(String, Outcome)>,
     settled_successes: &Mutex<BTreeSet<String>>,
-    live: &Foreground,
+    live: &Arc<Foreground>,
+    turns: &Arc<MemberTurns>,
 ) {
     let Ok(waves) = ready_order(graph) else {
         return;
@@ -1942,12 +1956,45 @@ fn run_cron_chain(
             .collect();
         // A chain member was counted finished where it was skipped in the
         // initial waves, so nothing is counted here.
-        for (name, outcome) in run_wave(&runnable, invocations, emitter, bounds, &mut |_| {}) {
+        for (name, outcome) in run_wave(
+            &runnable,
+            invocations,
+            emitter,
+            bounds,
+            turns,
+            Some(live),
+            &mut |_| {},
+        ) {
             if outcome.is_success() {
                 successful.insert(name.clone());
             }
             let _ = outcomes.send((name, outcome));
         }
+    }
+}
+
+/// One lock per member, held for the length of each turn it takes.
+///
+/// A firing's chain and the initial waves run at the same time, so a trigger can
+/// reach a member through the chain while that member's turn from its own wave
+/// is still running. Two turns of one member share one scratch directory, and
+/// what supervises a member is built on owning that directory alone: on Windows
+/// the second turn's jobs are named from it, asks for a job already in use, and
+/// is refused with "Access is denied", which kills the member. So the later turn
+/// waits for the earlier one rather than running beside it.
+struct MemberTurns(BTreeMap<String, Mutex<()>>);
+
+impl MemberTurns {
+    fn new<'a>(members: impl Iterator<Item = &'a String>) -> Self {
+        Self(members.map(|name| (name.clone(), Mutex::new(()))).collect())
+    }
+
+    /// Wait for `member`'s turn, answering the guard that holds it — `None` for
+    /// a member this run was not built with, which nothing can contend for.
+    fn take(&self, member: &str) -> Option<std::sync::MutexGuard<'_, ()>> {
+        self.0
+            .get(member)
+            .map(|turn| turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
     }
 }
 
@@ -1957,11 +2004,18 @@ fn run_cron_chain(
 /// arrives, while its siblings may still be running — which is the moment a
 /// foreground member finishes, and the moment a paced sibling still in this
 /// wave has to be able to learn about.
+///
+/// `stop_when_quiet` is a chain's: a member that waited on [`MemberTurns`] past
+/// the run's quiescence has no turn left to take, because no chain starts once
+/// the last foreground member has finished. It reports no outcome, as a member
+/// the chain never reached does not. The initial waves pass `None`.
 fn run_wave(
     wave: &[String],
     invocations: &BTreeMap<String, (Invocation, PathBuf)>,
     emitter: &Emitter,
     bounds: Bounds,
+    turns: &Arc<MemberTurns>,
+    stop_when_quiet: Option<&Arc<Foreground>>,
     settled: &mut dyn FnMut(&str),
 ) -> Vec<(String, Outcome)> {
     let (tx, rx) = mpsc::channel();
@@ -1981,8 +2035,13 @@ fn run_wave(
             scratch.clone(),
             tx.clone(),
         );
+        let (turns, stop_when_quiet) = (Arc::clone(turns), stop_when_quiet.cloned());
         running += 1;
         std::thread::spawn(move || {
+            let _turn = turns.take(&name);
+            if stop_when_quiet.is_some_and(|live| live.quiet()) {
+                return;
+            }
             let outcome = member::run(&invocation, &member_emitter, bounds, &scratch);
             let _ = tx.send((name, outcome));
         });
