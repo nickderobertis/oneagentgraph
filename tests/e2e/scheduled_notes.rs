@@ -652,7 +652,7 @@ fn a_reset_on_match_withdraws_the_untaken_copy_and_the_next_firing_waits_a_full_
     let fired = note_fired(&events, NOTE);
     let waited = gap(reset[0], fired[1]);
     assert!(
-        (EVERY * 1000 - 50..EVERY * 1000 + 3000).contains(&waited),
+        (EVERY * 1000..EVERY * 1000 + 3000).contains(&waited),
         "the firing after the reset came {waited}ms after it, not a whole every of {EVERY}s"
     );
 }
@@ -1961,7 +1961,7 @@ fn a_reset_before_the_first_firing_restores_the_whole_first_span() {
     const START: i64 = 6;
     let near = |what: &str, waited: i64| {
         assert!(
-            (START * 1000 - 50..START * 1000 + 3000).contains(&waited),
+            (START * 1000..START * 1000 + 3000).contains(&waited),
             "{what} came {waited}ms after the reset, not the whole {START}s it still owed"
         );
     };
@@ -2228,7 +2228,7 @@ fn a_reset_on_match_during_a_single_sided_firing_restarts_the_next_interval() {
     );
     let waited = gap(resets[0], schedule_fired(&events, "ticker")[1]);
     assert!(
-        (EVERY * 1000 - 100..EVERY * 1000 + 3000).contains(&waited),
+        (EVERY * 1000..EVERY * 1000 + 3000).contains(&waited),
         "the next firing came {waited}ms after the reset, not a whole {EVERY}s"
     );
 }
