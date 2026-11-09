@@ -1629,7 +1629,7 @@ mod platform {
             // SAFETY: `job` is a live job handle this frame owns; failure is
             // reported through the return value and there is nothing to do
             // about a job that has already gone.
-            if unsafe { TerminateJobObject(job.as_raw(), 1) } != 0 {
+            if end_and_wait(job.as_raw(), &pids) {
                 ended += targets
                     .iter()
                     .filter(|identity| {
@@ -1823,12 +1823,61 @@ mod platform {
     /// End one job, and say how many processes it held.
     fn end(job: HANDLE) -> usize {
         let pids = pids_in(job);
-        // SAFETY: the job is one this group owns; failure is reported through
-        // the return value.
-        if unsafe { TerminateJobObject(job, 1) } == 0 {
+        if !end_and_wait(job, &pids) {
             return 0;
         }
         pids.len()
+    }
+
+    /// The longest [`end_and_wait`] waits for a terminated process to be over.
+    ///
+    /// Reached only by a process the kernel cannot finish — a thread stuck in a
+    /// driver — and a teardown that hung on one would lose the report it exists
+    /// to write. Nothing about an ordinary teardown spends it.
+    const END_BOUND_MS: u32 = 5_000;
+
+    /// Terminate `job` and return once `pids`, the processes it held, are over,
+    /// answering whether the job was terminated.
+    ///
+    /// `TerminateJobObject` only *begins* termination: it returns with each
+    /// process still to be scheduled and a thread mid-write still to finish, so
+    /// a caller that reads "ended" off its return reads a tree that is still
+    /// running. The handles are opened before the job is ended, while the pids
+    /// still name these processes, and a process handle signals only once every
+    /// one of its threads is gone.
+    fn end_and_wait(job: HANDLE, pids: &[u32]) -> bool {
+        let dying: Vec<OwnedHandle> = pids
+            .iter()
+            .filter_map(|pid| {
+                // SAFETY: `OpenProcess` takes a pid and reports failure with a
+                // null handle, which is a process already gone.
+                let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, *pid) };
+                // SAFETY: non-null is a handle this frame now solely owns.
+                (!handle.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
+            })
+            .collect();
+        // SAFETY: the job is a live handle the caller holds; failure is reported
+        // through the return value.
+        if unsafe { TerminateJobObject(job, 1) } == 0 {
+            return false;
+        }
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(END_BOUND_MS));
+        for process in dying {
+            let left = deadline
+                .saturating_duration_since(std::time::Instant::now())
+                .as_millis();
+            // SAFETY: `process` is a live handle owned by this frame. The answer
+            // is not read: a process past the bound is one nothing here can end
+            // any further, and the job has been terminated either way.
+            unsafe {
+                WaitForSingleObject(
+                    process.as_raw_handle() as HANDLE,
+                    u32::try_from(left).unwrap_or(END_BOUND_MS),
+                );
+            }
+        }
+        true
     }
 
     impl Drop for Group {
