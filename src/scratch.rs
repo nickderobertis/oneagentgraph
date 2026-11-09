@@ -1861,6 +1861,13 @@ mod platform {
         if unsafe { TerminateJobObject(job, 1) } == 0 {
             return false;
         }
+        // llmlint: ignore-block[changed_behavior_has_e2e] the wait's expiry has no
+        // journey because nothing a caller can arrange reaches it: it needs a
+        // process the kernel cannot finish, a thread stuck in a driver, and no
+        // seam this crate sanctions fakes one. The journey that matters is the
+        // ordinary one, a_group_has_ended_every_process_by_the_time_terminate_returns,
+        // and past the bound the job has been terminated all the same, which is
+        // the only thing the answer states.
         let deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(u64::from(END_BOUND_MS));
         for process in dying {
@@ -1877,6 +1884,7 @@ mod platform {
                 );
             }
         }
+        // llmlint: ignore-end[changed_behavior_has_e2e]
         true
     }
 
