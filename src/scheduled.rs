@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::config::ScheduledNote;
-use crate::event::{CronReset, Emitter, EventKind, WithdrawnReason};
+use crate::event::{CronReset, Emitter, WithdrawnReason};
 use crate::member::as_payload;
 use crate::note::{Fired, ScheduledNotes};
 use crate::resets::ResetOn;
@@ -99,6 +99,8 @@ pub(crate) struct NoteClock {
     pub(crate) member: crate::run::MemberName,
     /// Set once the graph is settling: every clock stops.
     pub(crate) over: Arc<AtomicBool>,
+    /// How this clock restarts on a match: published first, counted after.
+    pub(crate) restart: crate::resets::Restart,
     /// The suite's lever for *when* this clock starts counting — see
     /// [`NOTE_CLOCK_FROM`].
     #[cfg(feature = "test-doubles")]
@@ -171,9 +173,8 @@ fn run_note_clock(clock: &NoteClock) {
             return;
         }
         if let Some(cause) = clock.reset_on.as_ref().and_then(ResetOn::take) {
-            counting_since = Instant::now();
-            clock.emitter.emit(
-                EventKind::CronReset,
+            counting_since = clock.restart.announce(
+                &clock.emitter,
                 as_payload(&CronReset {
                     scheduled_note: Some(id.as_str().to_string()),
                     cause: Some(cause),

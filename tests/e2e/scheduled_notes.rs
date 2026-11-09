@@ -44,8 +44,8 @@ use crate::support::{
     FAKE_HARNESS_KEY,
 };
 use crate::two_party::{
-    base_without_done_when, gap, of, precedes, run_id, stream, turns_of, until_held, FAKE_JUDGE,
-    KEEP_GOING,
+    base_without_done_when, gap, of, precedes, publish_stalled_reset, run_id, stalling_reset,
+    stream, turns_of, until_held, FAKE_JUDGE, KEEP_GOING,
 };
 
 /// The id every journey's note is declared under.
@@ -608,13 +608,19 @@ fn a_reset_on_match_withdraws_the_untaken_copy_and_the_next_firing_waits_a_full_
     ));
     let followed = workspace.at("pipeline.jsonl");
     let gate = workspace.at("note-clock");
-    let child = launch(&workspace, &clocked(KEEP_GOING, &gate), Some(&followed));
+    let stall = workspace.at("reset-stall");
+    let child = launch(
+        &workspace,
+        &stalling_reset(&clocked(KEEP_GOING, &gate), &stall),
+        Some(&followed),
+    );
     until("the first worker turn to be live", || entered.exists());
     release(&gate);
     until("the first copy to be admitted", || {
         admitted_yet(&workspace, NOTE, 1)
     });
     append(&followed, &envelope(41, "pipeline", "planner-surfaced"));
+    publish_stalled_reset(&stall);
     until("the second firing after the reset", || {
         note_fired(&stream(&workspace), NOTE).len() >= 2
     });
@@ -2151,6 +2157,10 @@ fn a_reset_on_match_during_a_single_sided_firing_restarts_the_next_interval() {
     let workspace = Workspace::new();
     let (entered, hold) = (workspace.at("firing-entered"), workspace.at("firing-hold"));
     let keep_open = workspace.at("keeper-hold");
+    // Held for longer than a whole bound's slack between the clock reading the
+    // match and publishing it: the restart a consumer can see is `cron-reset`,
+    // and a slow publication must not eat the span it promises.
+    let stall = workspace.at("reset-stall");
     let schedule = format!("{{every: {EVERY}, start_after: 1, reset_on: {SURFACED}}}");
     let skeleton = format!(
         concat!(
@@ -2171,10 +2181,13 @@ fn a_reset_on_match_during_a_single_sided_firing_restarts_the_next_interval() {
             ),
             (
                 "members.ticker.task".to_string(),
-                format!(
-                    "fake:entered={} fake:hold={} write one status update",
-                    entered.display(),
-                    hold.display()
+                stalling_reset(
+                    &format!(
+                        "fake:entered={} fake:hold={} write one status update",
+                        entered.display(),
+                        hold.display()
+                    ),
+                    &stall,
                 ),
             ),
         ],
@@ -2193,6 +2206,7 @@ fn a_reset_on_match_during_a_single_sided_firing_restarts_the_next_interval() {
     );
 
     release(&hold);
+    publish_stalled_reset(&stall);
     until("the firing after the restarted interval", || {
         schedule_fired(&stream(&workspace), "ticker").len() >= 2
     });

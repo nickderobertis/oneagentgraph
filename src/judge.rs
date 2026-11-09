@@ -183,6 +183,8 @@ struct HoldState {
     /// stream and then stopped the run finds it set; cleared when the hold opens
     /// the next turn.
     holding: AtomicBool,
+    /// How a hold restarts: `cron-reset` published first, counted after.
+    restart: crate::resets::Restart,
     /// The suite's lever for the order the race used to lose: a hold that will
     /// not act on a stop until the supervisor has written this file on seeing
     /// the same stop. Read off the task by [`HOLD_STOP_UNTIL_SEEN`].
@@ -197,11 +199,10 @@ struct HoldState {
 
 impl HoldState {
     fn new(task: &str) -> Self {
-        #[cfg(not(feature = "test-doubles"))]
-        let _ = task;
         Self {
             ended: Mutex::new(None),
             holding: AtomicBool::new(false),
+            restart: crate::resets::Restart::of(task),
             #[cfg(feature = "test-doubles")]
             stop_seen: FixtureGate::parse(task, HOLD_STOP_UNTIL_SEEN).map(|gate| gate.gate),
             #[cfg(feature = "test-doubles")]
@@ -433,17 +434,15 @@ impl Hold {
             }
             if self.pace.resettable && reset.exists() {
                 let _ = std::fs::remove_file(&reset);
-                counting_since = Instant::now();
-                emitter.emit(EventKind::CronReset, serde_json::Map::new());
+                counting_since = self.state.restart.announce(emitter, serde_json::Map::new());
                 continue;
             }
             // The hold in progress, restarted by a match of the schedule's own
             // `reset_on` — the same restart a resettable reset is, naming the
             // envelope that caused it.
             if let Some(cause) = self.reset_on() {
-                counting_since = Instant::now();
-                emitter.emit(
-                    EventKind::CronReset,
+                counting_since = self.state.restart.announce(
+                    emitter,
                     as_payload(&crate::event::CronReset {
                         scheduled_note: None,
                         cause: Some(cause),

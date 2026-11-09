@@ -1507,6 +1507,12 @@ fn run_announcing(
                         signals: root.join(SIGNAL_DIR),
                         member: MemberName::parse(name)?,
                         over: Arc::clone(&over),
+                        restart: match &invocation.launch {
+                            invoke::Launch::Judge(launch) => {
+                                crate::resets::Restart::of(&launch.task)
+                            }
+                            invoke::Launch::Harness(_) => crate::resets::Restart::default(),
+                        },
                         #[cfg(feature = "test-doubles")]
                         from: match &invocation.launch {
                             invoke::Launch::Judge(launch) => crate::member::FixtureGate::parse(
@@ -2092,6 +2098,10 @@ fn cron(
     // The schedule's own `reset_on`, when it declares one — see
     // [`crate::resets`].
     let reset_on = crate::scheduled::of(scratch).and_then(|clocks| clocks.schedule_reset.clone());
+    let restart = crate::resets::Restart::of(match &invocation.launch {
+        invoke::Launch::Judge(launch) => &launch.task,
+        invoke::Launch::Harness(launch) => &launch.prompt,
+    });
     let mut last = None;
     // The interval this clock is currently counting down — `first_span` while it
     // owes the member a first turn, and the cadence after that
@@ -2119,16 +2129,14 @@ fn cron(
             // The wait in progress, restarted — so a reset before the first turn
             // restores the whole of `start_after` rather than quietly promoting
             // the member to its steady cadence.
-            counting_since = Instant::now();
-            emitter.emit(EventKind::CronReset, Map::new());
+            counting_since = restart.announce(emitter, Map::new());
             continue;
         }
         // The same restart, caused by a matching envelope rather than a file,
         // and naming the envelope.
         if let Some(cause) = reset_on.as_ref().and_then(crate::resets::ResetOn::take) {
-            counting_since = Instant::now();
-            emitter.emit(
-                EventKind::CronReset,
+            counting_since = restart.announce(
+                emitter,
                 member::as_payload(&crate::event::CronReset {
                     scheduled_note: None,
                     cause: Some(cause),
