@@ -306,6 +306,26 @@ fn delivered_turns(events: &[Value]) -> Vec<u64> {
         .collect()
 }
 
+/// For each supervisor's turn the judge was asked for, how many copies of the
+/// note addressed to `addressee` it was handed.
+fn note_copies_per_supervisor_frame(frames: &[Value], addressee: &str) -> Vec<usize> {
+    frames
+        .iter()
+        .filter(|frame| frame["op"] == "supervisor")
+        .map(|frame| {
+            frame["notes"].as_array().map_or(0, |notes| {
+                notes
+                    .iter()
+                    .filter(|handed| {
+                        handed["note"]["text"] == NOTE_TEXT
+                            && handed["note"]["addressee"] == addressee
+                    })
+                    .count()
+            })
+        })
+        .collect()
+}
+
 /// Where `event` sits in `events`.
 fn at(events: &[Value], event: &Value) -> usize {
     events
@@ -1451,8 +1471,8 @@ fn a_cancel_or_stop_stops_note_clocks_at_once() {
 /// party it addresses. Each addressee gets its own run: two clocks in one fire
 /// independently, so the turn the first note opens could end the conversation
 /// before the second one fires, and that firing would rightly be published as
-/// undelivered. Three turns, because a conversation at `max_turns` ends without
-/// a supervisor's turn, and the note has to reach a supervisor that decides.
+/// undelivered. Three turns, so the note lands mid-conversation and the supervisor
+/// that reads it is an ordinary one; the turn cap's own case is the journey below.
 #[test]
 fn notes_for_the_supervisor_and_for_both_are_admitted_and_delivered_once() {
     for addressee in ["supervisor", "both"] {
@@ -1493,22 +1513,70 @@ fn notes_for_the_supervisor_and_for_both_are_admitted_and_delivered_once() {
         // One supervisor's turn before the note and one after, each handed the
         // notes delivered so far.
         let frames = recorded_documents(&std::fs::read_to_string(&judged).unwrap_or_default());
-        let supervisor: Vec<usize> = frames
-            .iter()
-            .filter(|frame| frame["op"] == "supervisor")
-            .map(|frame| {
-                frame["notes"].as_array().map_or(0, |notes| {
-                    notes
-                        .iter()
-                        .filter(|handed| {
-                            handed["note"]["text"] == NOTE_TEXT
-                                && handed["note"]["addressee"] == addressee
-                        })
-                        .count()
-                })
-            })
-            .collect();
-        assert_eq!(supervisor, [0, 1], "{addressee}: {frames:#?}");
+        assert_eq!(
+            note_copies_per_supervisor_frame(&frames, addressee),
+            [0, 1],
+            "{addressee}: {frames:#?}"
+        );
+        if addressee == "both" {
+            let handed = std::fs::read_to_string(&prompts).unwrap_or_default();
+            assert_eq!(handed.matches(NOTE_TEXT).count(), 1, "{handed}");
+        }
+    }
+}
+
+/// A note for the supervisor that the conversation's last worker turn takes has
+/// been answered as delivered, and the turn cap must not cost the judge it: one
+/// closing supervisor's turn reads it, and no worker turn opens after that.
+#[test]
+fn a_note_for_the_supervisor_taken_by_the_last_worker_turn_reaches_one_closing_decision() {
+    for addressee in ["supervisor", "both"] {
+        let workspace = Workspace::new();
+        let prompts = workspace.at("agent-prompts");
+        let judged = workspace.at("judge-frames");
+        workspace.write(
+            "base.yaml",
+            &base_without_done_when(&format!("fake:record-prompt={}", prompts.display())),
+        );
+        let note = note_entry(addressee, 3600, 0, None)
+            .replace("addressee: worker", &format!("addressee: {addressee}"));
+        workspace.graph(&graph(Some("{every: 120, start_after: 0}"), 2, &note, ""));
+        let gate = workspace.at("note-clock");
+        let task = clocked(KEEP_GOING, &gate);
+        let dir = workspace.dir().display().to_string();
+        let record = judged.display().to_string();
+        let child = Launched(Some(workspace.spawn_with(
+            &["run", "./graph.yaml", "--task", &task, "--dir", &dir],
+            &[("FAKE_PROVIDER_RECORD", record.as_str())],
+        )));
+        until_held(&workspace, 1);
+        release(&gate);
+        let (code, stderr) = exit_of(child);
+        assert_eq!(code, Some(1), "{addressee}: {stderr}");
+
+        let events = stream(&workspace);
+        let ledger = Ledger::of(&events, addressee);
+        assert_eq!(ledger.admitted.len(), 1, "{addressee}: {events:#?}");
+        assert_eq!(ledger.admitted[0]["payload"]["addressee"], addressee);
+        assert_eq!(ledger.accepted.len(), 1, "{addressee}: {events:#?}");
+        assert!(ledger.withdrawn.is_empty(), "{addressee}");
+        assert_eq!(
+            delivered_turns(&events),
+            [2],
+            "the last worker turn is the one that took it: {addressee}: {events:#?}"
+        );
+        assert_eq!(
+            turns_of(&events, "worker", "assistant", "turn-started").len(),
+            2,
+            "the closing decision opened another worker turn: {addressee}: {events:#?}"
+        );
+
+        let frames = recorded_documents(&std::fs::read_to_string(&judged).unwrap_or_default());
+        assert_eq!(
+            note_copies_per_supervisor_frame(&frames, addressee),
+            [0, 1],
+            "{addressee}: {frames:#?}"
+        );
         if addressee == "both" {
             let handed = std::fs::read_to_string(&prompts).unwrap_or_default();
             assert_eq!(handed.matches(NOTE_TEXT).count(), 1, "{handed}");

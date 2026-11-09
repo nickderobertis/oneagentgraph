@@ -463,7 +463,12 @@ test-doubles = []
 # 0.22.0 brings worker_config: the worker layers its stamped config without
 # discovering project routing from the member worktree.
 # 0.22.3 is the release built on onemessagebus 0.10, the one bus this graph links.
-onejudge = { version = "0.22.3", features = ["cli"] }
+# 0.22.5 hands a note for the supervisor that the last worker turn took to one
+# closing supervisor's turn; below it the note is reported delivered and no judge
+# reads it. `tests/e2e/scheduled_notes.rs`'s
+# `a_note_for_the_supervisor_taken_by_the_last_worker_turn_reaches_one_closing_decision`
+# fails against 0.22.3.
+onejudge = { version = "0.22.5", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
