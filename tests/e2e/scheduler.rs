@@ -872,6 +872,163 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
     );
 }
 
+fn newest_events(workspace: &Workspace) -> String {
+    let mut paths: Vec<_> = std::fs::read_dir(workspace.state())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path().join("events.jsonl"))
+        .collect();
+    paths.sort();
+    paths
+        .last()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_default()
+}
+
+fn count_of(stream: &str, member: &str, kind: &str) -> usize {
+    stream
+        .lines()
+        .filter(|line| {
+            line.contains(&format!("\"member\":\"{member}\""))
+                && line.contains(&format!("\"kind\":\"{kind}\""))
+        })
+        .count()
+}
+
+/// [`scheduled_graph`]'s chain with `publish`'s turn held on a path of its own,
+/// so a journey decides when the wave's turn of it ends.
+///
+/// Version 3 because a oneharness member's `task` needs it; a schedule naming no
+/// `start_after` still fires at t=0 there.
+fn held_publish_graph(keeper: &std::path::Path, publish: &std::path::Path) -> String {
+    graph_with(
+        &scheduled_graph(
+            &fake_harness(),
+            &keeper.display().to_string(),
+            "./oneharness.toml",
+        )
+        .replacen("version: 2", "version: 3", 1),
+        &[(
+            "members.publish.task",
+            format!("fake:complete-now fake:hold={}", publish.display()),
+        )],
+    )
+}
+
+/// A firing's chain reaches a member the initial waves have not finished with.
+///
+/// The chain below a schedule and the waves after its first turn run at the same
+/// time: `publish` is in the wave `keeper` holds open, and a trigger can reach
+/// `publish` through the chain while that wave's own turn is still running. Those
+/// are two turns of one member over one scratch directory, and the member's
+/// supervision is built on owning that directory alone.
+///
+/// Forced here rather than raced for: the wave's `publish` holds until the
+/// journey has seen the chain arrive at it, which is the ordering a slow runner
+/// only sometimes produces. The chain's turn must wait its turn, so the run ends
+/// cleanly, and the second `publish` opens only after the first has settled.
+#[test]
+fn a_chain_waits_for_a_turn_of_its_member_the_initial_waves_still_hold() {
+    let workspace = Workspace::new();
+    let release = workspace.at("keeper-release");
+    let publish_release = workspace.at("publish-release");
+    workspace.graph(&held_publish_graph(&release, &publish_release));
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: scheduled",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events = || newest_events(&workspace);
+    until("the wave's publish to be running", || {
+        let stream = events();
+        count_of(&stream, "publish", "member-started") == 1
+            && stream.contains("\"member\":\"keeper\"")
+    });
+    let run = workspace.record();
+    let id = run["run_id"].as_str().expect("run id");
+    workspace.run(&["trigger", id, "ticker"]).expect_code(0);
+    // The chain has reached `publish` once `report` has settled a second time,
+    // and the pause is what gives an overlapping turn the chance to appear.
+    until("the chain to reach publish", || {
+        count_of(&events(), "report", "member-settled") >= 2
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        count_of(&events(), "publish", "member-started"),
+        1,
+        "the chain opened a second turn of publish beside the one still running"
+    );
+    std::fs::write(&publish_release, "go").expect("release publish");
+    until("the chain's own publish to run", || {
+        count_of(&events(), "publish", "member-started") == 2
+    });
+    std::fs::write(&release, "release").expect("release keeper");
+    let output = child.wait_with_output().expect("finished output");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        events()
+    );
+}
+
+/// A chain turn that waited behind its member past the run's quiescence does not
+/// start: no chain starts once the last foreground member has finished.
+#[test]
+fn a_chain_turn_held_behind_its_member_past_quiescence_never_starts() {
+    let workspace = Workspace::new();
+    let release = workspace.at("keeper-release");
+    let publish_release = workspace.at("publish-release");
+    workspace.graph(&held_publish_graph(&release, &publish_release));
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: scheduled",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events = || newest_events(&workspace);
+    until("the wave's publish to be running", || {
+        let stream = events();
+        count_of(&stream, "publish", "member-started") == 1
+            && stream.contains("\"member\":\"keeper\"")
+    });
+    let run = workspace.record();
+    let id = run["run_id"].as_str().expect("run id");
+    workspace.run(&["trigger", id, "ticker"]).expect_code(0);
+    until("the chain to reach publish", || {
+        count_of(&events(), "report", "member-settled") >= 2
+    });
+    let quiescent = workspace.state().join(id).join("signals").join("quiescent");
+    std::fs::write(&release, "release").expect("release keeper");
+    until("the run to quiesce", || quiescent.exists());
+    std::fs::write(&publish_release, "go").expect("release publish");
+    let output = child.wait_with_output().expect("finished output");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        count_of(&events(), "publish", "member-started"),
+        1,
+        "a chain turn started after the run had quiesced"
+    );
+}
+
 #[test]
 fn a_failed_downstream_member_suppresses_its_dependant_in_that_cron_iteration() {
     let workspace = Workspace::new();
