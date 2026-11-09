@@ -869,7 +869,132 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
         events()
             .lines()
             .rfind(|line| line.contains("graph-settled")),
-        events().lines().filter(|l| l.contains("died")||l.contains("settled")).collect::<Vec<_>>().join("\nFULL ")
+        events()
+            .lines()
+            .filter(|l| l.contains("died") || l.contains("settled"))
+            .collect::<Vec<_>>()
+            .join("\nFULL ")
+    );
+}
+
+/// A firing's chain reaches a member the initial waves have not finished with.
+///
+/// The chain below a schedule and the waves after its first turn run at the same
+/// time: `publish` is in the wave `keeper` holds open, and a trigger can reach
+/// `publish` through the chain while that wave's own turn is still running. Those
+/// are two turns of one member over one scratch directory, and the member's
+/// supervision is built on owning that directory alone.
+///
+/// Forced here rather than raced for: the wave's `publish` holds until the
+/// journey has seen the chain arrive at it, which is the ordering a slow runner
+/// only sometimes produces. The chain's turn must wait its turn, so the run ends
+/// cleanly, and the second `publish` opens only after the first has settled.
+#[test]
+fn a_chain_waits_for_a_turn_of_its_member_the_initial_waves_still_hold() {
+    let workspace = Workspace::new();
+    let release = workspace.at("keeper-release");
+    let publish_release = workspace.at("publish-release");
+    workspace.graph(&graph_with(
+        concat!(
+            "version: 3\nname: scheduled-chain\n",
+            "env: {}\n",
+            "members:\n",
+            "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  ticker:\n    kind: oneharness\n",
+            "    schedule: {every: 3600}\n",
+            "    oneharness_config: ./oneharness.toml\n",
+            "  bridge:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    deps: [anchor]\n",
+            "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
+            "    persona: engineer\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
+            "    mode: bypass\n    deps: [bridge]\n",
+            "  report:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    deps: [ticker]\n",
+            "  publish:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    deps: [report]\n",
+        ),
+        &[
+            (FAKE_HARNESS_KEY, &fake_harness()),
+            (
+                "members.keeper.task",
+                &format!("fake:complete-now fake:hold={}", release.display()),
+            ),
+            (
+                "members.publish.task",
+                &format!("fake:complete-now fake:hold={}", publish_release.display()),
+            ),
+        ],
+    ));
+    let mut child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            "fake:complete-now: scheduled",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events = || {
+        let mut paths: Vec<_> = std::fs::read_dir(workspace.state())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.path().join("events.jsonl"))
+            .collect();
+        paths.sort();
+        paths
+            .last()
+            .and_then(|path| std::fs::read_to_string(path).ok())
+            .unwrap_or_default()
+    };
+    let started = |stream: &str, member: &str| {
+        stream
+            .lines()
+            .filter(|line| {
+                line.contains(&format!("\"member\":\"{member}\""))
+                    && line.contains("\"kind\":\"member-started\"")
+            })
+            .count()
+    };
+    until("the wave's publish to be running", || {
+        started(&events(), "publish") == 1 && events().contains("\"member\":\"keeper\"")
+    });
+    let run = workspace.record();
+    let id = run["run_id"].as_str().expect("run id");
+    workspace.run(&["trigger", id, "ticker"]).expect_code(0);
+    // The chain has reached `publish` when `report` has settled a second time.
+    until("the chain to reach publish", || {
+        events()
+            .lines()
+            .filter(|line| {
+                line.contains("\"member\":\"report\"")
+                    && line.contains("\"kind\":\"member-settled\"")
+            })
+            .count()
+            >= 2
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    if std::env::var("OVERLAP_PROBE").is_err() { assert_eq!(
+        started(&events(), "publish"),
+        1,
+        "the chain opened a second turn of publish beside the one still running"
+    ); }
+    std::fs::write(&publish_release, "go").expect("release publish");
+    until("the chain's own publish to run", || {
+        started(&events(), "publish") == 2
+    });
+    std::fs::write(&release, "release").expect("release keeper");
+    let output = child.wait_with_output().expect("finished output");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}\nFULL {}",
+        String::from_utf8_lossy(&output.stderr),
+        events().lines().filter(|l| l.contains("died")||l.contains("graph-settled")).map(|l| l.chars().take(900).collect::<String>()).collect::<Vec<_>>().join("\nFULL ")
     );
 }
 

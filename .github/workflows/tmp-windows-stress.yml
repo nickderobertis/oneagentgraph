@@ -16,11 +16,7 @@ jobs:
       - name: drain journey, repeated
         continue-on-error: true
         run: cargo nextest run --locked --all-features --test e2e -E 'test(a_group_has_ended_every_process) | test(a_group_reaps_a_descendant)' --stress-count 40 --no-fail-fast --status-level fail
-      - name: cron journey under load
+      - name: overlap probe
         continue-on-error: true
-        run: |
-          for w in 1 2 3 4 5 6; do
-            cargo nextest run --locked --all-features --test e2e -E 'test(cron_firings_repeat)' --stress-count 80 --no-fail-fast --status-level fail > out$w.log 2>&1 &
-          done
-          wait
-          cat out*.log | grep -E "left:|right:|stderr:|settled:|^\s*\{|FULL|Summary|error:" | cut -c1-6000 | head -80
+        env: {OVERLAP_PROBE: "1"}
+        run: cargo nextest run --locked --all-features --test e2e -E 'test(a_chain_waits_for)' --stress-count 10 --no-fail-fast --status-level fail
