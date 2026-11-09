@@ -498,7 +498,6 @@ pub(crate) fn stalling_reset(task: &str, gate: &Path) -> String {
         gate.display()
     )
 }
-// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Let the reset held at `gate` be published, once it has stood unpublished for
 /// far longer than a clock's tick and any slack a span's bound allows.
@@ -511,6 +510,7 @@ pub(crate) fn publish_stalled_reset(gate: &Path) {
     std::thread::sleep(Duration::from_millis(800));
     std::fs::write(gate, "go").expect("a gate is writable");
 }
+// llmlint: ignore-end[tests_mirror_real_usage]
 
 /// Whether `earlier` precedes `later` on the stream.
 pub(crate) fn precedes(events: &[Value], earlier: &Value, later: &Value) -> bool {
