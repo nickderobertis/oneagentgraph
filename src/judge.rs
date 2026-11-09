@@ -263,9 +263,13 @@ const HOLD_AT_EXPIRY: &str = "oneagentgraph-fixture:hold-at-expiry=";
 /// `TurnClosed(User)`, while one that completes or settles publishes the close
 /// with no message between — so nothing is asked of the engine that it does not
 /// already say. A turn that closed on a completion is followed by no worker
-/// turn, and holding there would be a wait before nothing.
+/// turn, and holding there would be a wait before nothing. So is a supervisor
+/// turn at the turn cap: onejudge takes one only to hand the judge a note the last
+/// worker turn took, and it may speak there, but no worker turn follows it.
 struct Hold {
     pace: Pace,
+    /// The conversation's turn cap, as the plan the engine is driven from has it.
+    turn_cap: usize,
     /// The member's scratch, which is where the signal directory is derived from
     /// — the same derivation [`cancellation_requested`] makes.
     scratch: PathBuf,
@@ -286,9 +290,16 @@ struct Hold {
 }
 
 impl Hold {
-    fn new(pace: Pace, scratch: &Path, offered: Arc<AtomicU64>, state: Arc<HoldState>) -> Self {
+    fn new(
+        pace: Pace,
+        turn_cap: usize,
+        scratch: &Path,
+        offered: Arc<AtomicU64>,
+        state: Arc<HoldState>,
+    ) -> Self {
         Self {
             pace,
+            turn_cap,
             scratch: scratch.to_path_buf(),
             continued: false,
             offered,
@@ -319,7 +330,7 @@ impl Hold {
     fn opens_hold(&self, observation: &Observation<'_>) -> bool {
         self.continued
             && matches!(observation, Observation::TurnClosed(closed)
-                if matches!(closed.role, onejudge::Role::User))
+                if matches!(closed.role, onejudge::Role::User) && closed.turn < self.turn_cap)
     }
 
     /// Mark the conversation as at its hold, **before** the observation that
@@ -636,6 +647,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         endpoint.as_ref().map(crate::note::Endpoint::address),
     );
 
+    let turn_cap = plan.settings.max_turns as usize;
     let activity = Arc::new(AtomicU64::new(0));
     let abort = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
@@ -670,10 +682,15 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
         let mut deliveries = crate::note::Deliveries::of(relayed);
         let scheduled = scheduled.clone();
         // The pace this member's schedule asked for, if it asked for one.
-        let mut hold = launch
-            .pace
-            .clone()
-            .map(|pace| Hold::new(pace, scratch, Arc::clone(&offered), Arc::clone(&state)));
+        let mut hold = launch.pace.clone().map(|pace| {
+            Hold::new(
+                pace,
+                turn_cap,
+                scratch,
+                Arc::clone(&offered),
+                Arc::clone(&state),
+            )
+        });
         // The gate this run's task asked for, if it asked for one — see
         // [`hold_between_turns`], which is compiled only for the suite.
         #[cfg(feature = "test-doubles")]
