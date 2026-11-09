@@ -462,7 +462,8 @@ test-doubles = []
 # are resolvable at emission rather than reconstructed after settlement.
 # 0.22.0 brings worker_config: the worker layers its stamped config without
 # discovering project routing from the member worktree.
-onejudge = { version = "0.22.0", features = ["cli"] }
+# 0.22.3 is the release built on onemessagebus 0.10, the one bus this graph links.
+onejudge = { version = "0.22.3", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -497,7 +498,10 @@ onejudge = { version = "0.22.0", features = ["cli"] }
 # turn being announced takes at every held offer, so a note is attributed to the
 # turn that carried it when the engine answers it rather than when its caller
 # next waits — with withdrawal and expiry still atomic while it is untaken.
-onemessagebus = "0.9.3"
+#
+# 0.10.0 moves with `onejudge` and `onevcs`, which link it too: cargo treats 0.9
+# and 0.10 as incompatible, and two buses' types do not unify across the seams.
+onemessagebus = "0.10.0"
 # The payload structs are registered with the bus's schema registry as
 # `Message` types, which is a `schemars` derivation. The same major and feature
 # the bus itself takes, so the one `JsonSchema` trait is the bus's.
@@ -756,7 +760,8 @@ sha2 = "0.10"
 # needs nothing installed for the gate to run offline on every platform leg.
 # Dev-only — nothing here reaches a consumer's build. 0.51.0 reads its own YAML
 # through serde-saphyr, so the libyaml translation no longer reaches the dev graph.
-onevcs = "0.51.0"
+# 0.63.0 is the release built on onemessagebus 0.10, so the lockfile keeps one bus.
+onevcs = "0.63.0"
 
 [[test]]
 name = "e2e"
