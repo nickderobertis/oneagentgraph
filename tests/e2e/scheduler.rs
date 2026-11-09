@@ -872,7 +872,6 @@ fn cron_firings_repeat_the_chain_and_quiescence_finishes_it() {
     );
 }
 
-/// The events of the newest run under `workspace`.
 fn newest_events(workspace: &Workspace) -> String {
     let mut paths: Vec<_> = std::fs::read_dir(workspace.state())
         .into_iter()
@@ -887,7 +886,6 @@ fn newest_events(workspace: &Workspace) -> String {
         .unwrap_or_default()
 }
 
-/// How many envelopes of `kind` `member` has on `stream`.
 fn count_of(stream: &str, member: &str, kind: &str) -> usize {
     stream
         .lines()

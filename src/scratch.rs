@@ -1424,7 +1424,8 @@ mod platform {
 
     use sha2::{Digest as _, Sha256};
     use windows_sys::Win32::Foundation::{
-        CloseHandle, GetLastError, ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE, WAIT_TIMEOUT,
+        CloseHandle, GetLastError, ERROR_MORE_DATA, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows_sys::Win32::Storage::FileSystem::{
         LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, SYNCHRONIZE,
@@ -1433,9 +1434,10 @@ mod platform {
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicProcessIdList,
-        JobObjectExtendedLimitInformation, OpenJobObjectW, QueryInformationJobObject,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+        JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, OpenJobObjectW,
+        QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_BASIC_PROCESS_ID_LIST,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_QUERY, JOB_OBJECT_TERMINATE};
@@ -1860,64 +1862,140 @@ mod platform {
         pids.len()
     }
 
-    /// The longest [`end_and_wait`] waits for a terminated process to be over.
+    /// The longest [`end_and_wait`] waits for a terminated job to be over.
     ///
     /// Reached only by a process the kernel cannot finish — a thread stuck in a
     /// driver — and a teardown that hung on one would lose the report it exists
     /// to write. Nothing about an ordinary teardown spends it.
-    const END_BOUND_MS: u32 = 5_000;
+    const END_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
-    /// Terminate `job` and return once `pids`, the processes it held, are over,
-    /// answering whether the job was terminated.
+    /// Terminate `job` and return once it is over, answering whether it is.
     ///
-    /// `TerminateJobObject` only *begins* termination: it returns with each
-    /// process still to be scheduled and a thread mid-write still to finish, so
-    /// a caller that reads "ended" off its return reads a tree that is still
-    /// running. The handles are opened before the job is ended, while the pids
-    /// still name these processes, and a process handle signals only once every
-    /// one of its threads is gone.
+    /// A `false` has been said on stderr, and the caller counts nothing as ended.
     fn end_and_wait(job: HANDLE, pids: &[u32], between: &dyn Fn()) -> bool {
-        let dying: Vec<OwnedHandle> = pids
-            .iter()
-            .filter_map(|pid| {
-                // SAFETY: `OpenProcess` takes a pid and reports failure with a
-                // null handle, which is a process already gone.
-                let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, *pid) };
-                // SAFETY: non-null is a handle this frame now solely owns.
-                (!handle.is_null()).then(|| unsafe { OwnedHandle::from_raw_handle(handle.cast()) })
-            })
-            .collect();
+        match drain(job, pids, between) {
+            Ok(()) => true,
+            // llmlint: ignore-block[changed_behavior_has_e2e] every reason that
+            // reaches this arm is a kernel refusal or a process the kernel cannot
+            // finish, and no seam this crate sanctions fakes Win32. The journeys
+            // that matter are the ordinary ones,
+            // a_group_has_ended_every_process_by_the_time_terminate_returns and
+            // a_group_has_ended_descendants_started_during_terminate.
+            Err(reason) => {
+                eprintln!("oneagentgraph: a process group was not confirmed over: {reason}");
+                false
+            } // llmlint: ignore-end[changed_behavior_has_e2e]
+        }
+    }
+
+    /// End `job` and wait for it to be empty, then for its processes to be gone.
+    ///
+    /// `TerminateJobObject` only *begins* termination, so its return says nothing
+    /// about what is still running. The job's own count of active processes does,
+    /// and unlike a list taken beforehand it includes a descendant that started a
+    /// moment before the job was ended. It is what ends the wait.
+    ///
+    /// A job can read empty a moment before a process handle is signalled, so
+    /// handles are held as well: from `pids`, opened while those numbers still
+    /// name these processes, and from each listing made while waiting.
+    fn drain(job: HANDLE, pids: &[u32], between: &dyn Fn()) -> Result<(), String> {
+        let mut held = std::collections::BTreeMap::new();
+        hold(pids, &mut held);
         between();
+        // Read again, as near the end as it can be: the caller's list is older
+        // than anything that joined since, and the job's count below covers what
+        // still joins after this.
+        hold(&pids_in(job), &mut held);
+        terminate_job(job)?;
+        let deadline = std::time::Instant::now() + END_BOUND;
+        loop {
+            let active = active_processes(job)?;
+            if active == 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "{active} process(es) still active {}s after the job was ended",
+                    END_BOUND.as_secs()
+                ));
+            }
+            // Ended again, for a process that joined after the last call.
+            terminate_job(job)?;
+            hold(&pids_in(job), &mut held);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        for (pid, process) in held {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let millis = u32::try_from(left.as_millis()).unwrap_or(u32::MAX);
+            // SAFETY: `process` is a live handle owned by this frame.
+            match unsafe { WaitForSingleObject(process.as_raw_handle() as HANDLE, millis) } {
+                WAIT_OBJECT_0 => {}
+                WAIT_TIMEOUT => {
+                    return Err(format!("process {pid} had not exited inside the bound"));
+                }
+                _ => {
+                    return Err(format!(
+                        "waiting for process {pid} failed: {}",
+                        std::io::Error::last_os_error()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn hold(pids: &[u32], held: &mut std::collections::BTreeMap<u32, OwnedHandle>) {
+        for pid in pids {
+            if held.contains_key(pid) {
+                continue;
+            }
+            // SAFETY: `OpenProcess` takes a pid and reports failure with a null
+            // handle.
+            let handle = unsafe { OpenProcess(SYNCHRONIZE, 0, *pid) };
+            if handle.is_null() {
+                // Not proof the process has exited: only `ERROR_INVALID_PARAMETER`
+                // says the pid is gone, and a process this cannot open may be
+                // running. Either way it holds the job's active count up until
+                // it has ended, which is what [`drain`] waits on.
+                continue;
+            }
+            // SAFETY: non-null is a handle this frame now solely owns.
+            held.insert(*pid, unsafe { OwnedHandle::from_raw_handle(handle.cast()) });
+        }
+    }
+
+    fn terminate_job(job: HANDLE) -> Result<(), String> {
         // SAFETY: the job is a live handle the caller holds; failure is reported
         // through the return value.
         if unsafe { TerminateJobObject(job, 1) } == 0 {
-            return false;
+            return Err(format!(
+                "the job could not be ended: {}",
+                std::io::Error::last_os_error()
+            ));
         }
-        // llmlint: ignore-block[changed_behavior_has_e2e] the wait's expiry has no
-        // journey because nothing a caller can arrange reaches it: it needs a
-        // process the kernel cannot finish, a thread stuck in a driver, and no
-        // seam this crate sanctions fakes one. The journey that matters is the
-        // ordinary one, a_group_has_ended_every_process_by_the_time_terminate_returns,
-        // and past the bound the job has been terminated all the same, which is
-        // the only thing the answer states.
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(END_BOUND_MS));
-        for process in dying {
-            let left = deadline
-                .saturating_duration_since(std::time::Instant::now())
-                .as_millis();
-            // SAFETY: `process` is a live handle owned by this frame. The answer
-            // is not read: a process past the bound is one nothing here can end
-            // any further, and the job has been terminated either way.
-            unsafe {
-                WaitForSingleObject(
-                    process.as_raw_handle() as HANDLE,
-                    u32::try_from(left).unwrap_or(END_BOUND_MS),
-                );
-            }
+        Ok(())
+    }
+
+    fn active_processes(job: HANDLE) -> Result<u32, String> {
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is a live, zeroed structure of exactly the size passed
+        // alongside it, and the class named is the one it is read back as.
+        let queried = unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                std::ptr::from_mut(&mut info).cast(),
+                u32::try_from(std::mem::size_of_val(&info)).unwrap_or(u32::MAX),
+                std::ptr::null_mut(),
+            )
+        };
+        if queried == 0 {
+            return Err(format!(
+                "the job could not be queried: {}",
+                std::io::Error::last_os_error()
+            ));
         }
-        // llmlint: ignore-end[changed_behavior_has_e2e]
-        true
+        Ok(info.ActiveProcesses)
     }
 
     impl Drop for Group {
