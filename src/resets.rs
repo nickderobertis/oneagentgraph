@@ -26,9 +26,11 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::event::{Envelope, EventFilter, EventKind, ResetCause, SOURCE_WORD};
+use serde_json::{Map, Value};
+
+use crate::event::{Emitter, Envelope, EventFilter, EventKind, ResetCause, SOURCE_WORD};
 use crate::note::ScheduledNoteId;
 use crate::run::MemberName;
 
@@ -36,6 +38,57 @@ use crate::run::MemberName;
 /// run's own clock tick, so a followed match reaches a clock no later than a
 /// `reset-timer` would.
 const FOLLOW_TICK: Duration = Duration::from_millis(100);
+
+/// How a clock restarts: `cron-reset` published first, the count begun after.
+///
+/// The envelope's `ts` is the only instant anyone outside this process can see
+/// a restart at, and the next firing is promised a whole span after it. A clock
+/// that began counting and *then* published would, on a thread stalled between
+/// the two, stamp a `ts` later than the instant it counts from and fire less
+/// than a span after its own announcement. Every clock restarts through
+/// [`Restart::announce`] so that order is decided once.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Restart {
+    /// The suite's lever for a stall before publication — see
+    /// [`STALL_RESET_ANNOUNCEMENT`].
+    #[cfg(feature = "test-doubles")]
+    stall: Option<crate::member::FixtureGate>,
+}
+
+/// The marker a journey puts in a member's **task** to hold each of that
+/// member's clocks at the instant it has read a reset and not yet published
+/// `cron-reset`, until the gate it names exists: a thread descheduled there is
+/// otherwise the host's to arrange and no journey's. Compiled only under
+/// `test-doubles`, in the task for `crate::judge`'s `HOLD_BETWEEN_TURNS` reason.
+#[cfg(feature = "test-doubles")]
+const STALL_RESET_ANNOUNCEMENT: &str = "oneagentgraph-fixture:stall-reset-announcement=";
+
+impl Restart {
+    /// The restart of a clock whose member was given `task`, which is read for
+    /// the fixture above and nothing else.
+    pub(crate) fn of(task: &str) -> Self {
+        #[cfg(not(feature = "test-doubles"))]
+        let _ = task;
+        Self {
+            #[cfg(feature = "test-doubles")]
+            stall: crate::member::FixtureGate::parse(task, STALL_RESET_ANNOUNCEMENT),
+        }
+    }
+
+    /// Publish `cron-reset`, and answer the instant the clock counts from.
+    pub(crate) fn announce(&self, emitter: &Emitter, payload: Map<String, Value>) -> Instant {
+        #[cfg(feature = "test-doubles")]
+        if let Some(gate) = &self.stall {
+            let _ = std::fs::write(&gate.entered, "entered");
+            let deadline = Instant::now() + crate::member::FIXTURE_HOLD;
+            while !gate.gate.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        emitter.emit(EventKind::CronReset, payload);
+        Instant::now()
+    }
+}
 
 /// Every `reset_on` subscription of one run.
 #[derive(Default)]

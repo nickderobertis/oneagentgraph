@@ -485,6 +485,33 @@ pub(crate) fn gap(earlier: &Value, later: &Value) -> i64 {
     millis(later) - millis(earlier)
 }
 
+// llmlint: ignore-block[tests_mirror_real_usage] a stall between reading a reset
+// and publishing it is the host's to arrange and cannot be asked for from
+// outside; the clock, the emitter and the binary are all the real ones, and the
+// fixture only chooses how long the publication waits, on the lever every
+// fixture of this crate uses (`src/AGENTS.md`).
+/// `task`, with each of its member's clocks holding a read reset unpublished
+/// until `gate` exists.
+pub(crate) fn stalling_reset(task: &str, gate: &Path) -> String {
+    format!(
+        "{task} oneagentgraph-fixture:stall-reset-announcement={}",
+        gate.display()
+    )
+}
+
+/// Let the reset held at `gate` be published, once it has stood unpublished for
+/// far longer than a clock's tick and any slack a span's bound allows.
+pub(crate) fn publish_stalled_reset(gate: &Path) {
+    let entered = gate.with_file_name(format!(
+        "{}.entered",
+        gate.file_name().expect("a gate").to_string_lossy()
+    ));
+    until("a clock to hold its reset unpublished", || entered.exists());
+    std::thread::sleep(Duration::from_millis(800));
+    std::fs::write(gate, "go").expect("a gate is writable");
+}
+// llmlint: ignore-end[tests_mirror_real_usage]
+
 /// Whether `earlier` precedes `later` on the stream.
 pub(crate) fn precedes(events: &[Value], earlier: &Value, later: &Value) -> bool {
     let at = |wanted: &Value| events.iter().position(|event| event == wanted);
@@ -959,7 +986,8 @@ fn a_reset_restarts_a_hold_and_restores_an_initial_delay() {
     let workspace = Workspace::new();
     workspace.write("base.yaml", &base_without_done_when(""));
     workspace.graph(&held_worker(EVERY as u64, 2, "    background: false\n"));
-    let child = spawn(&workspace, KEEP_GOING, &[]);
+    let stall = workspace.at("reset-stall");
+    let child = spawn(&workspace, &stalling_reset(KEEP_GOING, &stall), &[]);
     until_held(&workspace, 1);
     let id = run_id(&workspace);
     // Into the hold, so a reset that merely let the original count run would
@@ -968,6 +996,7 @@ fn a_reset_restarts_a_hold_and_restores_an_initial_delay() {
     workspace
         .run(&["reset-timer", &id, "worker"])
         .expect_code(0);
+    publish_stalled_reset(&stall);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");
     let events = stream(&workspace);
