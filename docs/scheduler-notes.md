@@ -197,9 +197,11 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
   publishes first and counts after so a stalled thread cannot leave the next
   firing less than a span past the `ts` it announced. Every one of these clocks
   counts from a `clock::SpanStart`, whose span has elapsed only once it has on
-  both the monotonic clock and the wall clock `ts` is read on: a host slewing
-  its wall clock 1.3% slow otherwise fired a 4s span 3.9s after its `cron-reset`
-  by `ts`. A match while a turn is live waits in the
+  both the monotonic clock and the wall clock `ts` is read on: a host pulling
+  its wall clock back ~100 ms at a time otherwise fired a 4s span 3.9s after
+  its `cron-reset`, and a 1s note span 896 ms after the graph started, by `ts`.
+  A wall clock behind by more than a tenth of the span or a second, whichever
+  is more, was reset rather than corrected and is set aside. A match while a turn is live waits in the
   subscription and is honoured at the next hold, as a reset file is.
 - **A scheduled note's clock** is `scheduled::spawn_note_clock`, started by
   `run::run` when the member's wave is reached, beside a deferred schedule's

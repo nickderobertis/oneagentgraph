@@ -15,20 +15,21 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// A span is promised against an envelope's `ts` — a clock restarts by
 /// publishing `cron-reset` and fires a whole span after it — and `ts` is the
 /// wall clock, while the thread counting the span waits on the monotonic one.
-/// The two need not run at the same rate: a host whose wall clock is being
-/// slewed toward its time source runs it slower or faster than the monotonic
-/// clock, and one was measured running it 1.3% slow — 7894 ms of wall clock
-/// across 8000 ms of monotonic. A span counted on the monotonic clock alone
-/// then fires early by every `ts` a reader holds it to. So a span has elapsed
-/// only once it has elapsed on both: [`SpanStart::elapsed`] is the shorter of
-/// the two readings.
+/// The two need not agree: a host correcting its wall clock toward its time
+/// source pulls it back against the monotonic clock, and one was measured
+/// doing it in steps of about 100 ms — 7894 ms of wall clock across 8000 ms of
+/// monotonic, and a one-second span read as 896 ms. A span counted on the
+/// monotonic clock alone then fires early by every `ts` a reader holds it to.
+/// So a span has elapsed only once it has elapsed on both:
+/// [`SpanStart::elapsed`] is the shorter of the two readings.
 ///
-/// The wall reading is trusted only as a *rate* disagreement. A wall clock
-/// stepped backwards past the start, or one disagreeing with the monotonic
-/// clock by more than a [`MAX_SLEW`]th of the span, was stepped rather than
-/// slewed, and says nothing about how long this span has run — so it is set
-/// aside and the monotonic reading stands, rather than holding a clock for
-/// however long the step was.
+/// The wall reading is honoured only while the wall clock is behind by a
+/// correction's worth — at most a [`MAX_SLEW`]th of the span or
+/// [`MAX_CORRECTION`], whichever is more. Behind by more than that, it was
+/// stepped by somebody resetting the time rather than corrected, and says
+/// nothing about how long this span has run — so it is set aside and the
+/// monotonic reading stands, rather than holding a clock for however long the
+/// step was.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SpanStart {
     monotonic: Instant,
@@ -36,9 +37,15 @@ pub(crate) struct SpanStart {
 }
 
 /// The largest disagreement between the two clocks, as a fraction of the span
-/// (one tenth), still read as a slew: several times the 1.3% measured and far
-/// past the 500 ppm an NTP slew is bounded by, while still small beside a step.
+/// (one tenth), still read as a correction on a long span: several times the
+/// 1.3% measured and far past the 500 ppm an NTP slew is bounded by, while
+/// still small beside a step.
 const MAX_SLEW: u32 = 10;
+
+/// The largest disagreement still read as a correction on a short span, where
+/// a tenth of it is less than one correction step: ten times the ~100 ms step
+/// measured, and still a delay nobody waits on.
+const MAX_CORRECTION: Duration = Duration::from_secs(1);
 
 impl SpanStart {
     /// Now, on both clocks.
@@ -58,15 +65,23 @@ impl SpanStart {
     // firing against `ts` (`tests/e2e/scheduled_notes.rs`, `tests/e2e/two_party.rs`):
     // run under an LD_PRELOAD shim slowing `CLOCK_REALTIME` 1.3%, three of them
     // failed in every one of 8 rounds without this reading and all four passed in
-    // 8 of 8 with it. The branches themselves are pinned by
+    // 8 of 8 with it, and on the host whose wall clock stepped back ~100 ms at a
+    // time they pass where a one-second note span had read as 896 ms. The branches themselves are pinned by
     // `tests::a_span_has_run_only_as_long_as_the_slower_clock_says`.
     /// How long this span has run: the shorter of the two clocks' readings —
     /// see the type's docs for when the wall clock's is set aside.
     pub(crate) fn elapsed(&self) -> Duration {
         let monotonic = self.monotonic.elapsed();
-        match self.wall.elapsed() {
-            Ok(wall) if wall < monotonic && monotonic - wall <= monotonic / MAX_SLEW => wall,
-            _ => monotonic,
+        // How far the wall clock is behind the monotonic one: its own shortfall,
+        // or — pulled back past the start — the whole span and then some.
+        let behind = match self.wall.elapsed() {
+            Ok(wall) => monotonic.saturating_sub(wall),
+            Err(back) => monotonic + back.duration(),
+        };
+        if behind <= (monotonic / MAX_SLEW).max(MAX_CORRECTION) {
+            monotonic.saturating_sub(behind)
+        } else {
+            monotonic
         }
     }
     // llmlint: ignore-end[changed_behavior_has_e2e]
@@ -148,34 +163,52 @@ mod tests {
     #[test]
     fn a_span_has_run_only_as_long_as_the_slower_clock_says() {
         let now = SpanStart::now();
-        // A wall clock slewed 1.3% slow: 79 ms of it across the monotonic 80.
+        let ago = |millis: u64| {
+            now.monotonic
+                .checked_sub(Duration::from_millis(millis))
+                .expect("a host up longer than the spans below")
+        };
+        // A wall clock pulled back 1.3%: 79 ms of it across the monotonic 80.
         let slewed = SpanStart {
-            monotonic: now.monotonic - Duration::from_millis(80),
+            monotonic: ago(80),
             wall: now.wall - Duration::from_millis(79),
         };
         let elapsed = slewed.elapsed();
         assert!(elapsed < Duration::from_millis(80), "{elapsed:?}");
         assert!(elapsed >= Duration::from_millis(79), "{elapsed:?}");
+        // A ~100 ms correction across a one-second span — a tenth of it and
+        // more — is still honoured: the span has run as long as the wall says.
+        let corrected = SpanStart {
+            monotonic: ago(1000),
+            wall: now.wall - Duration::from_millis(896),
+        };
+        assert!(corrected.elapsed() < Duration::from_millis(900));
+        // Pulled back past the start by a correction: no time has run.
+        let behind_start = SpanStart {
+            monotonic: ago(80),
+            wall: now.wall + Duration::from_millis(20),
+        };
+        assert!(behind_start.elapsed() < Duration::from_millis(5));
         // A wall clock running fast says nothing shorter, so the monotonic
         // reading stands.
         let fast = SpanStart {
-            monotonic: now.monotonic - Duration::from_millis(80),
+            monotonic: ago(80),
             wall: now.wall - Duration::from_millis(90),
         };
         assert!(fast.elapsed() >= Duration::from_millis(80));
         assert!(fast.elapsed() < Duration::from_millis(90));
-        // A wall clock stepped back past the start, or by more than a slew
-        // could account for, was stepped: the monotonic reading stands.
+        // Stepped back an hour, or behind by more than a tenth of a long span
+        // and more than a correction: set aside, the monotonic reading stands.
         let stepped = SpanStart {
-            monotonic: now.monotonic - Duration::from_millis(80),
+            monotonic: ago(80),
             wall: now.wall + Duration::from_secs(3600),
         };
         assert!(stepped.elapsed() >= Duration::from_millis(80));
-        let far = SpanStart {
-            monotonic: now.monotonic - Duration::from_millis(80),
-            wall: now.wall - Duration::from_millis(20),
+        let reset = SpanStart {
+            monotonic: ago(20_000),
+            wall: now.wall - Duration::from_millis(15_000),
         };
-        assert!(far.elapsed() >= Duration::from_millis(80));
+        assert!(reset.elapsed() >= Duration::from_secs(20));
     }
 
     /// One instant per boundary the rendering can get wrong: the epoch itself, a
