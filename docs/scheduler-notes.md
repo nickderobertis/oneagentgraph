@@ -195,7 +195,11 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
   `scheduled::run_note_clock` its pending span — each publishing `cron-reset`
   with `event::CronReset::cause`, through `resets::Restart::announce`, which
   publishes first and counts after so a stalled thread cannot leave the next
-  firing less than a span past the `ts` it announced. A match while a turn is live waits in the
+  firing less than a span past the `ts` it announced. Every one of these clocks
+  counts from a `clock::SpanStart`, whose span has elapsed only once it has on
+  both the monotonic clock and the wall clock `ts` is read on: a host slewing
+  its wall clock 1.3% slow otherwise fired a 4s span 3.9s after its `cron-reset`
+  by `ts`. A match while a turn is live waits in the
   subscription and is honoured at the next hold, as a reset file is.
 - **A scheduled note's clock** is `scheduled::spawn_note_clock`, started by
   `run::run` when the member's wave is reached, beside a deferred schedule's

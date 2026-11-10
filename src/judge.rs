@@ -394,7 +394,7 @@ impl Hold {
         // Measured against `elapsed` rather than as a deadline, for the reason
         // `crate::run::cron` gives: the span comes from a document, and an
         // `Instant + Duration` panics on a sum the platform cannot represent.
-        let mut counting_since = Instant::now();
+        let mut counting_since = crate::clock::SpanStart::now();
         #[cfg(feature = "test-doubles")]
         let mut deaf_since = None;
         // A scheduled note admitted while the turn before was live and still

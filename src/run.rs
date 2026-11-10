@@ -19,7 +19,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -2171,7 +2171,7 @@ fn cron(
     // represent, while comparing two `Duration`s is total for every value a
     // document can carry.
     let mut interval = first_span;
-    let mut counting_since = Instant::now();
+    let mut counting_since = crate::clock::SpanStart::now();
     loop {
         std::thread::sleep(TICK);
         // Again, after the sleep: a cancel that landed while this member slept
@@ -2227,7 +2227,7 @@ fn cron(
             break;
         }
         interval = Duration::from_secs(schedule.every);
-        counting_since = Instant::now();
+        counting_since = crate::clock::SpanStart::now();
     }
     last
 }

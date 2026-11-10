@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::ScheduledNote;
 use crate::event::{CronReset, Emitter, WithdrawnReason};
@@ -166,7 +166,7 @@ fn run_note_clock(clock: &NoteClock) {
             }
         }
     }
-    let mut counting_since = Instant::now();
+    let mut counting_since = crate::clock::SpanStart::now();
     loop {
         std::thread::sleep(TICK);
         if clock.over.load(Ordering::SeqCst) || stop.exists() || own_stop.exists() {
@@ -192,6 +192,6 @@ fn run_note_clock(clock: &NoteClock) {
             return;
         }
         span = Duration::from_secs(clock.note.every);
-        counting_since = Instant::now();
+        counting_since = crate::clock::SpanStart::now();
     }
 }

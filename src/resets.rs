@@ -26,7 +26,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{Map, Value};
 
@@ -76,17 +76,21 @@ impl Restart {
     }
 
     /// Publish `cron-reset`, and answer the instant the clock counts from.
-    pub(crate) fn announce(&self, emitter: &Emitter, payload: Map<String, Value>) -> Instant {
+    pub(crate) fn announce(
+        &self,
+        emitter: &Emitter,
+        payload: Map<String, Value>,
+    ) -> crate::clock::SpanStart {
         #[cfg(feature = "test-doubles")]
         if let Some(gate) = &self.stall {
             let _ = std::fs::write(&gate.entered, "entered");
-            let deadline = Instant::now() + crate::member::FIXTURE_HOLD;
-            while !gate.gate.exists() && Instant::now() < deadline {
+            let deadline = std::time::Instant::now() + crate::member::FIXTURE_HOLD;
+            while !gate.gate.exists() && std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
             }
         }
         emitter.emit(EventKind::CronReset, payload);
-        Instant::now()
+        crate::clock::SpanStart::now()
     }
 }
 

@@ -27,8 +27,8 @@ use std::path::PathBuf;
 use serde_json::Value;
 
 use crate::support::{
-    as_env, bounds, fake_harness, fake_llmlint, graph_with, until, Run, Workspace, CHAIN,
-    FAKE_HARNESS_KEY,
+    as_env, bounds, fake_harness, fake_llmlint, fake_provider, graph_with, until, Run, Workspace,
+    CHAIN, FAKE_HARNESS_KEY,
 };
 
 /// The material every passing journey judges.
@@ -1242,6 +1242,86 @@ fn an_llmlint_judge_is_fingerprinted_from_its_members_own_directory() {
         fingerprint(&workspace, "scoped", &[]),
         base,
         "the member's own directory's config did not move its bar"
+    );
+}
+
+/// A command judge judges a judge-only input through the same driver as any
+/// other judge, and its command line is part of the bar; and the settle of an
+/// ordinary run of the same member carries no `bar_fingerprint` at all.
+#[test]
+fn a_command_judge_is_judged_only_too_and_an_ordinary_settle_names_no_bar() {
+    let workspace = workspace();
+    let record = workspace.at("provider.log");
+    let mut document: Value =
+        oneagentgraph::yaml::from_str(&workspace.read("graph.yaml")).expect("the graph");
+    document["env"]["FAKE_PROVIDER_RECORD"] = Value::String(record.display().to_string());
+    document["members"]["checked"] = serde_json::json!({
+        "kind": "onejudge",
+        "base_config": "./base.yaml",
+        "agent": {"oneharness_config": "./oneharness.toml"},
+        "judge": [{"command": [fake_provider()], "label": "checks"}],
+        "mode": "bypass",
+    });
+    workspace.graph(&oneagentgraph::yaml::to_string(&document).expect("serializes"));
+
+    let base = fingerprint(&workspace, "checked", &[]);
+    let run = judge(&workspace, "checked", "plan.md", &[]);
+    run.expect_code(0);
+    no_agent_side(&workspace, &run);
+    assert_eq!(
+        settled(&run)["bar_fingerprint"],
+        Value::String(base.clone())
+    );
+    let decided = run.of_kind("judge-decided");
+    assert_eq!(decided.len(), 1, "{:?}", run.kinds());
+    assert_eq!(decided[0]["payload"]["kind"], "command");
+    assert_eq!(decided[0]["payload"]["judge"], "checks");
+    let requests = std::fs::read_to_string(&record).expect("the command judge was asked");
+    assert!(
+        requests.contains("migrate the store in three verified steps"),
+        "{requests}"
+    );
+
+    // The command line is the judge: another argument is another bar.
+    document["members"]["checked"]["judge"][0]["command"] =
+        serde_json::json!([fake_provider(), "--strict"]);
+    workspace.graph(&oneagentgraph::yaml::to_string(&document).expect("serializes"));
+    assert_ne!(
+        fingerprint(&workspace, "checked", &[]),
+        base,
+        "the command line"
+    );
+
+    // An ordinary run of a member like it — agent and judge — settles with no
+    // bar fingerprint: that field is a judge-only run's alone.
+    let ordinary: Value = serde_json::json!({
+        "version": 11,
+        "name": "ordinary",
+        "env": document["env"].clone(),
+        "members": {"checked": {
+            "kind": "onejudge",
+            "base_config": "./base.yaml",
+            "agent": {"oneharness_config": "./oneharness.toml"},
+            "judge": [{"command": [fake_provider()], "label": "checks"}],
+            "mode": "bypass",
+        }},
+    });
+    workspace.write(
+        "ordinary.yaml",
+        &oneagentgraph::yaml::to_string(&ordinary).expect("serializes"),
+    );
+    let normal = workspace.run(&[
+        "run",
+        "./ordinary.yaml",
+        "--task",
+        "fake:complete-now: write the plan",
+    ]);
+    normal.expect_code(0);
+    let payload = settled(&normal);
+    assert_eq!(payload["completed"], Value::Bool(true), "{payload}");
+    assert!(
+        payload.get("bar_fingerprint").is_none(),
+        "an ordinary settle named a bar: {payload}"
     );
 }
 
