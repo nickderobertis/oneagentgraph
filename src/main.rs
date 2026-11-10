@@ -269,7 +269,7 @@ fn judge_only(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Err
                 "oneagentgraph: {} failed its bar ({}):",
                 request.target.member, judged.bar_fingerprint
             );
-            for finding in findings {
+            for finding in findings.iter() {
                 eprintln!("  - {finding}");
             }
         }

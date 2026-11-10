@@ -39,11 +39,22 @@ const REVIEWER_BAR: &str = "You are a senior reviewer's editor.";
 /// member's when `--persona` names that file.
 const STRICT_BAR: &str = "You audit plans for an operator who has been burned before.";
 
+/// The boolean eval the strict persona carries, which onejudge scores against a
+/// judge-only transcript as it does a normal run's.
+const STRICT_EVAL: &str = "the plan names a rollback for every step";
+
+/// onejudge's own task for judge-only material that names none — what a member
+/// with no `task` of its own is judged against when the run gives none either.
+const DEFAULT_TASK: &str = "Produce the material under review.";
+
 /// The graph every journey but the adoption one runs: `planner`, judged by a
 /// harness reviewer and an llmlint judge, and `auditor`, the same panel shape
 /// under a different persona and a different harness routing — so a journey
-/// can tell which member's routing a judgement went through. Each member's
-/// task names the file its supervisor prompts are recorded in.
+/// can tell which member's routing a judgement went through. Each of those
+/// two members' tasks names the file its supervisor prompts are recorded in.
+/// `solo` is judged by one bare harness side and carries no task of its own.
+/// The planner's llmlint judge passes extra `args`: a `--label`, which shapes
+/// a run, and a `--prompt-template`, which decides a verdict.
 fn workspace() -> Workspace {
     let workspace = Workspace::new();
     let log = |name: &str| toml_edit::Value::from(workspace.at(name).display().to_string());
@@ -69,6 +80,14 @@ fn workspace() -> Workspace {
         ),
     );
     workspace.write(
+        "solo.judge.toml",
+        &format!(
+            "{CHAIN}\n[env]\nFAKE_HARNESS_ATTEMPT_LOG = {}\n",
+            log("solo.log")
+        ),
+    );
+    workspace.write("prompt.md", "Judge each rule strictly.\n");
+    workspace.write(
         "llmlint.yml",
         concat!(
             "plugins:\n",
@@ -83,7 +102,15 @@ fn workspace() -> Workspace {
     );
     workspace.write(
         "strict.yaml",
-        &format!("name: strict\nuser:\n  persona: \"{STRICT_BAR}\"\n  done_when: \"every step is reversible\"\n"),
+        &format!(
+            concat!(
+                "name: strict\nuser:\n  persona: \"{bar}\"\n",
+                "  done_when: \"every step is reversible\"\n",
+                "evals:\n  - criterion: \"{eval}\"\n    kind: boolean\n",
+            ),
+            bar = STRICT_BAR,
+            eval = STRICT_EVAL
+        ),
     );
     workspace.write("plan.md", PLAN);
     workspace.graph(&graph(&workspace));
@@ -95,7 +122,7 @@ fn graph(workspace: &Workspace) -> String {
     let prompts = |name: &str| workspace.at(name).display().to_string();
     graph_with(
         concat!(
-            "version: 9\nname: review\n",
+            "version: 10\nname: review\n",
             "env:\n  FAKE_LLMLINT_VERDICT: rules\n",
             "members:\n",
             "  planner:\n    kind: onejudge\n",
@@ -104,6 +131,7 @@ fn graph(workspace: &Workspace) -> String {
             "    judge:\n",
             "      - oneharness_config: ./reviewer.judge.toml\n        label: reviewer\n",
             "      - kind: llmlint\n        config: ./llmlint.yml\n        bin: set below\n",
+            "        args: [--label, team=docs, --prompt-template, set below]\n",
             "    mode: bypass\n",
             "  auditor:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -111,6 +139,11 @@ fn graph(workspace: &Workspace) -> String {
             "    judge:\n",
             "      - oneharness_config: ./auditor.judge.toml\n        label: auditor\n",
             "      - kind: llmlint\n        config: ./llmlint.yml\n        bin: set below\n",
+            "    mode: bypass\n",
+            "  solo:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n      oneharness_config: ./solo.judge.toml\n",
             "    mode: bypass\n",
         ),
         &[
@@ -120,6 +153,10 @@ fn graph(workspace: &Workspace) -> String {
                 workspace.at("llmlint-argv.log").display().to_string(),
             ),
             ("members.planner.judge.1.bin".to_string(), fake_llmlint()),
+            (
+                "members.planner.judge.1.args.3".to_string(),
+                workspace.at("prompt.md").display().to_string(),
+            ),
             ("members.auditor.judge.1.bin".to_string(), fake_llmlint()),
             (
                 "members.planner.task".to_string(),
@@ -411,6 +448,26 @@ fn a_persona_file_named_on_the_command_line_is_the_bar_the_judge_applies() {
         "{rejected}"
     );
     assert_eq!(settled(&fail)["completed"], Value::Bool(false));
+
+    // The persona's own boolean eval is scored against the judge-only
+    // transcript, and one that fails is a finding on stderr like any judge's.
+    workspace.write(
+        "risky.md",
+        "The plan: drop the old table first. fake:should-fail\n",
+    );
+    let eval = judge(
+        &workspace,
+        "planner",
+        "risky.md",
+        &["--persona", "./strict.yaml"],
+    );
+    eval.expect_code(1);
+    let finding = eval
+        .stderr
+        .lines()
+        .find(|line| line.contains(&format!("{STRICT_EVAL}: ")))
+        .unwrap_or_else(|| panic!("no finding for the eval: {}", eval.stderr));
+    assert!(finding.contains("fake judge verdict"), "{finding}");
 }
 
 /// A member's judgement runs under that member's own harness routing: judging
@@ -539,6 +596,57 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
     );
     workspace.write("auditor.judge.toml", &auditor);
 
+    // Nor does anything of the member's own that is not its bar: the task it
+    // is judged under, its turn cap, or its agent side's routing.
+    let tasked = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--judge-only",
+        "--member",
+        "planner",
+        "--input",
+        "plan.md",
+        "--task",
+        "A different task over the same bar.",
+    ]);
+    tasked.expect_code(0);
+    assert_eq!(
+        settled(&tasked)["bar_fingerprint"],
+        Value::String(base.clone())
+    );
+    assert_eq!(
+        fingerprint(
+            &workspace,
+            "planner",
+            &["--set", "members.planner.max_turns=9"]
+        ),
+        base,
+        "the member's turn cap"
+    );
+    let agent = workspace.read("oneharness.toml");
+    workspace.write(
+        "oneharness.toml",
+        &format!("{agent}\n# the agent rerouted\n"),
+    );
+    assert_eq!(
+        fingerprint(&workspace, "planner", &[]),
+        base,
+        "agent routing"
+    );
+    workspace.write("oneharness.toml", &agent);
+
+    // The llmlint judge was fingerprinted with the options of its `args` that
+    // `fingerprint` lists, and not the ones it does not.
+    let probe = llmlint_argvs(&workspace)
+        .into_iter()
+        .find(|argv| argv[0] == "fingerprint" && argv.iter().all(|arg| arg != "--help"))
+        .expect("a fingerprint ran");
+    assert!(
+        probe.iter().any(|arg| arg == "--prompt-template"),
+        "{probe:?}"
+    );
+    assert!(probe.iter().all(|arg| arg != "--label"), "{probe:?}");
+
     // Everything the bar is made of does.
     let mut seen = vec![base.clone()];
     let mut moved = |what: &str, digest: String| {
@@ -589,14 +697,195 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
             moved("a rule in an included file", digest);
         },
     );
+    moved(
+        "the member's judge settings",
+        fingerprint(
+            &workspace,
+            "planner",
+            &[
+                "--set",
+                "members.planner.judge_settings.allow_writable_judges=true",
+            ],
+        ),
+    );
+    restore_then(&workspace, "prompt.md", "Cite the line.\n", |digest| {
+        moved("the llmlint judge's prompt template", digest);
+    });
+    restore_then(
+        &workspace,
+        "base.yaml",
+        "evals:\n  - criterion: tested\n",
+        |digest| {
+            moved("the base config's bar", digest);
+        },
+    );
     let config = workspace.read("llmlint.yml");
     workspace.write(
         "llmlint.yml",
         &config.replace("shared.yml@1", "shared.yml@2"),
     );
     moved("a plugin pin", fingerprint(&workspace, "planner", &[]));
+    // A config the llmlint judge's own `fingerprint` refuses is a bar that
+    // cannot be digested: exit 2, naming the judge entry, and no digest.
+    workspace.write("llmlint.yml", "plugins: ./not-a-list.yml\n");
+    let refused = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--judge-only",
+        "--member",
+        "planner",
+        "--bar-fingerprint",
+    ]);
+    refused.expect_code(2);
+    assert!(refused.stdout.is_empty(), "{}", refused.stdout);
+    assert!(
+        refused.stderr.contains("judge entry 2") && refused.stderr.contains("must be a list"),
+        "{}",
+        refused.stderr
+    );
     workspace.write("llmlint.yml", &config);
     assert_eq!(fingerprint(&workspace, "planner", &[]), base, "restored");
+}
+
+/// `--artifact` replaces the artifacts the bar names: the judge is pointed at
+/// the ones given, and not at the persona's own.
+#[test]
+fn artifacts_named_on_the_command_line_replace_the_bars_own() {
+    let workspace = workspace();
+    workspace.write("persona-notes.md", "Notes the persona points at.\n");
+    workspace.write("given-notes.md", "Notes the caller points at.\n");
+    workspace.write(
+        "noted.yaml",
+        "name: noted\nuser:\n  persona: \"Read the notes.\"\n  artifacts: [persona-notes.md]\n",
+    );
+    let pointed = judge(
+        &workspace,
+        "planner",
+        "plan.md",
+        &["--persona", "./noted.yaml"],
+    );
+    pointed.expect_code(0);
+    assert!(
+        workspace
+            .read("planner-prompts.log")
+            .contains("persona-notes.md"),
+        "the bar's own artifact never reached the judge"
+    );
+    std::fs::remove_file(workspace.at("planner-prompts.log")).expect("cleared");
+
+    let given = judge(
+        &workspace,
+        "planner",
+        "plan.md",
+        &["--persona", "./noted.yaml", "--artifact", "given-notes.md"],
+    );
+    given.expect_code(0);
+    let prompt = workspace.read("planner-prompts.log");
+    assert!(prompt.contains("given-notes.md"), "{prompt}");
+    assert!(!prompt.contains("persona-notes.md"), "{prompt}");
+}
+
+/// A member that depends on another, runs on a schedule and is background is
+/// still judged once, now: none of that belongs to one judgement of it, so its
+/// dependency never runs and its schedule's delay is never waited out.
+#[test]
+fn a_scheduled_dependent_member_is_judged_once_and_at_once() {
+    let workspace = workspace();
+    let mut document: Value =
+        oneagentgraph::yaml::from_str(&workspace.read("graph.yaml")).expect("the graph");
+    let planner = &mut document["members"]["planner"];
+    planner["deps"] = serde_json::json!(["auditor"]);
+    planner["schedule"] = serde_json::json!({"every": 3600, "start_after": 3600});
+    planner["background"] = Value::Bool(true);
+    workspace.graph(&oneagentgraph::yaml::to_string(&document).expect("serializes"));
+
+    let started = std::time::Instant::now();
+    let run = judge(&workspace, "planner", "plan.md", &[]);
+    run.expect_code(0);
+    assert!(started.elapsed() < std::time::Duration::from_secs(120));
+    assert_eq!(launches(&workspace, "reviewer.log"), 1);
+    assert_eq!(launches(&workspace, "auditor.log"), 0, "a dependency ran");
+    assert_eq!(run.of_kind("member-started").len(), 1, "{:?}", run.kinds());
+}
+
+/// A judge whose answer never parses as a decision reaches no judgement:
+/// onejudge settles on its `settled_reason`, and that is exit 2 with the reason
+/// on stderr — never a fail with nothing to act on.
+#[test]
+fn a_judge_whose_answer_never_parses_could_not_judge() {
+    let workspace = workspace();
+    workspace.write(
+        "evasive.md",
+        "The plan, which the judge will not decide on. fake:unparseable\n",
+    );
+    let run = judge(&workspace, "solo", "evasive.md", &[]);
+    run.expect_code(2);
+    assert!(run.stderr.contains("could not judge"), "{}", run.stderr);
+    assert!(run.stderr.contains("did not parse"), "{}", run.stderr);
+    let report = report(&run);
+    assert!(report["settled_reason"].is_string(), "{report}");
+}
+
+/// The run's own flags mean what they mean for `run`: the task the material
+/// answers (onejudge's default when neither the member nor the run names
+/// one), the directory, the labels, the filter, and the text rendering.
+#[test]
+fn a_judge_only_run_takes_the_runs_own_flags() {
+    let workspace = workspace();
+    let prompts = workspace.at("solo-prompts.log");
+    workspace.write(
+        "recorded.md",
+        &format!(
+            "The plan, step by step. fake:record-supervisor-prompt={}\n",
+            prompts.display()
+        ),
+    );
+
+    let filtered = judge(
+        &workspace,
+        "solo",
+        "recorded.md",
+        &[
+            "--label",
+            "review=pre-launch",
+            "--event-filter",
+            r#"{"include":[{"kind":"member-settled"}]}"#,
+        ],
+    );
+    filtered.expect_code(0);
+    assert_eq!(filtered.kinds(), ["member-settled"], "{}", filtered.stdout);
+    assert_eq!(
+        filtered.of_kind("member-settled")[0]["labels"]["review"],
+        "pre-launch"
+    );
+    let prompt = std::fs::read_to_string(&prompts).expect("the judge was prompted");
+    assert!(prompt.contains(DEFAULT_TASK), "{prompt}");
+    std::fs::remove_file(&prompts).expect("cleared");
+
+    let dir = workspace.dir().display().to_string();
+    let tasked = judge(
+        &workspace,
+        "solo",
+        "recorded.md",
+        &["--task", "Judge the migration plan.", "--dir", &dir],
+    );
+    tasked.expect_code(0);
+    let prompt = std::fs::read_to_string(&prompts).expect("the judge was prompted");
+    assert!(prompt.contains("Judge the migration plan."), "{prompt}");
+    assert!(!prompt.contains(DEFAULT_TASK), "{prompt}");
+    assert_eq!(
+        tasked.of_kind("member-started")[0]["payload"]["worktree"],
+        Value::String(dir)
+    );
+
+    let text = judge(&workspace, "solo", "plan.md", &["--output", "text"]);
+    text.expect_code(0);
+    assert!(!text.stdout.trim().is_empty());
+    // Rendered, not NDJSON: the first line is no envelope, and the settle is
+    // drawn by its kind.
+    let first = text.stdout.lines().next().unwrap_or_default();
+    assert!(serde_json::from_str::<Value>(first).is_err(), "{first}");
+    assert!(text.stdout.contains("member-settled"), "{}", text.stdout);
 }
 
 /// Append `addition` to `file`, hand the fingerprint that results to `check`,

@@ -30,10 +30,16 @@
 //! rule a real llmlint loads from a file its config includes. A plugin that is a
 //! URL is a pin the double never fetches.
 //!
+//! A config whose `plugins` is not a list of strings, or whose rule lacks a
+//! string `id` or `forbid`, is refused with exit `2` rather than read in part.
+//!
 //! `fingerprint` answers as the real one does, with one line of 64 lowercase hex
 //! characters: a SHA-256 over every `-c` config and every local plugin it
-//! reaches, by content — so editing a rule in an included file, or moving a pin,
-//! changes it. A config that cannot be read is exit `2`, as the real one refuses.
+//! reaches, by content, and over the `--model` and `--prompt-template` content
+//! it was given — so editing a rule in an included file, moving a pin, or
+//! editing the template changes it. A config that cannot be read is exit `2`, as
+//! the real one refuses. `fingerprint --help` lists the options it takes in
+//! clap's layout, as the real one does.
 //!
 //! `--version` answers on every verdict, because that is the probe onejudge
 //! makes before any turn: a `bin` that does not answer it is refused at plan
@@ -111,7 +117,11 @@ fn main() -> std::process::ExitCode {
         return std::process::ExitCode::SUCCESS;
     }
     if argv.first().map(String::as_str) == Some("fingerprint") {
-        return match fingerprint(&configs(&argv)) {
+        if argv.iter().any(|arg| arg == "--help") {
+            print!("{FINGERPRINT_HELP}");
+            return std::process::ExitCode::SUCCESS;
+        }
+        return match fingerprint(&argv) {
             Ok(digest) => {
                 println!("{digest}");
                 std::process::ExitCode::SUCCESS
@@ -217,47 +227,100 @@ fn configs(argv: &[String]) -> Vec<std::path::PathBuf> {
     found
 }
 
+/// One fixture config, read and checked: its local plugins, resolved against
+/// its own directory, and its rules as `(id, forbid)`.
+struct Fixture {
+    text: String,
+    plugins: Vec<std::path::PathBuf>,
+    rules: Vec<(String, String)>,
+}
+
+/// Read one fixture config, refusing a shape it does not document — a
+/// `plugins` that is not a list of strings, or a rule without a string `id`
+/// and `forbid` — rather than judging with part of it dropped.
+fn fixture(path: &std::path::Path) -> Result<Fixture, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| format!("cannot read config {}: {err}", path.display()))?;
+    let document: serde_json::Value = oneagentgraph::yaml::from_str(&text)
+        .map_err(|err| format!("{} is not YAML: {err}", path.display()))?;
+    let refused = |what: &str| format!("{}: {what}", path.display());
+    let list = |key: &str| match document.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(serde_json::Value::Array(items)) => Ok(items.clone()),
+        Some(_) => Err(refused(&format!("`{key}` must be a list"))),
+    };
+    let dir = path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let mut plugins = Vec::new();
+    for plugin in list("plugins")? {
+        let plugin = plugin
+            .as_str()
+            .ok_or_else(|| refused("every `plugins` entry must be a string"))?;
+        if !plugin.starts_with("https://") && !plugin.starts_with("http://") {
+            plugins.push(dir.join(plugin));
+        }
+    }
+    let mut rules = Vec::new();
+    for rule in list("rules")? {
+        let field = |name: &str| rule.get(name).and_then(serde_json::Value::as_str);
+        let (Some(id), Some(forbid)) = (field("id"), field("forbid")) else {
+            return Err(refused("every rule must carry a string `id` and `forbid`"));
+        };
+        rules.push((id.to_string(), forbid.to_string()));
+    }
+    Ok(Fixture {
+        text,
+        plugins,
+        rules,
+    })
+}
+
 /// Each config `configs` reaches — the named ones, then every local plugin
-/// they name, depth first — as `(path, content, document)`.
-fn reached(
-    configs: &[std::path::PathBuf],
-) -> Result<Vec<(std::path::PathBuf, String, serde_json::Value)>, String> {
+/// they name, depth first.
+fn reached(configs: &[std::path::PathBuf]) -> Result<Vec<Fixture>, String> {
     let mut out = Vec::new();
     let mut pending: Vec<std::path::PathBuf> = configs.iter().rev().cloned().collect();
     while let Some(path) = pending.pop() {
-        let text = std::fs::read_to_string(&path)
-            .map_err(|err| format!("cannot read config {}: {err}", path.display()))?;
-        let document: serde_json::Value = oneagentgraph::yaml::from_str(&text)
-            .map_err(|err| format!("{} is not YAML: {err}", path.display()))?;
-        let plugins: Vec<String> = document
-            .get("plugins")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(serde_json::Value::as_str)
-            .filter(|plugin| !plugin.starts_with("https://") && !plugin.starts_with("http://"))
-            .map(str::to_string)
-            .collect();
-        let dir = path
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_default();
-        for plugin in plugins.iter().rev() {
-            pending.push(dir.join(plugin));
-        }
-        out.push((path, text, document));
+        let read = fixture(&path)?;
+        pending.extend(read.plugins.iter().rev().cloned());
+        out.push(read);
     }
     Ok(out)
 }
 
-/// The double's `fingerprint`: SHA-256 over every config reached, by content.
-fn fingerprint(configs: &[std::path::PathBuf]) -> Result<String, String> {
+/// The value the argv gives `flag`, as `flag VALUE` or `flag=VALUE`.
+fn value_of<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    let prefix = format!("{flag}=");
+    argv.iter().enumerate().find_map(|(at, arg)| {
+        if arg == flag {
+            argv.get(at + 1).map(String::as_str)
+        } else {
+            arg.strip_prefix(&prefix)
+        }
+    })
+}
+
+/// The double's `fingerprint`: SHA-256 over every config reached, by content,
+/// and over the `--model` and the `--prompt-template`'s content when given.
+fn fingerprint(argv: &[String]) -> Result<String, String> {
     use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(b"fake-llmlint 0.4.3\n");
-    for (_, text, _) in reached(configs)? {
-        hasher.update(text.len().to_le_bytes());
-        hasher.update(text.as_bytes());
+    let mut take = |part: &str| {
+        hasher.update(part.len().to_le_bytes());
+        hasher.update(part.as_bytes());
+    };
+    for read in reached(&configs(argv))? {
+        take(&read.text);
+    }
+    take(value_of(argv, "--model").unwrap_or(""));
+    if let Some(template) = value_of(argv, "--prompt-template") {
+        take(
+            &std::fs::read_to_string(template)
+                .map_err(|err| format!("cannot read --prompt-template {template}: {err}"))?,
+        );
     }
     Ok(hasher
         .finalize()
@@ -266,23 +329,31 @@ fn fingerprint(configs: &[std::path::PathBuf]) -> Result<String, String> {
         .collect())
 }
 
+/// What `fingerprint --help` lists, in clap's own layout — the options the
+/// real `llmlint fingerprint` takes that this double reads.
+const FINGERPRINT_HELP: &str = "\
+Usage: llmlint fingerprint [OPTIONS]
+
+Options:
+  -c, --config <PATH>
+          llmlint config file(s); repeatable
+      --model <NAME>
+          Default judge model
+      --prompt-template <PATH>
+          Override the master prompt template with this file's contents
+      --cwd <DIR>
+          Directory to lint from
+  -h, --help
+          Print help
+";
+
 /// Each finding the fixture rules make against the files `lint` was handed —
 /// its trailing arguments that are files.
 fn broken_rules(argv: &[String]) -> Result<Vec<String>, String> {
-    let mut rules = Vec::new();
-    for (_, _, document) in reached(&configs(argv))? {
-        for rule in document
-            .get("rules")
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let field = |name: &str| rule.get(name).and_then(serde_json::Value::as_str);
-            if let (Some(id), Some(forbid)) = (field("id"), field("forbid")) {
-                rules.push((id.to_string(), forbid.to_string()));
-            }
-        }
-    }
+    let rules: Vec<(String, String)> = reached(&configs(argv))?
+        .into_iter()
+        .flat_map(|read| read.rules)
+        .collect();
     let mut broken = Vec::new();
     for file in argv.iter().rev().take_while(|arg| !arg.starts_with('-')) {
         let path = std::path::Path::new(file);

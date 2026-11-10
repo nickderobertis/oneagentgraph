@@ -136,17 +136,42 @@ impl std::fmt::Display for BarFingerprint {
 pub enum Verdict {
     /// The judge side declared the bar met.
     Pass,
-    /// The judge side judged the material and found it short. Never empty.
+    /// The judge side judged the material and found it short.
     Fail {
-        /// What each judge that did not pass said, then the finding the panel
-        /// handed back.
-        findings: Vec<String>,
+        /// What each judge that did not pass said, then each boolean verdict
+        /// that failed.
+        findings: Findings,
     },
     /// No judgement was reached.
     CouldNotJudge {
         /// Why.
         reason: String,
     },
+}
+
+/// What a [`Verdict::Fail`] found: at least one finding, by construction — a
+/// fail with nothing to act on is not one this module can produce, because it
+/// is read as [`Verdict::CouldNotJudge`] instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Findings {
+    first: String,
+    rest: Vec<String>,
+}
+
+impl Findings {
+    /// The findings, in order: `None` for an empty list, which is no fail.
+    fn of(mut all: Vec<String>) -> Option<Self> {
+        if all.is_empty() {
+            return None;
+        }
+        let first = all.remove(0);
+        Some(Self { first, rest: all })
+    }
+
+    /// Each finding, in the order the report holds them.
+    pub fn iter(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.first.as_str()).chain(self.rest.iter().map(String::as_str))
+    }
 }
 
 impl Verdict {
@@ -385,7 +410,10 @@ pub(crate) fn arm(
 /// judge, and neither could a member that died or never started.
 pub(crate) fn judged(outcome: Option<&Outcome>, scratch: &Path, bar: BarFingerprint) -> Judged {
     let path = scratch.join(REPORT_FILE);
-    let report: Option<Value> = std::fs::read_to_string(&path)
+    // onejudge's own `Report`, read back through its own type from the copy
+    // the settle stored: what a decision is called, and where a verdict's value
+    // lives, are onejudge's to say.
+    let report: Option<onejudge::Report> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok());
     let report_path = report.as_ref().map(|_| path);
@@ -414,69 +442,41 @@ pub(crate) fn judged(outcome: Option<&Outcome>, scratch: &Path, bar: BarFingerpr
 }
 
 /// The verdict on a report that did not meet its bar — see [`judged`].
-fn incomplete(report: Option<&Value>) -> Verdict {
+fn incomplete(report: Option<&onejudge::Report>) -> Verdict {
     let Some(report) = report else {
         return Verdict::CouldNotJudge {
             reason: "the judge side settled without a report".to_string(),
         };
     };
-    if let Some(why) = report.get("settled_reason").and_then(Value::as_str) {
+    if let Some(why) = &report.settled_reason {
         return Verdict::CouldNotJudge {
-            reason: why.to_string(),
+            reason: why.clone(),
         };
     }
-    let mut findings = Vec::new();
-    for turn in report
-        .get("judge_decisions")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        for decision in turn
-            .get("decisions")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            let said = |field: &str| decision.get(field).and_then(Value::as_str).unwrap_or("");
-            if said("decision") != "done" {
-                findings.push(format!(
-                    "{} ({}) {}: {}",
-                    said("judge"),
-                    said("kind"),
-                    said("decision"),
-                    said("reason").trim()
-                ));
-            }
-        }
-    }
-    for verdict in report
-        .get("verdicts")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
-        if verdict.pointer("/verdict/value") == Some(&Value::Bool(false)) {
-            findings.push(format!(
-                "{}: {}",
-                verdict
-                    .get("criterion")
-                    .and_then(Value::as_str)
-                    .unwrap_or("the bar"),
-                verdict
-                    .pointer("/verdict/reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .trim()
-            ));
-        }
-    }
-    if findings.is_empty() {
-        Verdict::CouldNotJudge {
+    let judges = report
+        .judge_decisions
+        .iter()
+        .flat_map(|turn| &turn.decisions)
+        .filter(|decision| decision.decision != onejudge::Decision::Done)
+        .map(|decision| {
+            format!(
+                "{} ({}) {}: {}",
+                decision.judge,
+                decision.kind,
+                decision.decision.as_str(),
+                decision.reason.trim()
+            )
+        });
+    let verdicts = report
+        .verdicts
+        .iter()
+        .filter(|named| named.verdict.value == onejudge::JudgeValue::Bool(false))
+        .map(|named| format!("{}: {}", named.criterion, named.verdict.reason.trim()));
+    match Findings::of(judges.chain(verdicts).collect()) {
+        Some(findings) => Verdict::Fail { findings },
+        None => Verdict::CouldNotJudge {
             reason: "the judge side neither passed the material nor said what it lacks".to_string(),
-        }
-    } else {
-        Verdict::Fail { findings }
+        },
     }
 }
 
@@ -536,27 +536,57 @@ fn canonicalize(value: Value) -> Value {
     }
 }
 
-/// The `llmlint lint` options `llmlint fingerprint` also takes, which decide a
-/// verdict — and so are forwarded from a judge's `args` — paired with whether
-/// each takes a value. The rest of a judge's `args` (`--label`, `--diff`, …)
-/// shape a run rather than its bar; they are in the digest as the graph wrote
-/// them, and `fingerprint` would refuse them.
-const FINGERPRINT_OPTIONS: [(&str, bool); 10] = [
-    ("-c", true),
-    ("--config", true),
-    ("--oneharness-config", true),
-    ("--oneharness-bin", true),
-    ("--model", true),
-    ("--prompt-template", true),
-    ("--schema-max-retries", true),
-    ("--max-prompt-chars", true),
-    ("--rationales", false),
-    ("--no-rationales", false),
-];
+/// The options `<bin> fingerprint` takes, as its own `--help` lists them —
+/// each spelling paired with whether it takes a value. llmlint is the one
+/// source of which options decide a verdict, so this asks it rather than
+/// keeping a copy of its command line here: an option a later llmlint adds is
+/// forwarded the day it ships, and one it drops is never passed to a release
+/// that would refuse it.
+fn fingerprint_options(
+    bin: &str,
+    env: &BTreeMap<String, String>,
+) -> Result<Vec<(String, bool)>, String> {
+    let output = std::process::Command::new(bin)
+        .args(["fingerprint", "--help"])
+        .env_clear()
+        .envs(env)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| format!("could not run `{bin} fingerprint --help`: {err}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`{bin} fingerprint --help` failed ({}): {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(options_listed(&String::from_utf8_lossy(&output.stdout)))
+}
 
-/// The part of a judge's `args` its `fingerprint` takes — see
-/// [`FINGERPRINT_OPTIONS`].
-fn fingerprint_args(args: &[String]) -> Vec<String> {
+/// Every option a clap `--help` lists: each line that opens with `-` names
+/// one or two spellings, and takes a value when a `<VALUE>` follows them.
+fn options_listed(help: &str) -> Vec<(String, bool)> {
+    let mut options = Vec::new();
+    for line in help.lines().map(str::trim_start) {
+        if !line.starts_with('-') {
+            continue;
+        }
+        let head = line.split("  ").next().unwrap_or(line);
+        let takes_value = head.contains('<');
+        for word in head.split_whitespace() {
+            let spelling = word.trim_end_matches(',');
+            if spelling.starts_with('-') && spelling != "-h" && spelling != "--help" {
+                options.push((spelling.to_string(), takes_value));
+            }
+        }
+    }
+    options
+}
+
+/// The part of a judge's `args` its `fingerprint` takes, by `options` — see
+/// [`fingerprint_options`]. The rest (`--label`, `--diff`, …) shape a run
+/// rather than its bar; they are in the digest as the graph wrote them.
+fn fingerprint_args(args: &[String], options: &[(String, bool)]) -> Vec<String> {
     let mut kept = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -564,8 +594,7 @@ fn fingerprint_args(args: &[String]) -> Vec<String> {
             Some((flag, _)) if flag.starts_with("--") => (flag, true),
             _ => (arg.as_str(), false),
         };
-        let Some((_, takes_value)) = FINGERPRINT_OPTIONS.iter().find(|(name, _)| *name == flag)
-        else {
+        let Some((_, takes_value)) = options.iter().find(|(name, _)| name == flag) else {
             continue;
         };
         kept.push(arg.clone());
@@ -586,6 +615,18 @@ fn llmlint_fingerprint(
     worktree: &Path,
     env: &BTreeMap<String, String>,
 ) -> Result<String, Error> {
+    let refused = |why: String| {
+        Error::InvalidConfig(format!(
+            "judge entry {}: `{} fingerprint` {why}",
+            probe.entry, probe.bin
+        ))
+    };
+    let options = if probe.args.is_empty() {
+        Vec::new()
+    } else {
+        fingerprint_options(&probe.bin, env)
+            .map_err(|why| Error::InvalidConfig(format!("judge entry {}: {why}", probe.entry)))?
+    };
     let mut command = std::process::Command::new(&probe.bin);
     command.arg("fingerprint");
     if let Some(config) = &probe.config {
@@ -594,16 +635,10 @@ fn llmlint_fingerprint(
     command
         .arg("--cwd")
         .arg(worktree)
-        .args(fingerprint_args(&probe.args))
+        .args(fingerprint_args(&probe.args, &options))
         .env_clear()
         .envs(env)
         .stdin(std::process::Stdio::null());
-    let refused = |why: String| {
-        Error::InvalidConfig(format!(
-            "judge entry {}: `{} fingerprint` {why}",
-            probe.entry, probe.bin
-        ))
-    };
     let output = command
         .output()
         .map_err(|err| refused(format!("could not run: {err}")))?;
@@ -627,15 +662,28 @@ fn llmlint_fingerprint(
 mod tests {
     use super::*;
 
+    /// The shape llmlint's own `fingerprint --help` lists its options in.
+    const HELP: &str = "Usage: llmlint fingerprint [OPTIONS]\n\nOptions:\n  -c, --config <PATH>\n          llmlint config file(s); repeatable\n      --model <NAME>\n          Default judge model\n      --rationales\n          Require a rationale\n  -h, --help\n          Print help\n";
+
     #[test]
-    fn only_the_options_fingerprint_takes_are_forwarded() {
+    fn the_options_forwarded_are_the_ones_fingerprint_lists() {
+        let options = options_listed(HELP);
+        assert_eq!(
+            options,
+            [
+                ("-c".to_string(), true),
+                ("--config".to_string(), true),
+                ("--model".to_string(), true),
+                ("--rationales".to_string(), false),
+            ]
+        );
         let args: Vec<String> = [
             "--label",
             "k=v",
             "--model",
             "m",
             "--no-ignore-check",
-            "--prompt-template=t.md",
+            "--config=x.yml",
             "--rationales",
             "-c",
             "extra.yml",
@@ -643,11 +691,11 @@ mod tests {
         .map(str::to_string)
         .to_vec();
         assert_eq!(
-            fingerprint_args(&args),
+            fingerprint_args(&args, &options),
             [
                 "--model",
                 "m",
-                "--prompt-template=t.md",
+                "--config=x.yml",
                 "--rationales",
                 "-c",
                 "extra.yml"
@@ -666,33 +714,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fail_needs_findings_and_a_settle_without_a_decision_could_not_judge() {
-        let unparsed =
-            serde_json::json!({"settled_reason": "the supervisor's answer did not parse"});
-        assert!(matches!(
-            incomplete(Some(&unparsed)),
-            Verdict::CouldNotJudge { .. }
-        ));
-        assert!(matches!(
-            incomplete(Some(&serde_json::json!({}))),
-            Verdict::CouldNotJudge { .. }
-        ));
+    fn a_fail_is_never_empty() {
+        assert!(Findings::of(Vec::new()).is_none());
+        let findings = Findings::of(vec!["a".into(), "b".into()]).expect("two findings");
+        assert_eq!(findings.iter().collect::<Vec<_>>(), ["a", "b"]);
         assert!(matches!(incomplete(None), Verdict::CouldNotJudge { .. }));
-        let failed = serde_json::json!({
-            "judge_decisions": [{"turn": 1, "decisions": [
-                {"judge": "reviewer", "kind": "oneharness", "decision": "done", "reason": "ok"},
-                {"judge": "llmlint", "kind": "llmlint", "decision": "continue", "reason": "no_todo\n"}
-            ]}],
-            "verdicts": [{"criterion": "the bar", "verdict": {"value": false, "reason": "short"}}]
-        });
-        assert_eq!(
-            incomplete(Some(&failed)),
-            Verdict::Fail {
-                findings: vec![
-                    "llmlint (llmlint) continue: no_todo".to_string(),
-                    "the bar: short".to_string()
-                ]
-            }
-        );
     }
 }
