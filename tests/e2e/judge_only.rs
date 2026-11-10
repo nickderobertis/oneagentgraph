@@ -40,8 +40,8 @@ const REVIEWER_BAR: &str = "You are a senior reviewer's editor.";
 /// member's when `--persona` names that file.
 const STRICT_BAR: &str = "You audit plans for an operator who has been burned before.";
 
-/// The boolean eval the strict persona carries, which onejudge scores against a
-/// judge-only transcript as it does a normal run's.
+/// The boolean eval the `evaluated` persona carries, which onejudge scores
+/// against a judge-only transcript as it does a normal run's.
 const STRICT_EVAL: &str = "the plan names a rollback for every step";
 
 /// onejudge's own task for judge-only material that names none — what a member
@@ -106,13 +106,13 @@ fn workspace() -> Workspace {
     workspace.write(
         "strict.yaml",
         &format!(
-            concat!(
-                "name: strict\nuser:\n  persona: \"{bar}\"\n",
-                "  done_when: \"every step is reversible\"\n",
-                "evals:\n  - criterion: \"{eval}\"\n    kind: boolean\n",
-            ),
-            bar = STRICT_BAR,
-            eval = STRICT_EVAL
+            "name: strict\nuser:\n  persona: \"{STRICT_BAR}\"\n  done_when: \"every step is reversible\"\n"
+        ),
+    );
+    workspace.write(
+        "evaluated.yaml",
+        &format!(
+            "name: evaluated\nuser:\n  persona: \"Check the rollbacks.\"\nevals:\n  - criterion: \"{STRICT_EVAL}\"\n    kind: boolean\n"
         ),
     );
     workspace.write("plan.md", PLAN);
@@ -135,7 +135,8 @@ fn graph(workspace: &Workspace) -> String {
             "      - oneharness_config: ./reviewer.judge.toml\n        label: reviewer\n",
             "      - kind: llmlint\n        config: ./llmlint.yml\n        bin: set below\n",
             "        args: [--label, team=docs, --prompt-template, set below,\n",
-            "               --model, judge-model, --rationales, set below]\n",
+            "               --model, judge-model, --rationales, set below,\n",
+            "               --strictness, high]\n",
             "    mode: bypass\n",
             "  auditor:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -457,17 +458,19 @@ fn a_persona_file_named_on_the_command_line_is_the_bar_the_judge_applies() {
     );
     assert_eq!(settled(&fail)["completed"], Value::Bool(false));
 
-    // The persona's own boolean eval is scored against the judge-only
+    // A persona's own boolean eval is scored against the judge-only
     // transcript, and one that fails is a finding on stderr like any judge's.
+    // On `solo`, whose one harness judge scores it: an llmlint judge would lint
+    // the worktree for an eval, which the `rules` fixture does not.
     workspace.write(
         "risky.md",
         "The plan: drop the old table first. fake:should-fail\n",
     );
     let eval = judge(
         &workspace,
-        "planner",
+        "solo",
         "risky.md",
-        &["--persona", "./strict.yaml"],
+        &["--persona", "./evaluated.yaml"],
     );
     eval.expect_code(1);
     let finding = eval
@@ -796,6 +799,69 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
         "{}",
         garbled.stderr
     );
+    // Which args reach `fingerprint` follows its help as listed: one a later
+    // llmlint lists is forwarded, one it does not is not, and a help that
+    // fails, lists nothing, or cannot be run at all is a bar not digested.
+    let probes = || llmlint_argvs(&workspace).len();
+    let before = probes();
+    fingerprint(
+        &workspace,
+        "planner",
+        &["--set", "env.FAKE_LLMLINT_FINGERPRINT=help-wider"],
+    );
+    let wider = llmlint_argvs(&workspace)
+        .into_iter()
+        .skip(before)
+        .find(|argv| argv[0] == "fingerprint" && argv.iter().all(|arg| arg != "--help"))
+        .expect("a fingerprint ran");
+    assert!(
+        wider
+            .windows(2)
+            .any(|pair| pair == ["--strictness", "high"]),
+        "{wider:?}"
+    );
+    assert!(
+        !probe.iter().any(|arg| arg == "--strictness"),
+        "forwarded an option the help does not list: {probe:?}"
+    );
+    for (knob, says) in [
+        ("help-fails", "fingerprint --help` failed"),
+        ("help-blank", "listed no option"),
+    ] {
+        let refused = workspace.run(&[
+            "run",
+            "./graph.yaml",
+            "--judge-only",
+            "--member",
+            "planner",
+            "--bar-fingerprint",
+            "--set",
+            &format!("env.FAKE_LLMLINT_FINGERPRINT={knob}"),
+        ]);
+        refused.expect_code(2);
+        assert!(refused.stdout.is_empty(), "{knob}: {}", refused.stdout);
+        assert!(refused.stderr.contains(says), "{knob}: {}", refused.stderr);
+    }
+    let unspawnable = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--judge-only",
+        "--member",
+        "planner",
+        "--bar-fingerprint",
+        "--set",
+        &format!(
+            "members.planner.judge.1.bin={}",
+            workspace.unreachable_harness()
+        ),
+    ]);
+    unspawnable.expect_code(2);
+    assert!(
+        unspawnable.stderr.contains("could not run"),
+        "{}",
+        unspawnable.stderr
+    );
+
     workspace.write("llmlint.yml", "plugins: ./not-a-list.yml\n");
     let refused = workspace.run(&[
         "run",

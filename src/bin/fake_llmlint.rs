@@ -23,7 +23,10 @@
 //! | `FAKE_LLMLINT_VERDICT` | `pass` (default): exit `0` on a summary line; `fail`: exit `1` on a findings report; `fail-once`: `fail` on the first `lint`, `pass` after, remembered in `FAKE_LLMLINT_MARKER`; `broken`: exit `2` on a stderr diagnostic |
 //! | `FAKE_LLMLINT_MARKER` | the file `fail-once` records its first run in |
 //! | `FAKE_LLMLINT_FINGERPRINT=garbled` | `fingerprint` exits `0` having printed a line that is not a digest |
-//! | `FAKE_LLMLINT_VERDICT=rules` | judge the file `lint` is handed last against the config's fixture rules: exit `1` naming every rule whose `forbid` text it contains, else `0`; exit `2` when that file cannot be read; and exit `0` saying so when no file was handed (a lint over the worktree) |
+//! | `FAKE_LLMLINT_FINGERPRINT=help-fails` | `fingerprint --help` exits `2` |
+//! | `FAKE_LLMLINT_FINGERPRINT=help-blank` | `fingerprint --help` lists no option |
+//! | `FAKE_LLMLINT_FINGERPRINT=help-wider` | `fingerprint --help` also lists `--strictness <LEVEL>`, an option the real one does not have |
+//! | `FAKE_LLMLINT_VERDICT=rules` | judge the file `lint` is handed last against the config's fixture rules: exit `1` naming every rule whose `forbid` text it contains, else `0`; exit `2` when the last argument is not a readable file — a lint over the worktree, which only a judge-only run's decision is not |
 //!
 //! A fixture rule is `{id, forbid}` under a config's `rules:`, and a config's
 //! `plugins:` that are local paths (relative to the config naming them) are
@@ -121,8 +124,24 @@ fn main() -> std::process::ExitCode {
     }
     if argv.first().map(String::as_str) == Some("fingerprint") {
         if argv.iter().any(|arg| arg == "--help") {
-            print!("{FINGERPRINT_HELP}");
-            return std::process::ExitCode::SUCCESS;
+            return match std::env::var("FAKE_LLMLINT_FINGERPRINT").as_deref() {
+                Ok("help-fails") => {
+                    eprintln!("fake-llmlint: this release cannot describe `fingerprint`");
+                    std::process::ExitCode::from(2)
+                }
+                Ok("help-blank") => {
+                    println!("Usage: llmlint fingerprint");
+                    std::process::ExitCode::SUCCESS
+                }
+                Ok("help-wider") => {
+                    print!("{FINGERPRINT_HELP}{WIDER_OPTION}");
+                    std::process::ExitCode::SUCCESS
+                }
+                _ => {
+                    print!("{FINGERPRINT_HELP}");
+                    std::process::ExitCode::SUCCESS
+                }
+            };
         }
         return match fingerprint(&argv) {
             // A digest that is not one: what a broken release would print, and
@@ -199,15 +218,11 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(2)
         }
         Verdict::Rules => match broken_rules(&argv) {
-            Ok(None) => {
-                println!("0 violations: no material was named, so no fixture rule applies");
-                std::process::ExitCode::SUCCESS
-            }
-            Ok(Some(broken)) if broken.is_empty() => {
+            Ok(broken) if broken.is_empty() => {
                 println!("0 violations, every fixture rule holds");
                 std::process::ExitCode::SUCCESS
             }
-            Ok(Some(broken)) => {
+            Ok(broken) => {
                 for line in &broken {
                     println!("{line}");
                 }
@@ -376,71 +391,29 @@ fn fingerprint(argv: &[String]) -> Result<String, String> {
 /// installed llmlint, so the double cannot list an option the real one lacks.
 const FINGERPRINT_HELP: &str = include_str!("llmlint-fingerprint-help.txt");
 
-/// The `lint` options that take a value: the ones onejudge composes and the
-/// ones a journey's `args` pass. Whatever else follows `lint` and is not an
-/// option is material.
-const VALUED: [&str; 12] = [
-    "--cwd",
-    "--format",
-    "--color",
-    "--progress",
-    "-c",
-    "--config",
-    "--diff-base",
-    "--label",
-    "--model",
-    "--prompt-template",
-    "--tag",
-    "--oneharness-config",
-];
+/// An option a later llmlint might list, which `help-wider` adds to the help —
+/// so a journey can show that what is forwarded follows the help as listed.
+const WIDER_OPTION: &str =
+    "\n      --strictness <LEVEL>\n          How strictly each rule is held\n";
 
-/// The one file a `lint` argv names as its material, if it names one.
-///
-/// # Errors
-///
-/// When it names more than one: onejudge hands a judge-only run exactly one.
-fn material(argv: &[String]) -> Result<Option<&String>, String> {
-    let mut positionals = Vec::new();
-    let mut args = argv.iter().skip(1);
-    while let Some(arg) = args.next() {
-        if VALUED.contains(&arg.as_str()) {
-            args.next();
-        } else if !arg.starts_with('-') {
-            positionals.push(arg);
-        }
-    }
-    match positionals.as_slice() {
-        [] => Ok(None),
-        [file] => Ok(Some(*file)),
-        more => Err(format!(
-            "`lint` names {} files; onejudge hands one",
-            more.len()
-        )),
-    }
-}
-
-/// Each finding the fixture rules make against the file `lint` was handed, or
-/// `None` when it was handed none.
-fn broken_rules(argv: &[String]) -> Result<Option<Vec<String>>, String> {
+/// Each finding the fixture rules make against the file `lint` was handed.
+fn broken_rules(argv: &[String]) -> Result<Vec<String>, String> {
     let rules: Vec<(String, String)> = reached(&configs(argv)?)?
         .into_iter()
         .flat_map(|read| read.rules)
         .collect();
-    // The material is the one positional onejudge appends after every option
-    // in a judge-only run. A lint over the worktree — an eval's, a normal turn's
-    // — names none, and these fixture rules judge only named material, so that
-    // run judges nothing, and says so. A file that is named and cannot be read
-    // is a run that could not complete rather than one that found nothing.
-    let Some(file) = material(argv)? else {
-        return Ok(None);
-    };
-    let text = std::fs::read_to_string(file)
-        .map_err(|err| format!("cannot read the material {file}: {err}"))?;
-    Ok(Some(
-        rules
-            .iter()
-            .filter(|(_, forbid)| text.contains(forbid.as_str()))
-            .map(|(id, forbid)| format!("{file}: {id} — the file contains {forbid:?}"))
-            .collect(),
-    ))
+    // The material is the one positional onejudge appends after every option,
+    // the caller's `args` included, in a judge-only run — always last. These
+    // fixture rules judge only that, so a lint whose last argument is not a
+    // readable file (a lint over the worktree, which no `rules` journey runs)
+    // could not complete rather than finding nothing.
+    let file = argv.last().map(String::as_str).unwrap_or_default();
+    let text = std::fs::read_to_string(file).map_err(|err| {
+        format!("`rules` judges the file onejudge appends last, and cannot read {file:?}: {err}")
+    })?;
+    Ok(rules
+        .iter()
+        .filter(|(_, forbid)| text.contains(forbid.as_str()))
+        .map(|(id, forbid)| format!("{file}: {id} — the file contains {forbid:?}"))
+        .collect())
 }

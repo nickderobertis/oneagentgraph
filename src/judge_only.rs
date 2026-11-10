@@ -619,13 +619,21 @@ fn fingerprint_args(args: &[String], options: &[(String, bool)]) -> Vec<String> 
     let mut kept = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
+        // `--long=VALUE`, and a short option's attached `-cVALUE` / `-c=VALUE`,
+        // carry their value in the one argument.
         let (flag, inline) = match arg.split_once('=') {
             Some((flag, _)) if flag.starts_with("--") => (flag, true),
+            _ if !arg.starts_with("--") && arg.len() > 2 && arg.is_char_boundary(2) => {
+                (&arg[..2], true)
+            }
             _ => (arg.as_str(), false),
         };
         let Some((_, takes_value)) = options.iter().find(|(name, _)| name == flag) else {
             continue;
         };
+        if inline && !takes_value {
+            continue;
+        }
         kept.push(arg.clone());
         if *takes_value && !inline {
             if let Some(value) = args.next() {
@@ -720,6 +728,9 @@ mod tests {
             "--rationales",
             "-c",
             "extra.yml",
+            "-cattached.yml",
+            "-c=equals.yml",
+            "-x",
         ]
         .map(str::to_string)
         .to_vec();
@@ -731,7 +742,9 @@ mod tests {
                 "--config=x.yml",
                 "--rationales",
                 "-c",
-                "extra.yml"
+                "extra.yml",
+                "-cattached.yml",
+                "-c=equals.yml",
             ]
         );
     }
