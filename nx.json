@@ -79,7 +79,8 @@
       "{workspaceRoot}/scripts/nx.sh",
       "{workspaceRoot}/package-lock.json",
       "{workspaceRoot}/llmlint.yml",
-      "{workspaceRoot}/oneharness.toml"
+      "{workspaceRoot}/oneharness.toml",
+      "{workspaceRoot}/src/bin/llmlint-fingerprint-help.txt"
     ],
     "repoToolingReads": [
       "{workspaceRoot}/.githooks/**/*",

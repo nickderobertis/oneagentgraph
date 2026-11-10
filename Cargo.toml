@@ -68,6 +68,10 @@ include = [
   # And once more, by `tests/e2e/support.rs`: the `oneharness` release the e2e
   # suite drives is the one this file pins, read from it rather than copied.
   "/justfile",
+  # And by `src/judge_only.rs`'s own unit tests and the llmlint double: the
+  # subset of `llmlint fingerprint --help` both are written against, which
+  # `tests/judged-lint/lint_llm_diff.rs` holds to the installed llmlint.
+  "/src/bin/llmlint-fingerprint-help.txt",
 ]
 
 [[bin]]

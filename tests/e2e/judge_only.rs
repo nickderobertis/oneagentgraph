@@ -54,7 +54,8 @@ const DEFAULT_TASK: &str = "Produce the material under review.";
 /// two members' tasks names the file its supervisor prompts are recorded in.
 /// `solo` is judged by one bare harness side and carries no task of its own.
 /// The planner's llmlint judge passes extra `args`: a `--label`, which shapes
-/// a run, and a `--prompt-template`, which decides a verdict.
+/// a run, and a `--prompt-template`, a `--model`, `--rationales` and a second
+/// `--config=`, which decide a verdict.
 fn workspace() -> Workspace {
     let workspace = Workspace::new();
     let log = |name: &str| toml_edit::Value::from(workspace.at(name).display().to_string());
@@ -87,6 +88,7 @@ fn workspace() -> Workspace {
         ),
     );
     workspace.write("prompt.md", "Judge each rule strictly.\n");
+    workspace.write("extra-llmlint.yml", "rules: []\n");
     workspace.write(
         "llmlint.yml",
         concat!(
@@ -131,7 +133,8 @@ fn graph(workspace: &Workspace) -> String {
             "    judge:\n",
             "      - oneharness_config: ./reviewer.judge.toml\n        label: reviewer\n",
             "      - kind: llmlint\n        config: ./llmlint.yml\n        bin: set below\n",
-            "        args: [--label, team=docs, --prompt-template, set below]\n",
+            "        args: [--label, team=docs, --prompt-template, set below,\n",
+            "               --model, judge-model, --rationales, set below]\n",
             "    mode: bypass\n",
             "  auditor:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -156,6 +159,10 @@ fn graph(workspace: &Workspace) -> String {
             (
                 "members.planner.judge.1.args.3".to_string(),
                 workspace.at("prompt.md").display().to_string(),
+            ),
+            (
+                "members.planner.judge.1.args.7".to_string(),
+                format!("--config={}", workspace.at("extra-llmlint.yml").display()),
             ),
             ("members.auditor.judge.1.bin".to_string(), fake_llmlint()),
             (
@@ -641,11 +648,44 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
         .into_iter()
         .find(|argv| argv[0] == "fingerprint" && argv.iter().all(|arg| arg != "--help"))
         .expect("a fingerprint ran");
+    for forwarded in [
+        "--prompt-template",
+        "--model",
+        "judge-model",
+        "--rationales",
+    ] {
+        assert!(
+            probe.iter().any(|arg| arg == forwarded),
+            "{forwarded}: {probe:?}"
+        );
+    }
     assert!(
-        probe.iter().any(|arg| arg == "--prompt-template"),
+        probe.iter().any(|arg| arg.starts_with("--config=")),
         "{probe:?}"
     );
     assert!(probe.iter().all(|arg| arg != "--label"), "{probe:?}");
+
+    // Nor do the parts of the base config a judge never reads: its provider
+    // block, session, task, skill, and its turn cap.
+    restore_then(
+        &workspace,
+        "base.yaml",
+        "session: elsewhere\ntask: ignored\nskill: ./skills/none\n",
+        |digest| assert_eq!(digest, base, "the base's session, task or skill"),
+    );
+    let shared = workspace.read("base.yaml");
+    workspace.write(
+        "base.yaml",
+        &shared
+            .replace("max_turns: 4", "max_turns: 7")
+            .replace("kind: oneharness", "kind: oneharness\n  bin: elsewhere"),
+    );
+    assert_eq!(
+        fingerprint(&workspace, "planner", &[]),
+        base,
+        "the base's cap or provider"
+    );
+    workspace.write("base.yaml", &shared);
 
     // Everything the bar is made of does.
     let mut seen = vec![base.clone()];
@@ -708,6 +748,17 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
             ],
         ),
     );
+    let graph = workspace.read("graph.yaml");
+    assert!(graph.contains("judge-model"), "{graph}");
+    workspace.graph(&graph.replace("judge-model", "other-model"));
+    moved(
+        "the llmlint judge's model",
+        fingerprint(&workspace, "planner", &[]),
+    );
+    workspace.graph(&graph);
+    restore_then(&workspace, "extra-llmlint.yml", "# stricter\n", |digest| {
+        moved("a second llmlint config", digest);
+    });
     restore_then(&workspace, "prompt.md", "Cite the line.\n", |digest| {
         moved("the llmlint judge's prompt template", digest);
     });
@@ -727,6 +778,23 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
     moved("a plugin pin", fingerprint(&workspace, "planner", &[]));
     // A config the llmlint judge's own `fingerprint` refuses is a bar that
     // cannot be digested: exit 2, naming the judge entry, and no digest.
+    let garbled = workspace.run(&[
+        "run",
+        "./graph.yaml",
+        "--judge-only",
+        "--member",
+        "planner",
+        "--bar-fingerprint",
+        "--set",
+        "env.FAKE_LLMLINT_FINGERPRINT=garbled",
+    ]);
+    garbled.expect_code(2);
+    assert!(garbled.stdout.is_empty(), "{}", garbled.stdout);
+    assert!(
+        garbled.stderr.contains("not one SHA-256 digest"),
+        "{}",
+        garbled.stderr
+    );
     workspace.write("llmlint.yml", "plugins: ./not-a-list.yml\n");
     let refused = workspace.run(&[
         "run",
@@ -824,6 +892,23 @@ fn a_judge_whose_answer_never_parses_could_not_judge() {
     assert!(run.stderr.contains("did not parse"), "{}", run.stderr);
     let report = report(&run);
     assert!(report["settled_reason"].is_string(), "{report}");
+
+    // A plan onejudge refuses to build starts no judge at all: the member is
+    // unstartable, and that is exit 2 too.
+    let before = launches(&workspace, "solo.log");
+    let refused = judge(
+        &workspace,
+        "solo",
+        "plan.md",
+        &["--set", "env.ONEJUDGE_MAX_TURNS=lots"],
+    );
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("could not start"),
+        "{}",
+        refused.stderr
+    );
+    assert_eq!(launches(&workspace, "solo.log"), before, "a judge started");
 }
 
 /// The run's own flags mean what they mean for `run`: the task the material

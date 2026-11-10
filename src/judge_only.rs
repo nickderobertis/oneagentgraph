@@ -430,9 +430,15 @@ pub(crate) fn judged(outcome: Option<&Outcome>, scratch: &Path, bar: BarFingerpr
         Some(Outcome::Unstartable(why)) => Verdict::CouldNotJudge {
             reason: format!("the judge side could not start: {why}"),
         },
+        // llmlint: ignore-block[changed_behavior_has_e2e] no input reaches this
+        // arm: `narrow` leaves the judged member alone in the graph with no
+        // dependency and no schedule, so the first wave always runs it and records
+        // its outcome. It exists so the absence a bug elsewhere would cause is a
+        // could-not-judge, never a pass.
         None => Verdict::CouldNotJudge {
             reason: "the judged member never ran".to_string(),
         },
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     };
     Judged {
         verdict,
@@ -443,11 +449,17 @@ pub(crate) fn judged(outcome: Option<&Outcome>, scratch: &Path, bar: BarFingerpr
 
 /// The verdict on a report that did not meet its bar — see [`judged`].
 fn incomplete(report: Option<&onejudge::Report>) -> Verdict {
+    // llmlint: ignore-block[changed_behavior_has_e2e] an incomplete settle is one
+    // `settle_report` wrote a report for moments before, so this arm is reached
+    // only when the host refused that write or the read back — a host failure no
+    // graph, input or flag asks for. Its direction is the safe one: no report is
+    // no judgement, never a fail with nothing in it.
     let Some(report) = report else {
         return Verdict::CouldNotJudge {
             reason: "the judge side settled without a report".to_string(),
         };
     };
+    // llmlint: ignore-end[changed_behavior_has_e2e]
     if let Some(why) = &report.settled_reason {
         return Verdict::CouldNotJudge {
             reason: why.clone(),
@@ -474,9 +486,16 @@ fn incomplete(report: Option<&onejudge::Report>) -> Verdict {
         .map(|named| format!("{}: {}", named.criterion, named.verdict.reason.trim()));
     match Findings::of(judges.chain(verdicts).collect()) {
         Some(findings) => Verdict::Fail { findings },
+        // llmlint: ignore-block[changed_behavior_has_e2e] onejudge records a
+        // judge-only run's bar as a boolean verdict whose value is whether it was
+        // met, so a settle that did not meet it and carries no `settled_reason`
+        // always holds that `false` verdict — a finding. This arm is what keeps
+        // `Findings` non-empty should a later onejudge stop recording it, and it
+        // reads that change as no judgement rather than an empty fail.
         None => Verdict::CouldNotJudge {
             reason: "the judge side neither passed the material nor said what it lacks".to_string(),
         },
+        // llmlint: ignore-end[changed_behavior_has_e2e]
     }
 }
 
@@ -662,8 +681,10 @@ fn llmlint_fingerprint(
 mod tests {
     use super::*;
 
-    /// The shape llmlint's own `fingerprint --help` lists its options in.
-    const HELP: &str = "Usage: llmlint fingerprint [OPTIONS]\n\nOptions:\n  -c, --config <PATH>\n          llmlint config file(s); repeatable\n      --model <NAME>\n          Default judge model\n      --rationales\n          Require a rationale\n  -h, --help\n          Print help\n";
+    /// The subset of llmlint's own `fingerprint --help` the llmlint double
+    /// answers with, which `tests/judged-lint/lint_llm_diff.rs` holds to the
+    /// installed llmlint.
+    const HELP: &str = include_str!("bin/llmlint-fingerprint-help.txt");
 
     #[test]
     fn the_options_forwarded_are_the_ones_fingerprint_lists() {
@@ -674,7 +695,9 @@ mod tests {
                 ("-c".to_string(), true),
                 ("--config".to_string(), true),
                 ("--model".to_string(), true),
+                ("--prompt-template".to_string(), true),
                 ("--rationales".to_string(), false),
+                ("--cwd".to_string(), true),
             ]
         );
         let args: Vec<String> = [

@@ -22,6 +22,7 @@
 //! | `FAKE_LLMLINT_ARGV_LOG` | append each invocation's argv, one JSON array per line, so a journey reads what onejudge composed |
 //! | `FAKE_LLMLINT_VERDICT` | `pass` (default): exit `0` on a summary line; `fail`: exit `1` on a findings report; `fail-once`: `fail` on the first `lint`, `pass` after, remembered in `FAKE_LLMLINT_MARKER`; `broken`: exit `2` on a stderr diagnostic |
 //! | `FAKE_LLMLINT_MARKER` | the file `fail-once` records its first run in |
+//! | `FAKE_LLMLINT_FINGERPRINT=garbled` | `fingerprint` exits `0` having printed a line that is not a digest |
 //! | `FAKE_LLMLINT_VERDICT=rules` | judge the files `lint` is handed against the config's fixture rules: exit `1` naming every rule whose `forbid` text a file contains, else `0` |
 //!
 //! A fixture rule is `{id, forbid}` under a config's `rules:`, and a config's
@@ -30,13 +31,15 @@
 //! rule a real llmlint loads from a file its config includes. A plugin that is a
 //! URL is a pin the double never fetches.
 //!
-//! A config whose `plugins` is not a list of strings, or whose rule lacks a
-//! string `id` or `forbid`, is refused with exit `2` rather than read in part.
+//! A config that is not a mapping, whose `plugins` is not a list of strings,
+//! whose rule lacks a string `id` or `forbid`, or whose local plugins include
+//! one another in a cycle — and a `-c` naming no path — is refused with exit `2`
+//! rather than read in part.
 //!
 //! `fingerprint` answers as the real one does, with one line of 64 lowercase hex
 //! characters: a SHA-256 over every `-c` config and every local plugin it
-//! reaches, by content, and over the `--model` and `--prompt-template` content
-//! it was given — so editing a rule in an included file, moving a pin, or
+//! reaches, by content, and over the `--model`, `--rationales` and
+//! `--prompt-template` content it was given — so editing a rule in an included file, moving a pin, or
 //! editing the template changes it. A config that cannot be read is exit `2`, as
 //! the real one refuses. `fingerprint --help` lists the options it takes in
 //! clap's layout, as the real one does.
@@ -122,6 +125,12 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::SUCCESS;
         }
         return match fingerprint(&argv) {
+            // A digest that is not one: what a broken release would print, and
+            // what the reader of this output has to refuse.
+            Ok(_) if std::env::var("FAKE_LLMLINT_FINGERPRINT").as_deref() == Ok("garbled") => {
+                println!("NOT-A-DIGEST");
+                std::process::ExitCode::SUCCESS
+            }
             Ok(digest) => {
                 println!("{digest}");
                 std::process::ExitCode::SUCCESS
@@ -211,20 +220,21 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Every `-c`/`--config` the argv names.
-fn configs(argv: &[String]) -> Vec<std::path::PathBuf> {
+/// Every `-c`/`--config` the argv names, refusing one that names no path.
+fn configs(argv: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
     let mut found = Vec::new();
     let mut args = argv.iter();
     while let Some(arg) = args.next() {
         if arg == "-c" || arg == "--config" {
-            if let Some(path) = args.next() {
-                found.push(std::path::PathBuf::from(path));
-            }
+            let path = args
+                .next()
+                .ok_or_else(|| format!("{arg} names no config path"))?;
+            found.push(std::path::PathBuf::from(path));
         } else if let Some(path) = arg.strip_prefix("--config=") {
             found.push(std::path::PathBuf::from(path));
         }
     }
-    found
+    Ok(found)
 }
 
 /// One fixture config, read and checked: its local plugins, resolved against
@@ -244,8 +254,12 @@ fn fixture(path: &std::path::Path) -> Result<Fixture, String> {
     let document: serde_json::Value = oneagentgraph::yaml::from_str(&text)
         .map_err(|err| format!("{} is not YAML: {err}", path.display()))?;
     let refused = |what: &str| format!("{}: {what}", path.display());
+    if !document.is_object() && !document.is_null() {
+        return Err(refused("a config must be a mapping"));
+    }
+    // Absent is empty; present is a list, and `null` is not one.
     let list = |key: &str| match document.get(key) {
-        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        None => Ok(Vec::new()),
         Some(serde_json::Value::Array(items)) => Ok(items.clone()),
         Some(_) => Err(refused(&format!("`{key}` must be a list"))),
     };
@@ -279,12 +293,30 @@ fn fixture(path: &std::path::Path) -> Result<Fixture, String> {
 
 /// Each config `configs` reaches — the named ones, then every local plugin
 /// they name, depth first.
+///
+/// A plugin that reaches a config already on its own path is refused: an
+/// include cycle has no fixed set of rules to judge with.
 fn reached(configs: &[std::path::PathBuf]) -> Result<Vec<Fixture>, String> {
     let mut out = Vec::new();
-    let mut pending: Vec<std::path::PathBuf> = configs.iter().rev().cloned().collect();
-    while let Some(path) = pending.pop() {
+    // Each config still to read, with the chain of includes that reached it.
+    let mut pending: Vec<(std::path::PathBuf, Vec<std::path::PathBuf>)> = configs
+        .iter()
+        .rev()
+        .map(|path| (path.clone(), Vec::new()))
+        .collect();
+    while let Some((path, mut chain)) = pending.pop() {
+        let identity = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if chain.contains(&identity) {
+            return Err(format!("{} includes itself", path.display()));
+        }
         let read = fixture(&path)?;
-        pending.extend(read.plugins.iter().rev().cloned());
+        chain.push(identity);
+        pending.extend(
+            read.plugins
+                .iter()
+                .rev()
+                .map(|plugin| (plugin.clone(), chain.clone())),
+        );
         out.push(read);
     }
     Ok(out)
@@ -312,10 +344,15 @@ fn fingerprint(argv: &[String]) -> Result<String, String> {
         hasher.update(part.len().to_le_bytes());
         hasher.update(part.as_bytes());
     };
-    for read in reached(&configs(argv))? {
+    for read in reached(&configs(argv)?)? {
         take(&read.text);
     }
     take(value_of(argv, "--model").unwrap_or(""));
+    take(if argv.iter().any(|arg| arg == "--rationales") {
+        "rationales"
+    } else {
+        ""
+    });
     if let Some(template) = value_of(argv, "--prompt-template") {
         take(
             &std::fs::read_to_string(template)
@@ -329,28 +366,16 @@ fn fingerprint(argv: &[String]) -> Result<String, String> {
         .collect())
 }
 
-/// What `fingerprint --help` lists, in clap's own layout — the options the
-/// real `llmlint fingerprint` takes that this double reads.
-const FINGERPRINT_HELP: &str = "\
-Usage: llmlint fingerprint [OPTIONS]
-
-Options:
-  -c, --config <PATH>
-          llmlint config file(s); repeatable
-      --model <NAME>
-          Default judge model
-      --prompt-template <PATH>
-          Override the master prompt template with this file's contents
-      --cwd <DIR>
-          Directory to lint from
-  -h, --help
-          Print help
-";
+/// What `fingerprint --help` lists: the subset of the real `llmlint
+/// fingerprint --help` this double reads, in its own words and layout —
+/// `tests/judged-lint/lint_llm_diff.rs` holds every option line of it to the
+/// installed llmlint, so the double cannot list an option the real one lacks.
+const FINGERPRINT_HELP: &str = include_str!("llmlint-fingerprint-help.txt");
 
 /// Each finding the fixture rules make against the files `lint` was handed —
 /// its trailing arguments that are files.
 fn broken_rules(argv: &[String]) -> Result<Vec<String>, String> {
-    let rules: Vec<(String, String)> = reached(&configs(argv))?
+    let rules: Vec<(String, String)> = reached(&configs(argv)?)?
         .into_iter()
         .flat_map(|read| read.rules)
         .collect();
