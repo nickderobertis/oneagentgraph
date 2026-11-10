@@ -94,6 +94,44 @@ impl Verdict {
     }
 }
 
+/// How `fingerprint` answers, as `FAKE_LLMLINT_FINGERPRINT` says — see the
+/// table above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FingerprintMode {
+    /// Unset: as the real one does.
+    Faithful,
+    /// `garbled`.
+    Garbled,
+    /// `help-fails`.
+    HelpFails,
+    /// `help-blank`.
+    HelpBlank,
+    /// `help-wider`.
+    HelpWider,
+}
+
+impl FingerprintMode {
+    /// Read the mode, refusing a spelling nobody documented, as [`Verdict`] does.
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("FAKE_LLMLINT_FINGERPRINT") {
+            Err(std::env::VarError::NotPresent) => Ok(Self::Faithful),
+            Ok(mode) => match mode.as_str() {
+                "garbled" => Ok(Self::Garbled),
+                "help-fails" => Ok(Self::HelpFails),
+                "help-blank" => Ok(Self::HelpBlank),
+                "help-wider" => Ok(Self::HelpWider),
+                other => Err(format!(
+                    "FAKE_LLMLINT_FINGERPRINT must be garbled, help-fails, help-blank, or \
+                     help-wider; got {other:?}"
+                )),
+            },
+            Err(std::env::VarError::NotUnicode(raw)) => {
+                Err(format!("FAKE_LLMLINT_FINGERPRINT {raw:?} is not UTF-8"))
+            }
+        }
+    }
+}
+
 fn main() -> std::process::ExitCode {
     // An argument that is not text is refused rather than dropped: what onejudge
     // composed is the whole of what a journey reads off the log below, and an
@@ -124,22 +162,10 @@ fn main() -> std::process::ExitCode {
     // Read before anything branches on it, so a misspelled mode is refused
     // rather than read as the default and leaving its journey asserting green
     // against a path it never took.
-    let fingerprint_mode = match std::env::var("FAKE_LLMLINT_FINGERPRINT") {
-        Err(std::env::VarError::NotPresent) => None,
-        Ok(mode)
-            if ["garbled", "help-fails", "help-blank", "help-wider"].contains(&mode.as_str()) =>
-        {
-            Some(mode)
-        }
-        Ok(other) => {
-            eprintln!(
-                "fake-llmlint: FAKE_LLMLINT_FINGERPRINT must be garbled, help-fails, help-blank, \
-                 or help-wider; got {other:?}"
-            );
-            return std::process::ExitCode::from(2);
-        }
-        Err(std::env::VarError::NotUnicode(raw)) => {
-            eprintln!("fake-llmlint: FAKE_LLMLINT_FINGERPRINT {raw:?} is not UTF-8");
+    let fingerprint_mode = match FingerprintMode::from_env() {
+        Ok(mode) => mode,
+        Err(why) => {
+            eprintln!("fake-llmlint: {why}");
             return std::process::ExitCode::from(2);
         }
     };
@@ -149,20 +175,20 @@ fn main() -> std::process::ExitCode {
     }
     if argv.first().map(String::as_str) == Some("fingerprint") {
         if argv.iter().any(|arg| arg == "--help") {
-            return match fingerprint_mode.as_deref() {
-                Some("help-fails") => {
+            return match fingerprint_mode {
+                FingerprintMode::HelpFails => {
                     eprintln!("fake-llmlint: this release cannot describe `fingerprint`");
                     std::process::ExitCode::from(2)
                 }
-                Some("help-blank") => {
+                FingerprintMode::HelpBlank => {
                     println!("Usage: llmlint fingerprint");
                     std::process::ExitCode::SUCCESS
                 }
-                Some("help-wider") => {
+                FingerprintMode::HelpWider => {
                     print!("{FINGERPRINT_HELP}{WIDER_OPTION}");
                     std::process::ExitCode::SUCCESS
                 }
-                _ => {
+                FingerprintMode::Faithful | FingerprintMode::Garbled => {
                     print!("{FINGERPRINT_HELP}");
                     std::process::ExitCode::SUCCESS
                 }
@@ -171,7 +197,7 @@ fn main() -> std::process::ExitCode {
         return match fingerprint(&argv) {
             // A digest that is not one: what a broken release would print, and
             // what the reader of this output has to refuse.
-            Ok(_) if fingerprint_mode.as_deref() == Some("garbled") => {
+            Ok(_) if fingerprint_mode == FingerprintMode::Garbled => {
                 println!("NOT-A-DIGEST");
                 std::process::ExitCode::SUCCESS
             }
