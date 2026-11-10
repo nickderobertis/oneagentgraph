@@ -34,6 +34,9 @@
 //! rule a real llmlint loads from a file its config includes. A plugin that is a
 //! URL is a pin the double never fetches.
 //!
+//! With no `-c`, the config is discovered as `llmlint.yml` in the `--cwd` it
+//! runs from, as the real one discovers its own.
+//!
 //! A config that is not a mapping (an empty or `null` document included), whose `plugins` is not a list of strings,
 //! whose rule lacks a string `id` or `forbid`, or whose local plugins include
 //! one another in a cycle — and a `-c` naming no path — is refused with exit `2`
@@ -239,7 +242,10 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-/// Every `-c`/`--config` the argv names, refusing one that names no path.
+/// Every config the argv names — `-c PATH`, `-cPATH`, `-c=PATH`, `--config
+/// PATH`, `--config=PATH` — refusing a flag that names no path. Naming none,
+/// the config is discovered as `llmlint.yml` in the `--cwd` it lints from, so
+/// which directory a run is pointed at decides which rules it reads.
 fn configs(argv: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
     let mut found = Vec::new();
     let mut args = argv.iter();
@@ -249,8 +255,20 @@ fn configs(argv: &[String]) -> Result<Vec<std::path::PathBuf>, String> {
                 .next()
                 .ok_or_else(|| format!("{arg} names no config path"))?;
             found.push(std::path::PathBuf::from(path));
-        } else if let Some(path) = arg.strip_prefix("--config=") {
+        } else if let Some(path) = arg
+            .strip_prefix("--config=")
+            .or_else(|| arg.strip_prefix("-c="))
+            .or_else(|| arg.strip_prefix("-c").filter(|rest| !rest.is_empty()))
+        {
             found.push(std::path::PathBuf::from(path));
+        }
+    }
+    if found.is_empty() {
+        if let Some(cwd) = value_of(argv, "--cwd") {
+            let discovered = std::path::Path::new(cwd).join("llmlint.yml");
+            if discovered.is_file() {
+                found.push(discovered);
+            }
         }
     }
     Ok(found)

@@ -22,6 +22,8 @@
 // design AGENTS.md states. Each journey here is one judge-only decision of the
 // doubled harness, and the hang journey waits out a two-second stall bound.
 
+use std::path::PathBuf;
+
 use serde_json::Value;
 
 use crate::support::{
@@ -90,6 +92,13 @@ fn workspace() -> Workspace {
     );
     workspace.write("prompt.md", "Judge each rule strictly.\n");
     workspace.write("extra-llmlint.yml", "rules: []\n");
+    workspace.write("short-llmlint.yml", "rules: []\n");
+    // `scoped` works in a directory of its own, whose llmlint judge names no
+    // config and so discovers the one there.
+    workspace.write(
+        "scoped/llmlint.yml",
+        "rules:\n  - id: no-wip\n    forbid: WIP\n",
+    );
     workspace.write(
         "llmlint.yml",
         concat!(
@@ -136,7 +145,7 @@ fn graph(workspace: &Workspace) -> String {
             "      - kind: llmlint\n        config: ./llmlint.yml\n        bin: set below\n",
             "        args: [--label, team=docs, --prompt-template, set below,\n",
             "               --model, judge-model, --rationales, set below,\n",
-            "               --strictness, high]\n",
+            "               --strictness, high, set below]\n",
             "    mode: bypass\n",
             "  auditor:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n    persona: engineer\n",
@@ -144,6 +153,13 @@ fn graph(workspace: &Workspace) -> String {
             "    judge:\n",
             "      - oneharness_config: ./auditor.judge.toml\n        label: auditor\n",
             "      - kind: llmlint\n        config: ./llmlint.yml\n        bin: set below\n",
+            "    mode: bypass\n",
+            "  scoped:\n    kind: onejudge\n",
+            "    base_config: ./base.yaml\n    dir: ./scoped\n",
+            "    agent:\n      oneharness_config: ./oneharness.toml\n",
+            "    judge:\n",
+            "      - oneharness_config: ./solo.judge.toml\n",
+            "      - kind: llmlint\n        bin: set below\n",
             "    mode: bypass\n",
             "  solo:\n    kind: onejudge\n",
             "    base_config: ./base.yaml\n",
@@ -167,6 +183,11 @@ fn graph(workspace: &Workspace) -> String {
                 format!("--config={}", workspace.at("extra-llmlint.yml").display()),
             ),
             ("members.auditor.judge.1.bin".to_string(), fake_llmlint()),
+            ("members.scoped.judge.1.bin".to_string(), fake_llmlint()),
+            (
+                "members.planner.judge.1.args.10".to_string(),
+                format!("-c{}", workspace.at("short-llmlint.yml").display()),
+            ),
             (
                 "members.planner.task".to_string(),
                 format!(
@@ -763,6 +784,9 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
     restore_then(&workspace, "extra-llmlint.yml", "# stricter\n", |digest| {
         moved("a second llmlint config", digest);
     });
+    restore_then(&workspace, "short-llmlint.yml", "# stricter\n", |digest| {
+        moved("a config named by an attached -c", digest);
+    });
     restore_then(&workspace, "prompt.md", "Cite the line.\n", |digest| {
         moved("the llmlint judge's prompt template", digest);
     });
@@ -1092,6 +1116,47 @@ fn a_judge_only_run_takes_the_runs_own_flags() {
     let first = text.stdout.lines().next().unwrap_or_default();
     assert!(serde_json::from_str::<Value>(first).is_err(), "{first}");
     assert!(text.stdout.contains("member-settled"), "{}", text.stdout);
+}
+
+/// An llmlint judge is fingerprinted from its member's own worktree, so a
+/// member working in a directory of its own digests the config found there —
+/// not the one beside the caller.
+#[test]
+fn an_llmlint_judge_is_fingerprinted_from_its_members_own_directory() {
+    let workspace = workspace();
+    let base = fingerprint(&workspace, "scoped", &[]);
+    let probe = llmlint_argvs(&workspace)
+        .into_iter()
+        .find(|argv| argv[0] == "fingerprint" && argv.iter().all(|arg| arg != "--help"))
+        .expect("a fingerprint ran");
+    let cwd = probe
+        .iter()
+        .position(|arg| arg == "--cwd")
+        .map(|at| PathBuf::from(&probe[at + 1]))
+        .unwrap_or_else(|| panic!("no --cwd: {probe:?}"));
+    assert_eq!(
+        cwd.canonicalize().expect("the --cwd exists"),
+        workspace
+            .at("scoped")
+            .canonicalize()
+            .expect("scoped exists"),
+        "{probe:?}"
+    );
+    let caller = workspace.read("llmlint.yml");
+    workspace.write("llmlint.yml", &format!("{caller}# the caller's own\n"));
+    assert_eq!(
+        fingerprint(&workspace, "scoped", &[]),
+        base,
+        "the caller's directory's config"
+    );
+    workspace.write("llmlint.yml", &caller);
+    let own = workspace.read("scoped/llmlint.yml");
+    workspace.write("scoped/llmlint.yml", &format!("{own}# tightened\n"));
+    assert_ne!(
+        fingerprint(&workspace, "scoped", &[]),
+        base,
+        "the member's own directory's config did not move its bar"
+    );
 }
 
 /// Append `addition` to `file`, hand the fingerprint that results to `check`,
