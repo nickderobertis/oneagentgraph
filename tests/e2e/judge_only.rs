@@ -479,6 +479,39 @@ fn a_persona_file_named_on_the_command_line_is_the_bar_the_judge_applies() {
     );
     assert_eq!(settled(&fail)["completed"], Value::Bool(false));
 
+    // Every judge that did not pass is named, not only the first: the same
+    // rejecting bar over material breaking a fixture rule fails both judges,
+    // and the bar's own verdict besides.
+    workspace.write("tbd.md", "The plan: step one, then step two is TBD.\n");
+    let both = judge(
+        &workspace,
+        "planner",
+        "tbd.md",
+        &["--persona", "./rejecting.yaml"],
+    );
+    both.expect_code(1);
+    let findings: Vec<&str> = both
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("  - "))
+        .collect();
+    assert!(
+        findings
+            .iter()
+            .any(|line| line.starts_with("  - reviewer (oneharness) continue")),
+        "{}",
+        both.stderr
+    );
+    assert!(
+        findings
+            .iter()
+            .any(|line| line.starts_with("  - llmlint (llmlint) continue")),
+        "{}",
+        both.stderr
+    );
+    assert!(both.stderr.contains("no-tbd"), "{}", both.stderr);
+    assert!(findings.len() >= 3, "{}", both.stderr);
+
     // A persona's own boolean eval is scored against the judge-only
     // transcript, and one that fails is a finding on stderr like any judge's.
     // On `solo`, whose one harness judge scores it: an llmlint judge would lint
@@ -689,6 +722,21 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
         "{probe:?}"
     );
     assert!(probe.iter().all(|arg| arg != "--label"), "{probe:?}");
+
+    // Nor does how a document happens to order its keys: the same base with
+    // its top-level keys, and the keys under `user`, written the other way
+    // round is the same bar.
+    let ordered = workspace.read("base.yaml");
+    workspace.write(
+        "base.yaml",
+        concat!(
+            "user:\n  max_turns: 4\n  done_when: \"the task is complete\"\n",
+            "system_prompt: |\n  Standing bar: verify before you claim done.\n",
+            "provider:\n  kind: oneharness\n",
+        ),
+    );
+    assert_eq!(fingerprint(&workspace, "planner", &[]), base, "key order");
+    workspace.write("base.yaml", &ordered);
 
     // Nor do the parts of the base config a judge never reads: its provider
     // block, session, task, skill, and its turn cap.
@@ -1159,8 +1207,9 @@ fn an_llmlint_judge_is_fingerprinted_from_its_members_own_directory() {
     );
 }
 
-/// Append `addition` to `file`, hand the fingerprint that results to `check`,
-/// and put the file back.
+/// One edit's fingerprint, taken in isolation: each edit is undone before the
+/// next is made, so every digest it yields differs from the unedited bar by
+/// that one edit alone.
 fn restore_then(workspace: &Workspace, file: &str, addition: &str, check: impl FnOnce(String)) {
     let original = workspace.read(file);
     workspace.write(file, &format!("{original}{addition}"));
