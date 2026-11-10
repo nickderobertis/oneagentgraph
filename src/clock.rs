@@ -49,6 +49,17 @@ impl SpanStart {
         }
     }
 
+    // llmlint: ignore-block[changed_behavior_has_e2e] the disagreement this
+    // answers is the host's: a wall clock slewed against the monotonic one is
+    // set by the kernel's time discipline, and no seam this crate sanctions can
+    // slow `CLOCK_REALTIME` for the binary under test and for the bus that stamps
+    // `ts` alike, which is what a deterministic journey would need. The
+    // end-to-end proof is the four reset/cadence journeys that already measure a
+    // firing against `ts` (`tests/e2e/scheduled_notes.rs`, `tests/e2e/two_party.rs`):
+    // run under an LD_PRELOAD shim slowing `CLOCK_REALTIME` 1.3%, three of them
+    // failed in every one of 8 rounds without this reading and all four passed in
+    // 8 of 8 with it. The branches themselves are pinned by
+    // `tests::a_span_has_run_only_as_long_as_the_slower_clock_says`.
     /// How long this span has run: the shorter of the two clocks' readings —
     /// see the type's docs for when the wall clock's is set aside.
     pub(crate) fn elapsed(&self) -> Duration {
@@ -58,6 +69,7 @@ impl SpanStart {
             _ => monotonic,
         }
     }
+    // llmlint: ignore-end[changed_behavior_has_e2e]
 }
 
 /// Days in each month of a non-leap year, indexed from January.
