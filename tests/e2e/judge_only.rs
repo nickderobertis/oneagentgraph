@@ -578,6 +578,44 @@ fn each_member_is_judged_under_its_own_harness_routing() {
     assert!(prompt.contains(PLAN.trim()), "{prompt}");
     assert!(workspace.read("planner-prompts.log").is_empty());
 
+    // A request that cannot be judged is refused before anything starts: a
+    // member the graph does not have, no input at all, an input that cannot be
+    // read — each exit 2, saying which, with nothing streamed or launched.
+    let launched = launches(&workspace, "reviewer.log") + launches(&workspace, "auditor.log");
+    let recorded = std::fs::read_dir(workspace.state()).expect("state").count();
+    for (args, says) in [
+        (
+            &["--member", "nobody", "--input", "plan.md"][..],
+            "has no such member",
+        ),
+        (&["--member", "planner"][..], "needs --input"),
+        (
+            &["--member", "planner", "--input", "no-such-plan.md"][..],
+            "cannot read --input",
+        ),
+    ] {
+        let mut argv = vec!["run", "./graph.yaml", "--judge-only"];
+        argv.extend_from_slice(args);
+        let refused = workspace.run(&argv);
+        refused.expect_code(2);
+        assert!(
+            refused.stderr.contains(says),
+            "{args:?}: {}",
+            refused.stderr
+        );
+        assert!(refused.stdout.is_empty(), "{args:?}: {}", refused.stdout);
+    }
+    assert_eq!(
+        launches(&workspace, "reviewer.log") + launches(&workspace, "auditor.log"),
+        launched,
+        "a refused request launched a judge"
+    );
+    assert_eq!(
+        std::fs::read_dir(workspace.state()).expect("state").count(),
+        recorded,
+        "a refused request recorded a run"
+    );
+
     // A member with no judge side is refused before anything is created.
     workspace.write(
         "graph.yaml",
