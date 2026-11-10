@@ -796,7 +796,7 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     let bar = launch
         .judge_only
         .as_ref()
-        .map(|judging| judging.bar_fingerprint.as_str());
+        .map(|judging| &judging.bar_fingerprint);
     supervise(
         &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &state, heartbeat, bar,
     )
@@ -933,7 +933,7 @@ fn supervise(
     ending: Option<crate::note::Ending>,
     hold: &HoldState,
     mut heartbeat: Heartbeat,
-    bar: Option<&str>,
+    bar: Option<&crate::judge_only::BarFingerprint>,
 ) -> Outcome {
     // Published far more rarely than the beat is refreshed, for the reason
     // `crate::member` gives: a stream that is mostly heartbeats buries the events
@@ -1519,7 +1519,7 @@ fn finish(
     scratch: &Path,
     notes: Option<&Path>,
     held: Option<Ended>,
-    bar: Option<&str>,
+    bar: Option<&crate::judge_only::BarFingerprint>,
 ) -> Outcome {
     match answer {
         Ok(summary) => {

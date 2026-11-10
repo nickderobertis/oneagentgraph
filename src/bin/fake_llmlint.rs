@@ -23,7 +23,7 @@
 //! | `FAKE_LLMLINT_VERDICT` | `pass` (default): exit `0` on a summary line; `fail`: exit `1` on a findings report; `fail-once`: `fail` on the first `lint`, `pass` after, remembered in `FAKE_LLMLINT_MARKER`; `broken`: exit `2` on a stderr diagnostic |
 //! | `FAKE_LLMLINT_MARKER` | the file `fail-once` records its first run in |
 //! | `FAKE_LLMLINT_FINGERPRINT=garbled` | `fingerprint` exits `0` having printed a line that is not a digest |
-//! | `FAKE_LLMLINT_VERDICT=rules` | judge the files `lint` is handed against the config's fixture rules: exit `1` naming every rule whose `forbid` text a file contains, else `0` |
+//! | `FAKE_LLMLINT_VERDICT=rules` | judge the file `lint` is handed last against the config's fixture rules: exit `1` naming every rule whose `forbid` text it contains, else `0`; exit `2` when that file cannot be read; and exit `0` saying so when no file was handed (a lint over the worktree) |
 //!
 //! A fixture rule is `{id, forbid}` under a config's `rules:`, and a config's
 //! `plugins:` that are local paths (relative to the config naming them) are
@@ -31,7 +31,7 @@
 //! rule a real llmlint loads from a file its config includes. A plugin that is a
 //! URL is a pin the double never fetches.
 //!
-//! A config that is not a mapping, whose `plugins` is not a list of strings,
+//! A config that is not a mapping (an empty or `null` document included), whose `plugins` is not a list of strings,
 //! whose rule lacks a string `id` or `forbid`, or whose local plugins include
 //! one another in a cycle — and a `-c` naming no path — is refused with exit `2`
 //! rather than read in part.
@@ -199,11 +199,15 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::from(2)
         }
         Verdict::Rules => match broken_rules(&argv) {
-            Ok(broken) if broken.is_empty() => {
+            Ok(None) => {
+                println!("0 violations: no material was named, so no fixture rule applies");
+                std::process::ExitCode::SUCCESS
+            }
+            Ok(Some(broken)) if broken.is_empty() => {
                 println!("0 violations, every fixture rule holds");
                 std::process::ExitCode::SUCCESS
             }
-            Ok(broken) => {
+            Ok(Some(broken)) => {
                 for line in &broken {
                     println!("{line}");
                 }
@@ -254,7 +258,7 @@ fn fixture(path: &std::path::Path) -> Result<Fixture, String> {
     let document: serde_json::Value = oneagentgraph::yaml::from_str(&text)
         .map_err(|err| format!("{} is not YAML: {err}", path.display()))?;
     let refused = |what: &str| format!("{}: {what}", path.display());
-    if !document.is_object() && !document.is_null() {
+    if !document.is_object() {
         return Err(refused("a config must be a mapping"));
     }
     // Absent is empty; present is a list, and `null` is not one.
@@ -372,24 +376,31 @@ fn fingerprint(argv: &[String]) -> Result<String, String> {
 /// installed llmlint, so the double cannot list an option the real one lacks.
 const FINGERPRINT_HELP: &str = include_str!("llmlint-fingerprint-help.txt");
 
-/// Each finding the fixture rules make against the files `lint` was handed —
-/// its trailing arguments that are files.
-fn broken_rules(argv: &[String]) -> Result<Vec<String>, String> {
+/// Each finding the fixture rules make against the file `lint` was handed —
+/// its last argument — or `None` when it was handed none.
+fn broken_rules(argv: &[String]) -> Result<Option<Vec<String>>, String> {
     let rules: Vec<(String, String)> = reached(&configs(argv)?)?
         .into_iter()
         .flat_map(|read| read.rules)
         .collect();
-    let mut broken = Vec::new();
-    for file in argv.iter().rev().take_while(|arg| !arg.starts_with('-')) {
-        let path = std::path::Path::new(file);
-        let Ok(text) = std::fs::read_to_string(path) else {
-            continue;
-        };
-        for (id, forbid) in &rules {
-            if text.contains(forbid.as_str()) {
-                broken.push(format!("{file}: {id} — the file contains {forbid:?}"));
-            }
-        }
-    }
-    Ok(broken)
+    // The material is the one positional onejudge appends after every option
+    // in a judge-only run. A lint over the worktree — an eval's, a normal turn's
+    // — names none, and these fixture rules judge only named material, so that
+    // run judges nothing, and says so. A file that is named and cannot be read
+    // is a run that could not complete rather than one that found nothing.
+    let Some(file) = argv
+        .last()
+        .filter(|arg| !arg.starts_with('-') && std::path::Path::new(arg).exists())
+    else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(file)
+        .map_err(|err| format!("cannot read the material {file}: {err}"))?;
+    Ok(Some(
+        rules
+            .iter()
+            .filter(|(_, forbid)| text.contains(forbid.as_str()))
+            .map(|(id, forbid)| format!("{file}: {id} — the file contains {forbid:?}"))
+            .collect(),
+    ))
 }

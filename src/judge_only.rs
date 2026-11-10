@@ -41,7 +41,7 @@ use crate::error::Error;
 use crate::invoke::{Context, Invocation, Launch};
 use crate::member::{Outcome, REPORT_FILE};
 use crate::resolve::Resolver;
-use crate::run::{Label, Override};
+use crate::run::{Label, MemberName, Override};
 
 /// A judge-only run passed its bar.
 pub const EXIT_PASS: i32 = 0;
@@ -65,7 +65,7 @@ pub struct Target {
     /// The graph config, by path or URL.
     pub graph: ConfigRef,
     /// The `kind: onejudge` member whose judge side is run.
-    pub member: String,
+    pub member: MemberName,
     /// The persona to judge under in place of the member's own: a persona
     /// **name** — looked up in the graph's catalog and the shipped roles exactly
     /// as a member's `persona:` is — or a path or URL to a persona file. A
@@ -215,7 +215,7 @@ pub struct JudgeOnly {
 /// What [`crate::run`] is told to judge, prepared before the graph is read so a
 /// request that cannot be honoured is refused before anything is created.
 pub(crate) struct Judging {
-    pub(crate) member: String,
+    pub(crate) member: MemberName,
     persona: Option<ConfigRef>,
     input: onejudge::JudgeInput,
     artifacts: Vec<String>,
@@ -241,7 +241,7 @@ pub fn bar_fingerprint(
     })?;
     crate::config::validate(&graph)?;
     let persona = persona_ref(target.persona.as_deref())?;
-    let member = select(&mut graph, &target.member, persona)?.clone();
+    let member = select(&mut graph, target.member.as_str(), persona)?.clone();
     let scratch = std::env::temp_dir();
     let context = Context {
         dir: &target.dir,
@@ -375,7 +375,7 @@ fn select<'a>(
 
 /// [`select`] for a run: the one place [`crate::run`] narrows a graph.
 pub(crate) fn narrow(graph: &mut GraphConfig, judging: &Judging) -> Result<(), Error> {
-    select(graph, &judging.member, judging.persona.clone()).map(|_| ())
+    select(graph, judging.member.as_str(), judging.persona.clone()).map(|_| ())
 }
 
 /// Arm `invocation` — the judged member's, as [`crate::invoke::build`] made it
@@ -579,7 +579,17 @@ fn fingerprint_options(
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(options_listed(&String::from_utf8_lossy(&output.stdout)))
+    let options = options_listed(&String::from_utf8_lossy(&output.stdout));
+    // A help that lists nothing is one this reader no longer understands, not
+    // a command that takes no options: forwarding nothing would digest a bar
+    // without the options that decide it.
+    if options.is_empty() {
+        return Err(format!(
+            "`{bin} fingerprint --help` listed no option this can read, so which of the \
+             judge's args decide its verdict is unknown"
+        ));
+    }
+    Ok(options)
 }
 
 /// Every option a clap `--help` lists: each line that opens with `-` names

@@ -25,7 +25,8 @@
 use serde_json::Value;
 
 use crate::support::{
-    as_env, bounds, fake_harness, fake_llmlint, graph_with, Run, Workspace, CHAIN, FAKE_HARNESS_KEY,
+    as_env, bounds, fake_harness, fake_llmlint, graph_with, until, Run, Workspace, CHAIN,
+    FAKE_HARNESS_KEY,
 };
 
 /// The material every passing journey judges.
@@ -124,7 +125,7 @@ fn graph(workspace: &Workspace) -> String {
     let prompts = |name: &str| workspace.at(name).display().to_string();
     graph_with(
         concat!(
-            "version: 10\nname: review\n",
+            "version: 11\nname: review\n",
             "env:\n  FAKE_LLMLINT_VERDICT: rules\n",
             "members:\n",
             "  planner:\n    kind: onejudge\n",
@@ -815,8 +816,9 @@ fn the_bar_fingerprint_moves_exactly_when_the_bar_does() {
     assert_eq!(fingerprint(&workspace, "planner", &[]), base, "restored");
 }
 
-/// `--artifact` replaces the artifacts the bar names: the judge is pointed at
-/// the ones given, and not at the persona's own.
+/// `--artifact` replaces the artifacts the bar names, and beats onejudge's own
+/// `ONEJUDGE_ARTIFACTS`: the judge is pointed at the ones given, and at neither
+/// the persona's nor the environment's.
 #[test]
 fn artifacts_named_on_the_command_line_replace_the_bars_own() {
     let workspace = workspace();
@@ -841,21 +843,30 @@ fn artifacts_named_on_the_command_line_replace_the_bars_own() {
     );
     std::fs::remove_file(workspace.at("planner-prompts.log")).expect("cleared");
 
-    let given = judge(
-        &workspace,
-        "planner",
-        "plan.md",
-        &["--persona", "./noted.yaml", "--artifact", "given-notes.md"],
-    );
+    // onejudge's own environment variable replaces the bar's artifacts …
+    workspace.write("env-notes.md", "Notes the environment points at.\n");
+    let from_env = ["--set", "env.ONEJUDGE_ARTIFACTS=env-notes.md"];
+    let mut args = vec!["--persona", "./noted.yaml"];
+    args.extend_from_slice(&from_env);
+    judge(&workspace, "planner", "plan.md", &args).expect_code(0);
+    let prompt = workspace.read("planner-prompts.log");
+    assert!(prompt.contains("env-notes.md"), "{prompt}");
+    std::fs::remove_file(workspace.at("planner-prompts.log")).expect("cleared");
+
+    // … and `--artifact` replaces both.
+    args.extend_from_slice(&["--artifact", "given-notes.md"]);
+    let given = judge(&workspace, "planner", "plan.md", &args);
     given.expect_code(0);
     let prompt = workspace.read("planner-prompts.log");
     assert!(prompt.contains("given-notes.md"), "{prompt}");
     assert!(!prompt.contains("persona-notes.md"), "{prompt}");
+    assert!(!prompt.contains("env-notes.md"), "{prompt}");
 }
 
-/// A member that depends on another, runs on a schedule and is background is
-/// still judged once, now: none of that belongs to one judgement of it, so its
-/// dependency never runs and its schedule's delay is never waited out.
+/// A member that depends on another, runs on a schedule, carries scheduled
+/// notes and is background is still judged once, now: none of that belongs to
+/// one judgement of it, so its dependency never runs, its schedule's delay is
+/// never waited out, and no note's clock fires into the judgement.
 #[test]
 fn a_scheduled_dependent_member_is_judged_once_and_at_once() {
     let workspace = workspace();
@@ -865,15 +876,59 @@ fn a_scheduled_dependent_member_is_judged_once_and_at_once() {
     planner["deps"] = serde_json::json!(["auditor"]);
     planner["schedule"] = serde_json::json!({"every": 3600, "start_after": 3600});
     planner["background"] = Value::Bool(true);
+    // A note whose clock would fire at once, carrying the double's rejection:
+    // were it delivered, the judge would reject and a firing would be streamed.
+    planner["scheduled_notes"] = serde_json::json!([{
+        "id": "nudge",
+        "every": 1,
+        "start_after": 0,
+        "addressee": "supervisor",
+        "text": "Reject this. fake:should-fail",
+    }]);
     workspace.graph(&oneagentgraph::yaml::to_string(&document).expect("serializes"));
 
+    // The judge's decision is held open past the note's first firings, so a
+    // clock that was started would be seen firing into it.
+    let gate = workspace.at("decide");
+    workspace.write(
+        "held.md",
+        &format!("{PLAN}fake:supervisor-hold={}\n", gate.display()),
+    );
     let started = std::time::Instant::now();
-    let run = judge(&workspace, "planner", "plan.md", &[]);
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--judge-only",
+            "--member",
+            "planner",
+            "--input",
+            "held.md",
+        ],
+        &[],
+    );
+    let entered = workspace.at("decide.entered");
+    until("the judge to start deciding", || entered.exists());
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    workspace.write("decide", "go");
+    let output = child.wait_with_output().expect("the run finishes");
+    let run = Run {
+        code: output.status.code().unwrap_or(-1),
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    };
     run.expect_code(0);
     assert!(started.elapsed() < std::time::Duration::from_secs(120));
     assert_eq!(launches(&workspace, "reviewer.log"), 1);
     assert_eq!(launches(&workspace, "auditor.log"), 0, "a dependency ran");
     assert_eq!(run.of_kind("member-started").len(), 1, "{:?}", run.kinds());
+    for kind in ["cron-fired", "note-admitted"] {
+        assert!(
+            run.of_kind(kind).is_empty(),
+            "a scheduled note ran: {:?}",
+            run.kinds()
+        );
+    }
 }
 
 /// A judge whose answer never parses as a decision reaches no judgement:

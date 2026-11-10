@@ -213,10 +213,11 @@ fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error
 fn judge_only(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     let target = judge_only::Target {
         graph: config::ConfigRef(args.graph.clone()),
-        member: args
-            .member
-            .clone()
-            .expect("clap requires --member with --judge-only"),
+        member: run::MemberName::parse(
+            args.member
+                .as_deref()
+                .expect("clap requires --member with --judge-only"),
+        )?,
         persona: args.persona.clone(),
         overrides: args
             .set

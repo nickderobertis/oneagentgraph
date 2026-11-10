@@ -1021,7 +1021,7 @@ pub(crate) fn settle_report_judged(
     document: &Value,
     completed: bool,
     scratch: &Path,
-    bar: Option<&str>,
+    bar: Option<&crate::judge_only::BarFingerprint>,
 ) -> Outcome {
     let rendered = serde_json::to_string(document).unwrap_or_default();
     let path = scratch.join(REPORT_FILE);
@@ -1055,7 +1055,10 @@ pub(crate) fn settle_report_judged(
         ),
     ]);
     if let Some(bar) = bar {
-        fields.insert("bar_fingerprint".into(), Value::String(bar.to_string()));
+        fields.insert(
+            "bar_fingerprint".into(),
+            Value::String(bar.as_str().to_string()),
+        );
     }
     emitter.emit_with(
         EventKind::MemberSettled,

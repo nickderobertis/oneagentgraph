@@ -1693,9 +1693,9 @@ fn run_announcing(
     }
 
     let judged = judging.and_then(|judging| {
-        let (_, scratch) = invocations.get(&judging.member)?;
+        let (_, scratch) = invocations.get(judging.member.as_str())?;
         Some(crate::judge_only::judged(
-            settled.get(&judging.member),
+            settled.get(judging.member.as_str()),
             scratch,
             bar.clone()?,
         ))
