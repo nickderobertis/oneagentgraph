@@ -376,8 +376,51 @@ fn fingerprint(argv: &[String]) -> Result<String, String> {
 /// installed llmlint, so the double cannot list an option the real one lacks.
 const FINGERPRINT_HELP: &str = include_str!("llmlint-fingerprint-help.txt");
 
-/// Each finding the fixture rules make against the file `lint` was handed —
-/// its last argument — or `None` when it was handed none.
+/// The `lint` options that take a value: the ones onejudge composes and the
+/// ones a journey's `args` pass. Whatever else follows `lint` and is not an
+/// option is material.
+const VALUED: [&str; 12] = [
+    "--cwd",
+    "--format",
+    "--color",
+    "--progress",
+    "-c",
+    "--config",
+    "--diff-base",
+    "--label",
+    "--model",
+    "--prompt-template",
+    "--tag",
+    "--oneharness-config",
+];
+
+/// The one file a `lint` argv names as its material, if it names one.
+///
+/// # Errors
+///
+/// When it names more than one: onejudge hands a judge-only run exactly one.
+fn material(argv: &[String]) -> Result<Option<&String>, String> {
+    let mut positionals = Vec::new();
+    let mut args = argv.iter().skip(1);
+    while let Some(arg) = args.next() {
+        if VALUED.contains(&arg.as_str()) {
+            args.next();
+        } else if !arg.starts_with('-') {
+            positionals.push(arg);
+        }
+    }
+    match positionals.as_slice() {
+        [] => Ok(None),
+        [file] => Ok(Some(*file)),
+        more => Err(format!(
+            "`lint` names {} files; onejudge hands one",
+            more.len()
+        )),
+    }
+}
+
+/// Each finding the fixture rules make against the file `lint` was handed, or
+/// `None` when it was handed none.
 fn broken_rules(argv: &[String]) -> Result<Option<Vec<String>>, String> {
     let rules: Vec<(String, String)> = reached(&configs(argv)?)?
         .into_iter()
@@ -388,10 +431,7 @@ fn broken_rules(argv: &[String]) -> Result<Option<Vec<String>>, String> {
     // — names none, and these fixture rules judge only named material, so that
     // run judges nothing, and says so. A file that is named and cannot be read
     // is a run that could not complete rather than one that found nothing.
-    let Some(file) = argv
-        .last()
-        .filter(|arg| !arg.starts_with('-') && std::path::Path::new(arg).exists())
-    else {
+    let Some(file) = material(argv)? else {
         return Ok(None);
     };
     let text = std::fs::read_to_string(file)
