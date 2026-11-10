@@ -97,8 +97,31 @@ pub struct RunArgs {
     #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
     pub output: OutputFormat,
     /// Print `{run_id, events_path, pid}` and exit 0 instead of streaming.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "judge_only")]
     pub detach: bool,
+    /// Run only `--member`'s judge side over `--input`, against its bar: exit 0
+    /// pass, 1 judged fail (findings on stderr), 2 could not judge. No agent
+    /// side starts.
+    #[arg(long, requires = "member", conflicts_with = "follow_events")]
+    pub judge_only: bool,
+    /// The `kind: onejudge` member whose judge side `--judge-only` runs.
+    #[arg(long, value_name = "NAME", requires = "judge_only")]
+    pub member: Option<String>,
+    /// The material `--judge-only` judges: a file's path, or `-` for stdin.
+    #[arg(long, value_name = "PATH|-", requires = "judge_only")]
+    pub input: Option<String>,
+    /// Judge against this persona instead of the member's own: a built-in or
+    /// catalog role by name, or a persona file by path.
+    #[arg(long, value_name = "NAME|PATH", requires = "judge_only")]
+    pub persona: Option<String>,
+    /// A file or directory every judge is named to read. Repeatable; replaces
+    /// the bar's own artifacts.
+    #[arg(long, value_name = "PATH", requires = "judge_only")]
+    pub artifact: Vec<PathBuf>,
+    /// Print the digest of the bar `--judge-only` judges against, and run
+    /// nothing.
+    #[arg(long, requires = "judge_only", conflicts_with_all = ["input", "artifact"])]
+    pub bar_fingerprint: bool,
 }
 
 /// How `run` renders its events, and how `sweep` writes its report.

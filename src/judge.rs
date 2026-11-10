@@ -103,8 +103,8 @@ use crate::event::{
 };
 use crate::invoke::JudgeLaunch;
 use crate::member::{
-    activity, as_payload, payload, settle_report, unstartable, Bounds, Death, Heartbeat, Outcome,
-    Rule, Stall, HEARTBEAT_INTERVAL,
+    activity, as_payload, payload, settle_report, settle_report_judged, unstartable, Bounds, Death,
+    Heartbeat, Outcome, Rule, Stall, HEARTBEAT_INTERVAL,
 };
 #[cfg(feature = "test-doubles")]
 use crate::member::{FixtureGate, FIXTURE_HOLD};
@@ -793,8 +793,12 @@ pub fn run(launch: &JudgeLaunch, emitter: &Emitter, bounds: Bounds, scratch: &Pa
     // Started once the engine is, and kept by a thread of its own for
     // `Heartbeat`'s reason. The task is read for the suite's fixtures only.
     let heartbeat = Heartbeat::start(scratch, started, &launch.task);
+    let bar = launch
+        .judge_only
+        .as_ref()
+        .map(|judging| judging.bar_fingerprint.as_str());
     supervise(
-        &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &state, heartbeat,
+        &rx, &abort, emitter, bounds, scratch, started, &activity, ending, &state, heartbeat, bar,
     )
 }
 
@@ -912,10 +916,11 @@ fn hold_turn_open(observation: &Observation<'_>, gate: &mut Option<FixtureGate>)
 /// module's too: the panic containment both members rely on can only be driven
 /// against a real thread that really panics — see
 /// [`tests::a_panicking_engine_kills_its_own_member_and_not_the_process`].
-// Ten values, none derivable from another: where the answer arrives, the lever
-// that stops the engine, where the events go, the bounds, the member's scratch,
-// the two halves of the activity clock, how this member's note seam is closed,
-// what a hold shares with this loop, and the beat the heartbeat rule reads.
+// Eleven values, none derivable from another: where the answer arrives, the
+// lever that stops the engine, where the events go, the bounds, the member's
+// scratch, the two halves of the activity clock, how this member's note seam is
+// closed, what a hold shares with this loop, the beat the heartbeat rule reads,
+// and the bar fingerprint a judge-only settle carries.
 #[allow(clippy::too_many_arguments)]
 fn supervise(
     rx: &mpsc::Receiver<Answer>,
@@ -928,6 +933,7 @@ fn supervise(
     ending: Option<crate::note::Ending>,
     hold: &HoldState,
     mut heartbeat: Heartbeat,
+    bar: Option<&str>,
 ) -> Outcome {
     // Published far more rarely than the beat is refreshed, for the reason
     // `crate::member` gives: a stream that is mostly heartbeats buries the events
@@ -949,6 +955,7 @@ fn supervise(
             scratch,
             ending.as_ref().map(crate::note::Ending::endpoint),
             hold.ended(),
+            bar,
         )
     };
     loop {
@@ -1144,9 +1151,26 @@ fn plan(launch: &JudgeLaunch) -> Result<onejudge::cli::Plan, String> {
         task: Some(launch.task.clone()),
         ..Overrides::default()
     });
+    // A judge-only run's `--artifact`s replace the bar's own, as onejudge's
+    // `--artifact` does — applied last, so they beat `ONEJUDGE_ARTIFACTS` too.
+    if let Some(judging) = launch
+        .judge_only
+        .as_ref()
+        .filter(|j| !j.artifacts.is_empty())
+    {
+        config.apply(Overrides {
+            artifacts: Some(judging.artifacts.clone()),
+            ..Overrides::default()
+        });
+    }
     let mut plan = config.into_plan().map_err(|err| err.to_string())?;
     if plan.conversation.skill.dir == "." {
         plan.conversation.skill.dir = launch.worktree.display().to_string();
+    }
+    // The judge side alone, once, over the material — onejudge's own
+    // judge-only mode, reached through the same plan a normal run drives.
+    if let Some(judging) = &launch.judge_only {
+        plan = plan.with_judge_input(judging.input.clone());
     }
     Ok(plan)
 }
@@ -1495,6 +1519,7 @@ fn finish(
     scratch: &Path,
     notes: Option<&Path>,
     held: Option<Ended>,
+    bar: Option<&str>,
 ) -> Outcome {
     match answer {
         Ok(summary) => {
@@ -1528,7 +1553,7 @@ fn finish(
                 None => {
                     let completed = onejudge::cli::exit_code(&summary) == 0;
                     let document = serde_json::to_value(&summary.report).unwrap_or(Value::Null);
-                    settle_report(emitter, &document, completed, scratch)
+                    settle_report_judged(emitter, &document, completed, scratch, bar)
                 }
             }
         }
@@ -2071,6 +2096,7 @@ mod tests {
             agent_config: dir.path().join(crate::invoke::AGENT_CONFIG_FILE),
             session: "run-1-worker".to_string(),
             pace: None,
+            judge_only: None,
         };
         (dir, launch)
     }
@@ -2678,6 +2704,7 @@ mod tests {
             dir.path(),
             None,
             None,
+            None,
         );
 
         assert_eq!(
@@ -2733,6 +2760,7 @@ mod tests {
             dir.path(),
             None,
             None,
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -2781,6 +2809,7 @@ mod tests {
             dir.path(),
             None,
             None,
+            None,
         );
 
         let Outcome::Died(death) = outcome else {
@@ -2815,6 +2844,7 @@ mod tests {
             })),
             &emitter,
             dir.path(),
+            None,
             None,
             None,
         );
@@ -2859,6 +2889,7 @@ mod tests {
             None,
             &HoldState::new("write the thing"),
             Heartbeat::start(dir.path(), started, "write the thing"),
+            None,
         );
         let Outcome::Died(death) = outcome else {
             panic!("a panicking engine did not kill its member: {outcome:?}");

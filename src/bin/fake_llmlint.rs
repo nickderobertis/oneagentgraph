@@ -22,6 +22,18 @@
 //! | `FAKE_LLMLINT_ARGV_LOG` | append each invocation's argv, one JSON array per line, so a journey reads what onejudge composed |
 //! | `FAKE_LLMLINT_VERDICT` | `pass` (default): exit `0` on a summary line; `fail`: exit `1` on a findings report; `fail-once`: `fail` on the first `lint`, `pass` after, remembered in `FAKE_LLMLINT_MARKER`; `broken`: exit `2` on a stderr diagnostic |
 //! | `FAKE_LLMLINT_MARKER` | the file `fail-once` records its first run in |
+//! | `FAKE_LLMLINT_VERDICT=rules` | judge the files `lint` is handed against the config's fixture rules: exit `1` naming every rule whose `forbid` text a file contains, else `0` |
+//!
+//! A fixture rule is `{id, forbid}` under a config's `rules:`, and a config's
+//! `plugins:` that are local paths (relative to the config naming them) are
+//! configs too, read for their rules the same way — the double's stand-in for a
+//! rule a real llmlint loads from a file its config includes. A plugin that is a
+//! URL is a pin the double never fetches.
+//!
+//! `fingerprint` answers as the real one does, with one line of 64 lowercase hex
+//! characters: a SHA-256 over every `-c` config and every local plugin it
+//! reaches, by content — so editing a rule in an included file, or moving a pin,
+//! changes it. A config that cannot be read is exit `2`, as the real one refuses.
 //!
 //! `--version` answers on every verdict, because that is the probe onejudge
 //! makes before any turn: a `bin` that does not answer it is refused at plan
@@ -45,6 +57,7 @@ enum Verdict {
     Fail,
     FailOnce,
     Broken,
+    Rules,
 }
 
 impl Verdict {
@@ -57,8 +70,10 @@ impl Verdict {
             Ok("fail") => Ok(Verdict::Fail),
             Ok("fail-once") => Ok(Verdict::FailOnce),
             Ok("broken") => Ok(Verdict::Broken),
+            Ok("rules") => Ok(Verdict::Rules),
             Ok(other) => Err(format!(
-                "FAKE_LLMLINT_VERDICT must be pass, fail, fail-once, or broken; got {other:?}"
+                "FAKE_LLMLINT_VERDICT must be pass, fail, fail-once, broken, or rules; got \
+                 {other:?}"
             )),
         }
     }
@@ -94,6 +109,18 @@ fn main() -> std::process::ExitCode {
     if argv.first().map(String::as_str) == Some("--version") {
         println!("llmlint 0.4.3");
         return std::process::ExitCode::SUCCESS;
+    }
+    if argv.first().map(String::as_str) == Some("fingerprint") {
+        return match fingerprint(&configs(&argv)) {
+            Ok(digest) => {
+                println!("{digest}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(why) => {
+                eprintln!("fake-llmlint: {why}");
+                std::process::ExitCode::from(2)
+            }
+        };
     }
     if argv.first().map(String::as_str) != Some("lint") {
         eprintln!("fake-llmlint: expected `lint` or `--version`, got {argv:?}");
@@ -152,6 +179,121 @@ fn main() -> std::process::ExitCode {
             eprintln!("fake-llmlint: the judge harness is unreachable");
             std::process::ExitCode::from(2)
         }
+        Verdict::Rules => match broken_rules(&argv) {
+            Ok(broken) if broken.is_empty() => {
+                println!("0 violations, every fixture rule holds");
+                std::process::ExitCode::SUCCESS
+            }
+            Ok(broken) => {
+                for line in &broken {
+                    println!("{line}");
+                }
+                println!();
+                println!("{} violation(s)", broken.len());
+                std::process::ExitCode::from(1)
+            }
+            Err(why) => {
+                eprintln!("fake-llmlint: {why}");
+                std::process::ExitCode::from(2)
+            }
+        },
         Verdict::FailOnce => unreachable!("resolved above"),
     }
+}
+
+/// Every `-c`/`--config` the argv names.
+fn configs(argv: &[String]) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut args = argv.iter();
+    while let Some(arg) = args.next() {
+        if arg == "-c" || arg == "--config" {
+            if let Some(path) = args.next() {
+                found.push(std::path::PathBuf::from(path));
+            }
+        } else if let Some(path) = arg.strip_prefix("--config=") {
+            found.push(std::path::PathBuf::from(path));
+        }
+    }
+    found
+}
+
+/// Each config `configs` reaches — the named ones, then every local plugin
+/// they name, depth first — as `(path, content, document)`.
+fn reached(
+    configs: &[std::path::PathBuf],
+) -> Result<Vec<(std::path::PathBuf, String, serde_json::Value)>, String> {
+    let mut out = Vec::new();
+    let mut pending: Vec<std::path::PathBuf> = configs.iter().rev().cloned().collect();
+    while let Some(path) = pending.pop() {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("cannot read config {}: {err}", path.display()))?;
+        let document: serde_json::Value = oneagentgraph::yaml::from_str(&text)
+            .map_err(|err| format!("{} is not YAML: {err}", path.display()))?;
+        let plugins: Vec<String> = document
+            .get("plugins")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|plugin| !plugin.starts_with("https://") && !plugin.starts_with("http://"))
+            .map(str::to_string)
+            .collect();
+        let dir = path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_default();
+        for plugin in plugins.iter().rev() {
+            pending.push(dir.join(plugin));
+        }
+        out.push((path, text, document));
+    }
+    Ok(out)
+}
+
+/// The double's `fingerprint`: SHA-256 over every config reached, by content.
+fn fingerprint(configs: &[std::path::PathBuf]) -> Result<String, String> {
+    use sha2::{Digest as _, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"fake-llmlint 0.4.3\n");
+    for (_, text, _) in reached(configs)? {
+        hasher.update(text.len().to_le_bytes());
+        hasher.update(text.as_bytes());
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+/// Each finding the fixture rules make against the files `lint` was handed —
+/// its trailing arguments that are files.
+fn broken_rules(argv: &[String]) -> Result<Vec<String>, String> {
+    let mut rules = Vec::new();
+    for (_, _, document) in reached(&configs(argv))? {
+        for rule in document
+            .get("rules")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let field = |name: &str| rule.get(name).and_then(serde_json::Value::as_str);
+            if let (Some(id), Some(forbid)) = (field("id"), field("forbid")) {
+                rules.push((id.to_string(), forbid.to_string()));
+            }
+        }
+    }
+    let mut broken = Vec::new();
+    for file in argv.iter().rev().take_while(|arg| !arg.starts_with('-')) {
+        let path = std::path::Path::new(file);
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        for (id, forbid) in &rules {
+            if text.contains(forbid.as_str()) {
+                broken.push(format!("{file}: {id} — the file contains {forbid:?}"));
+            }
+        }
+    }
+    Ok(broken)
 }

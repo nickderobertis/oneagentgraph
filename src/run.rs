@@ -1202,7 +1202,30 @@ pub fn run(
     sink: Box<dyn std::io::Write + Send>,
     env: &BTreeMap<String, String>,
 ) -> Result<i32, Error> {
-    run_announcing(request, sink, env, &mut |_| {})
+    run_announcing(request, sink, env, &mut |_| {}, None).map(|ran| ran.exit)
+}
+
+/// [`run`], narrowed to one member's judge side over a judge-only input — the
+/// whole of `run --judge-only` past its argument parsing, which is
+/// [`crate::judge_only::run`]'s.
+pub(crate) fn judge(
+    request: &Request,
+    sink: Box<dyn std::io::Write + Send>,
+    env: &BTreeMap<String, String>,
+    judging: &crate::judge_only::Judging,
+) -> Result<crate::judge_only::Judged, Error> {
+    let ran = run_announcing(request, sink, env, &mut |_| {}, Some(judging))?;
+    Ok(ran
+        .judged
+        .expect("a judge-only run settles on a judgement or refuses"))
+}
+
+/// What one run of [`run_announcing`] came to.
+struct Ran {
+    /// The exit code the graph settled with.
+    exit: i32,
+    /// The judgement, for a judge-only run.
+    judged: Option<crate::judge_only::Judged>,
 }
 
 /// [`run`], telling `announce` the run's id at the moment the graph starts.
@@ -1218,16 +1241,23 @@ fn run_announcing(
     sink: Box<dyn std::io::Write + Send>,
     env: &BTreeMap<String, String>,
     announce: &mut dyn FnMut(RunId),
-) -> Result<i32, Error> {
+    judging: Option<&crate::judge_only::Judging>,
+) -> Result<Ran, Error> {
     let mut resolver = Resolver::new();
     let graph_document = resolver.resolve(&request.graph, None)?.clone();
-    let graph = read_graph(&graph_document.content, &request.graph.0, |parsed| {
+    let mut graph = read_graph(&graph_document.content, &request.graph.0, |parsed| {
         // The environment's say first, so the request's own `--set` — which is
         // the operator's, typed for this run — wins over it.
         apply_background_env(parsed, env)?;
         apply_overrides(parsed, &request.overrides)
     })?;
     crate::config::validate(&graph)?;
+    // A judge-only run is this same run over the one member it judges: the
+    // whole graph is validated as written, and then nothing but that member is
+    // prepared, recorded or launched.
+    if let Some(judging) = judging {
+        crate::judge_only::narrow(&mut graph, judging)?;
+    }
     // The flag beats the graph's own key, and whichever one is in force is
     // checked here — before a directory is created, a ref is fetched, or a
     // member is launched. A spec that names an unmatchable matcher is the same
@@ -1316,6 +1346,9 @@ fn run_announcing(
     // refusal read as a graph that began, which is exactly what a caller wired
     // in early must not see.
     let mut invocations = BTreeMap::new();
+    // The judged member's bar, for a judge-only run — computed as its launch is
+    // prepared, before anything starts.
+    let mut bar = None;
     for (name, member) in &graph.members {
         let scratch = root.join(MEMBERS_DIR).join(name);
         std::fs::create_dir_all(&scratch).map_err(|err| {
@@ -1332,10 +1365,18 @@ fn run_announcing(
             oneharness_bin: &request.oneharness_bin,
             background: graph.is_background(name),
         };
-        invocations.insert(
-            name.clone(),
-            (invoke::build(member, &context, &mut resolver)?, scratch),
-        );
+        let mut invocation = invoke::build(member, &context, &mut resolver)?;
+        if let Some(judging) = judging {
+            bar = Some(crate::judge_only::arm(
+                &mut invocation,
+                member,
+                &context,
+                &mut resolver,
+                &member_env,
+                judging,
+            )?);
+        }
+        invocations.insert(name.clone(), (invocation, scratch));
     }
     record.refs = resolver.inventory();
     write_record(&root, &record)?;
@@ -1446,6 +1487,9 @@ fn run_announcing(
     let successful_members = Arc::new(Mutex::new(BTreeSet::new()));
     let mut cron_threads = Vec::new();
     let mut failed = false;
+    // How each member's initial turn came out, which a judge-only run reads its
+    // verdict off.
+    let mut settled: BTreeMap<String, Outcome> = BTreeMap::new();
     for wave in waves {
         let mut runnable = Vec::new();
         let mut deferred = Vec::new();
@@ -1587,6 +1631,7 @@ fn run_announcing(
         );
         for (name, outcome) in &outcomes {
             record.members.insert(name.clone(), describe(outcome));
+            settled.insert(name.clone(), outcome.clone());
             failed |= !outcome.is_success();
             if outcome.is_success() {
                 successful_members
@@ -1647,10 +1692,18 @@ fn run_announcing(
         }
     }
 
-    let exit = if failed {
-        EXIT_MEMBER_FAILED
-    } else {
-        EXIT_SUCCESS
+    let judged = judging.and_then(|judging| {
+        let (_, scratch) = invocations.get(&judging.member)?;
+        Some(crate::judge_only::judged(
+            settled.get(&judging.member),
+            scratch,
+            bar.clone()?,
+        ))
+    });
+    let exit = match &judged {
+        Some(judged) => judged.verdict.exit_code(),
+        None if failed => EXIT_MEMBER_FAILED,
+        None => EXIT_SUCCESS,
     };
     emitter.emit(
         EventKind::GraphSettled,
@@ -1676,7 +1729,7 @@ fn run_announcing(
     record.exit_code = Some(exit);
     write_record(&root, &record)?;
     let _ = crate::scratch::reap(&root);
-    Ok(exit)
+    Ok(Ran { exit, judged })
 }
 
 /// Start a graph on a scheduler thread and return a live handle.
@@ -1707,9 +1760,16 @@ pub fn start(request: &Request, env: &BTreeMap<String, String>) -> Result<Runnin
             events: event_tx,
             buffered: Vec::new(),
         };
-        let result = run_announcing(&request, Box::new(writer), &env, &mut |run_id| {
-            let _ = started_tx.send(run_id);
-        });
+        let result = run_announcing(
+            &request,
+            Box::new(writer),
+            &env,
+            &mut |run_id| {
+                let _ = started_tx.send(run_id);
+            },
+            None,
+        )
+        .map(|ran| ran.exit);
         let _ = result_tx.send(result);
     });
 

@@ -203,6 +203,10 @@ pub struct JudgeLaunch {
     /// held, which is every two-party member written before graph schema
     /// version [`crate::config::FIRST_TWO_PARTY_JOB_VERSION`].
     pub pace: Option<crate::judge::Pace>,
+    /// The material this member's judge side judges in place of an agent's
+    /// turn, when the run is `run --judge-only` — see [`crate::judge_only`].
+    /// `None`, which is every launch [`build`] makes, is a normal two-party run.
+    pub judge_only: Option<crate::judge_only::JudgeOnly>,
 }
 
 /// One member, ready to start.
@@ -396,6 +400,7 @@ fn onejudge(
                 resettable: schedule.resettable,
                 background: context.background,
             }),
+            judge_only: None,
         })),
         persona: label,
         // Nothing: this member starts no child process of its own, so it has no
@@ -404,6 +409,113 @@ fn onejudge(
         env: Vec::new(),
         refs: resolver.inventory(),
     })
+}
+
+/// Everything a two-party member's verdict is judged against, gathered the way
+/// [`build`] gathers it and without writing or launching anything — the
+/// material [`crate::judge_only`] digests into a bar fingerprint.
+///
+/// Read through the same resolver, catalog lookup and persona merge a dispatch
+/// of this member uses, so the bar digested is the bar a run of it applies: the
+/// member's own judge list and `judge_settings` as the graph wrote them, each
+/// harness judge's oneharness config as read (its routing), the persona
+/// document the member resolves to, and the effective onejudge config that
+/// persona merges into — less the keys a judge never reads (`provider`, which
+/// the judge list above stands for; `session`; `task`; `skill`; and
+/// `user.max_turns`, which bounds the agent loop and not the bar).
+///
+/// An llmlint judge's bar is the rules it would load, which only llmlint can
+/// enumerate, so each one is returned as what to ask it rather than read here.
+pub(crate) struct Bar {
+    /// The material this crate can read for itself, as one JSON document.
+    pub(crate) document: Value,
+    /// Each llmlint judge, in list order, as the `llmlint fingerprint` to run.
+    pub(crate) llmlint: Vec<LlmlintBar>,
+}
+
+/// One llmlint judge's side of a [`Bar`]: what `<bin> fingerprint` is asked.
+pub(crate) struct LlmlintBar {
+    /// The judge's 1-based position in the member's list, for a refusal.
+    pub(crate) entry: usize,
+    /// The executable, as onejudge would run it.
+    pub(crate) bin: String,
+    /// The judge's config, absolute, exactly as onejudge is handed it.
+    pub(crate) config: Option<PathBuf>,
+    /// The judge's own extra `args`.
+    pub(crate) args: Vec<String>,
+}
+
+/// Gather `member`'s [`Bar`] against `context`.
+///
+/// # Errors
+///
+/// [`Error::InvalidConfig`] for the refusals [`build`] gives the same inputs: a
+/// ref that cannot be read, a persona that does not load or merge, an llmlint
+/// config that is not a readable file.
+pub(crate) fn bar(
+    member: &OnejudgeMember,
+    context: &Context<'_>,
+    resolver: &mut Resolver,
+) -> Result<Bar, Error> {
+    catalog_root(context)?;
+    let base = resolver
+        .resolve(&member.base_config, context.graph_dir)?
+        .clone();
+    let persona_text = match &member.persona {
+        Some(reference) => Some(persona_document(reference, context, resolver)?.0),
+        None => None,
+    };
+    let (persona, _) = load_persona(member.persona.as_ref(), context, resolver)?;
+    let mut effective = persona::merge(&base.content, &member.base_config.0, &persona)?;
+    if let Some(map) = effective.as_object_mut() {
+        for key in ["provider", "session", "task", "skill"] {
+            map.remove(key);
+        }
+        if let Some(Value::Object(user)) = map.get_mut("user") {
+            user.remove("max_turns");
+        }
+    }
+    let mut routing = Vec::with_capacity(member.judge.len());
+    let mut llmlint = Vec::new();
+    for (index, judge) in member.judge.iter().enumerate() {
+        let entry = index + 1;
+        routing.push(match judge {
+            JudgeSide::Harness(harness) => Value::String(
+                resolver
+                    .resolve(&harness.oneharness_config, context.graph_dir)?
+                    .content
+                    .clone(),
+            ),
+            JudgeSide::Llmlint(side) => {
+                llmlint.push(LlmlintBar {
+                    entry,
+                    bin: side.bin.clone().unwrap_or_else(|| "llmlint".to_string()),
+                    config: side
+                        .config
+                        .as_ref()
+                        .map(|config| llmlint_config(config, entry, context))
+                        .transpose()?,
+                    args: side.args.clone(),
+                });
+                Value::Null
+            }
+            JudgeSide::Command(_) => Value::Null,
+        });
+    }
+    let document = serde_json::json!({
+        "judge": member.judge,
+        "judge_settings": member.judge_settings,
+        "judge_routing": routing,
+        "persona": persona_text,
+        "bar": effective,
+    });
+    Ok(Bar { document, llmlint })
+}
+
+/// The directory a member works in, as [`build`] resolves it — what an llmlint
+/// judge of it is fingerprinted from.
+pub(crate) fn worktree(member: &OnejudgeMember, context: &Context<'_>) -> PathBuf {
+    member_dir(member.dir.as_deref(), context)
 }
 
 /// Anchor a base config's own `skill:` to the directory its author wrote it in.
