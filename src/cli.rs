@@ -32,8 +32,10 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 #[command(rename_all = "kebab-case")]
 pub enum Command {
+    // Boxed: `RunArgs` is by far the widest variant, past clippy's
+    // `large_enum_variant` bound wherever a path is wider, as on Windows.
     /// Run a graph, streaming envelopes to stdout.
-    Run(RunArgs),
+    Run(Box<RunArgs>),
     /// Check a graph without running it.
     Validate(ValidateArgs),
     /// Fire a scheduled member now.

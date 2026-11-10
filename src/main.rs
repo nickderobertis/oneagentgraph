@@ -73,7 +73,7 @@ fn exit_for(err: &Error) -> i32 {
 /// Run one command, returning the code it exits with.
 fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     match command {
-        Command::Run(args) => run_graph(args, env),
+        Command::Run(args) => run_graph(*args, env),
         Command::Validate(args) => validate(&args, env),
         Command::Trigger(args) => signal(&args, env, run::Signal::Trigger),
         Command::ResetTimer(args) => signal(&args, env, run::Signal::Reset),
