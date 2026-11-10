@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.4](https://github.com/nickderobertis/oneagentgraph/compare/v0.11.3...v0.11.4) - 2026-11-10
+
+### Added
+
+- run only a graph member's judge side as an option of run ([#275](https://github.com/nickderobertis/oneagentgraph/pull/275))
+
 ## [0.11.3](https://github.com/nickderobertis/oneagentgraph/compare/v0.11.2...v0.11.3) - 2026-11-09
 
 ### Fixed
