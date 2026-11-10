@@ -1021,6 +1021,127 @@ fn a_run_names_the_stream_it_follows_and_reset_timer_gains_nothing() {
     }
 }
 
+/// The judge-only surface the contract documents is the one the parser takes:
+/// both documented shapes parse into the fields the binary reads, the exit codes
+/// the document assigns are the library's, and the event it names the digest on
+/// is the one the run publishes it on.
+#[test]
+fn the_documented_judge_only_surface_is_the_one_the_binary_parses() {
+    use clap::Parser as _;
+    let usage = fenced_block("");
+    assert!(
+        usage.contains("[--judge-only --member NAME (--input PATH|- [--artifact PATH]... | --bar-fingerprint) [--persona NAME|PATH]]"),
+        "the contract's CLI block no longer spells the judge-only flags"
+    );
+    let parse = |argv: &[&str]| {
+        let cli = oneagentgraph::cli::Cli::try_parse_from(argv)
+            .unwrap_or_else(|err| panic!("{argv:?}: {err}"));
+        let oneagentgraph::cli::Command::Run(args) = cli.command else {
+            panic!("a run")
+        };
+        args
+    };
+    let judged = parse(&[
+        "oneagentgraph",
+        "run",
+        "g.yaml",
+        "--judge-only",
+        "--member",
+        "worker",
+        "--input",
+        "-",
+        "--artifact",
+        "a.md",
+        "--artifact",
+        "b",
+        "--persona",
+        "reviewer",
+    ]);
+    assert!(judged.judge_only && !judged.bar_fingerprint);
+    assert_eq!(judged.member.as_deref(), Some("worker"));
+    assert_eq!(judged.input.as_deref(), Some("-"));
+    assert_eq!(judged.persona.as_deref(), Some("reviewer"));
+    assert_eq!(judged.artifact.len(), 2);
+    let digest = parse(&[
+        "oneagentgraph",
+        "run",
+        "g.yaml",
+        "--judge-only",
+        "--member",
+        "worker",
+        "--persona",
+        "./p.yaml",
+        "--bar-fingerprint",
+    ]);
+    assert!(digest.bar_fingerprint && digest.input.is_none());
+    for refused in [
+        &[
+            "oneagentgraph",
+            "run",
+            "g.yaml",
+            "--judge-only",
+            "--input",
+            "x",
+        ][..],
+        &[
+            "oneagentgraph",
+            "run",
+            "g.yaml",
+            "--member",
+            "w",
+            "--input",
+            "x",
+        ][..],
+        &[
+            "oneagentgraph",
+            "run",
+            "g.yaml",
+            "--judge-only",
+            "--member",
+            "w",
+            "--detach",
+        ][..],
+        &[
+            "oneagentgraph",
+            "run",
+            "g.yaml",
+            "--judge-only",
+            "--member",
+            "w",
+            "--follow-events",
+            "e",
+        ][..],
+        &[
+            "oneagentgraph",
+            "run",
+            "g.yaml",
+            "--judge-only",
+            "--member",
+            "w",
+            "--input",
+            "x",
+            "--bar-fingerprint",
+        ][..],
+    ] {
+        assert!(
+            oneagentgraph::cli::Cli::try_parse_from(refused).is_err(),
+            "{refused:?} parsed"
+        );
+    }
+    use oneagentgraph::judge_only::{EXIT_COULD_NOT_JUDGE, EXIT_FAIL, EXIT_PASS};
+    for (code, meaning) in [
+        (EXIT_PASS, "the judge side declared the bar met"),
+        (EXIT_FAIL, "it judged the input and found it short"),
+        (EXIT_COULD_NOT_JUDGE, "it could not judge"),
+    ] {
+        assert!(
+            CONTRACT.contains(&format!("**{code}** {meaning}")),
+            "the contract no longer gives exit {code} as {meaning:?}"
+        );
+    }
+    assert!(CONTRACT.contains("plus `bar_fingerprint` on a judge-only run's, and on no other"));
+}
+
 /// The documented graph's scheduled note and `reset_on` are schema 11's, and the
 /// same document declaring schema 10 is refused by the field's name.
 #[test]
