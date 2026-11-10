@@ -30,6 +30,14 @@ mod events;
 mod history_store;
 // llmlint: ignore-end[expensive_tests_stay_behind_their_own_edge]
 mod interrupt;
+// llmlint: ignore-block[e2e_not_mocked] the same declaration `mod panel;` below
+// carries, for the same reason: the journeys are in tests/e2e/judge_only.rs,
+// which declares it itself — the paid harness process is the one sanctioned
+// double, replaced at oneharness's own `ONEHARNESS_BIN_<ID>` seam, and the
+// `llmlint` its graphs name is an input the graph supplies. This line only
+// names the module.
+mod judge_only;
+// llmlint: ignore-end[e2e_not_mocked]
 mod library;
 mod liveness;
 // llmlint: ignore-block[e2e_not_mocked] the journeys are in tests/e2e/note.rs,

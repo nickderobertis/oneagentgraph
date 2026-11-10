@@ -68,6 +68,10 @@ include = [
   # And once more, by `tests/e2e/support.rs`: the `oneharness` release the e2e
   # suite drives is the one this file pins, read from it rather than copied.
   "/justfile",
+  # And by `src/judge_only.rs`'s own unit tests and the llmlint double: the
+  # subset of `llmlint fingerprint --help` both are written against, which
+  # `tests/judged-lint/lint_llm_diff.rs` holds to the installed llmlint.
+  "/src/bin/llmlint-fingerprint-help.txt",
 ]
 
 [[bin]]
@@ -468,7 +472,13 @@ test-doubles = []
 # reads it. `tests/e2e/scheduled_notes.rs`'s
 # `a_note_for_the_supervisor_taken_by_the_last_worker_turn_reaches_one_closing_decision`
 # fails against 0.22.3.
-onejudge = { version = "0.22.5", features = ["cli"] }
+# **0.23.0 is a compile floor**: `JudgeInput` and `Plan::with_judge_input`,
+# onejudge's judge-only mode — the judge side alone, once, over material in
+# place of a worker's turn — which `run --judge-only` drives through the same
+# plan a two-party member runs (`src/judge_only.rs`, `src/judge.rs`). Its
+# `oneharness-core` requirement is unchanged, so the one-copy rule holds.
+# `tests/e2e/judge_only.rs` drives it end to end.
+onejudge = { version = "0.23.0", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the

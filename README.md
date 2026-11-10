@@ -151,6 +151,23 @@ not take:
 
 ![Two oneagentgraph validate runs in a terminal. The first prints "node-scope: 1 member(s) OK". The second is refused with exit status detail: invalid config, member "worker", judge entry 1, label "code reviewer" — use letters, digits, hyphens, and underscores; a label names this judge on every surface and, for a harness judge, the config file this run writes for it](docs/screenshots/validate.svg)
 
+## Review with one member's judge alone
+
+`run --judge-only` runs only one member's reviewer over a piece of work — a plan
+before it launches, a correction to one that is running — with that member's
+own judge panel, harness routing and persona bar, and no agent side at all:
+
+```bash
+oneagentgraph run graphs/planner.yaml --judge-only --member worker --input plan.md
+oneagentgraph run graphs/planner.yaml --judge-only --member worker \
+  --persona ./personas/strict.yaml --input - < plan.md
+```
+
+It exits `0` when the bar is met, `1` with the findings on stderr when it is not,
+and `2` when no judgement was reached. `--bar-fingerprint` in place of `--input`
+prints one digest of that bar and runs nothing, so a host can record what a pass
+was judged against; the judge-only run's `member-settled` carries the same digest.
+
 ## What past runs did
 
 A run's record is written when it starts and rewritten as it settles, so

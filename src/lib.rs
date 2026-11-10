@@ -32,6 +32,7 @@ pub mod health;
 pub mod history;
 pub mod invoke;
 pub mod judge;
+pub mod judge_only;
 pub mod liveness;
 pub mod member;
 pub mod note;

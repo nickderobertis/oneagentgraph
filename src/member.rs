@@ -551,7 +551,7 @@ impl Bounds {
 ///   single-sided member that talks as it works stamps this clock at each item
 ///   it finishes — while one spending ten minutes generating a single reply,
 ///   with no tool call and no finished item in between, still hands it nothing.
-/// * `onejudge` 0.22.5 delivers the worker's same normalized events **live**,
+/// * `onejudge` 0.23.0 delivers the worker's same normalized events **live**,
 ///   from inside `respond_observing`, as `Observation::Action` — a tool event as
 ///   `Observation::Tool` first and then as `Action`, the agent's words as
 ///   `Action` alone — so a two-party member's worker turn stamps this clock at
@@ -564,7 +564,10 @@ impl Bounds {
 ///   once the supervisor call has returned and delivers each as
 ///   `Observation::JudgeTool` just before that judge's
 ///   `Observation::JudgeDecided`, so they stamp the clock like any observation,
-///   though they are not relayed, but only at the decision's end.
+///   though they are not relayed, but only at the decision's end. A judge-only
+///   run has no worker turn at all: its one supervisor decision is that same
+///   call and those same deliveries, so its clock is stamped only as the
+///   decision opens and once it returns.
 /// * The `alive N ago` an operator-facing view prints is `member-heartbeat`,
 ///   which [`crate::harness`] and [`crate::judge`] emit on their supervisor's
 ///   own timer whatever the member is doing. It is this process saying it is
@@ -1006,39 +1009,60 @@ pub(crate) fn settle_report(
     completed: bool,
     scratch: &Path,
 ) -> Outcome {
+    settle_report_judged(emitter, document, completed, scratch, None)
+}
+
+/// [`settle_report`], carrying the bar fingerprint a judge-only run judged
+/// against — see [`crate::judge_only`] — as `bar_fingerprint` on the payload.
+/// `None` publishes exactly what [`settle_report`] does: the field is absent
+/// from every settle that is not a judge-only one.
+pub(crate) fn settle_report_judged(
+    emitter: &Emitter,
+    document: &Value,
+    completed: bool,
+    scratch: &Path,
+    bar: Option<&crate::judge_only::BarFingerprint>,
+) -> Outcome {
     let rendered = serde_json::to_string(document).unwrap_or_default();
     let path = scratch.join(REPORT_FILE);
     // Best-effort: a member that settled is settled, and losing the stored copy
     // of its report is not a reason to report it as anything else. The payload
     // says where it went either way, which is what an operator needs to look.
     let stored = std::fs::write(&path, &rendered).is_ok();
+    let mut fields = payload([
+        ("completed", Value::Bool(completed)),
+        (
+            "verdict",
+            document
+                .get("verdicts")
+                .cloned()
+                .unwrap_or(Value::Array(Vec::new())),
+        ),
+        (
+            "completion_reason",
+            document
+                .get("completion_reason")
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
+        (
+            "report_path",
+            if stored {
+                Value::String(path.display().to_string())
+            } else {
+                Value::Null
+            },
+        ),
+    ]);
+    if let Some(bar) = bar {
+        fields.insert(
+            "bar_fingerprint".into(),
+            Value::String(bar.as_str().to_string()),
+        );
+    }
     emitter.emit_with(
         EventKind::MemberSettled,
-        payload([
-            ("completed", Value::Bool(completed)),
-            (
-                "verdict",
-                document
-                    .get("verdicts")
-                    .cloned()
-                    .unwrap_or(Value::Array(Vec::new())),
-            ),
-            (
-                "completion_reason",
-                document
-                    .get("completion_reason")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-            ),
-            (
-                "report_path",
-                if stored {
-                    Value::String(path.display().to_string())
-                } else {
-                    Value::Null
-                },
-            ),
-        ]),
+        fields,
         vec![crate::event::Artifact {
             id: format!("report-{}", emitter.stream()),
             kind: "report".into(),
@@ -1457,6 +1481,7 @@ mod tests {
                 agent_config: std::path::PathBuf::from("/scratch/oneharness.toml"),
                 session: "s-worker".into(),
                 pace: None,
+                judge_only: None,
             }))),
             start_after: None,
             truncated: false,

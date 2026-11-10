@@ -26,7 +26,7 @@ use oneagentgraph::persona::{Persona, PERSONA_TEMPLATE};
 use oneagentgraph::render::Text;
 use oneagentgraph::resolve::Resolver;
 use oneagentgraph::scratch::{Owned, SCRATCH_PREFIX};
-use oneagentgraph::{config, health, history, run, smoke, sweep};
+use oneagentgraph::{config, health, history, judge_only, run, smoke, sweep};
 
 /// Where run state lives unless the environment says otherwise.
 const STATE_DIR_ENV: &str = "ONEAGENTGRAPH_STATE_DIR";
@@ -73,7 +73,7 @@ fn exit_for(err: &Error) -> i32 {
 /// Run one command, returning the code it exits with.
 fn dispatch(command: Command, env: &BTreeMap<String, String>) -> Result<i32, Error> {
     match command {
-        Command::Run(args) => run_graph(args, env),
+        Command::Run(args) => run_graph(*args, env),
         Command::Validate(args) => validate(&args, env),
         Command::Trigger(args) => signal(&args, env, run::Signal::Trigger),
         Command::ResetTimer(args) => signal(&args, env, run::Signal::Reset),
@@ -170,6 +170,9 @@ fn requested_filter(args: &RunArgs) -> Result<Option<EventFilter>, Error> {
 
 /// `oneagentgraph run`.
 fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    if args.judge_only {
+        return judge_only(&args, env);
+    }
     let task = requested_task(&args)?;
     let request = run::Request {
         graph: config::ConfigRef(args.graph.clone()),
@@ -199,6 +202,86 @@ fn run_graph(args: RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error
         OutputFormat::Text => Box::new(Text::new(std::io::stdout())),
     };
     run::run(&request, sink, env)
+}
+
+/// `oneagentgraph run --judge-only`: one member's judge side over `--input`,
+/// streaming the run as `run` does and exiting with the verdict — or, with
+/// `--bar-fingerprint`, the digest of the bar it would judge against, alone.
+///
+/// Every refusal before the judgement starts exits 2, which is both the
+/// contract's invalid-config code and the judge-only "could not judge".
+fn judge_only(args: &RunArgs, env: &BTreeMap<String, String>) -> Result<i32, Error> {
+    let target = judge_only::Target {
+        graph: config::ConfigRef(args.graph.clone()),
+        member: run::MemberName::parse(
+            args.member
+                .as_deref()
+                .expect("clap requires --member with --judge-only"),
+        )?,
+        persona: args.persona.clone(),
+        overrides: args
+            .set
+            .iter()
+            .map(|raw| run::parse_set(raw))
+            .collect::<Result<Vec<_>, _>>()?,
+        dir: args.dir.clone().unwrap_or_else(|| PathBuf::from(".")),
+    };
+    if args.bar_fingerprint {
+        println!("{}", judge_only::bar_fingerprint(&target, env)?);
+        return Ok(EXIT_SUCCESS);
+    }
+    let input = match args.input.as_deref() {
+        None => {
+            return Err(Error::InvalidConfig(
+                "--judge-only needs --input PATH (or `-` for stdin), or --bar-fingerprint".into(),
+            ))
+        }
+        Some("-") => {
+            let mut text = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut text)
+                .map_err(|err| Error::InvalidConfig(format!("cannot read --input -: {err}")))?;
+            judge_only::Input::Text(text)
+        }
+        Some(path) => judge_only::Input::File(PathBuf::from(path)),
+    };
+    let request = judge_only::Request {
+        target,
+        input,
+        artifacts: args.artifact.clone(),
+        task: requested_task(args)?,
+        labels: args
+            .label
+            .iter()
+            .map(|raw| run::parse_label(raw))
+            .collect::<Result<Vec<_>, _>>()?,
+        filter: requested_filter(args)?,
+        state_dir: state_dir(env),
+        oneharness_bin: oneharness_bin(env),
+    };
+    let sink: Box<dyn std::io::Write + Send> = match args.output {
+        OutputFormat::Json => Box::new(std::io::stdout()),
+        OutputFormat::Text => Box::new(Text::new(std::io::stdout())),
+    };
+    let judged = judge_only::run(&request, sink, env)?;
+    match &judged.verdict {
+        judge_only::Verdict::Pass => {}
+        judge_only::Verdict::Fail { findings } => {
+            eprintln!(
+                "oneagentgraph: {} failed its bar ({}):",
+                request.target.member, judged.bar_fingerprint
+            );
+            for finding in findings.iter() {
+                eprintln!("  - {finding}");
+            }
+        }
+        judge_only::Verdict::CouldNotJudge { reason } => {
+            eprintln!(
+                "oneagentgraph: {} could not judge the input: {reason}",
+                request.target.member
+            );
+        }
+    }
+    Ok(judged.verdict.exit_code())
 }
 
 /// Say on standard error what the graph a foreground `run` is about to run

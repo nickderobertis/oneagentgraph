@@ -580,3 +580,39 @@ fn an_explicit_or_ambient_cache_skip_judges_again() {
         );
     }
 }
+
+/// The llmlint double answers `fingerprint --help` with a checked-in subset of
+/// the real one's, and `src/judge_only.rs` decides which of a judge's `args`
+/// reach `llmlint fingerprint` by reading that output — so every option line
+/// the subset names must be one the installed llmlint lists, word for word.
+/// Without this the double and the parser could agree on an option the real
+/// CLI dropped or never took, and every journey would pass against it.
+#[test]
+fn the_fingerprint_help_the_double_answers_with_is_the_installed_llmlints() {
+    let subset = include_str!("../../src/bin/llmlint-fingerprint-help.txt");
+    let output = Command::new(installed_llmlint())
+        .args(["fingerprint", "--help"])
+        .output()
+        .expect("the installed llmlint runs");
+    assert!(
+        output.status.success(),
+        "`llmlint fingerprint --help` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let real = String::from_utf8_lossy(&output.stdout);
+    let listed: Vec<&str> = real.lines().map(str::trim_end).collect();
+    let options: Vec<&str> = subset
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| line.trim_start().starts_with('-'))
+        .collect();
+    assert!(!options.is_empty(), "the subset lists no option");
+    for option in options {
+        assert!(
+            listed.contains(&option),
+            "src/bin/llmlint-fingerprint-help.txt lists `{}`, which the installed \
+             `llmlint fingerprint --help` does not:\n{real}",
+            option.trim()
+        );
+    }
+}

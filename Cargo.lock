@@ -1374,9 +1374,9 @@ dependencies = [
 
 [[package]]
 name = "onejudge"
-version = "0.22.5"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d8a71178dbdcd5425076d869ab62385d5393ef7570620da215e7508f2ebaa36"
+checksum = "c733d6153705fe188937f5380875fdee50b1ebe318eb156ad6ffb8515c8c953e"
 dependencies = [
  "clap",
  "oneharness-core",

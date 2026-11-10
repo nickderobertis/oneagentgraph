@@ -63,6 +63,7 @@
 //! | `fake:spawn-ticker=<path>` | leave a **detached** ticker behind, which no cascade down the chain reaches |
 //! | `fake:supervisor-hold=<path>` | *judge side only:* write `<path>.entered` as the supervisor's turn begins, then block until `<path>` exists or an interrupt arrives |
 //! | `fake:next-turn=<path>` | *judge side only:* while `<path>` exists, continue the conversation with that file's contents as the next user turn, and consume it |
+//! | `fake:unparseable` | *judge side only:* answer the supervisor in prose that is neither documented decision shape, every time it is asked |
 //! | `fake:record-prompt=<path>` | append the exact prompt this side was given |
 //! | `fake:record-supervisor-prompt=<path>` | *judge side only:* append the exact prompt the supervisor was given |
 //! | `fake:record-cwd=<path>` | append the directory this process was started in |
@@ -94,9 +95,9 @@
 //! a matching model fails at that request rather than wedging on a turn nobody
 //! will complete.
 //!
-//! The three marked *judge side only* are the mirror of that, and they exist for
-//! the mirror reason: a journey about the **judge's** live turn needs one it can
-//! observe and release, and every other lever here is either the agent's or fires
+//! The four marked *judge side only* are the mirror of that, and they exist for
+//! the mirror reason: a journey about the **judge's** turn needs one it can
+//! observe, release or steer, and every other lever here is either the agent's or fires
 //! on both sides. Which side an invocation is comes from the prompt's own framing
 //! ([`prompt_frames_the_supervisor`]), because there is no flag that says so.
 //!
@@ -1293,6 +1294,9 @@ fn answer(prompt: &str) -> Result<String, String> {
         // completed response carries a `reason` and *no* `message`, because
         // there is no next turn for a message to be. A continuing one carries
         // both.
+        if steers(prompt, "unparseable") {
+            return Ok("I would rather not say whether this is done.".into());
+        }
         if steers(prompt, "should-fail") {
             return Ok(json!({
                 "completion": false,

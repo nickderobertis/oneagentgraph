@@ -1,0 +1,20 @@
+Usage: llmlint fingerprint [OPTIONS]
+
+Options:
+  -c, --config <PATH>
+          llmlint config file(s); repeatable. Replaces nested upward discovery
+
+      --model <NAME>
+          Default judge model (overrides config `oneharness.model`)
+
+      --prompt-template <PATH>
+          Override the master prompt template with this file's contents
+
+      --rationales
+          Require a `rationale` for every rule's verdict (overrides config)
+
+      --cwd <DIR>
+          Directory to lint from (config discovery + the harness cwd). Default: cwd
+
+  -h, --help
+          Print help (see a summary with '-h')
