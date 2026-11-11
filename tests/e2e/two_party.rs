@@ -314,9 +314,21 @@ pub(crate) const FAKE_JUDGE: &str = "judge.command.0";
 /// reached what it tests. `max_turns` is where a paced conversation ends on its
 /// own.
 fn paced_graph(schedule: &str, settings: &str, max_turns: u32, extra: &str) -> String {
+    paced_graph_at(9, schedule, settings, max_turns, extra)
+}
+
+/// [`paced_graph`], declaring schema `version` — the version 11 a schedule's
+/// `reset_on` requires, for the journeys that restart a clock on one.
+fn paced_graph_at(
+    version: u32,
+    schedule: &str,
+    settings: &str,
+    max_turns: u32,
+    extra: &str,
+) -> String {
     let skeleton = format!(
         concat!(
-            "version: 9\nname: paced\n",
+            "version: {version}\nname: paced\n",
             "env: {{}}\n",
             "members:\n",
             "  worker:\n    kind: onejudge\n",
@@ -327,6 +339,7 @@ fn paced_graph(schedule: &str, settings: &str, max_turns: u32, extra: &str) -> S
             "    max_turns: {max_turns}\n",
             "    schedule: {schedule}\n{settings}{extra}",
         ),
+        version = version,
         max_turns = max_turns,
         schedule = schedule,
         settings = settings,
@@ -775,11 +788,60 @@ fn start_after_defers_a_paced_conversations_first_turn_and_zero_opens_it_in_the_
 /// opens "at once" is unmistakable, and whose run is otherwise over at its cap.
 fn held_worker(every: u64, max_turns: u32, settings: &str) -> String {
     paced_graph(
-        &format!("{{every: {every}, start_after: 0, resettable: true}}"),
+        &format!("{{every: {every}, start_after: 0}}"),
         settings,
         max_turns,
         "",
     )
+}
+
+/// The `reset_on` every restart journey below declares: another program's
+/// envelope, appended to the stream the run follows.
+const SURFACED: &str = "{include: [{source: pipeline, kind: planner-surfaced}]}";
+
+/// [`held_worker`], whose schedule restarts on [`SURFACED`].
+fn held_worker_resetting(every: u64, max_turns: u32, settings: &str) -> String {
+    paced_graph_at(
+        11,
+        &format!("{{every: {every}, start_after: 0, reset_on: {SURFACED}}}"),
+        settings,
+        max_turns,
+        "",
+    )
+}
+
+/// [`spawn`], following `followed` the way `--follow-events` is given.
+fn spawn_following(workspace: &Workspace, task: &str, followed: &Path) -> Child {
+    let dir = workspace.dir().display().to_string();
+    let store = workspace.session_store().display().to_string();
+    workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--task",
+            task,
+            "--dir",
+            &dir,
+            "--follow-events",
+            &followed.display().to_string(),
+        ],
+        &[("XDG_STATE_HOME", store.as_str())],
+    )
+}
+
+/// Append to `followed` one envelope [`SURFACED`] matches, numbered `seq`.
+fn surface(followed: &Path, seq: u64) {
+    use std::io::Write as _;
+    let line = serde_json::json!({
+        "v": 1, "ts": "2026-11-08T00:00:00.000Z", "stream": "pipeline-run-1", "seq": seq,
+        "source": "pipeline", "kind": "planner-surfaced", "labels": {}, "payload": {}
+    });
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(followed)
+        .expect("the followed stream is writable");
+    writeln!(file, "{line}").expect("the followed stream is writable");
 }
 
 /// A `trigger` during a hold opens the next turn at once.
@@ -977,31 +1039,34 @@ fn quiescence_ends_a_background_paced_conversation_at_its_hold_as_settled() {
     );
 }
 
-/// A `reset-timer` on a resettable schedule restarts the hold in progress and
-/// publishes `cron-reset`; one during the initial delay restores the whole delay
-/// rather than promoting the member to its cadence.
+/// A `reset_on` match on a paced schedule restarts the hold in progress and
+/// publishes `cron-reset` naming it; one during the initial delay restores the
+/// whole delay rather than promoting the member to its cadence.
 #[test]
-fn a_reset_restarts_a_hold_and_restores_an_initial_delay() {
+fn a_reset_on_match_restarts_a_hold_and_restores_an_initial_delay() {
     const EVERY: i64 = 4;
     let workspace = Workspace::new();
     workspace.write("base.yaml", &base_without_done_when(""));
-    workspace.graph(&held_worker(EVERY as u64, 2, "    background: false\n"));
+    workspace.graph(&held_worker_resetting(
+        EVERY as u64,
+        2,
+        "    background: false\n",
+    ));
     let stall = workspace.at("reset-stall");
-    let child = spawn(&workspace, &stalling_reset(KEEP_GOING, &stall), &[]);
+    let followed = workspace.at("pipeline.jsonl");
+    let child = spawn_following(&workspace, &stalling_reset(KEEP_GOING, &stall), &followed);
     until_held(&workspace, 1);
-    let id = run_id(&workspace);
     // Into the hold, so a reset that merely let the original count run would
     // be told apart from one that restarted it.
     std::thread::sleep(Duration::from_millis(1500));
-    workspace
-        .run(&["reset-timer", &id, "worker"])
-        .expect_code(0);
+    surface(&followed, 1);
     publish_stalled_reset(&stall);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");
     let events = stream(&workspace);
     let reset = of(&events, "cron-reset", "worker");
     assert_eq!(reset.len(), 1, "{events:?}");
+    assert_eq!(reset[0]["payload"]["cause"]["seq"], 1, "{events:?}");
     let second = turns_of(&events, "worker", "assistant", "turn-started")[1];
     assert!(
         gap(reset[0], second) >= EVERY * 1000,
@@ -1012,24 +1077,26 @@ fn a_reset_restarts_a_hold_and_restores_an_initial_delay() {
     // The initial delay, reset: the whole of `start_after` again.
     const START_AFTER: i64 = 4;
     let deferred = Workspace::new();
-    deferred.graph(&paced_graph(
-        &format!("{{every: 1, start_after: {START_AFTER}, resettable: true}}"),
+    deferred.graph(&paced_graph_at(
+        11,
+        &format!("{{every: 1, start_after: {START_AFTER}, reset_on: {SURFACED}}}"),
         "    background: false\n",
         1,
         "",
     ));
-    let child = spawn(&deferred, "fake:complete-now finish at once", &[]);
+    let followed = deferred.at("pipeline.jsonl");
+    let child = spawn_following(&deferred, "fake:complete-now finish at once", &followed);
     until("the deferred member to come up", || {
         !of(&stream(&deferred), "member-started", "worker").is_empty()
     });
     std::thread::sleep(Duration::from_millis(1500));
-    let id = run_id(&deferred);
-    deferred.run(&["reset-timer", &id, "worker"]).expect_code(0);
+    surface(&followed, 2);
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(0), "{stderr}");
     let events = stream(&deferred);
     let reset = of(&events, "cron-reset", "worker");
     assert_eq!(reset.len(), 1, "{events:?}");
+    assert_eq!(reset[0]["payload"]["cause"]["seq"], 2, "{events:?}");
     let first = turns_of(&events, "worker", "assistant", "turn-started")[0];
     assert!(
         gap(reset[0], first) >= START_AFTER * 1000,
@@ -1038,28 +1105,78 @@ fn a_reset_restarts_a_hold_and_restores_an_initial_delay() {
     );
 }
 
-/// A `reset-timer` that arrives while a turn is live is honoured at the next
-/// hold rather than lost: the hold restarts on it, publishing `cron-reset`, and
-/// the next turn opens no sooner than `every` after that.
+/// A paced conversation's hold no longer watches the `<member>.reset` file the
+/// removed `reset-timer` verb left: one written into the run's signal directory
+/// throughout the hold — so a watcher would never let the hold reach `every` —
+/// restarts nothing. The next turn opens on the schedule's own cadence, no
+/// `cron-reset` is published, and the file is never consumed.
 #[test]
-fn a_reset_left_mid_turn_is_honoured_at_the_next_hold() {
+fn a_legacy_reset_signal_file_does_not_restart_a_hold() {
     const EVERY: i64 = 3;
     let workspace = Workspace::new();
     workspace.write("base.yaml", &base_without_done_when(""));
     workspace.graph(&held_worker(EVERY as u64, 2, "    background: false\n"));
+    let child = spawn(&workspace, KEEP_GOING, &[]);
+    until_held(&workspace, 1);
+    let legacy = workspace
+        .state()
+        .join(run_id(&workspace))
+        .join(oneagentgraph::run::SIGNAL_DIR)
+        .join("worker.reset");
+    std::fs::create_dir_all(legacy.parent().expect("a signal directory")).expect("mkdir");
+    until("the next turn to open on the hold's own cadence", || {
+        std::fs::write(&legacy, "reset").expect("the legacy signal is writable");
+        turns_of(&stream(&workspace), "worker", "assistant", "turn-started").len() >= 2
+    });
+    assert!(
+        legacy.is_file(),
+        "the hold consumed the legacy reset file, so something still watches it"
+    );
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let events = stream(&workspace);
+    assert!(
+        of(&events, "cron-reset", "worker").is_empty(),
+        "a legacy reset file restarted the hold: {events:?}"
+    );
+    let closed = turns_of(&events, "worker", "user", "turn-completed")[0];
+    let second = turns_of(&events, "worker", "assistant", "turn-started")[1];
+    let held = gap(closed, second);
+    assert!(
+        (EVERY * 1000..EVERY * 1000 + 3000).contains(&held),
+        "the next turn opened {held}ms after the hold began, not on its {EVERY}s cadence"
+    );
+}
+
+/// A `reset_on` match that lands while a turn is live is honoured at the next
+/// hold rather than lost: the hold restarts on it, publishing `cron-reset`, and
+/// the next turn opens no sooner than `every` after that.
+#[test]
+fn a_reset_on_match_left_mid_turn_is_honoured_at_the_next_hold() {
+    const EVERY: i64 = 3;
+    let workspace = Workspace::new();
+    workspace.write("base.yaml", &base_without_done_when(""));
+    workspace.graph(&held_worker_resetting(
+        EVERY as u64,
+        2,
+        "    background: false\n",
+    ));
     let hold = workspace.at("turn-hold");
-    let child = spawn(
+    let followed = workspace.at("pipeline.jsonl");
+    let child = spawn_following(
         &workspace,
         &format!("{KEEP_GOING} fake:hold={}", hold.display()),
-        &[],
+        &followed,
     );
     until("the first turn to be live", || {
         !turns_of(&stream(&workspace), "worker", "assistant", "turn-started").is_empty()
     });
-    let id = run_id(&workspace);
-    workspace
-        .run(&["reset-timer", &id, "worker"])
-        .expect_code(0);
+    // The run reads its followed stream on its own tick, whatever the member is
+    // doing; give it a few before the turn is let go, so the match is one that
+    // was read while the turn was live rather than one landing at the hold.
+    surface(&followed, 3);
+    std::thread::sleep(Duration::from_millis(600));
     std::fs::write(&hold, "go").expect("release the turn");
     let (code, stderr) = exit_of(child);
     assert_eq!(code, Some(1), "{stderr}");

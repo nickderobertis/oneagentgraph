@@ -40,11 +40,6 @@ pub enum Command {
     Validate(ValidateArgs),
     /// Fire a scheduled member now.
     Trigger(MemberArgs),
-    /// Restart a resettable schedule's clock.
-    ///
-    /// Deprecated, and kept working unchanged through this release: declare
-    /// `reset_on` on the schedule instead.
-    ResetTimer(MemberArgs),
     /// Cancel a run, or one member of it.
     Cancel(CancelArgs),
     /// Redirect a member's in-flight turn instead of ending it.
@@ -144,7 +139,7 @@ pub struct ValidateArgs {
     pub graph: String,
 }
 
-/// `oneagentgraph trigger` and `oneagentgraph reset-timer`.
+/// `oneagentgraph trigger`.
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct MemberArgs {
     /// The run.

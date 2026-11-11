@@ -397,7 +397,6 @@ fn onejudge(
             // clock's — resolved there, where the schema is known.
             pace: member.schedule.as_ref().map(|schedule| crate::judge::Pace {
                 every: std::time::Duration::from_secs(schedule.every),
-                resettable: schedule.resettable,
                 background: context.background,
             }),
             judge_only: None,

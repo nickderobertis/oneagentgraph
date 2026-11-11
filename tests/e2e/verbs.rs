@@ -1972,8 +1972,7 @@ fn a_shipped_persona_is_reachable_by_name() {
 
 // llmlint: ignore-end[tests_mirror_real_usage]
 
-/// A cron member fires again on `trigger`, and `reset-timer` restarts a
-/// resettable clock. `cancel` is what ends it.
+/// A cron member fires again on `trigger`. `cancel` is what ends it.
 #[test]
 fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
     let workspace = Workspace::new();
@@ -1984,7 +1983,7 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
             "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
@@ -2033,13 +2032,6 @@ fn a_cron_member_fires_on_trigger_and_stops_on_cancel() {
         std::fs::read_to_string(&events).is_ok_and(|s| s.contains("member-settled"))
     });
 
-    workspace
-        .run(&["reset-timer", &id, "reporter"])
-        .expect_code(0);
-    until("the clock to restart", || {
-        std::fs::read_to_string(&events).is_ok_and(|s| s.contains("cron-reset"))
-    });
-
     workspace.run(&["trigger", &id, "reporter"]).expect_code(0);
     until("the scheduled member to fire", || {
         std::fs::read_to_string(&events).is_ok_and(|s| s.contains("cron-fired"))
@@ -2078,10 +2070,10 @@ fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
             "members:\n",
             "  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600}\n",
             "  auditor:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
@@ -2203,8 +2195,8 @@ fn a_member_scoped_cancel_stops_that_member_and_leaves_the_run_running() {
     );
 }
 
-/// `trigger` and `reset-timer` name a member the run does not have rather than
-/// leaving a signal nothing will ever read.
+/// `trigger` names a member the run does not have rather than leaving a signal
+/// nothing will ever read.
 #[test]
 fn a_signal_for_an_unknown_member_is_refused_by_name() {
     let workspace = Workspace::new();
@@ -2222,7 +2214,7 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
     );
     assert!(refused.stderr.contains("worker"), "{}", refused.stderr);
 
-    let missing = workspace.run(&["reset-timer", "no-such-run", "worker"]);
+    let missing = workspace.run(&["trigger", "no-such-run", "worker"]);
     missing.expect_code(2);
     assert!(missing.stderr.contains("no-such-run"), "{}", missing.stderr);
 
@@ -2268,15 +2260,15 @@ fn a_signal_for_an_unknown_member_is_refused_by_name() {
     );
 }
 
-/// `reset-timer` reads a run's record while the run is rewriting it — the way a
-/// consumed surface restarts an observer's check-in clock while the detached
+/// `trigger` reads a run's record while the run is rewriting it — the way a
+/// consumed surface fires an observer's check-in early while the detached
 /// driver writes — and every read sees a whole record, so none reports the run
 /// as missing.
 ///
 /// The writer is the store's own, [`oneagentgraph::run::write_record`], driven
 /// without pause, because a run rewrites its record only three times.
 #[test]
-fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
+fn trigger_reads_a_whole_record_while_it_is_being_rewritten() {
     let workspace = Workspace::new();
     workspace
         .run_task("fake:complete-now: rewritten")
@@ -2296,10 +2288,10 @@ fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
                 oneagentgraph::run::write_record(&root, &record).expect("the record rewrites");
             },
             || {
-                let reset = workspace.run(&["reset-timer", &id, "worker"]);
-                match reset.code {
+                let triggered = workspace.run(&["trigger", &id, "worker"]);
+                match triggered.code {
                     0 => Ok(()),
-                    code => Err(format!("exit {code}: {}", reset.stderr)),
+                    code => Err(format!("exit {code}: {}", triggered.stderr)),
                 }
             },
         )
@@ -2317,7 +2309,7 @@ fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
     );
 }
 
-/// `reset-timer` reads a run's record that the run replaces while the read is
+/// `trigger` reads a run's record that the run replaces while the read is
 /// in progress, and acts on the whole record it opened — never on the
 /// replacement half-read, and never reporting the run missing.
 ///
@@ -2327,7 +2319,7 @@ fn reset_timer_reads_a_whole_record_while_it_is_being_rewritten() {
 /// `tests/e2e/interrupt.rs`. The replacement is the record's own first half, so
 /// a verb that read anything but the record it opened would refuse it.
 #[test]
-fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_read() {
+fn trigger_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_read() {
     let workspace = Workspace::new();
     workspace
         .run_task("fake:complete-now: replaced")
@@ -2340,11 +2332,11 @@ fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_r
 
     let lever = format!("{RECORD_FILE}={}", half.display());
     // llmlint: ignore[tests_mirror_real_usage] the instant under test is one a real concurrent writer reaches only some of the time, and the task requires it forced deterministically; the replacement is the store's production writer landing over the production reader's held handle — see the same marker in `tests/e2e/interrupt.rs`.
-    let reset = workspace.run_with(
-        &["reset-timer", &id, "worker"],
+    let triggered = workspace.run_with(
+        &["trigger", &id, "worker"],
         &[("ONEAGENTGRAPH_FIXTURE_REPLACE_UNDER_READ", &lever)],
     );
-    reset.expect_code(0);
+    triggered.expect_code(0);
     assert_eq!(
         std::fs::read_to_string(&file).expect("the record reads"),
         whole[..whole.len() / 2],
@@ -2353,7 +2345,7 @@ fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_r
 
     // The next read meets the replacement: a record that does not read,
     // refused by its file — never a run that does not exist.
-    let after = workspace.run(&["reset-timer", &id, "worker"]);
+    let after = workspace.run(&["trigger", &id, "worker"]);
     after.expect_code(2);
     assert!(
         after.stderr.contains("does not read")
@@ -2364,7 +2356,7 @@ fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_r
     assert!(!after.stderr.contains("no run"), "{}", after.stderr);
 }
 
-/// `reset-timer` arriving while the run is replacing its record — at the
+/// `trigger` arriving while the run is replacing its record — at the
 /// instant a Windows rename left the name missing to an open — waits for the
 /// replacement and acts on the whole record it leaves, never reporting the run
 /// missing.
@@ -2377,7 +2369,7 @@ fn reset_timer_acts_on_the_record_it_opened_when_a_replacement_lands_under_the_r
 /// replacement declares a member the run as recorded does not have, so the
 /// verb can only accept it by having read the replacement, whole.
 #[test]
-fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves() {
+fn trigger_arriving_mid_replace_waits_for_the_record_the_replacement_leaves() {
     let workspace = Workspace::new();
     workspace
         .run_task("fake:complete-now: mid-replace")
@@ -2392,12 +2384,12 @@ fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves(
 
     let lever = format!("{RECORD_FILE}={}", staged.join(RECORD_FILE).display());
     // llmlint: ignore[tests_mirror_real_usage] the instant under test — a read arriving while a replacement has the name missing — is one a real concurrent writer reaches only some of the time, which is the flake this journey exists to replace, and the task requires it forced deterministically with no clock; the replacement is the store's production writer, under its production lock, and the verb, the binary and the record it acts on are all real.
-    let reset = workspace.run_with(
-        &["reset-timer", &id, "late"],
+    let triggered = workspace.run_with(
+        &["trigger", &id, "late"],
         &[("ONEAGENTGRAPH_FIXTURE_READ_DURING_REPLACE", &lever)],
     );
-    reset.expect_code(0);
-    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+    triggered.expect_code(0);
+    assert!(!triggered.stderr.contains("no run"), "{}", triggered.stderr);
     assert_eq!(
         oneagentgraph::history::show(&state, &id).expect("the record reads"),
         replacement,
@@ -2407,9 +2399,9 @@ fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves(
         state
             .join(&id)
             .join(SIGNAL_DIR)
-            .join("late.reset")
+            .join("late.trigger")
             .is_file(),
-        "the reset was not signalled to the replacement's member"
+        "the trigger was not signalled to the replacement's member"
     );
     assert!(
         partials(&state.join(&id)).is_empty(),
@@ -2420,7 +2412,7 @@ fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves(
 
 /// A record an earlier build wrote has no lock file beside it, and a reader
 /// that finds none may meet a writer of this build that creates the lock and
-/// begins replacing the record in the instant after it looked. `reset-timer`
+/// begins replacing the record in the instant after it looked. `trigger`
 /// arriving there still acts on a whole record — the replacement — and never
 /// reports the run missing; and reading such a record writes nothing, so a
 /// store the reader cannot write reads as it always did.
@@ -2433,8 +2425,7 @@ fn reset_timer_arriving_mid_replace_waits_for_the_record_the_replacement_leaves(
 /// with no clock. The replacement declares a member the run as recorded does
 /// not have, so the verb can only accept it by having read the replacement.
 #[test]
-fn reset_timer_reads_a_whole_legacy_record_a_writer_begins_replacing_after_the_reader_finds_no_lock(
-) {
+fn trigger_reads_a_whole_legacy_record_a_writer_begins_replacing_after_the_reader_finds_no_lock() {
     let workspace = Workspace::new();
     workspace
         .run_task("fake:complete-now: legacy")
@@ -2456,12 +2447,12 @@ fn reset_timer_reads_a_whole_legacy_record_a_writer_begins_replacing_after_the_r
 
     let lever = format!("{RECORD_FILE}={}", staged.join(RECORD_FILE).display());
     // llmlint: ignore[tests_mirror_real_usage] the instant under test — a writer beginning to replace a lock-less legacy record just after a reader found no lock — is one a real concurrent writer reaches only some of the time, and it is forced here deterministically with no clock; the replacement is the store's production writer creating its production lock, and the verb, the binary and the record it acts on are all real.
-    let reset = workspace.run_with(
-        &["reset-timer", &id, "late"],
+    let triggered = workspace.run_with(
+        &["trigger", &id, "late"],
         &[("ONEAGENTGRAPH_FIXTURE_REPLACE_AFTER_NO_LOCK", &lever)],
     );
-    reset.expect_code(0);
-    assert!(!reset.stderr.contains("no run"), "{}", reset.stderr);
+    triggered.expect_code(0);
+    assert!(!triggered.stderr.contains("no run"), "{}", triggered.stderr);
     assert_eq!(
         oneagentgraph::history::show(&state, &id).expect("the record reads"),
         replacement,
@@ -2472,8 +2463,8 @@ fn reset_timer_reads_a_whole_legacy_record_a_writer_begins_replacing_after_the_r
         "the writer did not create the record's lock"
     );
     assert!(
-        root.join(SIGNAL_DIR).join("late.reset").is_file(),
-        "the reset was not signalled to the replacement's member"
+        root.join(SIGNAL_DIR).join("late.trigger").is_file(),
+        "the trigger was not signalled to the replacement's member"
     );
     assert!(partials(&root).is_empty(), "{:?}", partials(&root));
 }
@@ -2577,7 +2568,7 @@ fn a_record_that_does_not_read_is_refused_by_its_file() {
             None => std::fs::create_dir_all(&record).expect("a directory where the record goes"),
         }
 
-        let refused = workspace.run(&["reset-timer", id, "worker"]);
+        let refused = workspace.run(&["trigger", id, "worker"]);
         refused.expect_code(2);
         assert!(
             refused.stderr.contains(&record.display().to_string()) && refused.stderr.contains(why),
@@ -2615,7 +2606,7 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
             "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600}\n",
         ),
         &[(FAKE_HARNESS_KEY, fake_harness())],
     ));
@@ -2671,7 +2662,7 @@ fn a_signal_for_an_unknown_member_is_refused_while_the_run_is_still_running() {
         "this journey needs a run with no settled member yet: {raw}"
     );
 
-    for verb in ["trigger", "reset-timer"] {
+    for verb in ["trigger", "cancel"] {
         let refused = workspace.run(&[verb, &id, "ghost"]);
         refused.expect_code(2);
         assert!(
@@ -2836,91 +2827,130 @@ fn detach_refuses_a_graph_that_could_never_run_rather_than_reporting_it_started(
     );
 }
 
-/// `reset-timer` is accepted for any member, but only a schedule that declared
-/// itself `resettable` restarts its clock.
-///
-/// The signal is left either way — an operator cannot know from outside which
-/// schedules opted in, and refusing at the CLI would make the answer depend on a
-/// record the caller cannot see. What differs is the run's response: a
-/// non-resettable schedule keeps counting, and says nothing it did not do.
+/// `oneagentgraph reset-timer` is no longer a verb, and a run no longer watches
+/// the `<member>.reset` signal file it used to leave: invoking the verb is
+/// clap's ordinary unknown-subcommand error and writes nothing, and the file,
+/// written into the run's signal directory exactly where the verb left it — and
+/// rewritten throughout the wait, so a watcher would never let the clock reach
+/// its span — restarts nothing. The schedule fires on its configured
+/// cadence, no `cron-reset` is published, and the file is never consumed.
 #[test]
-fn reset_timer_leaves_a_non_resettable_schedule_counting() {
+fn the_removed_reset_verb_and_its_legacy_signal_file_restart_no_clock() {
+    const START_AFTER: i64 = 2;
+    const EVERY: i64 = 2;
     let workspace = Workspace::new();
-    let release = workspace.at("reset-keeper-release");
+    let release = workspace.at("legacy-reset-release");
     workspace.graph(&graph_with(
         concat!(
-            "version: 2\nname: node-scope\n",
+            "version: 11\nname: legacy-reset\n",
             "env: {}\n",
-            "members:\n  reporter:\n    kind: oneharness\n",
-            "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: false}\n",
-            "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
-            "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
-            "    persona: engineer\n",
-            "    agent:\n      oneharness_config: ./oneharness.toml\n",
-            "    judge:\n      oneharness_config: ./oneharness.judge.toml\n",
-            "    mode: bypass\n    deps: [anchor]\n",
+            "members:\n",
+            "  holder:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "  reporter:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
+            "    schedule: {every: 2, start_after: 2}\n",
         ),
         &[
             (FAKE_HARNESS_KEY, fake_harness()),
             (
-                "members.keeper.task",
-                format!("fake:complete-now fake:hold={}", release.display()),
+                "members.holder.task",
+                format!(
+                    "fake:complete-now hold this run open. fake:hold={}",
+                    release.display()
+                ),
+            ),
+            (
+                "members.reporter.task",
+                "fake:complete-now write one status update".to_string(),
             ),
         ],
     ));
     let state = workspace.state();
-    let handle = {
-        let dir = workspace.path().to_path_buf();
-        let state = state.clone();
-        std::thread::spawn(move || {
-            std::process::Command::new(env!("CARGO_BIN_EXE_oneagentgraph"))
-                .args([
-                    "run",
-                    "./graph.yaml",
-                    "--task",
-                    "fake:complete-now: unresettable",
-                    "--dir",
-                    &dir.join("work").display().to_string(),
-                ])
-                .current_dir(&dir)
-                .env("ONEAGENTGRAPH_STATE_DIR", &state)
-                .env(
-                    "ONEAGENTGRAPH_ONEHARNESS_BIN",
-                    crate::support::oneharness_bin(),
-                )
-                .hermetic()
-                .output()
-                .expect("the run finishes")
-        })
+    let child = workspace.spawn_with(
+        &[
+            "run",
+            "./graph.yaml",
+            "--dir",
+            &workspace.dir().display().to_string(),
+        ],
+        &[],
+    );
+    let events = || -> Vec<serde_json::Value> {
+        run_id(&state)
+            .and_then(|id| std::fs::read_to_string(state.join(id).join("events.jsonl")).ok())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
     };
-
-    until("the run to record itself", || run_id(&state).is_some());
+    let of = |events: &[serde_json::Value], kind: &str| -> Vec<serde_json::Value> {
+        events
+            .iter()
+            .filter(|event| event["kind"] == kind && event["labels"]["member"] == "reporter")
+            .cloned()
+            .collect()
+    };
+    until("the scheduled member to come up", || {
+        !of(&events(), "member-started").is_empty()
+    });
     let id = run_id(&state).expect("a run");
-    let events = state.join(&id).join("events.jsonl");
-    until("the first settle", || {
-        std::fs::read_to_string(&events).is_ok_and(|s| s.contains("member-settled"))
-    });
+    let legacy = state.join(&id).join(SIGNAL_DIR).join("reporter.reset");
 
-    workspace
-        .run(&["reset-timer", &id, "reporter"])
-        .expect_code(0);
-
-    // A trigger after it, so the run is proven to have read the signal
-    // directory past the reset rather than merely not reached it yet.
-    workspace.run(&["trigger", &id, "reporter"]).expect_code(0);
-    until("the scheduled member to fire", || {
-        std::fs::read_to_string(&events).is_ok_and(|s| s.contains("cron-fired"))
-    });
-
-    workspace.run(&["cancel", &id, "reporter"]).expect_code(0);
-    std::fs::write(&release, "release").expect("release keeper");
-    handle.join().expect("the run thread");
-
-    let stream = std::fs::read_to_string(&events).expect("the stream");
+    // The verb that used to leave that file is no verb at all: clap's ordinary
+    // unknown-subcommand error, and nothing written for the run to read.
+    let removed = workspace.run(&["reset-timer", &id, "reporter"]);
+    assert_eq!(removed.code, 2, "{}", removed.stderr);
     assert!(
-        !stream.contains("cron-reset"),
-        "a schedule that is not resettable reported restarting its clock: {stream}"
+        removed
+            .stderr
+            .contains("unrecognized subcommand 'reset-timer'"),
+        "{}",
+        removed.stderr
+    );
+    assert!(removed.stdout.is_empty(), "{}", removed.stdout);
+    assert!(
+        !legacy.exists(),
+        "the removed verb still left a reset for the run"
+    );
+
+    std::fs::create_dir_all(legacy.parent().expect("a signal directory")).expect("mkdir");
+    until("two firings on the schedule's own cadence", || {
+        std::fs::write(&legacy, "reset").expect("the legacy signal is writable");
+        of(&events(), "cron-fired").len() >= 2
+    });
+    assert!(
+        legacy.is_file(),
+        "the run consumed the legacy reset file, so something still watches it"
+    );
+
+    std::fs::write(&release, "release").expect("release the holder");
+    let output = child.wait_with_output().expect("the run finishes");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let events = events();
+    assert!(
+        events.iter().all(|event| event["kind"] != "cron-reset"),
+        "a legacy reset file restarted a clock: {events:#?}"
+    );
+    let millis = crate::two_party::millis;
+    let started = millis(&of(&events, "member-started")[0]);
+    let fired = of(&events, "cron-fired");
+    let settled = of(&events, "member-settled");
+    let first = millis(&fired[0]) - started;
+    assert!(
+        (START_AFTER * 1000..START_AFTER * 1000 + 3000).contains(&first),
+        "the first firing came {first}ms after the member came up, not on its {START_AFTER}s \
+         start_after: {events:#?}"
+    );
+    let second = millis(&fired[1]) - millis(&settled[0]);
+    assert!(
+        (EVERY * 1000..EVERY * 1000 + 3000).contains(&second),
+        "the second firing came {second}ms after the first settled, not on its {EVERY}s \
+         cadence: {events:#?}"
     );
 }
 
@@ -2954,7 +2984,6 @@ fn the_verbs_the_readme_says_need_no_cli_run_without_one() {
         vec!["persona", "new", "solo"],
         vec!["persona", "validate", "solo.yaml"],
         vec!["trigger", id.as_str(), "worker"],
-        vec!["reset-timer", id.as_str(), "worker"],
         vec!["cancel", id.as_str()],
         // Reporting only: the reclaiming half is driven by its own journeys,
         // and a suite that removed scratch out of this one would be sweeping

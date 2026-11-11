@@ -66,6 +66,19 @@ fn scheduled_graph(fake: &str, hold: &str, ticker_config: &str) -> String {
 /// a number, and one quoted into the document would be refused by the schema
 /// before any journey reached what it tests.
 fn deferred_graph(fake: &str, hold: &str, delays: (Option<u64>, u64), recorded: &str) -> String {
+    deferred_graph_resetting_on(fake, hold, delays, recorded, None)
+}
+
+/// [`deferred_graph`], with the ticker's schedule restarting on `reset_on` when
+/// it names a filter — which moves the document to the schema that has the
+/// field, and changes nothing else these members mean.
+fn deferred_graph_resetting_on(
+    fake: &str,
+    hold: &str,
+    delays: (Option<u64>, u64),
+    recorded: &str,
+    reset_on: Option<&str>,
+) -> String {
     const SKELETON: &str = concat!(
         "version: 4\nname: paced\n",
         "env: {}\n",
@@ -73,17 +86,25 @@ fn deferred_graph(fake: &str, hold: &str, delays: (Option<u64>, u64), recorded: 
         "  worker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
         "  ticker:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
         "    persona: reviewer\n",
-        "    schedule: {every: 0, start_after: 0, resettable: true}\n",
+        "    schedule: {start_after: 0, every: 0}\n",
     );
     let (start_after, every) = delays;
     let named = match start_after {
         Some(seconds) => format!("start_after: {seconds}, "),
         None => String::new(),
     };
+    let skeleton = SKELETON
+        .replace("start_after: 0, ", &named)
+        .replace("every: 0", &format!("every: {every}"));
+    let skeleton = match reset_on {
+        Some(filter) => skeleton.replace("version: 4\n", "version: 11\n").replace(
+            &format!("every: {every}}}"),
+            &format!("every: {every}, reset_on: {filter}}}"),
+        ),
+        None => skeleton,
+    };
     graph_with(
-        &SKELETON
-            .replace("start_after: 0, ", &named)
-            .replace("every: 0", &format!("every: {every}")),
+        &skeleton,
         &[
             (FAKE_HARNESS_KEY, fake.to_string()),
             (
@@ -440,18 +461,22 @@ fn a_cancel_stops_a_deferred_member_before_its_first_turn() {
     let workspace = Workspace::new();
     let release = workspace.at("paced-release");
     let recorded = workspace.at("ticker.prompt");
-    workspace.graph(&deferred_graph(
+    workspace.graph(&deferred_graph_resetting_on(
         &fake_harness(),
         &release.display().to_string(),
         (Some(START_AFTER), 3600),
         &recorded.display().to_string(),
+        Some("{include: [{source: pipeline, kind: planner-surfaced}]}"),
     ));
+    let followed = workspace.at("pipeline.jsonl");
     let child = workspace.spawn_with(
         &[
             "run",
             "./graph.yaml",
             "--dir",
             &workspace.dir().display().to_string(),
+            "--follow-events",
+            &followed.display().to_string(),
         ],
         &[],
     );
@@ -708,32 +733,37 @@ fn a_trigger_fires_a_member_whose_first_turn_is_still_deferred() {
     );
 }
 
-/// `reset-timer` before the first turn restarts the whole of `start_after`,
-/// rather than promoting the member to its steady cadence.
+/// A `reset_on` match before the first turn restarts the whole of `start_after`
+/// on a single-sided schedule, rather than promoting the member to its steady
+/// cadence, and `cron-reset` names the envelope that matched.
 ///
 /// What a reset means is "restart the wait in progress", and before the first turn
 /// the wait in progress is the first-turn delay. The floor is measured from the
-/// moment the reset was *asked for* — the run picks it up strictly after that — so
-/// a member that ignored the reset would fire at launch plus the delay, which is
-/// earlier than this floor and fails here.
+/// moment the matching envelope was *appended* — the run reads it strictly after
+/// that — so a member that ignored the match would fire at launch plus the delay,
+/// which is earlier than this floor and fails here.
 #[test]
 fn a_reset_before_the_first_turn_restarts_the_whole_delay() {
     const START_AFTER: u64 = 4;
     let workspace = Workspace::new();
     let release = workspace.at("paced-release");
     let recorded = workspace.at("ticker.prompt");
-    workspace.graph(&deferred_graph(
+    workspace.graph(&deferred_graph_resetting_on(
         &fake_harness(),
         &release.display().to_string(),
         (Some(START_AFTER), 3600),
         &recorded.display().to_string(),
+        Some("{include: [{source: pipeline, kind: planner-surfaced}]}"),
     ));
+    let followed = workspace.at("pipeline.jsonl");
     let child = workspace.spawn_with(
         &[
             "run",
             "./graph.yaml",
             "--dir",
             &workspace.dir().display().to_string(),
+            "--follow-events",
+            &followed.display().to_string(),
         ],
         &[],
     );
@@ -745,21 +775,30 @@ fn a_reset_before_the_first_turn_restarts_the_whole_delay() {
     // Well into the delay, so that "the reset restarted it" and "the reset did
     // nothing" are seconds apart rather than milliseconds.
     std::thread::sleep(Duration::from_secs(2));
-    let id = workspace.record()["run_id"]
-        .as_str()
-        .expect("run id")
-        .to_string();
     assert!(
         !recorded.exists(),
         "the member took its turn before the reset this journey is about"
     );
     let asked = Instant::now();
-    workspace
-        .run(&["reset-timer", &id, "ticker"])
-        .expect_code(0);
+    let surfaced = serde_json::json!({
+        "v": 1, "ts": "2026-11-08T00:00:00.000Z", "stream": "pipeline-run-1", "seq": 9,
+        "source": "pipeline", "kind": "planner-surfaced", "labels": {}, "payload": {}
+    });
+    std::fs::write(&followed, format!("{surfaced}\n")).expect("the followed stream is writable");
     until("the run to pick the reset up", || {
         stream(&workspace).contains("\"kind\":\"cron-reset\"")
     });
+    let reset = stream(&workspace)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|event| event["kind"] == "cron-reset")
+        .expect("the reset is on the stream");
+    assert_eq!(reset["labels"]["member"], "ticker", "{reset}");
+    assert_eq!(reset["payload"]["cause"]["seq"], 9, "{reset}");
+    assert_eq!(
+        reset["payload"]["cause"]["kind"], "planner-surfaced",
+        "{reset}"
+    );
     until("the restarted first turn", || recorded.is_file());
     let waited = asked.elapsed();
     assert!(

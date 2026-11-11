@@ -536,19 +536,19 @@ fn a_library_caller_redirects_a_members_in_flight_turn() {
     );
 }
 
-/// A caller restarts a scheduled member's clock, and the live run publishes the
-/// reset it picked up.
+/// A caller fires a scheduled member now, and the live run publishes the
+/// firing it picked up.
 ///
-/// The assertion is the run's own `cron-reset` on the same stream the CLI
+/// The assertion is the run's own `cron-fired` on the same stream the CLI
 /// consumes: a call that wrote a file nothing ever read would leave the caller
 /// with a success and a member whose clock never moved, which is exactly the
 /// failure the member check exists to prevent — driven here as the second half,
 /// where a name this run never declared is refused and leaves no file behind.
 #[test]
-fn a_library_caller_resets_a_scheduled_members_timer() {
+fn a_library_caller_triggers_a_scheduled_member() {
     let _serial = serial();
     let workspace = Workspace::new();
-    // The `keeper` holds the run open while the reset is delivered and picked
+    // The `keeper` holds the run open while the trigger is delivered and picked
     // up: a graph of nothing but the scheduled member settles every non-cron
     // member at once, and its cron thread stops with them. It waits on `anchor`
     // so it lands in the *second* wave — a held member in the first would keep
@@ -562,7 +562,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
             "env: {}\n",
             "members:\n  reporter:\n    kind: oneharness\n",
             "    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 3600, resettable: true}\n",
+            "    schedule: {every: 3600}\n",
             "  anchor:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  keeper:\n    kind: onejudge\n    base_config: ./base.yaml\n",
             "    persona: engineer\n",
@@ -593,7 +593,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
     let running = run::start(&request, &BTreeMap::new()).expect("the graph starts");
     let run_id = running.started().run_id.clone();
     let member = MemberName::parse("reporter").expect("a member name");
-    // The clock this call restarts only exists once the member has settled its
+    // The clock this call fires only exists once the member has settled its
     // first firing and its schedule is counting.
     assert!(
         drain_until(&running, |event| event.kind == EventKind::MemberSettled
@@ -604,7 +604,7 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
     // A name this run never declared is refused, and leaves nothing behind for
     // the run to read.
     let ghost = MemberName::parse("ghost").expect("a member name");
-    let refused = run::signal(&workspace.state(), &run_id, &ghost, Signal::Reset)
+    let refused = run::signal(&workspace.state(), &run_id, &ghost, Signal::Trigger)
         .expect_err("a member the run never had cannot be signalled");
     assert!(
         refused.to_string().contains("has no member \"ghost\""),
@@ -615,17 +615,17 @@ fn a_library_caller_resets_a_scheduled_members_timer() {
             .state()
             .join(run_id.as_str())
             .join(run::SIGNAL_DIR)
-            .join("ghost.reset")
+            .join("ghost.trigger")
             .exists(),
         "a refused signal still left its file behind"
     );
 
-    run::signal(&workspace.state(), &run_id, &member, Signal::Reset)
+    run::signal(&workspace.state(), &run_id, &member, Signal::Trigger)
         .expect("the run's own member is signallable");
     assert!(
-        drain_until(&running, |event| event.kind == EventKind::CronReset
+        drain_until(&running, |event| event.kind == EventKind::CronFired
             && event.labels.member.as_deref() == Some("reporter")),
-        "the run never picked the reset up"
+        "the run never picked the trigger up"
     );
 
     std::fs::write(&release, "release").expect("release the keeper");

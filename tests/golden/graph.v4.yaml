@@ -10,7 +10,6 @@ members:
     schedule:
       every: 1800
       start_after: 1800
-      resettable: true
   worker:
     kind: onejudge
     base_config: ./onejudge.base.yaml

@@ -33,7 +33,7 @@ nothing to install for it. `run`, `smoke`, and `interrupt` drive the [oneharness
 CLI, so that has to be on `PATH`, at the release the [`justfile`](justfile) pins
 as `oneharness-version` or newer — `smoke` and `interrupt` ask it for JSON by
 name (`--format json`), which an older release refuses as an unknown argument. `health`, `validate`, `history`, `persona`,
-`trigger`, `reset-timer`, `cancel`, and `sweep` need nothing at all — `health`
+`trigger`, `cancel`, and `sweep` need nothing at all — `health`
 reads oneharness's own identity sweep through its library, in this process.
 `ONEAGENTGRAPH_ONEHARNESS_BIN` names a pinned install instead.
 
@@ -128,10 +128,10 @@ end — never interrupting one — so a long-running supervisor is told somethin
 a timer at the cost of one more message rather than a fresh paid turn. Any clock
 may declare `reset_on`, a filter in the stack's shared grammar, and restarts on
 a matching envelope: one the run itself publishes, or one another program
-appends to the stream `oneagentgraph run --follow-events PATH` follows. A
-schedule's `resettable: true` and the `reset-timer` verb still work exactly as
-before, and say on standard error that they are deprecated in favour of
-`reset_on`.
+appends to the stream `oneagentgraph run --follow-events PATH` follows.
+`reset_on` is the one way a clock restarts: a schedule's `resettable` and the
+`reset-timer` verb were removed, and `validate` and `run` refuse a document that
+still declares `resettable`, naming `reset_on` as its replacement.
 
 When a member's turn goes the wrong way, `oneagentgraph interrupt RUN MEMBER
 --input "do this instead"` redirects it in place instead of discarding it the way
@@ -212,14 +212,14 @@ takes. What counts as proof, and the JSON's shape, are stated in
 
 ## The command surface
 
-Eleven verbs beside clap's own `help`, in the three groups they fall into:
-`run`, `smoke` and `interrupt` drive the [oneharness] CLI; `trigger`,
-`reset-timer` and `cancel` signal a run that is already going; and `validate`,
+Ten verbs beside clap's own `help`, in the three groups they fall into:
+`run`, `smoke` and `interrupt` drive the [oneharness] CLI; `trigger` and
+`cancel` signal a run that is already going; and `validate`,
 `history`, `health`, `sweep` and `persona` need nothing installed at all. `oneagentgraph <VERB> --help` has the flags for
 each, and [the contract](docs/contract.md) is the approved statement of the whole
 surface.
 
-![oneagentgraph --help in a terminal, colourised: the one-line description, the usage line, and the twelve commands with their summaries — run, validate, trigger, reset-timer, cancel, interrupt, history, health, smoke, sweep, persona and help — then the --help and --version options](docs/screenshots/help.svg)
+![oneagentgraph --help in a terminal, colourised: the one-line description, the usage line, and the twelve commands with their summaries — run, validate, trigger, cancel, interrupt, history, health, smoke, sweep, persona, render and help — then the --help and --version options](docs/screenshots/help.svg)
 
 ## Develop
 
