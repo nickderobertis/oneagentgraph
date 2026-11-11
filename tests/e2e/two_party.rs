@@ -1105,6 +1105,50 @@ fn a_reset_on_match_restarts_a_hold_and_restores_an_initial_delay() {
     );
 }
 
+/// A paced conversation's hold no longer watches the `<member>.reset` file the
+/// removed `reset-timer` verb left: one written into the run's signal directory
+/// throughout the hold — so a watcher would never let the hold reach `every` —
+/// restarts nothing. The next turn opens on the schedule's own cadence, no
+/// `cron-reset` is published, and the file is never consumed.
+#[test]
+fn a_legacy_reset_signal_file_does_not_restart_a_hold() {
+    const EVERY: i64 = 3;
+    let workspace = Workspace::new();
+    workspace.write("base.yaml", &base_without_done_when(""));
+    workspace.graph(&held_worker(EVERY as u64, 2, "    background: false\n"));
+    let child = spawn(&workspace, KEEP_GOING, &[]);
+    until_held(&workspace, 1);
+    let legacy = workspace
+        .state()
+        .join(run_id(&workspace))
+        .join(oneagentgraph::run::SIGNAL_DIR)
+        .join("worker.reset");
+    std::fs::create_dir_all(legacy.parent().expect("a signal directory")).expect("mkdir");
+    until("the next turn to open on the hold's own cadence", || {
+        std::fs::write(&legacy, "reset").expect("the legacy signal is writable");
+        turns_of(&stream(&workspace), "worker", "assistant", "turn-started").len() >= 2
+    });
+    assert!(
+        legacy.is_file(),
+        "the hold consumed the legacy reset file, so something still watches it"
+    );
+    let (code, stderr) = exit_of(child);
+    assert_eq!(code, Some(1), "{stderr}");
+
+    let events = stream(&workspace);
+    assert!(
+        of(&events, "cron-reset", "worker").is_empty(),
+        "a legacy reset file restarted the hold: {events:?}"
+    );
+    let closed = turns_of(&events, "worker", "user", "turn-completed")[0];
+    let second = turns_of(&events, "worker", "assistant", "turn-started")[1];
+    let held = gap(closed, second);
+    assert!(
+        (EVERY * 1000..EVERY * 1000 + 3000).contains(&held),
+        "the next turn opened {held}ms after the hold began, not on its {EVERY}s cadence"
+    );
+}
+
 /// A `reset_on` match that lands while a turn is live is honoured at the next
 /// hold rather than lost: the hold restarts on it, publishing `cron-reset`, and
 /// the next turn opens no sooner than `every` after that.
