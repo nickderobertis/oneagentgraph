@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.12.1...v0.13.0) - 2026-11-11
+
+### Added
+
+- *(schedule)* [**breaking**] remove resettable and the reset-timer verb ([#280](https://github.com/nickderobertis/oneagentgraph/pull/280))
+
 ## [0.12.1](https://github.com/nickderobertis/oneagentgraph/compare/v0.12.0...v0.12.1) - 2026-11-11
 
 ### Fixed
