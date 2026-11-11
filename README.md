@@ -219,7 +219,7 @@ Ten verbs beside clap's own `help`, in the three groups they fall into:
 each, and [the contract](docs/contract.md) is the approved statement of the whole
 surface.
 
-![oneagentgraph --help in a terminal, colourised: the one-line description, the usage line, and the eleven commands with their summaries — run, validate, trigger, cancel, interrupt, history, health, smoke, sweep, persona and help — then the --help and --version options](docs/screenshots/help.svg)
+![oneagentgraph --help in a terminal, colourised: the one-line description, the usage line, and the twelve commands with their summaries — run, validate, trigger, cancel, interrupt, history, health, smoke, sweep, persona, render and help — then the --help and --version options](docs/screenshots/help.svg)
 
 ## Develop
 
