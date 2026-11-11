@@ -478,7 +478,9 @@ test-doubles = []
 # plan a two-party member runs (`src/judge_only.rs`, `src/judge.rs`). Its
 # `oneharness-core` requirement is unchanged, so the one-copy rule holds.
 # `tests/e2e/judge_only.rs` drives it end to end.
-onejudge = { version = "0.23.0", features = ["cli"] }
+# **0.23.1 is the release built on onemessagebus 0.11**, moved in lockstep with
+# the `onemessagebus` requirement below so the graph links one bus.
+onejudge = { version = "0.23.1", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -516,7 +518,11 @@ onejudge = { version = "0.23.0", features = ["cli"] }
 #
 # 0.10.0 moves with `onejudge` and `onevcs`, which link it too: cargo treats 0.9
 # and 0.10 as incompatible, and two buses' types do not unify across the seams.
-onemessagebus = "0.10.0"
+#
+# 0.11 removes validators in favour of a message hook. This crate never
+# installed a validator, so nothing here changes with it; it moves with
+# `onejudge` 0.23.1 and `onevcs` 0.65.0, the releases built on 0.11.
+onemessagebus = "0.11.1"
 # The payload structs are registered with the bus's schema registry as
 # `Message` types, which is a `schemars` derivation. The same major and feature
 # the bus itself takes, so the one `JsonSchema` trait is the bus's.
@@ -775,8 +781,8 @@ sha2 = "0.10"
 # needs nothing installed for the gate to run offline on every platform leg.
 # Dev-only — nothing here reaches a consumer's build. 0.51.0 reads its own YAML
 # through serde-saphyr, so the libyaml translation no longer reaches the dev graph.
-# 0.63.0 is the release built on onemessagebus 0.10, so the lockfile keeps one bus.
-onevcs = "0.63.0"
+# 0.65.0 is the release built on onemessagebus 0.11, so the lockfile keeps one bus.
+onevcs = "0.65.0"
 
 [[test]]
 name = "e2e"
