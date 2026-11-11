@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0](https://github.com/nickderobertis/oneagentgraph/compare/v0.11.4...v0.12.0) - 2026-11-11
+
+### Fixed
+
+- *(deps)* [**breaking**] build on onemessagebus 0.11 and the onejudge and onevcs releases built on it ([#277](https://github.com/nickderobertis/oneagentgraph/pull/277))
+
 ## [0.11.4](https://github.com/nickderobertis/oneagentgraph/compare/v0.11.3...v0.11.4) - 2026-11-10
 
 ### Added
