@@ -451,12 +451,15 @@ impl Hold {
                 // paced monitor is never held for the cadence, and nor is a
                 // scheduled one.
                 true
-            } else if counting_since.elapsed() >= self.pace.every {
-                #[cfg(feature = "test-doubles")]
-                self.pause_at_expiry();
-                true
             } else {
-                false
+                // Read once, so the fixture pauses at exactly the expiry this
+                // tick acts on.
+                let expired = counting_since.elapsed() >= self.pace.every;
+                #[cfg(feature = "test-doubles")]
+                if expired {
+                    self.pause_at_expiry();
+                }
+                expired
             };
             if !fired {
                 continue;
