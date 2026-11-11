@@ -638,8 +638,8 @@ mod judge_sides {
 
 /// A cron member's schedule.
 ///
-/// Read through [`ScheduleFields`] rather than derived, so the one field this
-/// crate removed is refused by its own name, naming its replacement, under every
+/// Deserialized by hand rather than derived, so the one field this crate removed
+/// (`resettable`) is refused by its own name, naming its replacement, under every
 /// schema version — rather than as one more unknown key.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Schedule {
