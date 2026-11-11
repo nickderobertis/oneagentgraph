@@ -1557,29 +1557,67 @@ mod tests {
         assert!(!Outcome::Unstartable("no".into()).is_success());
     }
 
-    /// The beat keeps going however late the loop that reads it is: a reader
-    /// that does nothing for several refresh intervals finds the beat fresh,
-    /// which is what makes a delayed turn loop a delayed loop rather than a dead
-    /// member. The wrapper file the rule was ported with is written beside it.
+    /// The beat keeps going however late the loop that reads it is: while the
+    /// turn loop never calls into the heartbeat, the beat still advances on its
+    /// own, refresh after refresh. That is what makes a delayed turn loop a
+    /// delayed loop rather than a dead member. The wrapper file the rule was
+    /// ported with is written beside it.
+    ///
+    /// The test counts refreshes and does not time them. An earlier version
+    /// slept three intervals and required `since_last` to be under two, which
+    /// left one interval of slack for the beat thread to be woken. On a loaded
+    /// host the scheduler takes longer than that, with nothing wrong with the
+    /// beat. The rule only condemns after a timeout of tens of seconds, so that
+    /// latency does not matter in a real run. `ADVANCES_DEADLINE` only stops a
+    /// beat that never advances from hanging the suite. It is not a freshness
+    /// bound.
     #[test]
     fn the_beat_stays_fresh_while_its_reader_is_away() {
+        /// Refreshes past the first one the thread must make on its own.
+        const ADVANCES: usize = 3;
+        /// Ends the wait for a stopped beat. A live beat's timing does not
+        /// depend on it.
+        const ADVANCES_DEADLINE: Duration = Duration::from_secs(30);
+
         let dir = tempfile::tempdir().expect("tempdir");
         let started = Instant::now();
         let heartbeat = Heartbeat::start(dir.path(), started, "write the thing");
-        std::thread::sleep(HEARTBEAT_INTERVAL * 3);
-        let since = heartbeat.since_last();
+        // Watch the beat's own counter, the value `since_last` is computed
+        // from, without calling anything on `Heartbeat`. That keeps the turn
+        // loop's side "away" the whole time.
+        let beat = Arc::clone(&heartbeat.beat);
+        let file = dir.path().join("member.heartbeat");
+        let mut seen = vec![beat.load(Ordering::SeqCst)];
+        let deadline = Instant::now() + ADVANCES_DEADLINE;
+        while seen.len() <= ADVANCES && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            let now = beat.load(Ordering::SeqCst);
+            if Some(&now) != seen.last() {
+                seen.push(now);
+            }
+        }
         assert!(
-            since < HEARTBEAT_INTERVAL * 2,
-            "the beat went stale while nothing read it: {since:?}"
+            seen.len() > ADVANCES,
+            "the beat stopped advancing while nothing read it: saw {seen:?}"
         );
-        let written = std::fs::read_to_string(dir.path().join("member.heartbeat"))
-            .expect("the heartbeat file");
+        assert!(
+            seen.windows(2).all(|pair| pair[0] < pair[1]),
+            "the beat went backwards: {seen:?}"
+        );
+        let written = std::fs::read_to_string(&file).expect("the heartbeat file");
         let at: u64 = written.trim().parse().expect("a millisecond count");
         assert!(at > 0, "the file never saw a refresh: {written:?}");
+
         // Dropping the member's supervision ends the thread rather than leaving
-        // one beating for a member that is over — `Drop` joins it, so a thread
-        // that did not stop would hang this test rather than pass it.
+        // one beating for a member that is over. The thread holds the other
+        // reference to the beat, so if this test's copy is the only one left,
+        // the thread has returned.
         drop(heartbeat);
+        assert_eq!(
+            Arc::strong_count(&beat),
+            1,
+            "the beat thread outlived the heartbeat that owned it"
+        );
     }
 
     /// A thread that stops leaves a beat that stops advancing, so the reader
