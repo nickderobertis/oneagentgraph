@@ -81,8 +81,8 @@ members:
     #
     # `start_after: 0` is stated because from schema 4 an omitted one defaults to
     # `every`, which would leave the first five minutes of every run unwatched; the
-    # conversation still opens with the wave. `resettable` is deliberately absent: a
-    # planner-visible surface resets the pacemaker's clock below, not this one.
+    # conversation still opens with the wave. Its cadence is fixed: it declares no
+    # `reset_on`.
     #
     # A manager's `note` offered during the hold ENDS it — the turn opens with the note
     # in it — so a note is never held for five minutes; a `trigger`, the run's `stop`,
@@ -99,9 +99,8 @@ members:
     background: false
   # The durable planner-update pacemaker: a single-sided member that comes due on a
   # schedule, reports the run's progress from durable evidence, and exits. It is what
-  # keeps a supervising planner informed without being asked. Resettable, so every
-  # planner-visible surface restarts its clock and a run that is already reporting
-  # does not also get a pacemaker surface.
+  # keeps a supervising planner informed without being asked, on a fixed cadence:
+  # its schedule declares no `reset_on`.
   #
   # It claims its own `task`, and that is a rule rather than a nicety. `onepipeline`
   # composes ONE task for this graph and `oneagentgraph` hands it to every member
@@ -242,7 +241,7 @@ members:
       rather than the thing it renders, as a report of a "malformed edit command"
       turned out to be newlines flattened for display. Say what you measured and what
       you measured it against.
-    schedule: {every: 1800, resettable: true}
+    schedule: {every: 1800}
     # BACKGROUND, by saying nothing: a scheduled member that declares no `background`
     # is background, which is exactly the pacemaker this member is meant to be. It fires
     # while the `monitor` conversation above holds the run open and never again once

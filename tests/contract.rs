@@ -943,8 +943,8 @@ fn the_documented_scheduled_note_payloads_round_trip_and_older_shapes_are_unchan
     .expect("another producer's envelope reads");
     assert_eq!(ResetCause::of(&foreign), cause);
 
-    // A member's own firing, and a reset `reset-timer` caused, are what they
-    // always were on the wire.
+    // A member's own firing, and a reset naming no cause, are what they always
+    // were on the wire.
     assert_eq!(
         serde_json::to_value(CronFired::default()).expect("serializes"),
         json!({})
@@ -962,10 +962,9 @@ fn the_documented_scheduled_note_payloads_round_trip_and_older_shapes_are_unchan
 }
 
 /// A run names the stream it follows through `run::Request::follow_events` and
-/// `--follow-events`, and the deprecated `reset-timer` takes exactly the
-/// arguments it always did.
+/// `--follow-events`.
 #[test]
-fn a_run_names_the_stream_it_follows_and_reset_timer_gains_nothing() {
+fn a_run_names_the_stream_it_follows() {
     use clap::Parser as _;
     let request = oneagentgraph::run::Request {
         graph: ConfigRef("./graph.yaml".to_string()),
@@ -1003,20 +1002,69 @@ fn a_run_names_the_stream_it_follows_and_reset_timer_gains_nothing() {
         Some(std::path::Path::new("/runs/pipeline/events.jsonl"))
     );
     assert!(fenced_block("").contains("[--follow-events PATH]"));
+}
 
-    assert!(oneagentgraph::cli::Cli::try_parse_from([
-        "oneagentgraph",
-        "reset-timer",
-        "R",
-        "worker"
-    ])
-    .is_ok());
-    for extra in [&["note"][..], &["--clock", "note"][..]] {
-        let mut argv = vec!["oneagentgraph", "reset-timer", "R", "worker"];
-        argv.extend_from_slice(extra);
+/// `reset_on` is the one way a clock restarts, and the contract says the other
+/// way is gone: a `Schedule` is built from every field it has — `resettable`
+/// is not among them — `run::Signal` is matched exhaustively with `Trigger` its
+/// one variant, `reset-timer` is no subcommand the parser knows, and the
+/// contract states the removal rather than documenting any of them as current.
+#[test]
+fn reset_on_is_the_one_way_a_clock_restarts() {
+    use clap::Parser as _;
+    // Every field a schedule has. A field added back is a field this literal
+    // no longer names, which fails to compile here.
+    let schedule = Schedule {
+        every: 60,
+        start_after: None,
+        reset_on: Some(surfaced()),
+    };
+    let read: Schedule = oneagentgraph::yaml::from_str(
+        "{every: 60, reset_on: {include: [{source: pipeline, kind: planner-surfaced}]}}",
+    )
+    .expect("a schedule restarting on `reset_on` reads");
+    assert_eq!(read, schedule);
+    let refused = oneagentgraph::yaml::from_str::<Schedule>("{every: 60, resettable: true}")
+        .expect_err("`resettable` was removed");
+    assert!(
+        refused.to_string().contains("`resettable`") && refused.to_string().contains("`reset_on`"),
+        "{refused}"
+    );
+
+    // Exhaustive: a variant added back is an arm this match lacks, which fails
+    // to compile here.
+    let suffix = |signal: oneagentgraph::run::Signal| match signal {
+        oneagentgraph::run::Signal::Trigger => signal.as_str(),
+    };
+    assert_eq!(suffix(oneagentgraph::run::Signal::Trigger), "trigger");
+
+    let unknown =
+        oneagentgraph::cli::Cli::try_parse_from(["oneagentgraph", "reset-timer", "R", "worker"])
+            .expect_err("`reset-timer` was removed");
+    assert_eq!(unknown.kind(), clap::error::ErrorKind::InvalidSubcommand);
+
+    let usage = fenced_block("");
+    assert!(
+        !usage.contains("reset-timer"),
+        "the contract's CLI block still documents `reset-timer`"
+    );
+    let config = fenced_block("yaml");
+    assert!(
+        !config.contains("resettable: "),
+        "the contract's graph schema still declares `resettable`"
+    );
+    for removal in [
+        "A `schedule` declaring `resettable`",
+        "refused by `oneagentgraph validate` and `oneagentgraph run` before anything is built",
+        "naming `reset_on` as its replacement",
+        "`config::Schedule` has no `resettable` field",
+        "The verb `oneagentgraph reset-timer` is removed",
+        "`run::Signal::Reset` is removed with it",
+        "a run no longer watches the `<member>.reset` signal file",
+    ] {
         assert!(
-            oneagentgraph::cli::Cli::try_parse_from(argv).is_err(),
-            "reset-timer accepted {extra:?}"
+            CONTRACT.contains(removal),
+            "the contract no longer states the removal: {removal:?}"
         );
     }
 }
@@ -2185,7 +2233,6 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
             schedule: Some(Schedule {
                 every: 300,
                 start_after: Some(0),
-                resettable: false,
                 reset_on: Some(surfaced()),
             }),
             scheduled_notes: vec![ScheduledNote {
@@ -2214,7 +2261,6 @@ fn the_documented_graph_round_trips_through_the_config_schema() {
             schedule: Some(Schedule {
                 every: 1800,
                 start_after: Some(1800),
-                resettable: true,
                 reset_on: None,
             }),
             background: Some(true),
@@ -3440,7 +3486,6 @@ fn the_documented_cli_names_every_command_the_binary_accepts() {
         "run",
         "validate",
         "trigger",
-        "reset-timer",
         "cancel",
         "interrupt",
         "history",

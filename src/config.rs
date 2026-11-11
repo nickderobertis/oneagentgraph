@@ -167,27 +167,6 @@ impl GraphConfig {
         self.background_memoized(name, &mut BTreeMap::new())
     }
 
-    /// One warning per member that declares a setting this release deprecates:
-    /// today `resettable: true` on a schedule, which still works unchanged and
-    /// whose replacement is `reset_on`.
-    ///
-    /// Hidden, and outside the contract's surface: public only so the binary's
-    /// `validate` and `run` print the one wording from one place.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn deprecations(&self) -> Vec<String> {
-        self.members
-            .iter()
-            .filter(|(_, member)| member.schedule().is_some_and(|schedule| schedule.resettable))
-            .map(|(name, _)| {
-                format!(
-                    "oneagentgraph: member {name:?}: `resettable` is deprecated and will be removed \
-                     in a later release — declare `reset_on` on its schedule instead"
-                )
-            })
-            .collect()
-    }
-
     /// [`is_background`](Self::is_background), sharing one memo across the
     /// pre-[`FIRST_BACKGROUND_VERSION`] descent so a diamond of `deps` is walked
     /// once per member rather than once per path.
@@ -658,8 +637,11 @@ mod judge_sides {
 }
 
 /// A cron member's schedule.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// Read through [`ScheduleFields`] rather than derived, so the one field this
+/// crate removed is refused by its own name, naming its replacement, under every
+/// schema version — rather than as one more unknown key.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Schedule {
     /// Interval in seconds.
     pub every: u64,
@@ -672,14 +654,6 @@ pub struct Schedule {
     /// version [`FIRST_START_AFTER_VERSION`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_after: Option<u64>,
-    /// Whether `reset-timer` may restart this schedule's clock.
-    ///
-    /// **Deprecated**, and kept working unchanged through this release:
-    /// [`reset_on`](Self::reset_on) is the one way forward for a clock to
-    /// restart, and `validate` and `run` say so on standard error for every
-    /// member that still declares this.
-    #[serde(default)]
-    pub resettable: bool,
     /// The envelopes that restart this schedule's pending interval — or the
     /// hold in progress, on a paced conversation — when one matches.
     ///
@@ -695,6 +669,49 @@ pub struct Schedule {
 // it; every field it compares is a string or an optional one, so equality is
 // reflexive and a schedule carrying one is as `Eq` as one without.
 impl Eq for Schedule {}
+
+/// Why a schedule declaring `resettable` is refused: the flag and the
+/// `reset-timer` verb it answered were removed, and `reset_on` is the one way a
+/// clock restarts.
+fn resettable_removed() -> String {
+    format!(
+        "schedule: `resettable` was removed, together with the `reset-timer` verb it \
+         answered — declare `reset_on` on the schedule instead, naming the envelopes that \
+         restart its clock (graph schema version {FIRST_SCHEDULED_NOTE_VERSION})"
+    )
+}
+
+/// [`Schedule`] exactly as a document writes it, which is what serde checks the
+/// shape against.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScheduleFields {
+    every: u64,
+    #[serde(default)]
+    start_after: Option<u64>,
+    #[serde(default)]
+    reset_on: Option<EventFilter>,
+}
+
+impl<'de> Deserialize<'de> for Schedule {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let written = serde_json::Value::deserialize(deserializer)?;
+        if written.get("resettable").is_some() {
+            return Err(D::Error::custom(resettable_removed()));
+        }
+        let ScheduleFields {
+            every,
+            start_after,
+            reset_on,
+        } = ScheduleFields::deserialize(written).map_err(D::Error::custom)?;
+        Ok(Self {
+            every,
+            start_after,
+            reset_on,
+        })
+    }
+}
 
 /// One timed note a two-party member's conversation is given — see
 /// [`OnejudgeMember::scheduled_notes`].
@@ -1220,7 +1237,7 @@ pub fn validate(graph: &GraphConfig) -> Result<(), crate::error::Error> {
             )));
         }
         // A member's name becomes a *path component* — its scratch directory,
-        // and the file `trigger` and `reset-timer` leave for it — so a name
+        // and the file `trigger` leaves for it — so a name
         // carrying a separator or a parent reference would put a member's
         // generated configs, and an operator's signal, outside the run's own
         // directory.
@@ -2346,7 +2363,7 @@ mod tests {
         };
         let graph = parse(&document(
             FIRST_TWO_PARTY_JOB_VERSION,
-            "    dir: ./api\n    schedule: {every: 300, start_after: 0, resettable: true}\n",
+            "    dir: ./api\n    schedule: {every: 300, start_after: 0}\n",
         ));
         validate(&graph).expect("the schema that has the fields accepts them");
         let Member::Onejudge(monitor) = &graph.members["monitor"] else {
@@ -2358,7 +2375,6 @@ mod tests {
             Some(Schedule {
                 every: 300,
                 start_after: Some(0),
-                resettable: true,
                 reset_on: None,
             })
         );
@@ -2453,16 +2469,14 @@ mod tests {
             );
         }
         // A schedule naming no `start_after` waits one `every` before its first
-        // turn under the current schema, and `resettable` defaults off.
+        // turn under the current schema.
         let inherited = scheduled("{every: 300}");
         assert_eq!(inherited.start_after, None);
         assert_eq!(inherited.first_turn_after(SCHEMA_VERSION), 300);
-        assert!(!inherited.resettable);
         assert_eq!(
             scheduled("{every: 300, start_after: 0}").first_turn_after(SCHEMA_VERSION),
             0
         );
-        assert!(scheduled("{every: 300, resettable: true}").resettable);
     }
 
     /// `background` is a member's own say over whether it holds the run open,
@@ -2791,20 +2805,46 @@ mod tests {
         assert!(err.to_string().contains("scheduled_notes"), "{err}");
     }
 
-    /// `resettable` still reads and still works, and every member declaring it
-    /// is named once in the deprecation warnings, which name `reset_on`.
+    /// `resettable` was removed: a schedule declaring it — true or false, on
+    /// either kind, under every schema version — is refused by its name, naming
+    /// `reset_on` as what replaced it, rather than read and ignored.
     #[test]
-    fn a_resettable_schedule_is_named_once_as_deprecated() {
-        let graph = parse(concat!(
-            "version: 11\nname: g\nmembers:\n",
-            "  a:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
-            "    schedule: {every: 60, resettable: true}\n",
-            "  b:\n    kind: oneharness\n    oneharness_config: ./a.toml\n",
-            "    schedule: {every: 60}\n",
-        ));
-        validate(&graph).expect("still valid");
-        let warnings = graph.deprecations();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(warnings[0].contains("\"a\"") && warnings[0].contains("`reset_on`"));
+    fn a_schedule_declaring_resettable_is_refused_naming_reset_on() {
+        for version in 1..=SCHEMA_VERSION {
+            for value in ["true", "false"] {
+                for member in [
+                    "    kind: oneharness\n    oneharness_config: ./a.toml\n",
+                    "    kind: onejudge\n    base_config: ./b.yaml\n    mode: bypass\n    \
+                     agent: {oneharness_config: ./a.toml}\n    judge: {oneharness_config: ./j.toml}\n",
+                ] {
+                    let document = format!(
+                        "version: {version}\nname: g\nmembers:\n  a:\n{member}    \
+                         schedule: {{every: 60, resettable: {value}}}\n"
+                    );
+                    let err = crate::yaml::from_str::<GraphConfig>(&document).unwrap_err();
+                    let said = err.to_string();
+                    assert!(
+                        said.contains("`resettable` was removed") && said.contains("`reset_on`"),
+                        "version {version}, resettable: {value}: {said}"
+                    );
+                }
+            }
+        }
+        // Every other key is still refused as the unknown key it is, and a
+        // schedule without the removed flag still reads.
+        let err = crate::yaml::from_str::<Schedule>("{every: 60, resetable: true}").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field `resetable`"),
+            "{err}"
+        );
+        let read: Schedule = crate::yaml::from_str("{every: 60, start_after: 5}").expect("reads");
+        assert_eq!(
+            read,
+            Schedule {
+                every: 60,
+                start_after: Some(5),
+                reset_on: None,
+            }
+        );
     }
 }

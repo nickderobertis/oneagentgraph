@@ -279,7 +279,7 @@ pub enum EventKind {
     MemberDied,
     /// A scheduled member fired.
     CronFired,
-    /// A resettable schedule's clock restarted.
+    /// A clock restarted on a match of its `reset_on`.
     CronReset,
     /// A member settled: the full onejudge report is an artifact and the verdict
     /// is inline in the payload.
@@ -1183,9 +1183,9 @@ pub struct CronFired {
 
 /// The payload of an [`EventKind::CronReset`] event.
 ///
-/// Empty — exactly as before — for a reset a deprecated `reset-timer` caused;
-/// a `reset_on` match names the envelope that matched, and a scheduled note's
-/// clock names its note.
+/// A `reset_on` match names the envelope that matched, and a scheduled note's
+/// clock names its note. Both fields are optional and omitted when absent, so
+/// the empty payload a consumer written before them reads is still `{}`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CronReset {

@@ -9,7 +9,13 @@ the current reader to that record.
 - `host/graphs/`, `host/personas/` and `host/config/onejudge.base.yaml` are
   copied byte for byte from the host's `ai-orchestrator` checkout at commit
   `9eb8acffaf6d1e5782a18f415314d168d9febe5e`. Those are the graphs, personas
-  and base config every dispatch on that host runs. Nothing in them was edited.
+  and base config every dispatch on that host runs. Nothing in them was edited
+  but one thing, after that copy: when this crate removed a schedule's
+  `resettable`, the one schedule declaring it — the `check-in` member's in
+  `host/graphs/dag-scope.yaml` — lost the key, the two comments describing it
+  were reworded to the fixed cadence it now has, and `expected.json` lost the
+  `resettable` it had recorded on every schedule. The host's own graph had
+  already stopped declaring it.
 - The `host/oneharness*.toml` files and `host/config/plan-checklist.llmlint.yml`
   are stand-ins, not copies. They exist only so the real graphs' relative refs
   resolve. The effective onejudge config names where a side's config is written

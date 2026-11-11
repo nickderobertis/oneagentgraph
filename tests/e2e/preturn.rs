@@ -617,7 +617,7 @@ fn a_scheduled_members_views_run_again_for_every_turn() {
             "members:\n",
             "  holder:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
             "  watcher:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
-            "    schedule: {every: 2, start_after: 1, resettable: true}\n",
+            "    schedule: {every: 2, start_after: 1}\n",
             "    pre_turn:\n    - {command: [VIEW, --say, TEXT], label: queue}\n",
         ),
         &[

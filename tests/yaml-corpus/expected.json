@@ -14,8 +14,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             }
           },
           "worker": {
@@ -67,8 +66,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             }
           },
           "worker": {
@@ -121,8 +119,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             }
           },
           "worker": {
@@ -175,8 +172,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             },
             "pre_turn": [
               {
@@ -239,8 +235,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             },
             "background": true,
             "pre_turn": [
@@ -305,8 +300,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             },
             "background": true,
             "pre_turn": [
@@ -335,8 +329,7 @@
             "dir": "./api",
             "schedule": {
               "every": 300,
-              "start_after": 0,
-              "resettable": false
+              "start_after": 0
             },
             "background": false
           }
@@ -377,8 +370,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             },
             "background": true,
             "pre_turn": [
@@ -413,8 +405,7 @@
             "dir": "./api",
             "schedule": {
               "every": 300,
-              "start_after": 0,
-              "resettable": false
+              "start_after": 0
             },
             "background": false
           }
@@ -520,8 +511,7 @@
             "persona": "../personas/check-in.yaml",
             "task": "{task}\n\nReport current progress on that run, for the planner supervising it. Your turn\nis this bounded sequence, in this order:\n\n1. Run `onepipeline status <run-id>` for the run named above — that one run,\n   never the view over every run.\n2. Run `onetaskgraph task list --source drafts --project <run-id> --json`, the\n   draft root the launch exported. Report how many follow-up drafts the run's\n   draft project holds and their titles; an empty list is none, and your working\n   directory needs no configuration for it, because the launch exported the\n   source whole.\n3. Compose one compact update from those two readings — the run's state and what\n   is running, then the drafts — and raise it with the one `onepipeline surface\n   --kind check-in` invocation shown below, naming the run above.\n4. Exit.\n\nThose two readings are the whole of your reading. Never discover commands: no\n`--help` walk, no `just --list`. Never list runs host-wide: no bare `just runs`,\nno `onepipeline runs`. Never search the filesystem recursively: no `rg`, no\n`grep -r`, no `find` over the checkout or a state directory. Two turns of this\nmember spent their entire deadline on exactly those and were killed having raised\nnothing, which is the one outcome a pacemaker exists to prevent. A question the\ntwo readings cannot answer is reported in the update as unanswered, with what you\nread, rather than investigated. Never send `onepipeline reply`: live graph edits\nbelong to the monitor member, which watches the whole run, and to the planner.\n\nA draft is an unverified, non-blocking follow-up somebody verifies after the run.\nYou may draft one yourself before you exit, with `\"$ORCHESTRATOR_FOLLOW_UP_DRAFT\"\n--as pacemaker --member check-in` — its `--help` gives the body, and is the one\n`--help` this turn may read — but anything the planner must act on now stays in\nthis update, never only in a draft: nobody reads a draft until the run is over.\n\nHand the update to the verb as bytes, on its stdin, never as a command-line\nword:\n\n    onepipeline surface --kind check-in <run-id> <<'UPDATE'\n    <your update, punctuated however you like, backticks and dollar signs\n    included>\n    UPDATE\n\nThe verb reads the surface's text from a file you name, or from stdin when you\nname none, so those bytes reach it without a shell ever parsing them. Never\nreach for the inline `--message` form instead: that text is a command-line\nword, and inside double quotes bash performs command substitution on backticks\nand on `$(...)`, so an update that quotes a command name runs that command in\nthe launch directory and splices its output into what the planner reads. That\nis measured rather than feared — an update naming a command was read back with\nthe command replaced by its own output, after spending twenty-five minutes of a\nshared host's CPU on work nobody requested. The heredoc's single-quoted\ndelimiter is what keeps its body literal on the way to stdin; do not build the\ntext up in a double-quoted shell variable first.\n\nNever call anything a hang until you have compared its elapsed time against a\nbound you located and can name — the timeout the command itself declares, the\nmember's configured deadline, the node's turn budget. Three escalations from\nthis member in one session were false for want of that comparison: 3m25s into a\n360s bound is a bounded wait, not a stall, and that command completed on its\nown at 360.068s. Report elapsed against the bound, or not at all; if you cannot\nfind a bound, say that you could not find one rather than inferring a hang from\nelapsed time alone.\n\nShow the reading behind any claim that something is alive or dead. Quote the\ncommand you ran and that command's own output, and read it a second time before you\nescalate to a terminal verdict — a driver, an observer or a dispatch called dead is\na claim about a state, and one read cannot tell a state from a gap. Nine such claims\nin one run said that run's driver was gone; the engine had answered no such thing at\nany of the nine moments, no stop was recorded, and each of that run's fourteen\nlaunches carried a distinct driver process, so the record was never stale. Not one\nof the nine quoted an output. What one of them did quote was a host-wide view, whose\nseven entries called stale belonged to seven other runs. An unquoted verdict\nestablishes nothing however often it is repeated, and a supervisor whose terminal\nverdicts are usually wrong has lost the instrument for the one that is real.\n\nRead an absence of events beside a live heartbeat as generation, not silence.\nThe views print `alive Ns ago` for a streaming dispatch, and a model\nmid-generation records nothing while staying alive, so \"no turn activity for\nover two minutes\" with a live heartbeat is a model thinking. Two neighbouring\nreadings failed the same way and are worth the same care: no matching process\nis not no work, because a command whose output is captured to a log file runs\nwith nothing on a terminal to show it — three named processes were in fact\nrunning — and text that renders oddly in a status view is usually the renderer\nrather than the thing it renders, as a report of a \"malformed edit command\"\nturned out to be newlines flattened for display. Say what you measured and what\nyou measured it against.\n",
             "schedule": {
-              "every": 1800,
-              "resettable": true
+              "every": 1800
             }
           },
           "monitor": {
@@ -542,8 +532,7 @@
             "mode": "bypass",
             "schedule": {
               "every": 300,
-              "start_after": 0,
-              "resettable": false
+              "start_after": 0
             },
             "background": false
           }
@@ -685,8 +674,7 @@
             "persona": "./reporter.yaml",
             "schedule": {
               "every": 1800,
-              "start_after": 1800,
-              "resettable": true
+              "start_after": 1800
             },
             "background": true,
             "pre_turn": [
@@ -722,7 +710,6 @@
             "schedule": {
               "every": 300,
               "start_after": 0,
-              "resettable": false,
               "reset_on": {
                 "include": [
                   {

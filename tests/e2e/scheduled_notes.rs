@@ -36,7 +36,6 @@ use std::path::Path;
 use std::process::Child;
 use std::time::Duration;
 
-use oneagentgraph::run::{MemberName, RunId, Signal};
 use serde_json::{json, Value};
 
 use crate::support::{
@@ -1036,145 +1035,91 @@ fn reset_on_restarts_every_clock_declaring_it_on_a_followed_or_own_envelope() {
     }
 }
 
-/// The deprecated reset still works exactly as before and says it is
-/// deprecated: `reset-timer` and `run::signal(.., Signal::Reset)` restart a
-/// `resettable` schedule — a single-sided clock at once, and a paced
-/// conversation's hold at its next hold — and the same reset leaves a
-/// non-resettable schedule and every scheduled-note clock untouched.
+/// `resettable` was removed, and `reset_on` is the one way a clock restarts: a
+/// document declaring it on a schedule — single-sided or paced, `true` or
+/// `false`, at schema 10 and at schema 11 — is refused by `validate`, by `run`
+/// and by `run --detach` with a message naming `resettable` and `reset_on`,
+/// before anything runs: no envelope, no run record, no harness turn.
 #[test]
-fn the_deprecated_reset_still_restarts_a_resettable_schedule_and_nothing_else() {
-    let workspace = Workspace::new();
-    let (entered, hold) = (workspace.at("turn-entered"), workspace.at("turn-hold"));
-    workspace.write(
-        "base.yaml",
-        &base_without_done_when(&format!(
-            "fake:entered={} fake:hold={}",
-            entered.display(),
-            hold.display()
-        )),
-    );
-    let extra = format!(
-        "{}{}",
-        single("reporter", "{every: 60, start_after: 60, resettable: true}"),
-        single("ticker", "{every: 60, start_after: 60}"),
-    );
-    workspace.graph(&graph(
-        Some("{every: 120, start_after: 0, resettable: true}"),
-        3,
-        &note_entry(NOTE, 3600, 0, None),
-        &extra,
-    ));
-
-    let validated = workspace.run_bounded(&["validate", "./graph.yaml"]);
-    validated.expect_code(0);
-    let deprecated = |stderr: &str, member: &str| {
-        stderr
-            .lines()
-            .filter(|line| {
-                line.contains(&format!("member \"{member}\""))
-                    && line.contains("`resettable` is deprecated")
-                    && line.contains("`reset_on`")
-            })
-            .count()
-    };
-    assert_eq!(
-        deprecated(&validated.stderr, "worker"),
-        1,
-        "{}",
-        validated.stderr
-    );
-    assert_eq!(
-        deprecated(&validated.stderr, "reporter"),
-        1,
-        "{}",
-        validated.stderr
-    );
-    assert_eq!(
-        deprecated(&validated.stderr, "ticker"),
-        0,
-        "{}",
-        validated.stderr
-    );
-
-    let gate = workspace.at("note-clock");
-    let child = launch(&workspace, &clocked(KEEP_GOING, &gate), None);
-    until("the first worker turn to be live", || entered.exists());
-    release(&gate);
-    until("the note to be admitted, untaken", || {
-        admitted_yet(&workspace, NOTE, 1)
-    });
-    let id = run_id(&workspace);
-    for member in ["worker", "ticker", "reporter"] {
-        let reset = workspace.run_bounded(&["reset-timer", &id, member]);
-        reset.expect_code(0);
-        assert!(
-            reset.stderr.contains("`reset-timer` is deprecated")
-                && reset.stderr.contains("`reset_on`"),
-            "{}",
-            reset.stderr
-        );
-    }
-    // A reset is a file, so two inside one tick are one; the library's is left
-    // once the verb's has been read.
-    until("the verb's reporter reset to land", || {
-        !of(&stream(&workspace), "cron-reset", "reporter").is_empty()
-    });
-    oneagentgraph::run::signal(
-        &workspace.state(),
-        &RunId::parse(&id).expect("a run id"),
-        &MemberName::parse("reporter").expect("a member"),
-        Signal::Reset,
-    )
-    .expect("the library's reset reaches the run");
-    // The verb takes what it took before and no more.
-    assert_eq!(
-        workspace
-            .run_bounded(&["reset-timer", &id, "worker", NOTE])
-            .code,
-        2
-    );
-    assert_eq!(
-        workspace
-            .run_bounded(&["reset-timer", &id, "worker", "--clock", NOTE])
-            .code,
-        2
-    );
-    until("both reporter resets to land", || {
-        of(&stream(&workspace), "cron-reset", "reporter").len() >= 2
-    });
-    let mid = stream(&workspace);
-    assert!(
-        Ledger::of(&mid, NOTE).withdrawn.is_empty(),
-        "the reset withdrew a scheduled note's copy: {mid:#?}"
-    );
-    release(&hold);
-    until("the worker's next hold to read its reset", || {
-        !of(&stream(&workspace), "cron-reset", "worker").is_empty()
-    });
-    workspace
-        .run_bounded(&["trigger", &id, "worker"])
-        .expect_code(0);
-    let (code, stderr) = exit_of(child);
-    assert_eq!(code, Some(1), "{stderr}");
-    assert_eq!(deprecated(&stderr, "worker"), 1, "{stderr}");
-    assert_eq!(deprecated(&stderr, "reporter"), 1, "{stderr}");
-
-    let events = stream(&workspace);
-    for (member, count) in [("reporter", 2), ("worker", 1), ("ticker", 0)] {
-        let resets = of(&events, "cron-reset", member);
-        assert_eq!(resets.len(), count, "{member}: {events:#?}");
-        for reset in resets {
+fn validate_and_run_refuse_a_schedule_declaring_resettable_naming_reset_on() {
+    for version in [10, 11] {
+        for (who, member) in [
+            (
+                "a single-sided schedule",
+                concat!(
+                    "  reporter:\n    kind: oneharness\n",
+                    "    oneharness_config: ./oneharness.toml\n",
+                    "    task: write one status update\n",
+                    "    schedule: {every: 60, start_after: 60, resettable: true}\n",
+                ),
+            ),
+            (
+                "a paced conversation",
+                concat!(
+                    "  worker:\n    kind: onejudge\n",
+                    "    base_config: ./base.yaml\n    persona: engineer\n",
+                    "    agent:\n      oneharness_config: ./oneharness.toml\n",
+                    "    judge:\n      command: [placeholder]\n",
+                    "    mode: bypass\n",
+                    "    schedule: {every: 60, start_after: 0, resettable: false}\n",
+                ),
+            ),
+        ] {
+            let workspace = Workspace::new();
+            let recorded = workspace.at("harness.prompt");
+            let skeleton =
+                format!("version: {version}\nname: removed\nenv: {{}}\nmembers:\n{member}");
+            let mut values = vec![(FAKE_HARNESS_KEY.to_string(), fake_harness())];
+            if member.contains("onejudge") {
+                values.push((format!("members.worker.{FAKE_JUDGE}"), fake_provider()));
+            }
+            workspace.graph(&graph_with(&skeleton, &values));
+            let task = format!(
+                "fake:complete-now fake:record-prompt={}",
+                recorded.display()
+            );
+            let dir = workspace.dir().display().to_string();
+            for args in [
+                vec!["validate", "./graph.yaml"],
+                vec!["run", "./graph.yaml", "--task", &task, "--dir", &dir],
+                vec![
+                    "run",
+                    "./graph.yaml",
+                    "--task",
+                    &task,
+                    "--dir",
+                    &dir,
+                    "--detach",
+                ],
+            ] {
+                let refused = workspace.run_bounded(&args);
+                let said = format!("version {version}, {who}, `{}`", args.join(" "));
+                assert_eq!(refused.code, 2, "{said}: {}", refused.stderr);
+                assert!(
+                    refused.stderr.contains("`resettable` was removed")
+                        && refused.stderr.contains("`reset_on`"),
+                    "{said}: {}",
+                    refused.stderr
+                );
+                assert!(
+                    refused.stdout.trim().is_empty(),
+                    "{said}: something ran: {}",
+                    refused.stdout
+                );
+            }
             assert_eq!(
-                reset["payload"],
-                json!({}),
-                "the reset changed shape: {reset}"
+                std::fs::read_dir(workspace.state())
+                    .expect("the state directory")
+                    .count(),
+                0,
+                "version {version}, {who}: a refused graph left a run behind"
+            );
+            assert!(
+                !recorded.exists(),
+                "version {version}, {who}: a refused graph spent a harness turn"
             );
         }
     }
-    let ledger = Ledger::of(&events, NOTE);
-    assert!(ledger.withdrawn.is_empty(), "{events:#?}");
-    assert_eq!(ledger.admitted.len(), 1);
-    assert_eq!(ledger.accepted.len(), 1, "{events:#?}");
 }
 
 /// `validate` refuses each new field under schema 10 by its name, a
@@ -1591,10 +1536,9 @@ fn a_note_for_the_supervisor_taken_by_the_last_worker_turn_reaches_one_closing_d
 }
 
 /// A detached run forwards `--follow-events` to the run it starts, which resets
-/// on what is appended there, and the detaching process says on its own standard
-/// error what the graph declares that is deprecated.
+/// on what is appended there.
 #[test]
-fn a_detached_run_follows_the_stream_it_was_given_and_warns_of_deprecation() {
+fn a_detached_run_follows_the_stream_it_was_given() {
     let workspace = Workspace::new();
     let keep_open = workspace.at("keeper-hold");
     let skeleton = concat!(
@@ -1602,7 +1546,7 @@ fn a_detached_run_follows_the_stream_it_was_given_and_warns_of_deprecation() {
         "  keeper:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
         "  reporter:\n    kind: oneharness\n    oneharness_config: ./oneharness.toml\n",
         "    task: write one status update\n",
-        "    schedule: {every: 60, start_after: 60, resettable: true,\n",
+        "    schedule: {every: 60, start_after: 60,\n",
         "               reset_on: {include: [{source: pipeline, kind: planner-surfaced}]}}\n",
     );
     workspace.graph(&graph_with(
@@ -1628,16 +1572,6 @@ fn a_detached_run_follows_the_stream_it_was_given_and_warns_of_deprecation() {
         "--detach",
     ]);
     detached.expect_code(0);
-    let warned = detached
-        .stderr
-        .lines()
-        .filter(|line| {
-            line.contains("member \"reporter\"")
-                && line.contains("`resettable` is deprecated")
-                && line.contains("`reset_on`")
-        })
-        .count();
-    assert_eq!(warned, 1, "{}", detached.stderr);
     until("the detached graph to start", || {
         stream(&workspace)
             .iter()

@@ -82,8 +82,8 @@
 //! What the hold does is decided entirely here, from files the run's verbs
 //! already write and one count the note relay keeps: it ends on `every`, on a
 //! `trigger`, on a note offered, on the run's `stop` or the member's own
-//! `cancel`, and — for a background member — on the run's quiescence; a
-//! `reset-timer` restarts it. It refreshes the activity clock every tick, so the
+//! `cancel`, and — for a background member — on the run's quiescence; a match
+//! of the schedule's own `reset_on` restarts it. It refreshes the activity clock every tick, so the
 //! watchdog on the supervising thread never reads the wait as a stall, and that
 //! thread's heartbeat is untouched by it.
 
@@ -132,8 +132,8 @@ const HOLD_TICK: Duration = Duration::from_millis(100);
 
 /// The pace a scheduled two-party member's one conversation runs at.
 ///
-/// What rides [`JudgeLaunch::pace`]: the schedule's `every` and `resettable`,
-/// resolved where the schema is known, and whether this member is background —
+/// What rides [`JudgeLaunch::pace`]: the schedule's `every`, resolved where the
+/// schema is known, and whether this member is background —
 /// which decides whether the run's quiescence ends its conversation at the next
 /// hold. The first delay is not here: `start_after` is the run's clock's, exactly
 /// as it is for a single-sided member, and the conversation opens when that clock
@@ -143,8 +143,6 @@ pub struct Pace {
     /// The hold between turns, counted from the moment the supervisor closes a
     /// turn with a next instruction.
     pub every: Duration,
-    /// Whether a `reset-timer` may restart a hold in progress.
-    pub resettable: bool,
     /// Whether the run's quiescence ends this conversation at its next hold —
     /// what a background member's hold answers, and what a foreground one's
     /// never does, because a foreground member is what keeps the run from
@@ -389,7 +387,6 @@ impl Hold {
         let stop = signals.join("stop");
         let own_stop = signals.join(format!("{name}.stop"));
         let trigger = signals.join(format!("{name}.trigger"));
-        let reset = signals.join(format!("{name}.reset"));
         let quiescent = signals.join(crate::run::QUIESCENT_FILE);
         // Measured against `elapsed` rather than as a deadline, for the reason
         // `crate::run::cron` gives: the span comes from a document, and an
@@ -432,14 +429,8 @@ impl Hold {
                 self.end(Ended::Quiescent);
                 return ControlFlow::Break(());
             }
-            if self.pace.resettable && reset.exists() {
-                let _ = std::fs::remove_file(&reset);
-                counting_since = self.state.restart.announce(emitter, serde_json::Map::new());
-                continue;
-            }
             // The hold in progress, restarted by a match of the schedule's own
-            // `reset_on` — the same restart a resettable reset is, naming the
-            // envelope that caused it.
+            // `reset_on`, naming the envelope that caused it.
             if let Some(cause) = self.reset_on() {
                 counting_since = self.state.restart.announce(
                     emitter,
@@ -517,7 +508,7 @@ impl Hold {
 ///
 /// The scratch is `<run>/members/<name>`, so the run is two levels up and its
 /// signals sit beside `members` — the same shape [`crate::run`] creates and
-/// `cancel`, `trigger` and `reset-timer` write into.
+/// `cancel` and `trigger` write into.
 fn signal_dir(scratch: &Path) -> PathBuf {
     scratch
         .parent()

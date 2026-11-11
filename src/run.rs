@@ -8,8 +8,8 @@
 //! Ordering is the graph's own: `deps` names the members whose settle precedes
 //! this member's first run, and everything with no unsettled dependency runs
 //! concurrently. A cron member is one whose schedule fires it again after each
-//! settle, and `trigger` / `reset-timer` are how an operator moves that clock
-//! from outside the run.
+//! settle, and `trigger` is how an operator moves that clock from outside the
+//! run.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -33,7 +33,7 @@ use crate::member::{self, Bounds, Outcome};
 use crate::resolve::{ResolvedRef, Resolver};
 use crate::scratch::Owned;
 
-/// The control file a run watches for `trigger` and `reset-timer`.
+/// The control files a run watches for `trigger` and `cancel`.
 ///
 /// A signal is a file rather than a socket because the two commands are the
 /// contract's whole out-of-band surface, a run may be detached from any
@@ -74,8 +74,8 @@ pub const RECORD_FILE: &str = "record.json";
 /// rather than a guess from which keys happen to be present.
 ///
 /// * **1** — the original shape, written without this field at all.
-/// * **2** — adds `declared_members`, the graph's member list, so `trigger`,
-///   `reset-timer`, and `cancel` can tell a member of the run from a typo while
+/// * **2** — adds `declared_members`, the graph's member list, so `trigger`
+///   and `cancel` can tell a member of the run from a typo while
 ///   it is still in flight.
 /// * **3** — records `skipped (...)` when unsuccessful dependencies prevent a
 ///   member from starting.
@@ -92,8 +92,8 @@ fn unversioned_record() -> u32 {
     1
 }
 
-/// How often a run notices a `trigger` / `reset-timer` signal, and re-checks a
-/// schedule's clock.
+/// How often a run notices a `trigger` signal, and re-checks a schedule's
+/// clock.
 const TICK: Duration = Duration::from_millis(100);
 
 /// One run, as `history` keeps it.
@@ -126,8 +126,8 @@ pub struct Record {
     /// Every member the graph declared, written before any of them runs.
     ///
     /// `members` above fills in as members *settle*, so for the whole of a live
-    /// run it is empty — and that is exactly when `trigger`, `reset-timer`, and
-    /// `cancel` are used. Without this, those verbs had nothing to check a member
+    /// run it is empty — and that is exactly when `trigger` and `cancel` are
+    /// used. Without this, those verbs had nothing to check a member
     /// name against while the run was in flight, and answered a typo with a
     /// signal file nothing would ever read and an exit 0.
     ///
@@ -400,7 +400,7 @@ impl CancelScope {
     }
 }
 
-/// The two out-of-band signals the contract gives an operator over a scheduled
+/// The out-of-band signal the contract gives an operator over a scheduled
 /// member's clock.
 ///
 /// A closed set, because a run watches for a file named after one: a third
@@ -409,13 +409,10 @@ impl CancelScope {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     /// Fire a scheduled member now — `oneagentgraph trigger`.
-    Trigger,
-    /// Restart a resettable schedule's clock — `oneagentgraph reset-timer`.
     ///
-    /// Deprecated, and working exactly as before through this release: it will
-    /// be removed with `resettable`, and a schedule declares `reset_on` instead.
-    /// It never reaches a scheduled-note clock or a non-resettable schedule.
-    Reset,
+    /// The only one: a clock restarts on a match of its own `reset_on`, which
+    /// the document that declares the clock states, and never on a signal.
+    Trigger,
 }
 
 impl Signal {
@@ -425,7 +422,6 @@ impl Signal {
     pub const fn as_str(self) -> &'static str {
         match self {
             Signal::Trigger => "trigger",
-            Signal::Reset => "reset",
         }
     }
 }
@@ -530,10 +526,9 @@ pub fn cancel(
     })
 }
 
-/// Leave a run the out-of-band signal `oneagentgraph trigger` and
-/// `oneagentgraph reset-timer` leave.
+/// Leave a run the out-of-band signal `oneagentgraph trigger` leaves.
 ///
-/// One implementation serves those two verbs and a library caller, so a change
+/// One implementation serves that verb and a library caller, so a change
 /// to where a run watches, or to what counts as a member of it, cannot land on
 /// only one. The record is read for the reason the CLI reads it: a signal file
 /// is *named after* a member, so a name this run never declared is a file
@@ -542,9 +537,7 @@ pub fn cancel(
 /// is found under, where [`cancel`] takes an already-resolved run directory.
 ///
 /// The run picks the signal up on its own next tick. A member with no schedule
-/// ignores it, and so does a [`Signal::Reset`] for a schedule that did not
-/// declare itself `resettable` — a member's author decides whether its cadence
-/// can be deferred, and this call does not overrule that.
+/// ignores it.
 ///
 /// # Errors
 ///
@@ -2127,10 +2120,10 @@ fn run_wave(
 /// Keep firing a scheduled member until its run is asked to stop.
 ///
 /// A cron member's own settle is not the end of it: the schedule fires it again
-/// after `every` seconds, `trigger` fires it now, and `reset-timer` restarts the
-/// clock — the last only on a schedule that declared itself `resettable`, so an
-/// operator cannot quietly defer a member whose author said its cadence is
-/// fixed.
+/// after `every` seconds, `trigger` fires it now, and a match of the schedule's
+/// own `reset_on` restarts the clock — the only restart there is, so a
+/// member's cadence moves on what its author's document says and on nothing
+/// an operator writes beside it.
 // Every parameter is one thing a firing needs and none is derivable from
 // another: its schedule, identity and invocation, event sink, bounds, scratch
 // and signals, plus the liveness gate and successful-chain callback. Bundling
@@ -2153,7 +2146,6 @@ fn cron(
     // above stops every one of them.
     let own_stop = signals.join(format!("{name}.stop"));
     let trigger = signals.join(format!("{name}.trigger"));
-    let reset = signals.join(format!("{name}.reset"));
     let stopped = || stop.exists() || own_stop.exists();
     // The schedule's own `reset_on`, when it declares one — see
     // [`crate::resets`].
@@ -2184,16 +2176,9 @@ fn cron(
         if live.quiet() {
             break;
         }
-        if schedule.resettable && reset.exists() {
-            let _ = std::fs::remove_file(&reset);
-            // The wait in progress, restarted — so a reset before the first turn
-            // restores the whole of `start_after` rather than quietly promoting
-            // the member to its steady cadence.
-            counting_since = restart.announce(emitter, Map::new());
-            continue;
-        }
-        // The same restart, caused by a matching envelope rather than a file,
-        // and naming the envelope.
+        // The wait in progress, restarted by a matching envelope, naming it —
+        // so a reset before the first turn restores the whole of `start_after`
+        // rather than quietly promoting the member to its steady cadence.
         if let Some(cause) = reset_on.as_ref().and_then(crate::resets::ResetOn::take) {
             counting_since = restart.announce(
                 emitter,
@@ -2375,7 +2360,7 @@ pub fn expand(value: &str, env: &BTreeMap<String, String>) -> String {
 /// was there **whole**.
 ///
 /// The record is read by other processes while the run is still writing it —
-/// `trigger`, `reset-timer`, `cancel`, `interrupt` and `history` all read it to
+/// `trigger`, `cancel`, `interrupt` and `history` all read it to
 /// learn which members a live run has — so it is never rewritten in place: an
 /// in-place write truncates first, and a reader landing in that window read an
 /// empty file and reported a live run as missing. See `replace_whole` in this module.
@@ -3197,7 +3182,6 @@ mod tests {
         let schedule = |every: u64, start_after: Option<u64>| crate::config::Schedule {
             every,
             start_after,
-            resettable: false,
             reset_on: None,
         };
         let current = crate::config::SCHEMA_VERSION;

@@ -3,7 +3,7 @@
 //!
 //! A clock that declares `reset_on` is *subscribed* here when the run starts,
 //! and reads its subscription on its own tick — the same tick it reads the
-//! `trigger` and `reset` signal files on — so a match restarts it within one
+//! `trigger` signal file on — so a match restarts it within one
 //! tick without anything outside the run signalling it. Nothing here restarts
 //! a clock that declared no `reset_on`: such a clock holds no subscription, so
 //! no envelope, however plausible a match, reaches it.
@@ -36,7 +36,7 @@ use crate::run::MemberName;
 
 /// How often a followed stream is read for what was appended to it — the
 /// run's own clock tick, so a followed match reaches a clock no later than a
-/// `reset-timer` would.
+/// `trigger` does.
 const FOLLOW_TICK: Duration = Duration::from_millis(100);
 
 /// How a clock restarts: `cron-reset` published first, the count begun after.

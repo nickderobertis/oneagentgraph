@@ -20,7 +20,6 @@ members:
     schedule:
       every: 1800
       start_after: 1800
-      resettable: true
     background: true
     pre_turn:
     - command:
@@ -46,7 +45,6 @@ members:
     schedule:
       every: 300
       start_after: 0
-      resettable: false
       reset_on:
         include:
         - source: pipeline

@@ -47,6 +47,13 @@
 //!   each judge's own `settings` in version 10, and a two-party member's
 //!   `scheduled_notes` and every clock's `reset_on` in version 11.
 //!
+//!   One key left every one of them at once, by removal rather than by a
+//!   version: a schedule's `resettable`, which `reset_on` replaced. These
+//!   goldens stopped carrying it in the release that removed it, and a document
+//!   that still declares it is refused by its name under every version — which
+//!   `a_golden_still_declaring_resettable_is_refused_naming_reset_on` holds
+//!   against each of them.
+//!
 //! Regenerating an old golden to make a failure go away is the mistake this
 //! guards against: if the bytes changed, either the change was meant — in which
 //! case it is a version bump and a new golden beside the old one — or it was not.
@@ -135,7 +142,6 @@ fn golden_graph() -> GraphConfig {
                     schedule: Some(Schedule {
                         every: 1800,
                         start_after: Some(1800),
-                        resettable: true,
                         reset_on: None,
                     }),
                     background: Some(true),
@@ -177,7 +183,6 @@ fn golden_graph() -> GraphConfig {
                     schedule: Some(Schedule {
                         every: 300,
                         start_after: Some(0),
-                        resettable: false,
                         reset_on: Some(surfaced()),
                     }),
                     scheduled_notes: vec![ScheduledNote {
@@ -281,7 +286,6 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
         .expect("the golden's worker is paced");
     assert_eq!(pace.every, 300);
     assert_eq!(pace.first_turn_after(read.version), 0);
-    assert!(!pace.resettable);
 
     // The onejudge settings this version added, read back at both levels: a
     // mapping that survived the trip as an empty one would be a member whose
@@ -302,6 +306,37 @@ fn the_current_graph_golden_is_exactly_what_this_build_reads_and_writes() {
     assert_eq!(worker.scheduled_notes[0].id, "progress-report");
     assert_eq!(worker.scheduled_notes[0].reset_on, Some(surfaced()));
     assert_eq!(pace.reset_on, Some(surfaced()));
+}
+
+/// Every graph golden, written as it was before `resettable` was removed — the
+/// reporter's schedule declaring it — is refused by that key's name, naming
+/// `reset_on` as what replaced it, whichever schema version the document
+/// declares: the key is not read and ignored on any of them.
+#[test]
+fn a_golden_still_declaring_resettable_is_refused_naming_reset_on() {
+    let goldens = [
+        include_str!("golden/graph.v4.yaml"),
+        include_str!("golden/graph.v5.yaml"),
+        include_str!("golden/graph.v6.yaml"),
+        include_str!("golden/graph.v7.yaml"),
+        include_str!("golden/graph.v8.yaml"),
+        include_str!("golden/graph.v9.yaml"),
+        include_str!("golden/graph.v10.yaml"),
+        include_str!("golden/graph.v11.yaml"),
+    ];
+    for golden in goldens {
+        let declared = "      start_after: 1800\n";
+        assert!(golden.contains(declared), "the reporter's schedule moved");
+        let written_before =
+            golden.replace(declared, &format!("{declared}      resettable: true\n"));
+        let error = oneagentgraph::yaml::from_str::<GraphConfig>(&written_before)
+            .expect_err("`resettable` was removed");
+        assert!(
+            error.to_string().contains("`resettable` was removed")
+                && error.to_string().contains("`reset_on`"),
+            "{error}"
+        );
+    }
 }
 
 /// A graph written against the schema before scheduled notes and `reset_on`
@@ -920,7 +955,7 @@ fn the_member_started_goldens_are_exactly_what_this_build_writes() {
 
 /// Every shape of the payloads scheduled notes and `reset_on` touch, keyed by
 /// kind, in the order the golden commits them: the shape each had before — a
-/// caller's note, a member's own firing, a `reset-timer` reset — then the ones
+/// caller's note, a member's own firing, a reset naming no cause — then the ones
 /// a scheduled note's clock and a `reset_on` match publish.
 fn golden_clock_and_note_payloads() -> BTreeMap<&'static str, Vec<serde_json::Value>> {
     let offer = "note-1792401955594017000-3399723-1";
@@ -1432,8 +1467,8 @@ fn a_record_naming_a_path_outside_the_run_store_is_refused() {
 }
 
 /// `events_path` is reported, never followed. A record naming a stream outside
-/// the run store does not move where `trigger` and `reset-timer` write: those
-/// derive the signal directory from the run's id, as `cancel` does.
+/// the run store does not move where `trigger` writes: it
+/// derives the signal directory from the run's id, as `cancel` does.
 ///
 /// The record here is otherwise valid — a well-formed run id, a readable record
 /// — so what is under test is the *use* of the path rather than the parse that

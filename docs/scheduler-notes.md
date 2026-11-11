@@ -99,9 +99,9 @@ deadline, so no span a document can carry reaches arithmetic that could panic.
 `run::spawn_cron` owns the member's clock either way, and is handed the span its
 first turn owes — `run::first_span`, resolved where the schema is known, so the
 clock itself needs no version. `run::cron` watches the existing stop,
-member-stop, trigger, and reset files. It counts down the interval currently
+member-stop, and trigger files. It counts down the interval currently
 pending — that first span until the member has taken a turn and `every` from then
-on, which is also what a `reset-timer` on a resettable schedule restarts, so a
+on, which is also what a match of the schedule's `reset_on` restarts, so a
 reset before the first turn restores the whole delay rather than promoting the
 member to its steady cadence. A schedule that fired at
 t=0 has nothing left to defer, so its pending interval is `every` from the start.
@@ -122,13 +122,13 @@ kind alone, and is what the run spawns a clock from after a wave.
 - **The first delay is the run's clock's.** A deferred two-party member comes up
   with its wave, publishes `member-started` carrying `start_after`, and
   `run::spawn_cron` counts `run::first_span` down for it exactly as for a
-  single-sided member — the same stop, member-stop, trigger and reset files, and
+  single-sided member — the same stop, member-stop and trigger files, and
   the same `cron-fired` — and `run::cron` then calls `member::run` **once** and
   returns, because the conversation it opened was the member's whole life. A
   `start_after: 0` two-party member opens in the wave, and `run::run` spawns no
   clock for it afterwards.
 - **The hold between turns is the conversation's own.** `invoke::onejudge` puts
-  the schedule's `every` and `resettable`, and whether the member is background,
+  the schedule's `every`, and whether the member is background,
   on `invoke::JudgeLaunch::pace` (`judge::Pace`); `judge::run` gives it to a
   `judge::Hold` that lives inside the observation sink. The hold is taken on the
   supervisor's `TurnClosed` when that turn carried a `Message` — onejudge's own
@@ -141,8 +141,8 @@ kind alone, and is what the run spawns a clock from after a wave.
 - **What ends a hold** is read every `judge::HOLD_TICK` from the run's signal
   directory, derived from the member's scratch as `judge::cancellation_requested`
   derives it: `every` elapsing, or `<member>.trigger`, publish `cron-fired` and
-  answer the engine `Continue`; `<member>.reset` on a `resettable` pace restarts
-  the count and publishes `cron-reset`; `stop` or `<member>.stop` answers
+  answer the engine `Continue`; a match of the schedule's `reset_on` restarts
+  the count and publishes `cron-reset` naming it; `stop` or `<member>.stop` answers
   `Break`, and `judge::finish` reports the conversation as a cancel is reported
   mid-turn — `member-died`, `cause: cancelled`; and, for a background member,
   `run::QUIESCENT_FILE` answers `Break` and `judge::finish` settles the member
@@ -234,9 +234,11 @@ serde refuses it by name. `run::apply_overrides` addresses a list entry by its
   `resets`) holds a clock between reading a reset and publishing `cron-reset`. All
   three are `test-doubles` only, and `tests/e2e/` is what drives them.
 
-`resettable` and `run::Signal::Reset` are untouched apart from the warning:
-`config::GraphConfig::deprecations` is the one wording `validate` and `run` print,
-and the `reset-timer` arm of the binary's `signal` prints its own.
+`resettable`, the `reset-timer` verb and `run::Signal::Reset` were removed, and
+`reset_on` is the one way a clock restarts. `config::Schedule`'s reader refuses a
+schedule still declaring `resettable` by that name, naming `reset_on`, under
+every schema version — before `validate` or `run` builds anything — and no clock
+watches a `<member>.reset` file any more: `run::Signal` is `Trigger` alone.
 
 ## Background and foreground
 
