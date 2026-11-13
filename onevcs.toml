@@ -13,7 +13,14 @@
 # build modified within the last 2 days, so a rebuild stays warm. How long one
 # pass takes is the `oneagentgraph-pool-maintenance-seconds` budget
 # (`pool-maintenance/budgets.yaml`).
-schema_version = 1
+schema_version = 2
+
+[policy]
+publication = "change-auto"
+approvals = "none"
+
+[policy.checks]
+wait_seconds = 6900  # recorded max 5447 s (run 39352027435) + 25% margin
 
 [pool.maintain]
 command = ["just", "pool-maintenance"]
