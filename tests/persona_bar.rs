@@ -246,6 +246,13 @@ fn a_demand_reworded_from_the_one_engineer_carried_is_still_caught() {
 /// work, and neither satisfied by reading alone. The bar may not say
 /// `inspection` (it is in [`OUT_OF_REACH`]), so that refusal is held in the
 /// words the bar can use.
+///
+/// Held as wording rather than end to end on purpose: what this text changes is
+/// how a model judge weighs a worker's proof, and the only seam a journey may
+/// fake is the harness that model runs behind — so an e2e would assert on a
+/// scripted judge's verdict, which proves the script, not the bar. What this
+/// crate owns is that the shipped text, as `shipped` hands it to a member, says
+/// this; that is what is asserted.
 #[test]
 fn the_engineer_bar_still_demands_what_it_is_for() {
     let stance = flowing(
@@ -261,7 +268,6 @@ fn the_engineer_bar_still_demands_what_it_is_for() {
         "validated trust boundaries",
         "backward compatibility",
         "accessibility",
-        // Durable behavior keeps the committed, real-interface test.
         "Durable behavior — anything that runs again, or that something relies on \
          after the change lands",
         "needs a committed, realistic test: require tests that drive the real interface \
@@ -269,7 +275,6 @@ fn the_engineer_bar_still_demands_what_it_is_for() {
         "a failure or recovery path",
         "fail for the intended reason before passing",
         "coverage gaps it opens",
-        // One-off work is proved once and that proof is accepted.
         "One-off or point-in-time work",
         "is proved by commands run once in this run",
         "accept that proof, and do not demand a committed test for such work",
@@ -277,7 +282,6 @@ fn the_engineer_bar_still_demands_what_it_is_for() {
          flakiness — against committing it",
         "A schema migration that replays on every fresh database is durable; a one-time \
          data backfill is not.",
-        // Neither form of proof is reading alone.
         "Refuse proof by reading the change alone for either kind of work",
         "schema-version bump",
         "acceptance criteria",
@@ -293,7 +297,8 @@ fn the_engineer_bar_still_demands_what_it_is_for() {
 
 /// The worker is told the same proof policy its reviewer holds it to, so a
 /// worker that writes a one-off proof is not refused for it and one that skips a
-/// durable test is not surprised by the refusal.
+/// durable test is not surprised by the refusal. Held as wording for the reason
+/// the reviewer's half above gives.
 #[test]
 fn the_engineer_worker_is_told_the_proof_policy_its_reviewer_holds() {
     let persona = Persona::parse(
