@@ -240,6 +240,19 @@ fn a_demand_reworded_from_the_one_engineer_carried_is_still_caught() {
 /// half that keeps the correction from being a softening. Each phrase here is one
 /// the class does not object to: it names a property of the change the member
 /// itself produced, not a tier that has to run over it or a place it has to reach.
+///
+/// The proof demands are proportionate rather than unconditional: committed,
+/// real-interface tests for durable behavior, one-off proof accepted for one-off
+/// work, and neither satisfied by reading alone. The bar may not say
+/// `inspection` (it is in [`OUT_OF_REACH`]), so that refusal is held in the
+/// words the bar can use.
+///
+/// Held as wording rather than end to end on purpose: what this text changes is
+/// how a model judge weighs a worker's proof, and the only seam a journey may
+/// fake is the harness that model runs behind — so an e2e would assert on a
+/// scripted judge's verdict, which proves the script, not the bar. What this
+/// crate owns is that the shipped text, as `shipped` hands it to a member, says
+/// this; that is what is asserted.
 #[test]
 fn the_engineer_bar_still_demands_what_it_is_for() {
     let stance = flowing(
@@ -255,9 +268,21 @@ fn the_engineer_bar_still_demands_what_it_is_for() {
         "validated trust boundaries",
         "backward compatibility",
         "accessibility",
-        "tests that drive the real interface rather than mocking the layer",
+        "Durable behavior — anything that runs again, or that something relies on \
+         after the change lands",
+        "needs a committed, realistic test: require tests that drive the real interface \
+         rather than mocking the layer",
         "a failure or recovery path",
+        "fail for the intended reason before passing",
         "coverage gaps it opens",
+        "One-off or point-in-time work",
+        "is proved by commands run once in this run",
+        "accept that proof, and do not demand a committed test for such work",
+        "Weigh a test's cost — its runtime, the code it adds, its maintenance, its \
+         flakiness — against committing it",
+        "A schema migration that replays on every fresh database is durable; a one-time \
+         data backfill is not.",
+        "Refuse proof by reading the change alone for either kind of work",
         "schema-version bump",
         "acceptance criteria",
         "no regression is introduced in what it touched",
@@ -266,6 +291,48 @@ fn the_engineer_bar_still_demands_what_it_is_for() {
             stance.contains(demand),
             "personas/engineer.yaml's `user.persona` no longer demands {demand:?}, so correcting \
              what it may not demand has softened what it must:\n{stance}"
+        );
+    }
+}
+
+/// The worker is told the same proof policy its reviewer holds it to, so a
+/// worker that writes a one-off proof is not refused for it and one that skips a
+/// durable test is not surprised by the refusal. Held as wording for the reason
+/// the reviewer's half above gives.
+#[test]
+fn the_engineer_worker_is_told_the_proof_policy_its_reviewer_holds() {
+    let persona = Persona::parse(
+        oneagentgraph::persona::shipped("engineer").expect("shipped"),
+        "engineer",
+    )
+    .expect("engineer loads");
+    let merged = merge(BARE_BASE, "base.yaml", &persona).expect("engineer merges");
+    let prompt = flowing(
+        merged
+            .get("system_prompt")
+            .and_then(|value| value.as_str())
+            .expect("engineer briefs its worker"),
+    );
+    for demand in [
+        "Durable behavior — anything that runs again, or that something relies on after \
+         the change lands",
+        "gets a committed, realistic test. Drive it through the real interface or boundary",
+        "Do not mock the layer under test",
+        "at least one failure or recovery path",
+        "fail for the intended reason before accepting it",
+        "Close coverage gaps the change opens",
+        "One-off or point-in-time work",
+        "is proved by commands run once in this run, with their output reported for the \
+         reviewer to read",
+        "its runtime, the code it adds, its maintenance, and its flakiness",
+        "A schema migration that replays on every fresh database is durable; a one-time \
+         data backfill is not.",
+        "Neither form of proof is proof by inspection alone",
+    ] {
+        assert!(
+            prompt.contains(demand),
+            "personas/engineer.yaml's `system_prompt` no longer says {demand:?}, so the worker \
+             and its reviewer no longer share one proof policy:\n{prompt}"
         );
     }
 }

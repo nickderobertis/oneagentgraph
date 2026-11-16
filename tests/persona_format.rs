@@ -213,13 +213,16 @@ fn the_document_names_exactly_the_fields_the_crate_refuses() {
 /// `agent: {instructions}` preamble. Nothing here regenerates it: a role whose
 /// effective config moved has to be looked at, not re-recorded.
 ///
-/// `engineer`'s entry is not that capture: its `user.persona` carries two
-/// corrections. The first keeps a shipped bar to what a member can settle inside
-/// its own run, which `tests/persona_bar.rs` holds every role to and gives the
-/// reason for. The second narrows what makes a blocker terminal, after a
-/// simulated user read a 145-second test timeout as one and ended a dispatch over
-/// something the worker could simply have re-run; `tests/e2e/dispatch.rs` drives
-/// both ends of that definition. The other four roles are the capture.
+/// `engineer`'s entry is not that capture: it carries three corrections. The
+/// first keeps a shipped bar to what a member can settle inside its own run,
+/// which `tests/persona_bar.rs` holds every role to and gives the reason for. The
+/// second narrows what makes a blocker terminal, after a simulated user read a
+/// 145-second test timeout as one and ended a dispatch over something the worker
+/// could simply have re-run; `tests/e2e/dispatch.rs` drives both ends of that
+/// definition. The third, on both its `system_prompt` and its `user.persona`,
+/// makes proof proportionate — committed tests for durable behavior, one-off
+/// proof for one-off work — which `tests/persona_bar.rs` also holds. The other
+/// four roles are the capture.
 #[test]
 fn the_shipped_roles_merge_to_what_they_did_before_the_format_changed() {
     let expected: BTreeMap<String, Value> =
