@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.2](https://github.com/nickderobertis/oneagentgraph/compare/v0.13.1...v0.13.2) - 2026-11-18
+
+### Fixed
+
+- *(deps)* link the onejudge and oneharness-core that read the Codex git-check setting ([#293](https://github.com/nickderobertis/oneagentgraph/pull/293))
+
 ## [0.13.1](https://github.com/nickderobertis/oneagentgraph/compare/v0.13.0...v0.13.1) - 2026-11-16
 
 ### Fixed
