@@ -1435,3 +1435,39 @@ fn a_repository_of_its_own_configures_a_judge_only_review_by_configuration_alone
     fail.expect_code(1);
     assert!(fail.stderr.contains("no-open-questions"), "{}", fail.stderr);
 }
+
+/// A judge whose `oneharness_config` writes
+/// `[harness.codex] skip_git_repo_check = true` is read, routed and settled like
+/// any other: the judge turn is reached, decides, and the member settles, where
+/// a core or CLI without the key refuses the config before any judge starts. A
+/// misspelt key beside it is still refused at that read, so the passing run is
+/// the key being understood rather than the section being ignored.
+#[test]
+fn a_judge_config_that_skips_codexs_git_check_is_read_and_its_turn_settles() {
+    let workspace = workspace();
+    let config = |key: &str| {
+        format!(
+            "{CHAIN}\n[env]\nFAKE_HARNESS_ATTEMPT_LOG = {}\n\n[harness.codex]\n{key} = true\n",
+            toml_edit::Value::from(workspace.at("solo.log").display().to_string())
+        )
+    };
+
+    workspace.write("solo.judge.toml", &config("skip_git_repo_check"));
+    let pass = judge(&workspace, "solo", "plan.md", &[]);
+    pass.expect_code(0);
+    no_agent_side(&workspace, &pass);
+    assert_eq!(launches(&workspace, "solo.log"), 1, "{}", pass.stderr);
+    assert_eq!(settled(&pass)["completed"], Value::Bool(true));
+    let decided = report(&pass);
+    assert!(decided["completion_reason"].is_string(), "{decided}");
+
+    workspace.write("solo.judge.toml", &config("skip_git_repo_checks"));
+    let refused = judge(&workspace, "solo", "plan.md", &[]);
+    refused.expect_code(2);
+    assert!(
+        refused.stderr.contains("skip_git_repo_checks"),
+        "{}",
+        refused.stderr
+    );
+    assert_eq!(launches(&workspace, "solo.log"), 1, "a judge started");
+}

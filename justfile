@@ -45,13 +45,14 @@ msrv-version := `sed -n 's/^rust-version *= *"\([^"]*\)".*/\1/p' Cargo.toml`
 # which the core this release links still has. It is pinned separately from the
 # `oneharness-core` `Cargo.toml` takes: the linked engine answers what a
 # `kind: oneharness` member does, and this CLI answers what `smoke`, `interrupt`,
-# and onejudge's per-side turns do (`docs/oneharness-library.md`). 0.26.0 is the
-# CLI released beside core 0.29.0, so a two-party member's sides record history
-# as a single-sided member's turn does. `Cargo.toml` links core 0.29.1, which
-# differs from 0.29.0 only in announcing a buffered run's candidates to the
-# embedding caller's event sink. The e2e suite reads this number (`tests/e2e/support.rs`) and drives
-# only a CLI at it.
-oneharness-version := "0.26.0"
+# and onejudge's per-side turns do (`docs/oneharness-library.md`). 0.31.0 is the
+# CLI that links core 0.34.0, the core `Cargo.toml` takes: the first to accept
+# `[harness.codex] skip_git_repo_check`. A two-party member's sides read their
+# config through this CLI, so below it a judge config carrying the key is refused
+# at turn time even though the linked core accepts it —
+# `tests/e2e/judge_only.rs` drives exactly that judge. The e2e suite reads this
+# number (`tests/e2e/support.rs`) and drives only a CLI at it.
+oneharness-version := "0.31.0"
 
 # The pruner `pool-maintenance` runs, which onevcs runs in this repository's idle
 # warm-pool slots (`onevcs.toml`). `just bootstrap` installs exactly this release

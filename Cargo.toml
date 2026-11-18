@@ -480,7 +480,15 @@ test-doubles = []
 # `tests/e2e/judge_only.rs` drives it end to end.
 # **0.23.1 is the release built on onemessagebus 0.11**, moved in lockstep with
 # the `onemessagebus` requirement below so the graph links one bus.
-onejudge = { version = "0.23.1", features = ["cli"] }
+# **0.23.5 is what is linked**, moved in lockstep with oneharness-core 0.34.0
+# below: its published requirement is `^0.34.0`, a pre-1.0 minor the `^0.29.0`
+# 0.23.1 asked for excludes, so the two are edited together or the graph carries
+# two cores. Its loader reads a judge's `oneharness_config` with that core, the
+# first to declare `[harness.codex] skip_git_repo_check`, and it refuses a
+# spawned `oneharness` CLI below 0.30.0 — which is why the `justfile` pin moved
+# with it. Nothing this crate calls changed from 0.23.1. `tests/e2e/judge_only.rs`
+# judges through a config carrying the key.
+onejudge = { version = "0.23.5", features = ["cli"] }
 # llmlint: ignore-end[changed_behavior_has_e2e]
 # The typed message bus, linked rather than restated — the *generic* core alone.
 # The envelope's shape, the filter grammar, the payload bounds and redaction, the
@@ -689,7 +697,16 @@ schemars = { version = "1", features = ["preserve_order"] }
 # 0.29.1 is the floor because 0.29.0 dropped the sink of a run that does not
 # stream, so a `stream = false` single-sided member never learned its history
 # and journalled cut copies; 0.29.1 calls `run_began` per candidate there too.
-oneharness-core = "0.29.1"
+# 0.34.0 is what is linked, in lockstep with onejudge 0.23.5 above. It declares
+# `[harness.codex] skip_git_repo_check`, which starts a Codex `exec` turn with
+# `--skip-git-repo-check`; below it the key is a `deny_unknown_fields` refusal,
+# so a `kind: oneharness` member whose config carries it dies unstartable —
+# `tests/e2e/selection.rs` drives one. The releases it crosses broke config keys
+# and report fields (0.30.0 lean sessions, 0.31.0 prompts off argv, 0.32.0 the
+# `[sync]` section, 0.33.0 a per-run allowlist) that this crate neither builds
+# nor restates; `EventSink`, `run_supervised` and `ProcessSupervisor` are
+# unchanged.
+oneharness-core = "0.34.0"
 clap = { version = "4.6", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` keeps JSON object keys in insertion order, so a re-serialized

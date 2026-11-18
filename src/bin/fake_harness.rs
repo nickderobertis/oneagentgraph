@@ -23,9 +23,10 @@
 //! rather than assumed — see [`Shape`], which is what a structured-output run
 //! (`--output-format json`, one document) needs.
 //!
-//! The turn is steered by sentinels in the prompt (which arrives on the argv,
-//! after `-p`, because that is how oneharness spawns claude-code) and by
-//! `FAKE_HARNESS_*` variables, so one binary covers every journey.
+//! The turn is steered by sentinels in the prompt (which arrives on this
+//! process's stdin, because from oneharness-core 0.31.0 that is how oneharness
+//! hands every uncontrolled turn its prompt — see [`prompt_on_stdin`])
+//! and by `FAKE_HARNESS_*` variables, so one binary covers every journey.
 //!
 //! Every sentinel carries the [`MARK`] prefix, and that is not decoration: a
 //! prompt is the whole rendered system prompt, persona included, so a bare word
@@ -351,25 +352,30 @@ fn main() -> std::process::ExitCode {
     // claude-code's streamed input protocol, so there is no `-p` positional at
     // all — the prompt is the first frame on this process's stdin, and stdin
     // stays open so an `oneharness interrupt` can abort the turn through it.
+    //
+    // An uncontrolled turn's prompt is never on the argv: oneharness-core 0.31.0
+    // pipes it to stdin and closes it, with claude-code's system prompt in the
+    // file `--append-system-prompt-file` names. The argv spellings are still read
+    // so a double launched by hand keeps working.
     let system = flag(&argv, "--append-system-prompt")
         .or_else(|| flag(&argv, "--system"))
+        .or_else(|| {
+            flag(&argv, "--append-system-prompt-file")
+                .and_then(|path| std::fs::read_to_string(path).ok())
+        })
         .unwrap_or_default();
     let task = if controlled(&argv) {
         String::new()
+    } else if prompt_on_stdin(&argv) {
+        let mut piped = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut piped);
+        piped
     } else {
         flag(&argv, "-p")
             .or_else(|| flag(&argv, "--prompt"))
             .unwrap_or_default()
     };
     let prompt = format!("{system}\n{task}");
-
-    // Neither flag is there when the prompt is **large**: past oneharness's own
-    // 64 KiB threshold it omits the positional and pipes the prompt to this
-    // process's stdin instead (claude-code's `--input-format text`). This double
-    // reads only the argv, so a journey whose prompt clears that threshold gets
-    // an empty task here and every sentinel in it silently stops steering. Keep a
-    // journey's texts under it, or teach this to read that stdin — the latter is
-    // a second delivery path nothing has needed yet.
 
     // A controlled turn has none of the task yet — it arrives on stdin — so its
     // recordings are made per turn, in [`turn`], against the prompt that turn was
@@ -625,6 +631,27 @@ fn recordings(prompt: &str, argv: &[String]) {
 /// one.
 fn controlled(argv: &[String]) -> bool {
     flag(argv, "--input-format").as_deref() == Some("stream-json")
+}
+
+/// Whether oneharness piped this turn's whole prompt to stdin and closed it.
+///
+/// From oneharness-core 0.31.0 that is every uncontrolled turn, spelled per
+/// harness: claude-code's `-p --input-format text`, codex's `exec … -`, and
+/// qwen's bare stdin with no `-p` at all — so the tell is what it is *not*. A
+/// controlled turn and an app-server keep stdin open for frames, the `--version`
+/// probe reads none, and a prompt still on the argv (a double run by hand) needs
+/// none; a terminal is never read, so a hand run cannot block here.
+fn prompt_on_stdin(argv: &[String]) -> bool {
+    let on_argv = ["-p", "--prompt"]
+        .iter()
+        .any(|name| flag(argv, name).is_some_and(|value| !value.starts_with("--")));
+    !controlled(argv)
+        && !on_argv
+        && !matches!(
+            argv.first().map(String::as_str),
+            Some("app-server" | "--version")
+        )
+        && !std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
 /// Stand in for `codex app-server` for as long as oneharness's dialogue needs to
