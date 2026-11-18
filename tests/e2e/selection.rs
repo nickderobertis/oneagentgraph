@@ -1036,4 +1036,25 @@ fn a_member_whose_config_opts_into_plugins_starts_codex_with_no_plugins_flag() {
         );
     }
 }
+
+/// A member whose config writes `[harness.codex] skip_git_repo_check = true` is
+/// accepted by the linked core rather than refused as an unknown key, and its
+/// Codex turn starts with `--skip-git-repo-check`, so a scratch directory that
+/// is no repository runs the turn instead of Codex refusing it. Without the key
+/// the flag is absent, which is Codex's own default.
+#[cfg(unix)]
+#[test]
+fn a_member_whose_config_skips_codexs_git_check_starts_codex_with_the_flag() {
+    let skip = |argv: &Vec<String>| argv.iter().any(|arg| arg == "--skip-git-repo-check");
+    let config = format!("{CODEX_CHAIN}\n[harness.codex]\nskip_git_repo_check = true\n");
+    for argv in codex_launches_under(&config) {
+        assert!(skip(&argv), "codex was started without the flag: {argv:?}");
+    }
+    for argv in codex_launches_under(CODEX_CHAIN) {
+        assert!(
+            !skip(&argv),
+            "codex was started with the flag unasked: {argv:?}"
+        );
+    }
+}
 // llmlint: ignore-end[tests_mirror_real_usage]
